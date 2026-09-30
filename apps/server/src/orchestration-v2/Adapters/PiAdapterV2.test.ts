@@ -1,6 +1,7 @@
 import { assert, describe, it } from "@effect/vitest";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import {
+  CheckpointId,
   EnvironmentId,
   NodeId,
   ProviderInstanceId,
@@ -41,6 +42,7 @@ import {
 } from "../ProviderAdapter.ts";
 import { handoffBudget } from "../ContextHandoffBudget.ts";
 import { makePiAdapterV2, PI_PROVIDER } from "./PiAdapterV2.ts";
+import { PI_FLAVOR, PRIME_AGENT_FLAVOR, type PiFlavor } from "./PiFlavor.ts";
 import { makePiRpcConnection, type PiRpcRecord } from "./PiRpc.ts";
 
 const serverConfigLayer = ServerConfig.layerTest(process.cwd(), {
@@ -78,6 +80,8 @@ interface FakePi {
   readonly queueEntries: (data: unknown) => void;
   /** Data returned by the next active-branch `get_messages` acks. */
   readonly queueMessages: (data: unknown) => void;
+  /** Data returned by the next `get_fork_messages` acks, consumed in order. */
+  readonly queueForkMessages: (data: unknown) => void;
   /** Make the next `switch_session` ack report an extension veto. */
   readonly vetoNextSwitch: () => void;
   /** Fields overriding the recorded idle state in the next `get_state` acks, in order. */
@@ -136,6 +140,7 @@ const makeFakePi: Effect.Effect<FakePi> = Effect.gen(function* () {
   const requests = yield* Queue.unbounded<PiRpcRecord>();
   const entriesQueue: Array<unknown> = [];
   const messagesQueue: Array<unknown> = [];
+  const forkMessagesQueue: Array<unknown> = [];
   const stateQueue: Array<Record<string, unknown>> = [];
   const statsQueue: Array<unknown> = [];
   const commandsQueue: Array<{ readonly success: boolean; readonly data?: unknown }> = [];
@@ -190,6 +195,8 @@ const makeFakePi: Effect.Effect<FakePi> = Effect.gen(function* () {
         return { ...base, data: entriesQueue.shift() ?? { entries: [], leafId: null } };
       case "get_messages":
         return { ...base, data: messagesQueue.shift() ?? { messages: [] } };
+      case "get_fork_messages":
+        return { ...base, data: forkMessagesQueue.shift() ?? { messages: [] } };
       case "get_session_stats":
         return { ...base, data: statsQueue.shift() ?? {} };
       case "get_commands":
@@ -269,6 +276,7 @@ const makeFakePi: Effect.Effect<FakePi> = Effect.gen(function* () {
     takeRequest,
     queueEntries: (data) => entriesQueue.push(data),
     queueMessages: (data) => messagesQueue.push(data),
+    queueForkMessages: (data) => forkMessagesQueue.push(data),
     deferNextState: () => {
       deferState = true;
     },
@@ -310,11 +318,17 @@ const makeFakePi: Effect.Effect<FakePi> = Effect.gen(function* () {
   } satisfies FakePi;
 });
 
-const makeAdapter = Effect.fnUntraced(function* (fake: FakePi, launchArgs = "", forkFake?: FakePi) {
+const makeAdapter = Effect.fnUntraced(function* (
+  fake: FakePi,
+  launchArgs = "",
+  forkFake?: FakePi,
+  flavor: PiFlavor = PI_FLAVOR,
+) {
   const idAllocator = yield* IdAllocator.IdAllocatorV2;
   const serverConfig = yield* ServerConfig.ServerConfig;
   const fileSystem = yield* FileSystem.FileSystem;
   return makePiAdapterV2({
+    flavor,
     instanceId: PI_INSTANCE_ID,
     settings: { enabled: true, binaryPath: "pi", launchArgs, customModels: [] },
     environment: {},
@@ -338,8 +352,9 @@ const openRuntime = Effect.fnUntraced(function* (
   threadId = THREAD_ID,
   providerSessionId = SESSION_ID,
   forkFake?: FakePi,
+  flavor: PiFlavor = PI_FLAVOR,
 ) {
-  const adapter = yield* makeAdapter(fake, "", forkFake);
+  const adapter = yield* makeAdapter(fake, "", forkFake, flavor);
   const runtime = yield* adapter.openSession({
     threadId,
     providerSessionId,
@@ -2389,5 +2404,232 @@ describe("PiRpc early process exit", () => {
       assert.equal(error.operation, "read");
       assert.equal(error.detail, "pi process exited with code 1");
     }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+  );
+});
+
+describe("PiAdapterV2 with the Prime Agent flavor", () => {
+  const openPrimeThread = Effect.fnUntraced(function* (fake: FakePi) {
+    const { runtime, takeEvent } = yield* openRuntime(
+      fake,
+      "default",
+      THREAD_ID,
+      SESSION_ID,
+      undefined,
+      PRIME_AGENT_FLAVOR,
+    );
+    const providerThread = yield* runtime.ensureThread({
+      threadId: THREAD_ID,
+      modelSelection: modelSelection("default"),
+      runtimePolicy,
+    });
+    return { runtime, takeEvent, providerThread };
+  });
+
+  /** Prime Agent keeps an action active through retry waits and post-run work. */
+  const busyState = {
+    sessionActions: {
+      queuedCount: 0,
+      steering: [],
+      followUps: [],
+      active: { kind: "turn", phase: "running" },
+    },
+  };
+
+  /** Advances virtual time in busy-probe steps until the fake sees another `get_state`. */
+  const takeReprobe = (fake: FakePi) =>
+    Effect.gen(function* () {
+      const reprobe = yield* fake.takeRequest("get_state").pipe(Effect.forkScoped);
+      for (let step = 0; step < 20 && reprobe.pollUnsafe() === undefined; step += 1) {
+        yield* TestClock.adjust(Duration.millis(100));
+        yield* Effect.yieldNow;
+      }
+      return yield* Fiber.join(reprobe);
+    });
+
+  it.effect("settles a turn after agent_end only once get_state shows no active work", () =>
+    Effect.gen(function* () {
+      const fake = yield* makeFakePi;
+      const { runtime, takeEvent, providerThread } = yield* openPrimeThread(fake);
+      yield* startTurn(runtime, providerThread);
+      yield* fake.takeRequest("prompt");
+      yield* fake.emit({ type: "agent_start" });
+
+      fake.queueState(busyState);
+      yield* fake.emit({ type: "agent_end", messages: [] });
+      yield* fake.takeRequest("get_state");
+      // The idle re-probe answers with the fake's default idle state.
+      yield* takeReprobe(fake);
+
+      const terminal = yield* takeEvent((event) => event.type === "turn.terminal");
+      assert.isTrue(terminal.type === "turn.terminal" && terminal.status === "completed");
+    }).pipe(Effect.scoped, Effect.provide(testLayer)),
+  );
+
+  it.effect("keeps a retrying turn open across agent_end and settles on the recovered run", () =>
+    Effect.gen(function* () {
+      const fake = yield* makeFakePi;
+      const { runtime, takeEvent, providerThread } = yield* openPrimeThread(fake);
+      yield* startTurn(runtime, providerThread);
+      yield* fake.takeRequest("prompt");
+      yield* fake.emit({ type: "agent_start" });
+      yield* fake.emit({
+        type: "message_end",
+        message: {
+          role: "assistant",
+          content: [],
+          stopReason: "error",
+          errorMessage: "overloaded",
+        },
+      });
+
+      fake.queueState(busyState);
+      yield* fake.emit({ type: "agent_end", messages: [] });
+      yield* fake.takeRequest("get_state");
+      yield* fake.emit({
+        type: "auto_retry_start",
+        attempt: 1,
+        maxAttempts: 3,
+        delayMs: 2_000,
+        errorMessage: "overloaded",
+      });
+      yield* fake.emit({ type: "agent_start" });
+      yield* fake.emit({ type: "auto_retry_end", success: true, attempt: 1 });
+      yield* fake.emit({ type: "agent_end", messages: [] });
+
+      const terminal = yield* takeEvent((event) => event.type === "turn.terminal");
+      assert.isTrue(terminal.type === "turn.terminal" && terminal.status === "completed");
+    }).pipe(Effect.scoped, Effect.provide(testLayer)),
+  );
+
+  it.effect("shows ipython cells as bash commands, python tools, and file changes", () =>
+    Effect.gen(function* () {
+      const fake = yield* makeFakePi;
+      const { runtime, takeEvent, providerThread } = yield* openPrimeThread(fake);
+      yield* startTurn(runtime, providerThread);
+      yield* fake.takeRequest("prompt");
+      yield* fake.emit({ type: "agent_start" });
+
+      yield* fake.emit({
+        type: "tool_execution_start",
+        toolCallId: "cell_bash",
+        toolName: "ipython",
+        args: { code: "r = await bash('pnpm test'); print(r.output)" },
+      });
+      yield* fake.emit({
+        type: "tool_execution_end",
+        toolCallId: "cell_bash",
+        toolName: "ipython",
+        result: { content: [{ type: "text", text: "ok\n" }], details: { status: "ok" } },
+        isError: false,
+      });
+      const command = yield* takeEvent(
+        (event) =>
+          event.type === "turn_item.updated" &&
+          event.turnItem.type === "command_execution" &&
+          event.turnItem.status === "completed",
+      );
+      assert.isTrue(
+        command.type === "turn_item.updated" &&
+          command.turnItem.type === "command_execution" &&
+          command.turnItem.input === "pnpm test" &&
+          command.turnItem.output === "ok\n",
+      );
+
+      // A failed cell reports its error on the result while the event flag stays false.
+      yield* fake.emit({
+        type: "tool_execution_start",
+        toolCallId: "cell_edit",
+        toolName: "ipython",
+        args: { code: "edit('src/a.ts', 'old', 'new')" },
+      });
+      yield* fake.emit({
+        type: "tool_execution_end",
+        toolCallId: "cell_edit",
+        toolName: "ipython",
+        result: {
+          content: [{ type: "text", text: "Edited src/a.ts" }],
+          isError: true,
+          details: {
+            status: "error",
+            diffs: [{ path: "src/a.ts", oldStr: "old", newStr: "new", startLine: 3 }],
+          },
+        },
+        isError: false,
+      });
+      const python = yield* takeEvent(
+        (event) =>
+          event.type === "turn_item.updated" &&
+          event.turnItem.type === "dynamic_tool" &&
+          event.turnItem.status !== "running",
+      );
+      assert.isTrue(
+        python.type === "turn_item.updated" &&
+          python.turnItem.type === "dynamic_tool" &&
+          python.turnItem.toolName === "python" &&
+          python.turnItem.status === "failed",
+      );
+      const fileChange = yield* takeEvent(
+        (event) => event.type === "turn_item.updated" && event.turnItem.type === "file_change",
+      );
+      assert.isTrue(
+        fileChange.type === "turn_item.updated" &&
+          fileChange.turnItem.type === "file_change" &&
+          fileChange.turnItem.fileName === "src/a.ts" &&
+          fileChange.turnItem.oldStr === "old" &&
+          fileChange.turnItem.newStr === "new",
+      );
+    }).pipe(Effect.scoped, Effect.provide(testLayer)),
+  );
+
+  it.effect("rolls back at the first user entry the discarded turn added", () =>
+    Effect.gen(function* () {
+      const fake = yield* makeFakePi;
+      // ensureThread baselines the branch before the first turn.
+      fake.queueForkMessages({ messages: [] });
+      const { runtime, takeEvent, providerThread } = yield* openPrimeThread(fake);
+
+      const runTurn = (runOrdinal: number, userEntries: ReadonlyArray<string>) =>
+        Effect.gen(function* () {
+          yield* startTurn(
+            runtime,
+            providerThread,
+            "default",
+            [],
+            `turn ${runOrdinal}`,
+            undefined,
+            runOrdinal,
+          );
+          yield* fake.takeRequest("prompt");
+          fake.queueForkMessages({
+            messages: userEntries.map((entryId) => ({ entryId, text: entryId })),
+          });
+          yield* fake.emit({ type: "agent_start" });
+          yield* fake.emit({ type: "agent_end", messages: [] });
+          const settled = yield* takeEvent(
+            (event) =>
+              event.type === "provider_turn.updated" && event.providerTurn.status === "completed",
+          );
+          assert.isTrue(settled.type === "provider_turn.updated");
+          return settled.type === "provider_turn.updated" ? settled.providerTurn : undefined;
+        });
+
+      const first = yield* runTurn(1, ["u1"]);
+      const second = yield* runTurn(2, ["u1", "u2"]);
+      assert.equal(first?.nativeTurnRef?.nativeId, "u1");
+      assert.equal(second?.nativeTurnRef?.nativeId, "u2");
+
+      yield* runtime.rollbackThread({
+        providerThread,
+        target: {
+          type: "provider_turn",
+          checkpointId: CheckpointId.make("checkpoint-1"),
+          appRunOrdinal: 1,
+          providerTurn: first!,
+        },
+        providerThreadTurns: [first!, second!],
+      });
+      const fork = fake.allRequests().find((request) => request["type"] === "fork");
+      assert.equal(fork?.["entryId"], "u2");
+    }).pipe(Effect.scoped, Effect.provide(testLayer)),
   );
 });

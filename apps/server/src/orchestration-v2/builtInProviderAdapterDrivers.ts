@@ -18,7 +18,11 @@ import {
   OpenCodeAdapterV2Driver,
   type OpenCodeAdapterV2DriverEnv,
 } from "./Adapters/OpenCodeAdapterV2.ts";
-import { PiAdapterV2Driver, type PiAdapterV2DriverEnv } from "./Adapters/PiAdapterV2.ts";
+import {
+  PiAdapterV2Driver,
+  PrimeAgentAdapterV2Driver,
+  type PiAdapterV2DriverEnv,
+} from "./Adapters/PiAdapterV2.ts";
 import type { AnyProviderAdapterDriver } from "./ProviderAdapterDriver.ts";
 
 export type BuiltInProviderAdapterDriversV2Env =
@@ -39,6 +43,7 @@ const BUILT_IN_PROVIDER_ADAPTER_DRIVERS_V2: ReadonlyArray<
   OpenCodeAdapterV2Driver,
   GrokAdapterV2Driver,
   PiAdapterV2Driver,
+  PrimeAgentAdapterV2Driver,
   AcpRegistryAdapterV2Driver,
 ];
 

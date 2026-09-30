@@ -71,6 +71,22 @@ export function piRecordNumber(input: unknown, key: string): number | undefined 
 }
 
 /**
+ * Whether a `get_state` payload shows no remaining agent work. Pi reports a
+ * pending message count; Prime Agent keeps `sessionActions.active` set until a
+ * run's retry chain and post-run work finish, and counts queued input.
+ */
+export function piStateIsIdle(state: unknown): boolean {
+  const sessionActions = piRecordField(state, "sessionActions");
+  return (
+    piRecordField(state, "isStreaming") !== true &&
+    piRecordField(state, "isCompacting") !== true &&
+    (piRecordNumber(state, "pendingMessageCount") ?? 0) === 0 &&
+    (piRecordNumber(sessionActions, "queuedCount") ?? 0) === 0 &&
+    piRecordField(sessionActions, "active") === undefined
+  );
+}
+
+/**
  * Splits a `provider/model` slug into the two fields `set_model` expects.
  * Returns null for slugs without a usable separator so callers can reject the
  * selection instead of silently leaving Pi on its configured default.
