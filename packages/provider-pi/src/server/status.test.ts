@@ -6,7 +6,8 @@ import * as Stream from "effect/Stream";
 import * as ChildProcess from "effect/process/ChildProcess";
 import * as ChildProcessSpawner from "effect/process/ChildProcessSpawner";
 
-import { checkPiProviderStatus, MINIMUM_PI_VERSION } from "./status.ts";
+import { PI_FLAVOR, PRIME_AGENT_FLAVOR } from "./flavor.ts";
+import { checkPiProviderStatus } from "./status.ts";
 
 const encoder = new TextEncoder();
 
@@ -34,12 +35,12 @@ function processHandle(input: {
   });
 }
 
-function piProbeSpawner(version: string) {
+function piProbeSpawner(version: string, binary = "pi") {
   return ChildProcessSpawner.make((command) => {
     const args = ChildProcess.isStandardCommand(command) ? command.args : [];
     return Effect.succeed(
       args.includes("--version")
-        ? processHandle({ stdout: `pi ${version}\n` })
+        ? processHandle({ stdout: `${binary} ${version}\n` })
         : processHandle({ stderr: "RPC startup failed", exitCode: 1 }),
     );
   });
@@ -55,18 +56,18 @@ const settings = {
 describe("PiProvider", () => {
   it.effect("requires the first published Pi version with entries and settlement hooks", () =>
     Effect.gen(function* () {
-      const snapshot = yield* checkPiProviderStatus(settings).pipe(
+      const snapshot = yield* checkPiProviderStatus(PI_FLAVOR, settings).pipe(
         Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, piProbeSpawner("0.80.3")),
       );
       assert.equal(snapshot.status, "error");
       assert.equal(snapshot.version, "0.80.3");
-      assert.include(snapshot.message ?? "", `Pi ${MINIMUM_PI_VERSION} or newer`);
+      assert.include(snapshot.message ?? "", `Pi ${PI_FLAVOR.minimumVersion} or newer`);
     }).pipe(Effect.provide(NodeServices.layer)),
   );
 
   it.effect("keeps compatible Pi selectable when optional discovery fails", () =>
     Effect.gen(function* () {
-      const snapshot = yield* checkPiProviderStatus(settings).pipe(
+      const snapshot = yield* checkPiProviderStatus(PI_FLAVOR, settings).pipe(
         Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, piProbeSpawner("0.84.3")),
       );
       assert.equal(snapshot.status, "ready");
@@ -76,6 +77,39 @@ describe("PiProvider", () => {
         ["default"],
       );
       assert.include(snapshot.message ?? "", "could not refresh its models and commands");
+    }).pipe(Effect.provide(NodeServices.layer)),
+  );
+
+  it.effect("probes Prime Agent with its own binary, version floor, and runtime modes", () =>
+    Effect.gen(function* () {
+      const tooOld = yield* checkPiProviderStatus(PRIME_AGENT_FLAVOR, {
+        ...settings,
+        binaryPath: "",
+      }).pipe(
+        Effect.provideService(
+          ChildProcessSpawner.ChildProcessSpawner,
+          piProbeSpawner("0.9.5", "prime-agent"),
+        ),
+      );
+      assert.equal(tooOld.status, "error");
+      assert.include(tooOld.message ?? "", `Prime Agent ${PRIME_AGENT_FLAVOR.minimumVersion}`);
+
+      const current = yield* checkPiProviderStatus(PRIME_AGENT_FLAVOR, {
+        ...settings,
+        binaryPath: "",
+      }).pipe(
+        Effect.provideService(
+          ChildProcessSpawner.ChildProcessSpawner,
+          piProbeSpawner("0.9.8", "prime-agent"),
+        ),
+      );
+      assert.equal(current.status, "ready");
+      assert.equal(current.displayName, "Prime Agent");
+      assert.deepEqual(current.supportedRuntimeModes, ["approval-required", "full-access"]);
+      assert.deepEqual(
+        current.models.map((model) => model.name),
+        ["Prime Agent default"],
+      );
     }).pipe(Effect.provide(NodeServices.layer)),
   );
 });
