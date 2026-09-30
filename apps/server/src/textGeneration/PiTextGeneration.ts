@@ -4,6 +4,7 @@
  * No session file is written; the user's Pi configuration (default model,
  * auth, custom providers) still applies.
  */
+import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as Option from "effect/Option";
 import * as Queue from "effect/Queue";
@@ -12,7 +13,13 @@ import { ChildProcessSpawner } from "effect/process";
 
 import { TextGenerationError, type PiSettings } from "@t3tools/contracts";
 
-import { makePiRpcConnection, parsePiModelSlug } from "../orchestration-v2/Adapters/PiRpc.ts";
+import type { PiFlavor } from "../orchestration-v2/Adapters/PiFlavor.ts";
+import {
+  makePiRpcConnection,
+  parsePiModelSlug,
+  piStateIsIdle,
+  type PiRpcConnection,
+} from "../orchestration-v2/Adapters/PiRpc.ts";
 import {
   buildPiRpcLaunch,
   resolvePiLaunchArgs,
@@ -23,7 +30,28 @@ const PI_TIMEOUT_MS = 180_000;
 
 const isTextGenerationError = Schema.is(TextGenerationError);
 
+const SETTLE_POLL_INTERVAL = Duration.millis(100);
+
+/**
+ * Waits until the one prompt this process was given is fully done. Pi says so
+ * with `agent_settled`. Prime Agent has no such event, so after its first
+ * `agent_end` this polls `get_state` until retries and post-run work finish.
+ */
+const waitForPromptSettled = (flavor: PiFlavor, connection: PiRpcConnection) =>
+  Effect.gen(function* () {
+    const terminalEvent = flavor.settleSignal === "agent_settled" ? "agent_settled" : "agent_end";
+    while (true) {
+      const event = yield* Queue.take(connection.events);
+      if (event["type"] === terminalEvent) break;
+    }
+    if (flavor.settleSignal === "agent_settled") return;
+    while (!piStateIsIdle(yield* connection.request({ type: "get_state" }))) {
+      yield* Effect.sleep(SETTLE_POLL_INTERVAL);
+    }
+  });
+
 export const makePiTextGeneration = Effect.fn("makePiTextGeneration")(function* (
+  flavor: PiFlavor,
   piSettings: PiSettings,
   environment: NodeJS.ProcessEnv = process.env,
 ) {
@@ -51,7 +79,7 @@ export const makePiTextGeneration = Effect.fn("makePiTextGeneration")(function* 
         disableTools: true,
       });
       const connection = yield* makePiRpcConnection({
-        command: piSettings.binaryPath || "pi",
+        command: piSettings.binaryPath || flavor.defaultBinary,
         // Extensions and tools are disabled because no user is present to
         // answer a dialog and background text generation is read-only. User
         // model config and auth still apply.
@@ -68,7 +96,7 @@ export const makePiTextGeneration = Effect.fn("makePiTextGeneration")(function* 
         if (parsed === null) {
           return yield* new TextGenerationError({
             operation,
-            detail: `Pi model '${modelSelection.model}' must use provider/model format.`,
+            detail: `${flavor.displayName} model '${modelSelection.model}' must use provider/model format.`,
           });
         }
         yield* connection.request({
@@ -79,12 +107,7 @@ export const makePiTextGeneration = Effect.fn("makePiTextGeneration")(function* 
       }
 
       yield* connection.request({ type: "prompt", message: prompt });
-      yield* Effect.gen(function* () {
-        while (true) {
-          const event = yield* Queue.take(connection.events);
-          if (event["type"] === "agent_settled") return;
-        }
-      });
+      yield* waitForPromptSettled(flavor, connection);
       const data = yield* connection.request({ type: "get_last_assistant_text" });
       const text =
         typeof data === "object" &&
@@ -95,16 +118,21 @@ export const makePiTextGeneration = Effect.fn("makePiTextGeneration")(function* 
       if (!text) {
         return yield* new TextGenerationError({
           operation,
-          detail: "Pi returned empty output.",
+          detail: `${flavor.displayName} returned empty output.`,
         });
       }
-      return yield* TextGenerationOperations.decodeJsonReply(request, "Pi", text);
+      return yield* TextGenerationOperations.decodeJsonReply(request, flavor.displayName, text);
     }).pipe(
       Effect.timeoutOption(PI_TIMEOUT_MS),
       Effect.flatMap(
         Option.match({
           onNone: () =>
-            Effect.fail(new TextGenerationError({ operation, detail: "Pi request timed out." })),
+            Effect.fail(
+              new TextGenerationError({
+                operation,
+                detail: `${flavor.displayName} request timed out.`,
+              }),
+            ),
           onSome: (value) => Effect.succeed(value),
         }),
       ),
@@ -113,7 +141,7 @@ export const makePiTextGeneration = Effect.fn("makePiTextGeneration")(function* 
           ? cause
           : new TextGenerationError({
               operation,
-              detail: "Pi text generation failed.",
+              detail: `${flavor.displayName} text generation failed.`,
               cause,
             }),
       ),

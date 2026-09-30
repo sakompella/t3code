@@ -28,7 +28,7 @@ import { getModelSelectionStringOptionValue } from "@t3tools/shared/model";
 import {
   defaultInstanceIdForDriver,
   PiSettings,
-  ProviderDriverKind,
+  PrimeAgentSettings,
   type ChatAttachment,
   type ModelSelection,
   type OrchestrationV2ExecutionNode,
@@ -85,6 +85,7 @@ import {
   piRecordField as recordField,
   piRecordNumber as recordNumber,
   piRecordString as recordString,
+  piStateIsIdle,
   type PiRpcConnection,
   type PiRpcRecord,
 } from "./PiRpc.ts";
@@ -94,10 +95,11 @@ import {
   resolvePiLaunchArgs,
 } from "./piT3McpInjection.ts";
 import { PI_FILE_CHANGE_TOOLS } from "./piT3McpExtensionSource.ts";
+import { PI_FLAVOR, PRIME_AGENT_FLAVOR, type PiFlavor } from "./PiFlavor.ts";
+import { classifyIpythonCell } from "./primeAgentIpythonCell.ts";
 
-export const PI_PROVIDER = ProviderDriverKind.make("pi");
-const PI_DRIVER_KIND = PI_PROVIDER;
-const PI_DEFAULT_INSTANCE_ID = defaultInstanceIdForDriver(PI_DRIVER_KIND);
+export const PI_PROVIDER = PI_FLAVOR.driverKind;
+const PI_DEFAULT_INSTANCE_ID = defaultInstanceIdForDriver(PI_PROVIDER);
 const DEFAULT_PI_SETTINGS = Schema.decodeSync(PiSettings)({});
 
 /**
@@ -111,10 +113,11 @@ const PI_REQUEST_TIMEOUT_MS = 15_000;
 // Session lifecycle hooks reload extensions, MCP servers and language servers.
 const PI_SESSION_TIMEOUT_MS = 60_000;
 const PI_SKILL_DISCOVERY_TIMEOUT_MS = 4_000;
-const PI_UNSOLICITED_ACTIVITY_ERROR =
-  "Pi started agent work outside an active T3 turn. The session was stopped to prevent invisible tool execution.";
 const SETTLE_PROBE_MAX_ATTEMPTS = 3;
 const SETTLE_PROBE_RETRY_DELAY = Duration.millis(100);
+/** Idle-probe flavors re-read state while a retry, compaction, or queued action is still running. */
+const BUSY_PROBE_INITIAL_DELAY_MS = 100;
+const BUSY_PROBE_MAX_DELAY_MS = 1_000;
 
 const PiProviderCapabilitiesV2 = {
   runtimePolicy: { enforcement: "client-boundary" },
@@ -221,6 +224,7 @@ const PiProviderCapabilitiesV2 = {
 } satisfies OrchestrationV2ProviderCapabilities;
 
 export interface PiAdapterV2Options {
+  readonly flavor: PiFlavor;
   readonly instanceId: ProviderInstanceId;
   readonly settings: PiSettings;
   readonly environment: NodeJS.ProcessEnv;
@@ -243,11 +247,17 @@ function contentText(content: unknown): string {
     .join("");
 }
 
-function providerRef(
-  nativeId: string,
-  strength: "strong" | "weak" = "strong",
-): OrchestrationV2ProviderRef {
-  return { driver: PI_PROVIDER, nativeId, strength };
+/**
+ * Prime Agent runs every tool as an `ipython` cell, so only the T3 bridge's
+ * own confirmation can gate it. Edits are only known from the cell's result,
+ * after it ran, so there is no file-change approval to skip.
+ */
+function piProviderCapabilities(flavor: PiFlavor): OrchestrationV2ProviderCapabilities {
+  if (flavor.tools === "pi") return PiProviderCapabilitiesV2;
+  return {
+    ...PiProviderCapabilitiesV2,
+    approvals: { ...PiProviderCapabilitiesV2.approvals, supportsFileChangeApproval: false },
+  };
 }
 
 const PI_THINKING_LEVELS = new Set(["off", "minimal", "low", "medium", "high", "xhigh", "max"]);
@@ -371,19 +381,28 @@ interface PiThreadState {
 export function makePiAdapterV2(
   options: PiAdapterV2Options,
 ): ProviderAdapter.ProviderAdapterV2Shape {
-  const { idAllocator } = options;
+  const { idAllocator, flavor } = options;
+  const driver = flavor.driverKind;
+  const name = flavor.displayName;
+  const binary = options.settings.binaryPath || flavor.defaultBinary;
+  const capabilities = piProviderCapabilities(flavor);
+  const unsolicitedActivityError = `${name} started agent work outside an active T3 turn. The session was stopped to prevent invisible tool execution.`;
+  const providerRef = (
+    nativeId: string,
+    strength: "strong" | "weak" = "strong",
+  ): OrchestrationV2ProviderRef => ({ driver, nativeId, strength });
 
   const protocolError = (detail: string, payload?: unknown) =>
     new ProviderAdapter.ProviderAdapterProtocolError({
-      driver: PI_PROVIDER,
+      driver,
       detail,
       ...(payload === undefined ? {} : { payload }),
     });
 
   return ProviderAdapter.ProviderAdapterV2.of({
     instanceId: options.instanceId,
-    driver: PI_PROVIDER,
-    getCapabilities: () => Effect.succeed(PiProviderCapabilitiesV2),
+    driver,
+    getCapabilities: () => Effect.succeed(capabilities),
     planSelectionTransition: () => Effect.succeed(turnScopedSelectionTransition()),
     openSession: Effect.fn("PiAdapterV2.openSession")(function* (
       input: ProviderAdapter.ProviderAdapterV2OpenSessionInput,
@@ -397,7 +416,7 @@ export function makePiAdapterV2(
           Effect.mapError(
             (cause) =>
               new ProviderAdapter.ProviderAdapterOpenSessionError({
-                driver: PI_PROVIDER,
+                driver,
                 providerSessionId: input.providerSessionId,
                 cause,
               }),
@@ -421,7 +440,7 @@ export function makePiAdapterV2(
         runtimeMode: input.runtimePolicy.runtimeMode,
       });
       const connection: PiRpcConnection = yield* makePiRpcConnection({
-        command: options.settings.binaryPath || "pi",
+        command: binary,
         args: launch.args,
         cwd,
         env: launch.env,
@@ -430,7 +449,7 @@ export function makePiAdapterV2(
         Effect.mapError(
           (cause) =>
             new ProviderAdapter.ProviderAdapterOpenSessionError({
-              driver: PI_PROVIDER,
+              driver,
               providerSessionId: input.providerSessionId,
               cause,
             }),
@@ -448,12 +467,12 @@ export function makePiAdapterV2(
       const now = yield* DateTime.now;
       let sessionEntity: OrchestrationV2ProviderSession = {
         id: input.providerSessionId,
-        driver: PI_PROVIDER,
+        driver,
         providerInstanceId: options.instanceId,
         status: "ready",
         cwd,
         model: input.modelSelection.model,
-        capabilities: PiProviderCapabilitiesV2,
+        capabilities,
         createdAt: now,
         updatedAt: now,
         lastError: null,
@@ -498,6 +517,12 @@ export function makePiAdapterV2(
        * and the next capture re-syncs it instead of trusting it.
        */
       let leafCursorStale = false;
+      /**
+       * Fork-messages flavors: user entry ids already on the active branch as
+       * of the last turn boundary. A turn's start entry is the first id that
+       * is new at its end. Stale after a failed read, like `lastKnownLeaf`.
+       */
+      let knownUserEntryIds = new Set<string>();
       // Pi's own configured defaults, captured from the first `get_state` so
       // that selecting the displayed "Pi default" again can restore them. Pi
       // has no "unset" commands, so the baselines have to be replayed
@@ -536,7 +561,7 @@ export function makePiAdapterV2(
           sessionEntity = { ...sessionEntity, status, lastError, updatedAt };
           yield* emit({
             type: "provider_session.updated",
-            driver: PI_PROVIDER,
+            driver,
             providerSession: sessionEntity,
           });
         });
@@ -550,7 +575,7 @@ export function makePiAdapterV2(
           state.providerThread = { ...state.providerThread, ...patch, updatedAt };
           yield* emit({
             type: "provider_thread.updated",
-            driver: PI_PROVIDER,
+            driver,
             providerThread: state.providerThread,
           });
         });
@@ -587,7 +612,7 @@ export function makePiAdapterV2(
           // A local timeout does not cancel Pi's lifecycle hook. Retire the
           // process before fallback can race its eventual switch/new-session.
           Effect.tapError((error) =>
-            Effect.logWarning("Pi session lifecycle request failed", {
+            Effect.logWarning(`${name} session lifecycle request failed`, {
               providerSessionId: input.providerSessionId,
               operation: record["type"],
               errorTag: error._tag,
@@ -663,7 +688,7 @@ export function makePiAdapterV2(
           const updatedAt = yield* DateTime.now;
           yield* emit({
             type: "provider_turn.updated",
-            driver: PI_PROVIDER,
+            driver,
             threadId: turn.turnInput.threadId,
             providerTurn: {
               ...turn.providerTurn,
@@ -686,13 +711,13 @@ export function makePiAdapterV2(
         updatedAt: DateTime.Utc,
       ) => ({
         id: idAllocator.derive.turnItemFromProviderItem({
-          driver: PI_PROVIDER,
+          driver,
           nativeItemId,
         }),
         threadId: turn.turnInput.threadId,
         runId: turn.turnInput.runId,
         nodeId: idAllocator.derive.nodeFromProviderItem({
-          driver: PI_PROVIDER,
+          driver,
           nativeItemId,
         }),
         providerThreadId: turn.turnInput.providerThread.id,
@@ -714,10 +739,10 @@ export function makePiAdapterV2(
       ) =>
         emit({
           type: "node.updated",
-          driver: PI_PROVIDER,
+          driver,
           node: {
             id: idAllocator.derive.nodeFromProviderItem({
-              driver: PI_PROVIDER,
+              driver,
               nativeItemId,
             }),
             threadId: turn.turnInput.threadId,
@@ -745,10 +770,10 @@ export function makePiAdapterV2(
       ) {
         yield* emit({
           type: "turn_item.updated",
-          driver: PI_PROVIDER,
+          driver,
           turnItem: makeProviderRetryTurnItem({
             idAllocator,
-            driver: PI_PROVIDER,
+            driver,
             threadId: turn.turnInput.threadId,
             runId: turn.turnInput.runId,
             nodeId: turn.turnInput.rootNodeId,
@@ -789,14 +814,14 @@ export function makePiAdapterV2(
         );
         yield* emit({
           type: "turn_item.updated",
-          driver: PI_PROVIDER,
+          driver,
           turnItem: {
             ...baseItemFields(turn, compaction.nativeItemId, compaction.startedAt, emittedAt),
             status,
             title: compactionTitle(status),
             completedAt,
             type: "compaction",
-            driver: PI_PROVIDER,
+            driver,
             ...details,
           },
         });
@@ -818,12 +843,12 @@ export function makePiAdapterV2(
           );
           if (item.kind === "assistant_message") {
             const messageId = idAllocator.derive.messageFromProviderItem({
-              driver: PI_PROVIDER,
+              driver,
               nativeItemId: item.nativeItemId,
             });
             yield* emit({
               type: "turn_item.updated",
-              driver: PI_PROVIDER,
+              driver,
               turnItem: {
                 ...base,
                 status: streaming ? "running" : "completed",
@@ -837,13 +862,13 @@ export function makePiAdapterV2(
             });
             yield* emit({
               type: "message.updated",
-              driver: PI_PROVIDER,
+              driver,
               message: {
                 id: messageId,
                 threadId: turn.turnInput.threadId,
                 runId: turn.turnInput.runId,
                 nodeId: idAllocator.derive.nodeFromProviderItem({
-                  driver: PI_PROVIDER,
+                  driver,
                   nativeItemId: item.nativeItemId,
                 }),
                 role: "assistant",
@@ -860,7 +885,7 @@ export function makePiAdapterV2(
           }
           yield* emit({
             type: "turn_item.updated",
-            driver: PI_PROVIDER,
+            driver,
             turnItem: {
               ...base,
               status: streaming ? "running" : "completed",
@@ -944,8 +969,14 @@ export function makePiAdapterV2(
         const startedAt = turn.toolStartedAt.get(toolCallId) ?? emittedAt;
         turn.toolStartedAt.set(toolCallId, startedAt);
         const completed = phase === "end";
-        const isError = event["isError"] === true;
         const resultRecord = completed ? event["result"] : event["partialResult"];
+        // Prime Agent reports a failed cell on the result (and its kernel
+        // status) while the event-level flag stays false.
+        const isError =
+          event["isError"] === true ||
+          (completed &&
+            (recordField(resultRecord, "isError") === true ||
+              recordString(recordField(resultRecord, "details"), "status") === "error"));
         const outputText = contentText(recordField(resultRecord, "content"));
         // A Stop aborts in-flight tools, and pi reports those as error ends.
         // Present them as interrupted (matching the run) rather than failed.
@@ -970,11 +1001,37 @@ export function makePiAdapterV2(
           status,
           completedAt: completed ? emittedAt : null,
         } as const;
+        if (flavor.tools === "ipython" && toolName === "ipython") {
+          const cell = classifyIpythonCell(recordString(args, "code") ?? "");
+          yield* emit({
+            type: "turn_item.updated",
+            driver,
+            turnItem:
+              cell.kind === "bash"
+                ? {
+                    ...shared,
+                    title: "bash",
+                    type: "command_execution",
+                    input: cell.command,
+                    ...(outputText.length > 0 ? { output: outputText } : {}),
+                  }
+                : {
+                    ...shared,
+                    title: "python",
+                    type: "dynamic_tool",
+                    toolName: "python",
+                    input: { code: cell.code },
+                    ...(outputText.length > 0 ? { output: outputText } : {}),
+                  },
+          });
+          if (completed) yield* emitIpythonFileChanges(turn, toolCallId, resultRecord, emittedAt);
+          return;
+        }
         if (toolName === "bash") {
           const exitCode = recordNumber(recordField(resultRecord, "details"), "exitCode");
           yield* emit({
             type: "turn_item.updated",
-            driver: PI_PROVIDER,
+            driver,
             turnItem: {
               ...shared,
               title: toolName,
@@ -997,7 +1054,7 @@ export function makePiAdapterV2(
             const newStr = toolName === "write" ? recordString(args, "content") : undefined;
             yield* emit({
               type: "turn_item.updated",
-              driver: PI_PROVIDER,
+              driver,
               turnItem: {
                 ...shared,
                 title: toolName,
@@ -1012,7 +1069,7 @@ export function makePiAdapterV2(
         }
         yield* emit({
           type: "turn_item.updated",
-          driver: PI_PROVIDER,
+          driver,
           turnItem: {
             ...shared,
             title: toolName,
@@ -1025,6 +1082,45 @@ export function makePiAdapterV2(
         });
         if (toolName === "subagent") {
           yield* emitSubagentTasks(turn, toolCallId, resultRecord, completed);
+        }
+      });
+
+      /**
+       * Prime Agent's edit helper reports each change on the cell result as
+       * `details.diffs: [{ path, oldStr, newStr }]`. Surface them as file
+       * changes under the cell so the diff view works like other providers'.
+       */
+      const emitIpythonFileChanges = Effect.fnUntraced(function* (
+        turn: ActivePiTurn,
+        toolCallId: string,
+        resultRecord: unknown,
+        emittedAt: DateTime.Utc,
+      ) {
+        const diffs = recordField(recordField(resultRecord, "details"), "diffs");
+        if (!Array.isArray(diffs)) return;
+        const startedAt = turn.toolStartedAt.get(toolCallId) ?? emittedAt;
+        for (const [index, diff] of diffs.entries()) {
+          const fileName = recordString(diff, "path")?.trim();
+          const oldStr = recordString(diff, "oldStr");
+          const newStr = recordString(diff, "newStr");
+          if (fileName === undefined || fileName.length === 0) continue;
+          if (oldStr === undefined || newStr === undefined) continue;
+          const nativeItemId = `${toolCallId}:diff:${index}`;
+          yield* emitItemNode(turn, nativeItemId, "tool_call", "completed", startedAt, emittedAt);
+          yield* emit({
+            type: "turn_item.updated",
+            driver,
+            turnItem: {
+              ...baseItemFields(turn, nativeItemId, startedAt, emittedAt),
+              status: "completed",
+              completedAt: emittedAt,
+              title: "edit",
+              type: "file_change",
+              fileName,
+              oldStr,
+              newStr,
+            },
+          });
         }
       });
 
@@ -1044,7 +1140,7 @@ export function makePiAdapterV2(
         if (!Array.isArray(results)) return;
         const emittedAt = yield* DateTime.now;
         const parentNodeId = idAllocator.derive.nodeFromProviderItem({
-          driver: PI_PROVIDER,
+          driver,
           nativeItemId: toolCallId,
         });
         for (const [index, result] of results.entries()) {
@@ -1053,7 +1149,7 @@ export function makePiAdapterV2(
           if (agent === undefined || task === undefined) continue;
           const nativeTaskId = `${toolCallId}:subagent:${recordNumber(result, "step") ?? index}`;
           const subagentId = idAllocator.derive.nodeFromProviderItem({
-            driver: PI_PROVIDER,
+            driver,
             nativeItemId: nativeTaskId,
           });
           const startedAt = turn.toolStartedAt.get(nativeTaskId) ?? emittedAt;
@@ -1078,7 +1174,7 @@ export function makePiAdapterV2(
           const resultText = finished && outputText.length > 0 ? outputText.slice(0, 10_000) : null;
           yield* emit({
             type: "subagent.updated",
-            driver: PI_PROVIDER,
+            driver,
             subagent: {
               id: subagentId,
               threadId: turn.turnInput.threadId,
@@ -1086,7 +1182,7 @@ export function makePiAdapterV2(
               parentNodeId,
               origin: "provider_native",
               createdBy: "agent",
-              driver: PI_PROVIDER,
+              driver,
               providerInstanceId: options.instanceId,
               providerThreadId: turn.turnInput.providerThread.id,
               childThreadId: null,
@@ -1104,7 +1200,7 @@ export function makePiAdapterV2(
           });
           yield* emit({
             type: "turn_item.updated",
-            driver: PI_PROVIDER,
+            driver,
             turnItem: {
               ...baseItemFields(turn, nativeTaskId, startedAt, emittedAt),
               status,
@@ -1113,7 +1209,7 @@ export function makePiAdapterV2(
               type: "subagent",
               subagentId,
               origin: "provider_native",
-              driver: PI_PROVIDER,
+              driver,
               providerInstanceId: options.instanceId,
               childThreadId: null,
               prompt: task,
@@ -1142,18 +1238,18 @@ export function makePiAdapterV2(
           };
           yield* emit({
             type: "runtime_request.updated",
-            driver: PI_PROVIDER,
+            driver,
             threadId: pending.node.threadId,
             runtimeRequest: pending.runtimeRequest,
           });
           yield* emit({
             type: "node.updated",
-            driver: PI_PROVIDER,
+            driver,
             node: { ...pending.node, status: "cancelled", completedAt: resolvedAt },
           });
           yield* emit({
             type: "turn_item.updated",
-            driver: PI_PROVIDER,
+            driver,
             turnItem: {
               ...pending.turnItem,
               status: "cancelled",
@@ -1186,7 +1282,7 @@ export function makePiAdapterV2(
           yield* emitItemNode(turn, nativeItemId, "system", "completed", emittedAt, emittedAt);
           yield* emit({
             type: "turn_item.updated",
-            driver: PI_PROVIDER,
+            driver,
             turnItem: {
               ...baseItemFields(turn, nativeItemId, emittedAt, emittedAt),
               status: "completed",
@@ -1227,7 +1323,7 @@ export function makePiAdapterV2(
         const turn = state?.activeTurn ?? null;
         const createdAt = yield* DateTime.now;
         const requestId = yield* idAllocator.allocate.runtimeRequest({
-          driver: PI_PROVIDER,
+          driver,
           ...(turn === null ? {} : { providerTurnId: turn.providerTurn.id }),
           nativeRequestId,
         });
@@ -1309,12 +1405,12 @@ export function makePiAdapterV2(
         });
         yield* emit({
           type: "runtime_request.updated",
-          driver: PI_PROVIDER,
+          driver,
           threadId,
           runtimeRequest,
         });
-        yield* emit({ type: "node.updated", driver: PI_PROVIDER, node });
-        yield* emit({ type: "turn_item.updated", driver: PI_PROVIDER, turnItem });
+        yield* emit({ type: "node.updated", driver, node });
+        yield* emit({ type: "turn_item.updated", driver, turnItem });
       });
 
       const emitExtensionError = Effect.fnUntraced(function* (event: PiRpcRecord) {
@@ -1343,7 +1439,7 @@ export function makePiAdapterV2(
         yield* emitItemNode(turn, nativeItemId, "system", "failed", emittedAt, emittedAt);
         yield* emit({
           type: "turn_item.updated",
-          driver: PI_PROVIDER,
+          driver,
           turnItem: {
             ...baseItemFields(turn, nativeItemId, emittedAt, emittedAt),
             status: "failed",
@@ -1363,9 +1459,67 @@ export function makePiAdapterV2(
        * point `fork` rolls back to); the leaf becomes the conversation head.
        * Pure bookkeeping: failures degrade to the synthetic refs.
        */
+      /** Active-branch user entry ids from `get_fork_messages`, in branch order. */
+      const readUserEntryIds = (timeoutMs = PI_REQUEST_TIMEOUT_MS) =>
+        request({ type: "get_fork_messages" }, timeoutMs).pipe(
+          Effect.map((data) => {
+            const messages = recordField(data, "messages");
+            return Array.isArray(messages)
+              ? messages.flatMap((message) => recordString(message, "entryId") ?? [])
+              : [];
+          }),
+          Effect.option,
+        );
+
+      /**
+       * Record where the next turn starts. Pi baselines the tree leaf;
+       * fork-messages flavors baseline the user entries already present.
+       */
+      const baselineSessionTree = Effect.fnUntraced(function* () {
+        if (flavor.sessionTree === "fork_messages") {
+          const entryIds = yield* readUserEntryIds();
+          knownUserEntryIds = new Set(Option.getOrElse(entryIds, () => []));
+          leafCursorStale = Option.isNone(entryIds);
+          return null;
+        }
+        const entriesData = yield* request({ type: "get_entries" }).pipe(
+          Effect.orElseSucceed(() => undefined),
+        );
+        lastKnownLeaf = recordString(entriesData, "leafId") ?? null;
+        // A successful full baseline makes the cursor trustworthy again. Only
+        // a failed one leaves it stale, so a recovered session does not keep
+        // skipping turn refs. An empty tree is a success with no leafId.
+        leafCursorStale = entriesData === undefined;
+        return lastKnownLeaf;
+      });
+
+      /**
+       * Fork-messages flavors cannot see the leaf, so they only recover the
+       * turn's start entry; rollback and fork need nothing else.
+       */
+      const captureTurnStartFromUserEntries = Effect.fnUntraced(function* (
+        timeoutMs: number,
+      ): Effect.fn.Return<PiTurnTreeRefs | null> {
+        const cursorWasStale = leafCursorStale;
+        const entryIds = yield* readUserEntryIds(timeoutMs);
+        if (Option.isNone(entryIds)) {
+          leafCursorStale = true;
+          return null;
+        }
+        const firstNewEntryId = cursorWasStale
+          ? undefined
+          : entryIds.value.find((entryId) => !knownUserEntryIds.has(entryId));
+        knownUserEntryIds = new Set(entryIds.value);
+        leafCursorStale = false;
+        return { turnStartEntryId: firstNewEntryId ?? null, leafId: null };
+      });
+
       const captureTurnTreeRefs = Effect.fnUntraced(function* (
         timeoutMs = PI_REQUEST_TIMEOUT_MS,
       ): Effect.fn.Return<PiTurnTreeRefs | null> {
+        if (flavor.sessionTree === "fork_messages") {
+          return yield* captureTurnStartFromUserEntries(timeoutMs);
+        }
         const cursorWasStale = leafCursorStale;
         const cursor = cursorWasStale ? null : lastKnownLeaf;
         const data = yield* request(
@@ -1440,7 +1594,7 @@ export function makePiAdapterV2(
         const failure = turn.interrupted ? null : turn.failure;
         yield* emit({
           type: "provider_turn.updated",
-          driver: PI_PROVIDER,
+          driver,
           threadId: turn.turnInput.threadId,
           providerTurn: {
             ...turn.providerTurn,
@@ -1474,7 +1628,7 @@ export function makePiAdapterV2(
           } else {
             yield* emit({
               type: "turn_item.updated",
-              driver: PI_PROVIDER,
+              driver,
               turnItem: {
                 ...baseItemFields(turn, failureItemId, completedAt, completedAt),
                 status: "failed",
@@ -1487,7 +1641,7 @@ export function makePiAdapterV2(
           }
           yield* emit({
             type: "turn.terminal",
-            driver: PI_PROVIDER,
+            driver,
             providerThreadId: state.providerThread.id,
             providerTurnId: turn.providerTurn.id,
             runOrdinal: turn.turnInput.runOrdinal,
@@ -1505,7 +1659,7 @@ export function makePiAdapterV2(
         } else {
           yield* emit({
             type: "turn.terminal",
-            driver: PI_PROVIDER,
+            driver,
             providerThreadId: state.providerThread.id,
             providerTurnId: turn.providerTurn.id,
             runOrdinal: turn.turnInput.runOrdinal,
@@ -1522,6 +1676,7 @@ export function makePiAdapterV2(
         turn: ActivePiTurn,
         settleAfterAgentActivity = false,
         attempt = 1,
+        busyPolls = 0,
       ) => {
         const providerTurnId = turn.providerTurn.id;
         const settleProbeGeneration = turn.settleProbeGeneration;
@@ -1534,6 +1689,7 @@ export function makePiAdapterV2(
                 settleAfterAgentActivity,
                 settleProbeGeneration,
                 attempt,
+                busyPolls,
                 data,
               }),
             // A failed probe still has to reach the pump. Dropping it would
@@ -1561,7 +1717,7 @@ export function makePiAdapterV2(
           case "agent_start": {
             if (turn === null) {
               unsolicitedActivityDetected = true;
-              yield* updateProviderSession("error", PI_UNSOLICITED_ACTIVITY_ERROR);
+              yield* updateProviderSession("error", unsolicitedActivityError);
               yield* connection.terminate;
               return;
             }
@@ -1615,7 +1771,7 @@ export function makePiAdapterV2(
             yield* completeOpenStreamItems(turn);
             if (recordString(message, "stopReason") === "error" && turn.failure === null) {
               turn.failure = makeProviderFailure({
-                message: recordString(message, "errorMessage") ?? "Pi reported a model error.",
+                message: recordString(message, "errorMessage") ?? `${name} reported a model error.`,
                 class: "provider_error",
               });
             }
@@ -1667,7 +1823,7 @@ export function makePiAdapterV2(
                 return;
               }
               const errorMessage =
-                recordString(event, "errorMessage") ?? "Pi context compaction failed.";
+                recordString(event, "errorMessage") ?? `${name} context compaction failed.`;
               yield* emitCompaction(turn, compaction, "failed", {
                 summary: errorMessage.slice(0, 1_000),
               });
@@ -1707,7 +1863,7 @@ export function makePiAdapterV2(
             );
             const retryDelayMs = Math.max(0, Math.trunc(recordNumber(event, "delayMs") ?? 0));
             const failure = makeProviderFailure({
-              message: recordString(event, "errorMessage") ?? "Pi provider request failed.",
+              message: recordString(event, "errorMessage") ?? `${name} provider request failed.`,
               class: "provider_error",
               retryable: true,
             });
@@ -1749,7 +1905,7 @@ export function makePiAdapterV2(
               return;
             }
             const failure = makeProviderFailure({
-              message: recordString(event, "finalError") ?? "Pi auto-retry failed.",
+              message: recordString(event, "finalError") ?? `${name} auto-retry failed.`,
               class: "provider_error",
               retryable: false,
             });
@@ -1777,6 +1933,21 @@ export function makePiAdapterV2(
             return;
           case "extension_error": {
             yield* emitExtensionError(event);
+            return;
+          }
+          case "agent_end": {
+            // Pi follows agent_end with agent_settled once retries, compaction,
+            // and queued continuations are done. Prime Agent never sends that,
+            // so treat each agent_end as a candidate settle point and confirm
+            // it with get_state.
+            if (flavor.settleSignal !== "idle_probe" || turn === null) return;
+            if (turn.interrupted) {
+              if (state !== null) yield* finalizeTurn(state);
+              return;
+            }
+            turn.settleWhenIdle = true;
+            turn.settleProbeGeneration += 1;
+            yield* scheduleSettleProbe(turn, true);
             return;
           }
           case "agent_settled": {
@@ -1815,14 +1986,14 @@ export function makePiAdapterV2(
               if (compactTurn === null) return;
               if (compactTurn.activeCompaction !== null) return;
               if (pendingCompact?.kind === "steer") {
-                yield* Effect.logWarning("Pi rejected a compact steer.", {
+                yield* Effect.logWarning(`${name} rejected a compact steer.`, {
                   errorLength: recordString(event, "error")?.length,
                 });
                 return;
               }
               if (!compactTurn.sawCompaction) {
                 compactTurn.failure = makeProviderFailure({
-                  message: recordString(event, "error") ?? "Pi compact failed.",
+                  message: recordString(event, "error") ?? `${name} compact failed.`,
                   class: "provider_error",
                 });
                 if (state !== null) yield* finalizeTurn(state);
@@ -1857,7 +2028,7 @@ export function makePiAdapterV2(
               // A rejected steer only means that one message was refused. The
               // turn it was aimed at is still running on Pi, so terminalizing
               // here would report a failure while output keeps streaming.
-              yield* Effect.logWarning("Pi rejected a steer message.", {
+              yield* Effect.logWarning(`${name} rejected a steer message.`, {
                 errorLength: recordString(event, "error")?.length,
               });
               return;
@@ -1870,7 +2041,7 @@ export function makePiAdapterV2(
                   : null;
             if (failedTurn !== null) {
               failedTurn.failure = makeProviderFailure({
-                message: recordString(event, "error") ?? "Pi rejected the prompt.",
+                message: recordString(event, "error") ?? `${name} rejected the prompt.`,
                 class: "provider_error",
               });
               if (state !== null) yield* finalizeTurn(state);
@@ -1918,13 +2089,27 @@ export function makePiAdapterV2(
               yield* connection.terminate;
               return;
             }
-            if (
-              recordField(data, "isStreaming") !== true &&
-              recordField(data, "isCompacting") !== true &&
-              (recordNumber(data, "pendingMessageCount") ?? 0) === 0
-            ) {
+            if (piStateIsIdle(data)) {
               turn.settleWhenIdle = false;
               if (state !== null) yield* finalizeTurn(state);
+              return;
+            }
+            // Pi follows busy work with events that re-probe. Without
+            // agent_settled, the end of a retry wait or a queued action has no
+            // event of its own, so keep reading state until it goes idle.
+            // New work bumps the generation, which retires this chain.
+            if (flavor.settleSignal === "idle_probe") {
+              const busyPolls = Math.max(0, Math.trunc(recordNumber(event, "busyPolls") ?? 0));
+              const delayMs = Math.min(
+                BUSY_PROBE_INITIAL_DELAY_MS * 2 ** busyPolls,
+                BUSY_PROBE_MAX_DELAY_MS,
+              );
+              yield* Effect.sleep(Duration.millis(delayMs)).pipe(
+                Effect.andThen(
+                  scheduleSettleProbe(turn, settleAfterAgentActivity, 1, busyPolls + 1),
+                ),
+                Effect.forkIn(scope),
+              );
             }
             return;
           }
@@ -1952,13 +2137,13 @@ export function makePiAdapterV2(
                   ? null
                   : makeProviderFailure({
                       cause,
-                      message: "Pi process exited unexpectedly.",
+                      message: `${name} process exited unexpectedly.`,
                       class: "transport_error",
                     });
                 yield* finalizeTurn(state, false);
               }
               if (unsolicitedActivityDetected) {
-                yield* updateProviderSession("error", PI_UNSOLICITED_ACTIVITY_ERROR);
+                yield* updateProviderSession("error", unsolicitedActivityError);
                 yield* Queue.end(events);
               } else if (stopRequested) {
                 yield* updateProviderSession("stopped", null);
@@ -1966,12 +2151,14 @@ export function makePiAdapterV2(
               } else {
                 yield* updateProviderSession(
                   "error",
-                  interrupted ? "Pi process was stopped." : "Pi process exited unexpectedly.",
+                  interrupted
+                    ? `${name} process was stopped.`
+                    : `${name} process exited unexpectedly.`,
                 );
                 yield* Queue.fail(
                   events,
                   new ProviderAdapter.ProviderAdapterEventStreamError({
-                    driver: PI_PROVIDER,
+                    driver,
                     providerSessionId: input.providerSessionId,
                     cause,
                   }),
@@ -2058,7 +2245,7 @@ export function makePiAdapterV2(
           return yield* protocolError("get_state returned no persisted sessionFile", stateData);
         }
         if (needsNewSession && nativeId === lastNativeThreadId) {
-          return yield* protocolError("Pi did not create a distinct session file");
+          return yield* protocolError(`${name} did not create a distinct session file`);
         }
         lastNativeThreadId = nativeId;
         const createdAt = yield* DateTime.now;
@@ -2074,10 +2261,10 @@ export function makePiAdapterV2(
               }
             : {
                 id: idAllocator.derive.providerThread({
-                  driver: PI_PROVIDER,
+                  driver,
                   nativeThreadId: nativeId,
                 }),
-                driver: PI_PROVIDER,
+                driver,
                 providerInstanceId: options.instanceId,
                 providerSessionId: input.providerSessionId,
                 appThreadId: threadInput.threadId,
@@ -2094,20 +2281,13 @@ export function makePiAdapterV2(
                 updatedAt: createdAt,
               };
         threadState = { providerThread, activeTurn: null };
-        // Baseline the session-tree leaf so the first turn's user entry can
-        // be located with a `since` cursor instead of a full entry scan.
-        const baselineEntries = yield* request({ type: "get_entries" }).pipe(
-          Effect.orElseSucceed(() => undefined),
-        );
-        lastKnownLeaf = recordString(baselineEntries, "leafId") ?? null;
-        // A successful full baseline makes the cursor trustworthy again. Only
-        // a failed one leaves it stale, so a recovered session does not keep
-        // skipping turn refs. An empty tree is a success with no leafId.
-        leafCursorStale = baselineEntries === undefined;
+        // Baseline the session tree so the first turn's user entry can be
+        // located without a full scan.
+        yield* baselineSessionTree();
         if (publish)
           yield* emit({
             type: "provider_thread.updated",
-            driver: PI_PROVIDER,
+            driver,
             providerThread,
           });
         return providerThread;
@@ -2126,7 +2306,7 @@ export function makePiAdapterV2(
             sessionEntity = { ...sessionEntity, model: PI_INHERIT_MODEL_SLUG, updatedAt };
             yield* emit({
               type: "provider_session.updated",
-              driver: PI_PROVIDER,
+              driver,
               providerSession: sessionEntity,
             });
           }
@@ -2146,7 +2326,7 @@ export function makePiAdapterV2(
           const parsed = parsePiModelSlug(modelSelection.model);
           if (parsed === null) {
             return yield* protocolError(
-              `Pi model '${modelSelection.model}' must use provider/model format`,
+              `${name} model '${modelSelection.model}' must use provider/model format`,
             );
           }
           const selectedModel = yield* request({
@@ -2160,7 +2340,7 @@ export function makePiAdapterV2(
           sessionEntity = { ...sessionEntity, model: modelSelection.model, updatedAt };
           yield* emit({
             type: "provider_session.updated",
-            driver: PI_PROVIDER,
+            driver,
             providerSession: sessionEntity,
           });
         }
@@ -2213,7 +2393,7 @@ export function makePiAdapterV2(
 
       const runtime: ProviderAdapter.ProviderAdapterV2SessionRuntime = {
         instanceId: options.instanceId,
-        driver: PI_PROVIDER,
+        driver,
         providerSessionId: input.providerSessionId,
         get providerSession() {
           return sessionEntity;
@@ -2234,7 +2414,7 @@ export function makePiAdapterV2(
             Effect.mapError(
               (cause) =>
                 new ProviderAdapter.ProviderAdapterEnsureThreadError({
-                  driver: PI_PROVIDER,
+                  driver,
                   threadId: threadInput.threadId,
                   cause,
                 }),
@@ -2251,7 +2431,7 @@ export function makePiAdapterV2(
             Effect.mapError(
               (cause) =>
                 new ProviderAdapter.ProviderAdapterResumeThreadError({
-                  driver: PI_PROVIDER,
+                  driver,
                   providerSessionId: input.providerSessionId,
                   providerThreadId: threadInput.providerThread.id,
                   cause,
@@ -2269,18 +2449,18 @@ export function makePiAdapterV2(
           Effect.gen(function* () {
             const state = threadState;
             if (state === null) {
-              return yield* protocolError("Pi session has no registered thread");
+              return yield* protocolError(`${name} session has no registered thread`);
             }
             if (state.activeTurn !== null) {
               return yield* protocolError(
-                `Pi provider thread ${turnInput.providerThread.id} already has an active turn`,
+                `${name} provider thread ${turnInput.providerThread.id} already has an active turn`,
               );
             }
             if (
               state.providerThread.nativeThreadRef?.nativeId !==
               turnInput.providerThread.nativeThreadRef?.nativeId
             ) {
-              return yield* protocolError("Pi turn requested for a different native session");
+              return yield* protocolError(`${name} turn requested for a different native session`);
             }
             // The orchestrator adopts a fork under its already-allocated row.
             // Future session updates must retain that authoritative identity.
@@ -2316,7 +2496,7 @@ export function makePiAdapterV2(
             const syntheticNativeTurnId = `${state.providerThread.id}:attempt:${turnInput.attemptId}`;
             const providerTurn: OrchestrationV2ProviderTurn = {
               id: idAllocator.derive.providerTurn({
-                driver: PI_PROVIDER,
+                driver,
                 nativeTurnId: syntheticNativeTurnId,
               }),
               providerThreadId: turnInput.providerThread.id,
@@ -2377,7 +2557,7 @@ export function makePiAdapterV2(
               }
               yield* emit({
                 type: "provider_turn.updated",
-                driver: PI_PROVIDER,
+                driver,
                 threadId: turnInput.threadId,
                 providerTurn,
               });
@@ -2406,7 +2586,7 @@ export function makePiAdapterV2(
             Effect.mapError(
               (cause) =>
                 new ProviderAdapter.ProviderAdapterTurnStartError({
-                  driver: PI_PROVIDER,
+                  driver,
                   threadId: turnInput.threadId,
                   providerThreadId: turnInput.providerThread.id,
                   runId: turnInput.runId,
@@ -2418,7 +2598,9 @@ export function makePiAdapterV2(
           Effect.gen(function* () {
             const turn = threadState?.activeTurn ?? null;
             if (turn === null || turn.providerTurn.id !== steerInput.providerTurnId) {
-              return yield* protocolError(`Pi turn ${steerInput.providerTurnId} is not active`);
+              return yield* protocolError(
+                `${name} turn ${steerInput.providerTurnId} is not active`,
+              );
             }
             const compactCommand = parsePiCompactCommand(steerInput.message.text);
             const payload =
@@ -2438,7 +2620,9 @@ export function makePiAdapterV2(
             yield* sessionEventPermit.withPermits(1)(
               Effect.gen(function* () {
                 if (threadState?.activeTurn !== turn) {
-                  return yield* protocolError(`Pi turn ${steerInput.providerTurnId} is not active`);
+                  return yield* protocolError(
+                    `${name} turn ${steerInput.providerTurnId} is not active`,
+                  );
                 }
                 if (compactCommand !== null) {
                   turn.manualCompactInFlight = true;
@@ -2466,7 +2650,7 @@ export function makePiAdapterV2(
             Effect.mapError(
               (cause) =>
                 new ProviderAdapter.ProviderAdapterSteerRunError({
-                  driver: PI_PROVIDER,
+                  driver,
                   providerThreadId: steerInput.providerThread.id,
                   providerTurnId: steerInput.providerTurnId,
                   cause,
@@ -2480,7 +2664,9 @@ export function makePiAdapterV2(
             // nothing of that turn is left to stop.
             if (turn === null && interruptInput.requestRuntimeRestart === true) return;
             if (turn === null || turn.providerTurn.id !== interruptInput.providerTurnId) {
-              return yield* protocolError(`Pi turn ${interruptInput.providerTurnId} is not active`);
+              return yield* protocolError(
+                `${name} turn ${interruptInput.providerTurnId} is not active`,
+              );
             }
             turn.interrupted = true;
             if (
@@ -2512,11 +2698,23 @@ export function makePiAdapterV2(
             yield* request({ type: "abort" }).pipe(
               Effect.tapError(() => Effect.sync(() => (turn.interrupted = false))),
             );
+            // An abort during a retry wait or queued action ends no run, so
+            // no agent_end follows. Idle-probe flavors settle from state.
+            if (flavor.settleSignal === "idle_probe") {
+              yield* sessionEventPermit.withPermits(1)(
+                Effect.suspend(() => {
+                  if (threadState?.activeTurn !== turn) return Effect.void;
+                  turn.settleWhenIdle = true;
+                  turn.settleProbeGeneration += 1;
+                  return scheduleSettleProbe(turn, true).pipe(Effect.asVoid);
+                }),
+              );
+            }
           }).pipe(
             Effect.mapError(
               (cause) =>
                 new ProviderAdapter.ProviderAdapterInterruptError({
-                  driver: PI_PROVIDER,
+                  driver,
                   providerThreadId: interruptInput.providerThread.id,
                   providerTurnId: interruptInput.providerTurnId,
                   cause,
@@ -2551,18 +2749,18 @@ export function makePiAdapterV2(
             };
             yield* emit({
               type: "runtime_request.updated",
-              driver: PI_PROVIDER,
+              driver,
               threadId: pending.node.threadId,
               runtimeRequest: pending.runtimeRequest,
             });
             yield* emit({
               type: "node.updated",
-              driver: PI_PROVIDER,
+              driver,
               node: { ...pending.node, status: "completed", completedAt: resolvedAt },
             });
             yield* emit({
               type: "turn_item.updated",
-              driver: PI_PROVIDER,
+              driver,
               turnItem: {
                 ...pending.turnItem,
                 status: "completed",
@@ -2575,7 +2773,7 @@ export function makePiAdapterV2(
             Effect.mapError(
               (cause) =>
                 new ProviderAdapter.ProviderAdapterRuntimeRequestResponseError({
-                  driver: PI_PROVIDER,
+                  driver,
                   requestId: requestInput.requestId,
                   cause,
                 }),
@@ -2588,7 +2786,7 @@ export function makePiAdapterV2(
             const wantedNativeId = snapshotInput.providerThread.nativeThreadRef?.nativeId;
             if (state === null || wantedNativeId == null || boundNativeId !== wantedNativeId) {
               return yield* protocolError(
-                "Pi snapshot requested for a thread this session does not host",
+                `${name} snapshot requested for a thread this session does not host`,
               );
             }
             // get_messages is Pi's active-branch view. get_entries returns the
@@ -2611,7 +2809,7 @@ export function makePiAdapterV2(
                 return [
                   {
                     id: idAllocator.derive.messageFromProviderItem({
-                      driver: PI_PROVIDER,
+                      driver,
                       // RPC messages do not expose session-tree entry ids. The
                       // active-branch index is stable for the lifetime of this
                       // snapshot and keeps abandoned branch ids out of it.
@@ -2642,7 +2840,7 @@ export function makePiAdapterV2(
             Effect.mapError(
               (cause) =>
                 new ProviderAdapter.ProviderAdapterReadThreadSnapshotError({
-                  driver: PI_PROVIDER,
+                  driver,
                   providerThreadId: snapshotInput.providerThread.id,
                   cause,
                 }),
@@ -2652,11 +2850,11 @@ export function makePiAdapterV2(
           Effect.gen(function* () {
             const state = threadState;
             if (state === null) {
-              return yield* protocolError("Pi session has no registered thread");
+              return yield* protocolError(`${name} session has no registered thread`);
             }
             if (state.providerThread.id !== rollbackInput.providerThread.id) {
               return yield* protocolError(
-                "Pi rollback requested for a thread this session does not host",
+                `${name} rollback requested for a thread this session does not host`,
               );
             }
             if (state.activeTurn !== null) {
@@ -2671,7 +2869,9 @@ export function makePiAdapterV2(
               return piThreadSnapshot(state.providerThread);
             }
             if (forkEntryId === undefined) {
-              return yield* protocolError("Pi rollback target has no captured session-tree entry");
+              return yield* protocolError(
+                `${name} rollback target has no captured session-tree entry`,
+              );
             }
             const forkData = yield* lifecycleRequest({ type: "fork", entryId: forkEntryId });
             if (recordField(forkData, "cancelled") === true) {
@@ -2689,21 +2889,16 @@ export function makePiAdapterV2(
             const forkSessionFile = recordString(forkState, "sessionFile");
             if (forkSessionFile === undefined) {
               threadState = null;
-              return yield* protocolError("Pi fork did not return a persisted session file");
+              return yield* protocolError(`${name} fork did not return a persisted session file`);
             }
             lastNativeThreadId = forkSessionFile;
             appliedModel = null;
             appliedThinking = null;
             appliedSessionName = null;
             yield* updateProviderThread(state, { nativeThreadRef: providerRef(forkSessionFile) });
-            const entriesData = yield* request({ type: "get_entries" }).pipe(
-              Effect.orElseSucceed(() => undefined),
-            );
-            const leafId = recordString(entriesData, "leafId") ?? null;
-            lastKnownLeaf = leafId;
             // The fork re-baselined the tree, so the cursor is trustworthy
             // again unless this listing itself failed.
-            leafCursorStale = entriesData === undefined;
+            const leafId = yield* baselineSessionTree();
             yield* updateProviderThread(state, {
               nativeConversationHeadRef: leafId === null ? null : providerRef(leafId),
             });
@@ -2712,7 +2907,7 @@ export function makePiAdapterV2(
             Effect.mapError(
               (cause) =>
                 new ProviderAdapter.ProviderAdapterRollbackThreadError({
-                  driver: PI_PROVIDER,
+                  driver,
                   providerThreadId: rollbackInput.providerThread.id,
                   checkpointId: rollbackInput.target.checkpointId,
                   cause,
@@ -2727,13 +2922,13 @@ export function makePiAdapterV2(
             const source = forkInput.sourceProviderThread;
             const sourceFile = source.nativeThreadRef?.nativeId;
             if (sourceFile == null)
-              return yield* protocolError("Pi fork source has no session file");
+              return yield* protocolError(`${name} fork source has no session file`);
             const sourceTurns = (forkInput.sourceProviderTurns ?? []).filter(
               (turn) => turn.providerThreadId === source.id,
             );
             const target = sourceTurns.find((turn) => turn.id === forkInput.providerTurnId);
             if (forkInput.providerTurnId !== undefined && target === undefined) {
-              return yield* protocolError("Pi fork target turn is missing");
+              return yield* protocolError(`${name} fork target turn is missing`);
             }
             const beforeEntry =
               target === undefined
@@ -2743,7 +2938,9 @@ export function makePiAdapterV2(
                     providerThreadTurns: sourceTurns,
                   });
             if (beforeEntry === undefined) {
-              return yield* protocolError("Pi fork boundary has no captured session-tree entry");
+              return yield* protocolError(
+                `${name} fork boundary has no captured session-tree entry`,
+              );
             }
             // CLI --fork uses Pi's own session format and sets the destination
             // cwd. RPC switch_session/clone alone would retain the source cwd.
@@ -2759,7 +2956,7 @@ export function makePiAdapterV2(
             const nativeId = yield* Effect.scoped(
               Effect.gen(function* () {
                 const forkConnection = yield* makePiRpcConnection({
-                  command: options.settings.binaryPath || "pi",
+                  command: binary,
                   args: [...forkLaunch.args, "--fork", sourceFile],
                   cwd,
                   env: forkLaunch.env,
@@ -2781,7 +2978,9 @@ export function makePiAdapterV2(
                 const state = yield* forkConnection.request({ type: "get_state" });
                 const file = recordString(state, "sessionFile");
                 if (file === undefined || file === sourceFile) {
-                  return yield* protocolError("Pi fork did not create a distinct session file");
+                  return yield* protocolError(
+                    `${name} fork did not create a distinct session file`,
+                  );
                 }
                 return file;
               }),
@@ -2795,7 +2994,7 @@ export function makePiAdapterV2(
                 existingProviderThread: {
                   ...source,
                   id: idAllocator.derive.providerThread({
-                    driver: PI_PROVIDER,
+                    driver,
                     nativeThreadId: nativeId,
                   }),
                   appThreadId: forkInput.targetThreadId,
@@ -2824,7 +3023,7 @@ export function makePiAdapterV2(
             Effect.mapError(
               (cause) =>
                 new ProviderAdapter.ProviderAdapterForkThreadError({
-                  driver: PI_PROVIDER,
+                  driver,
                   providerThreadId: forkInput.sourceProviderThread.id,
                   cause,
                 }),
@@ -2959,41 +3158,60 @@ export type PiAdapterV2DriverEnv =
   | IdAllocator.IdAllocatorV2
   | ServerConfig.ServerConfig;
 
-export const PiAdapterV2Driver: ProviderAdapterDriver<PiSettings, PiAdapterV2DriverEnv> = {
-  driverKind: PI_DRIVER_KIND,
-  configSchema: PiSettings,
-  defaultConfig: (): PiSettings => DEFAULT_PI_SETTINGS,
-  create: Effect.fn("PiAdapterV2Driver.create")(
-    function* (input: ProviderAdapterDriverCreateInput<PiSettings>) {
-      const hostEnvironment = yield* HostProcessEnvironment;
-      const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
-      const fileSystem = yield* FileSystem.FileSystem;
-      const idAllocator = yield* IdAllocator.IdAllocatorV2;
-      const serverConfig = yield* ServerConfig.ServerConfig;
-      return makePiAdapterV2({
-        instanceId: input.instanceId,
-        settings: { ...input.config, enabled: input.enabled },
-        environment: mergeProviderInstanceEnvironment(input.environment, hostEnvironment),
-        spawner,
-        fileSystem,
-        idAllocator,
-        serverConfig,
-      });
-    },
-    (effect, input) =>
-      effect.pipe(
-        Effect.mapError(
-          (cause) =>
-            new ProviderAdapterDriverCreateError({
-              driver: PI_DRIVER_KIND,
-              instanceId: input.instanceId,
-              detail: "Failed to create Pi adapter.",
-              cause,
-            }),
+/** Both flavors share one settings shape; only defaults and form copy differ. */
+function makePiFlavorAdapterV2Driver(
+  flavor: PiFlavor,
+  configSchema: typeof PiSettings | typeof PrimeAgentSettings,
+  defaultConfig: PiSettings,
+): ProviderAdapterDriver<PiSettings, PiAdapterV2DriverEnv> {
+  return {
+    driverKind: flavor.driverKind,
+    configSchema,
+    defaultConfig: (): PiSettings => defaultConfig,
+    create: Effect.fn("PiAdapterV2Driver.create")(
+      function* (input: ProviderAdapterDriverCreateInput<PiSettings>) {
+        const hostEnvironment = yield* HostProcessEnvironment;
+        const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
+        const fileSystem = yield* FileSystem.FileSystem;
+        const idAllocator = yield* IdAllocator.IdAllocatorV2;
+        const serverConfig = yield* ServerConfig.ServerConfig;
+        return makePiAdapterV2({
+          flavor,
+          instanceId: input.instanceId,
+          settings: { ...input.config, enabled: input.enabled },
+          environment: mergeProviderInstanceEnvironment(input.environment, hostEnvironment),
+          spawner,
+          fileSystem,
+          idAllocator,
+          serverConfig,
+        });
+      },
+      (effect, input) =>
+        effect.pipe(
+          Effect.mapError(
+            (cause) =>
+              new ProviderAdapterDriverCreateError({
+                driver: flavor.driverKind,
+                instanceId: input.instanceId,
+                detail: `Failed to create ${flavor.displayName} adapter.`,
+                cause,
+              }),
+          ),
         ),
-      ),
-  ),
-};
+    ),
+  };
+}
+
+export const PiAdapterV2Driver = makePiFlavorAdapterV2Driver(
+  PI_FLAVOR,
+  PiSettings,
+  DEFAULT_PI_SETTINGS,
+);
+export const PrimeAgentAdapterV2Driver = makePiFlavorAdapterV2Driver(
+  PRIME_AGENT_FLAVOR,
+  PrimeAgentSettings,
+  Schema.decodeSync(PrimeAgentSettings)({}),
+);
 
 const layer: Layer.Layer<ProviderAdapter.ProviderAdapterV2, never, PiAdapterV2DriverEnv> =
   Layer.effect(
@@ -3005,6 +3223,7 @@ const layer: Layer.Layer<ProviderAdapter.ProviderAdapterV2, never, PiAdapterV2Dr
       const idAllocator = yield* IdAllocator.IdAllocatorV2;
       const serverConfig = yield* ServerConfig.ServerConfig;
       return makePiAdapterV2({
+        flavor: PI_FLAVOR,
         instanceId: PI_DEFAULT_INSTANCE_ID,
         settings: DEFAULT_PI_SETTINGS,
         environment: hostEnvironment,

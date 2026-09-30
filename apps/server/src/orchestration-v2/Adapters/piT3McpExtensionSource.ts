@@ -64,6 +64,9 @@ function runtimeMode(): RuntimeMode {
 }
 
 function toolInputSummary(input: unknown): string {
+  // Prime Agent's ipython cells are easier to judge as code than as JSON.
+  const code = (input as { readonly code?: unknown } | null)?.code;
+  if (typeof code === "string") return code.slice(0, 4_000);
   try {
     return JSON.stringify(input, null, 2).slice(0, 4_000);
   } catch {
