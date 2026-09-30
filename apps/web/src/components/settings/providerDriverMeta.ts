@@ -7,6 +7,7 @@ import {
   GrokSettings,
   OpenCodeSettings,
   PiSettings,
+  PrimeAgentSettings,
   ProviderDriverKind,
 } from "@t3tools/contracts";
 import type * as Schema from "effect/Schema";
@@ -90,6 +91,12 @@ const PROVIDER_CLIENT_DEFINITIONS: readonly ProviderClientDefinition[] = [
     value: ProviderDriverKind.make("pi"),
     label: "Pi",
     settingsSchema: PiSettings,
+  },
+  {
+    value: ProviderDriverKind.make("primeAgent"),
+    label: "Prime Agent",
+    badgeLabel: "Early Access",
+    settingsSchema: PrimeAgentSettings,
   },
   {
     value: ProviderDriverKind.make("acpRegistry"),

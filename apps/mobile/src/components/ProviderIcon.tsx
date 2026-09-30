@@ -80,6 +80,17 @@ export function ProviderIcon(props: ProviderIconProps) {
   if (props.provider === "acpRegistry") {
     return <AcpRegistryProviderIcon color={mono} iconUrl={props.iconUrl} size={size} />;
   }
+  if (props.provider === "primeAgent") {
+    // No official mark yet. Initials match the web fallback instead of
+    // borrowing the Codex glyph that unknown drivers get below.
+    return (
+      <View style={{ width: size, height: size, alignItems: "center", justifyContent: "center" }}>
+        <Text style={{ fontSize: size * 0.5, fontWeight: "700", lineHeight: size, color: mono }}>
+          {providerInstanceInitials("Prime Agent")}
+        </Text>
+      </View>
+    );
+  }
 
   if (props.provider === "claudeAgent") {
     return (
