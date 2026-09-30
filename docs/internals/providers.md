@@ -36,6 +36,15 @@ Forks use Pi's CLI in the destination directory because RPC session switching re
 session's cwd. Provider switches still use portable handoff summaries.
 See the [adapter](../../apps/server/src/orchestration-v2/Adapters/PiAdapterV2.ts).
 
+Prime Agent is a hard fork of Pi and runs through the same adapter with a
+[flavor](../../apps/server/src/orchestration-v2/Adapters/PiFlavor.ts). It forked before Pi added
+`agent_settled` and `get_entries`. After `agent_end` it can still retry, compact, or run queued
+work, and no event marks the end, so the adapter polls `get_state` until
+`sessionActions.active` clears; Prime Agent keeps that set through the whole retry chain. Turn
+boundaries for rollback come from new user entries in `get_fork_messages`. Every tool call is one
+`ipython` cell, and a failed cell reports `isError` on its result while the event's own flag stays
+false.
+
 Antigravity separates account profiles per instance while sharing installed executables across the
 environment. It forces file-based credential storage because the native macOS keychain entry would
 otherwise be shared across instances. The launch environment removes ambient Google credentials,
