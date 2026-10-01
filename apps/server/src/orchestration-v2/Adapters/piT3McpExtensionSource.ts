@@ -17,6 +17,14 @@ export const T3_MCP_BEARER_ENV = "T3_MCP_BEARER_TOKEN";
 export const T3_PI_RUNTIME_MODE_ENV = "T3_PI_RUNTIME_MODE";
 
 /**
+ * Hidden command that rolls the conversation back in place with the extension
+ * API's `navigateTree`, which RPC does not expose. It reports its outcome as a
+ * `notify` whose message starts with the marker; the adapter consumes it.
+ */
+export const T3_NAVIGATE_TREE_COMMAND = "t3-navigate-tree";
+export const T3_NAVIGATE_TREE_RESULT_MARKER = "t3-navigate-tree-result:";
+
+/**
  * Pi tools whose confirmations the bridge raises as file-change approvals.
  * Auto-accept edits skips them; the adapter keys the approval kind off them.
  */
@@ -31,6 +39,8 @@ const TOKEN_ENV = ${JSON.stringify(T3_MCP_BEARER_ENV)};
 const RUNTIME_MODE_ENV = ${JSON.stringify(T3_PI_RUNTIME_MODE_ENV)};
 const ORCHESTRATION_INSTRUCTIONS = ${JSON.stringify(T3_CODE_ORCHESTRATION_INSTRUCTIONS.trim())};
 const PROTOCOL = "2025-06-18";
+const NAVIGATE_TREE_COMMAND = ${JSON.stringify(T3_NAVIGATE_TREE_COMMAND)};
+const NAVIGATE_TREE_RESULT_MARKER = ${JSON.stringify(T3_NAVIGATE_TREE_RESULT_MARKER)};
 const READ_ONLY_TOOLS = new Set(["read", "grep", "find", "ls"]);
 const FILE_CHANGE_TOOLS = new Set(${JSON.stringify(PI_FILE_CHANGE_TOOLS)});
 
@@ -234,6 +244,27 @@ export default async function t3McpExtension(pi: ExtensionAPI) {
   // Pi deliberately leaves permission policy to extensions. T3's injected
   // bridge uses Pi's public blocking tool hook so the shared runtime modes
   // keep their normal meaning without replacing or shadowing Pi's runtime.
+  pi.registerCommand(NAVIGATE_TREE_COMMAND, {
+    description: "T3 Code internal: roll the conversation back in place.",
+    handler: async (args, ctx) => {
+      const [requestId = "", entryId = ""] = args.trim().split(/\\s+/);
+      const report = (result: Record<string, unknown>) =>
+        ctx.ui.notify(\`\${NAVIGATE_TREE_RESULT_MARKER}\${JSON.stringify({ requestId, ...result })}\`, "info");
+      try {
+        const result = await ctx.navigateTree(entryId);
+        report({ outcome: result.cancelled ? "cancelled" : "ok" });
+      } catch (error) {
+        // Read the message by shape: extension runtimes may load this file in
+        // a separate realm, where \`instanceof Error\` is false.
+        const message =
+          typeof error === "object" && error !== null && "message" in error
+            ? String(error.message)
+            : String(error);
+        report({ outcome: "error", error: message });
+      }
+    },
+  });
+
   pi.on("tool_call", async (event, ctx) => {
     const mode = runtimeMode();
     if (mode === "full-access" || READ_ONLY_TOOLS.has(event.toolName)) return;

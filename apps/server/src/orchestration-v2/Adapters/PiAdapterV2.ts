@@ -50,6 +50,7 @@ import {
 import * as Cause from "effect/Cause";
 import * as DateTime from "effect/DateTime";
 import * as Option from "effect/Option";
+import * as Deferred from "effect/Deferred";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
@@ -66,6 +67,7 @@ import * as McpProviderSession from "../../mcp/McpProviderSession.ts";
 import {
   expandPiSkillReference,
   parsePiCompactCommand,
+  hasPiNavigateTreeCommand,
   parsePiDiscoveredCommands,
   type PiCompactCommand,
 } from "../../provider/PiCommands.ts";
@@ -95,7 +97,11 @@ import {
   materializePiT3McpExtension,
   resolvePiLaunchArgs,
 } from "./piT3McpInjection.ts";
-import { PI_FILE_CHANGE_TOOLS } from "./piT3McpExtensionSource.ts";
+import {
+  PI_FILE_CHANGE_TOOLS,
+  T3_NAVIGATE_TREE_COMMAND,
+  T3_NAVIGATE_TREE_RESULT_MARKER,
+} from "./piT3McpExtensionSource.ts";
 import { PI_FLAVOR, PRIME_AGENT_FLAVOR, type PiFlavor } from "./PiFlavor.ts";
 import { classifyIpythonCell, previewPythonCell } from "./primeAgentIpythonCell.ts";
 
@@ -383,6 +389,12 @@ function piApprovalRequestKind(title: string): "command" | "file-change" {
     : "command";
 }
 
+const decodeNavigateTreeResult = Schema.decodeUnknownOption(Schema.fromJsonString(Schema.Unknown));
+
+function parseNavigateTreeResult(json: string): unknown {
+  return Option.getOrUndefined(decodeNavigateTreeResult(json));
+}
+
 interface PendingPiWake {
   readonly events: Array<PiRpcRecord>;
   offered: boolean;
@@ -584,14 +596,20 @@ export function makePiAdapterV2(
             }),
         ),
       );
+      /** Whether T3's extension command for in-place rollback is loaded; null until discovered. */
+      let navigateTreeAvailable: boolean | null = null;
       const discoverSkillNames = connection
         .request({ type: "get_commands" }, PI_SKILL_DISCOVERY_TIMEOUT_MS)
         .pipe(
-          Effect.map(
-            (data) => new Set(parsePiDiscoveredCommands(data).skills.map((skill) => skill.name)),
-          ),
+          Effect.map((data) => {
+            navigateTreeAvailable = hasPiNavigateTreeCommand(data);
+            return new Set(parsePiDiscoveredCommands(data).skills.map((skill) => skill.name));
+          }),
         );
       let skillNames: Set<string> | null = null;
+      /** In-place rollbacks waiting for the extension command's reported outcome. */
+      const pendingTreeNavigations = new Map<string, Deferred.Deferred<unknown>>();
+      let treeNavigationCounter = 0;
 
       const now = yield* DateTime.now;
       let sessionEntity: OrchestrationV2ProviderSession = {
@@ -1496,6 +1514,15 @@ export function makePiAdapterV2(
         const method = recordString(event, "method");
         const nativeRequestId = recordString(event, "id");
         if (method === undefined) return;
+        const notifyMessage = method === "notify" ? recordString(event, "message") : undefined;
+        if (notifyMessage?.startsWith(T3_NAVIGATE_TREE_RESULT_MARKER) === true) {
+          const result = parseNavigateTreeResult(
+            notifyMessage.slice(T3_NAVIGATE_TREE_RESULT_MARKER.length),
+          );
+          const pending = pendingTreeNavigations.get(recordString(result, "requestId") ?? "");
+          if (pending !== undefined) yield* Deferred.succeed(pending, result);
+          return;
+        }
         if (method === "notify") {
           const state = threadState;
           const turn = state?.activeTurn ?? null;
@@ -2678,6 +2705,37 @@ export function makePiAdapterV2(
         return { message, images };
       });
 
+      /**
+       * Rolls the conversation back to just before `entryId` inside the same
+       * session file. RPC has no tree navigation, so T3's extension command
+       * calls `ctx.navigateTree` and reports back through a marked notify.
+       */
+      const navigateTreeInPlace = Effect.fnUntraced(function* (entryId: string) {
+        const requestId = `t3-nav-${++treeNavigationCounter}`;
+        const outcome = yield* Deferred.make<unknown>();
+        pendingTreeNavigations.set(requestId, outcome);
+        const result = yield* Effect.gen(function* () {
+          yield* request(
+            { type: "prompt", message: `/${T3_NAVIGATE_TREE_COMMAND} ${requestId} ${entryId}` },
+            PI_SESSION_TIMEOUT_MS,
+          );
+          return yield* Deferred.await(outcome).pipe(
+            Effect.timeoutOrElse({
+              duration: Duration.millis(PI_SESSION_TIMEOUT_MS),
+              orElse: () =>
+                Effect.fail(protocolError(`${name} did not report the in-place rollback`)),
+            }),
+          );
+        }).pipe(Effect.ensuring(Effect.sync(() => pendingTreeNavigations.delete(requestId))));
+        const status = recordString(result, "outcome");
+        if (status === "ok") return;
+        return yield* protocolError(
+          status === "cancelled"
+            ? `A ${name} extension cancelled the rollback`
+            : `${name} rollback failed: ${recordString(result, "error") ?? "unknown error"}`,
+        );
+      });
+
       const runtime: ProviderAdapter.ProviderAdapterV2SessionRuntime = {
         instanceId: options.instanceId,
         driver,
@@ -3181,6 +3239,22 @@ export function makePiAdapterV2(
               return yield* protocolError(
                 `${name} rollback target has no captured session-tree entry`,
               );
+            }
+            if (flavor.rollback === "tree") {
+              const available =
+                navigateTreeAvailable ??
+                (yield* request({ type: "get_commands" }).pipe(
+                  Effect.map(hasPiNavigateTreeCommand),
+                  Effect.orElseSucceed(() => false),
+                ));
+              navigateTreeAvailable = available;
+              if (available) {
+                yield* navigateTreeInPlace(forkEntryId);
+                // Same session file and model; only the branch head moved.
+                yield* baselineSessionTree();
+                yield* updateProviderThread(state, { nativeConversationHeadRef: null });
+                return piThreadSnapshot(state.providerThread);
+              }
             }
             const forkData = yield* lifecycleRequest({ type: "fork", entryId: forkEntryId });
             if (recordField(forkData, "cancelled") === true) {

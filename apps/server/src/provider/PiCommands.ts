@@ -1,6 +1,8 @@
 import { type ServerProviderSkill, type ServerProviderSlashCommand } from "@t3tools/contracts";
 import * as Predicate from "effect/Predicate";
 
+import { T3_NAVIGATE_TREE_COMMAND } from "../orchestration-v2/Adapters/piT3McpExtensionSource.ts";
+
 // Pi RPC get_commands omits TUI builtins. Advertise /compact so T3 can map it to RPC compact.
 export const PI_COMPACT_SLASH_COMMAND: ServerProviderSlashCommand = {
   name: "compact",
@@ -83,12 +85,23 @@ export function parsePiDiscoveredCommands(data: unknown): PiDiscoveredCommands {
       });
       continue;
     }
+    // T3's own extension command is plumbing, not something to offer users.
+    if (commandName === T3_NAVIGATE_TREE_COMMAND) continue;
     slashCommands.push({
       name: commandName,
       ...(description === undefined ? {} : { description }),
     });
   }
   return { slashCommands, skills };
+}
+
+/** Whether the injected T3 extension loaded, so its in-place rollback command exists. */
+export function hasPiNavigateTreeCommand(data: unknown): boolean {
+  const commands = recordField(data, "commands");
+  return (
+    Array.isArray(commands) &&
+    commands.some((command) => recordString(command, "name") === T3_NAVIGATE_TREE_COMMAND)
+  );
 }
 
 /**

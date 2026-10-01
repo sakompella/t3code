@@ -22,7 +22,9 @@ cell as a Python step with its code. Edits made through Prime Agent's edit helpe
 file changes with their diffs.
 
 Threads use Prime Agent's native session files in `~/.prime/agent/sessions` for resume, rollback,
-and forks, so a thread started in T3 Code can be continued in the Prime Agent terminal UI.
+and forks, so a thread started in T3 Code can be continued in the Prime Agent terminal UI. Rolling
+back rewinds the conversation inside the same session file, so the discarded turns remain as a
+branch that Prime Agent's `/tree` view can still show.
 
 ## Subagents
 

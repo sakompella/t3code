@@ -2826,55 +2826,128 @@ describe("PiAdapterV2 with the Prime Agent flavor", () => {
     }).pipe(Effect.scoped, Effect.provide(testLayer)),
   );
 
+  /** Runs one turn whose end-of-turn branch lists `userEntries` as its user entries. */
+  const runPrimeTurn = (
+    session: Effect.Success<ReturnType<typeof openPrimeThread>>,
+    fake: FakePi,
+    runOrdinal: number,
+    userEntries: ReadonlyArray<string>,
+  ) =>
+    Effect.gen(function* () {
+      yield* startTurn(
+        session.runtime,
+        session.providerThread,
+        "default",
+        [],
+        `turn ${runOrdinal}`,
+        undefined,
+        runOrdinal,
+      );
+      yield* fake.takeRequest("prompt");
+      fake.queueForkMessages({
+        messages: userEntries.map((entryId) => ({ entryId, text: entryId })),
+      });
+      yield* fake.emit({ type: "agent_start" });
+      yield* fake.emit({ type: "agent_end", messages: [] });
+      const settled = yield* session.takeEvent(
+        (event) =>
+          event.type === "provider_turn.updated" && event.providerTurn.status === "completed",
+      );
+      assert.isTrue(settled.type === "provider_turn.updated");
+      return settled.type === "provider_turn.updated" ? settled.providerTurn : undefined;
+    });
+
+  const rollBackToFirstTurn = (
+    session: Effect.Success<ReturnType<typeof openPrimeThread>>,
+    turns: ReadonlyArray<OrchestrationV2ProviderTurn | undefined>,
+  ) =>
+    session.runtime.rollbackThread({
+      providerThread: session.providerThread,
+      target: {
+        type: "provider_turn",
+        checkpointId: CheckpointId.make("checkpoint-1"),
+        appRunOrdinal: 1,
+        providerTurn: turns[0]!,
+      },
+      providerThreadTurns: turns.map((turn) => turn!),
+    });
+
   it.effect("rolls back at the first user entry the discarded turn added", () =>
     Effect.gen(function* () {
       const fake = yield* makeFakePi;
       // ensureThread baselines the branch before the first turn.
       fake.queueForkMessages({ messages: [] });
-      const { runtime, takeEvent, providerThread } = yield* openPrimeThread(fake);
-
-      const runTurn = (runOrdinal: number, userEntries: ReadonlyArray<string>) =>
-        Effect.gen(function* () {
-          yield* startTurn(
-            runtime,
-            providerThread,
-            "default",
-            [],
-            `turn ${runOrdinal}`,
-            undefined,
-            runOrdinal,
-          );
-          yield* fake.takeRequest("prompt");
-          fake.queueForkMessages({
-            messages: userEntries.map((entryId) => ({ entryId, text: entryId })),
-          });
-          yield* fake.emit({ type: "agent_start" });
-          yield* fake.emit({ type: "agent_end", messages: [] });
-          const settled = yield* takeEvent(
-            (event) =>
-              event.type === "provider_turn.updated" && event.providerTurn.status === "completed",
-          );
-          assert.isTrue(settled.type === "provider_turn.updated");
-          return settled.type === "provider_turn.updated" ? settled.providerTurn : undefined;
-        });
-
-      const first = yield* runTurn(1, ["u1"]);
-      const second = yield* runTurn(2, ["u1", "u2"]);
+      const session = yield* openPrimeThread(fake);
+      const first = yield* runPrimeTurn(session, fake, 1, ["u1"]);
+      const second = yield* runPrimeTurn(session, fake, 2, ["u1", "u2"]);
       assert.equal(first?.nativeTurnRef?.nativeId, "u1");
       assert.equal(second?.nativeTurnRef?.nativeId, "u2");
 
-      yield* runtime.rollbackThread({
-        providerThread,
-        target: {
-          type: "provider_turn",
-          checkpointId: CheckpointId.make("checkpoint-1"),
-          appRunOrdinal: 1,
-          providerTurn: first!,
-        },
-        providerThreadTurns: [first!, second!],
-      });
+      // Without T3's extension command, rollback forks a new session file.
+      yield* rollBackToFirstTurn(session, [first, second]);
       const fork = fake.allRequests().find((request) => request["type"] === "fork");
       assert.equal(fork?.["entryId"], "u2");
+    }).pipe(Effect.scoped, Effect.provide(testLayer)),
+  );
+
+  const T3_COMMANDS = { commands: [{ name: "t3-navigate-tree", source: "extension" }] };
+
+  /** Answers the next in-place rollback command the way T3's extension reports it. */
+  const reportNavigation = (fake: FakePi, outcome: Record<string, unknown>) =>
+    Effect.gen(function* () {
+      const prompt = yield* fake.takeRequest("prompt");
+      const [command, requestId, entryId] = String(prompt["message"]).split(" ");
+      assert.equal(command, "/t3-navigate-tree");
+      yield* fake.emit({
+        type: "extension_ui_request",
+        id: "notify-nav",
+        method: "notify",
+        message: `t3-navigate-tree-result:${encodeJsonLine({ requestId, ...outcome })}`,
+        notifyType: "info",
+      });
+      return entryId;
+    });
+
+  it.effect("rolls back in place through T3's extension command when it is loaded", () =>
+    Effect.gen(function* () {
+      const fake = yield* makeFakePi;
+      fake.queueCommands(T3_COMMANDS);
+      fake.queueForkMessages({ messages: [] });
+      const session = yield* openPrimeThread(fake);
+      const first = yield* runPrimeTurn(session, fake, 1, ["u1"]);
+      const second = yield* runPrimeTurn(session, fake, 2, ["u1", "u2"]);
+
+      const rollback = yield* rollBackToFirstTurn(session, [first, second]).pipe(Effect.forkChild);
+      const navigatedEntry = yield* reportNavigation(fake, { outcome: "ok" });
+      const snapshot = yield* Fiber.join(rollback);
+
+      assert.equal(navigatedEntry, "u2");
+      assert.isFalse(fake.allRequests().some((request) => request["type"] === "fork"));
+      assert.equal(
+        snapshot.providerThread.nativeThreadRef?.nativeId,
+        session.providerThread.nativeThreadRef?.nativeId,
+        "an in-place rollback keeps the same session file",
+      );
+    }).pipe(Effect.scoped, Effect.provide(testLayer)),
+  );
+
+  it.effect("reports an extension veto of the in-place rollback as a failure", () =>
+    Effect.gen(function* () {
+      const fake = yield* makeFakePi;
+      fake.queueCommands(T3_COMMANDS);
+      fake.queueForkMessages({ messages: [] });
+      const session = yield* openPrimeThread(fake);
+      const first = yield* runPrimeTurn(session, fake, 1, ["u1"]);
+      const second = yield* runPrimeTurn(session, fake, 2, ["u1", "u2"]);
+
+      const rollback = yield* rollBackToFirstTurn(session, [first, second]).pipe(
+        Effect.flip,
+        Effect.forkChild,
+      );
+      yield* reportNavigation(fake, { outcome: "cancelled" });
+      const error = yield* Fiber.join(rollback);
+      assert.include(String(error.cause), "cancelled the rollback");
+      assert.isFalse(fake.allRequests().some((request) => request["type"] === "fork"));
     }).pipe(Effect.scoped, Effect.provide(testLayer)),
   );
 });

@@ -42,6 +42,12 @@ export interface PiFlavor {
    * agent messages), so the work is buffered and handed to a continuation run.
    */
   readonly selfWakes: "stop" | "continuation";
+  /**
+   * How rollback rewinds the native conversation. `fork` writes a new session
+   * file; `tree` moves the branch head inside the same file through T3's
+   * extension command, falling back to `fork` when the extension is absent.
+   */
+  readonly rollback: "fork" | "tree";
 }
 
 export const PI_FLAVOR: PiFlavor = {
@@ -59,6 +65,7 @@ export const PI_FLAVOR: PiFlavor = {
   sessionTree: "entries",
   tools: "pi",
   selfWakes: "stop",
+  rollback: "fork",
 };
 
 export const PRIME_AGENT_FLAVOR: PiFlavor = {
@@ -75,4 +82,5 @@ export const PRIME_AGENT_FLAVOR: PiFlavor = {
   sessionTree: "fork_messages",
   tools: "ipython",
   selfWakes: "continuation",
+  rollback: "tree",
 };
