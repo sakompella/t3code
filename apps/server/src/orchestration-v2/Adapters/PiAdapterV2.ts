@@ -1316,8 +1316,13 @@ export function makePiAdapterV2(
         if (childId === undefined) return;
         const emittedAt = yield* DateTime.now;
         const previous = rlmChildren.get(childId);
+        // Nested children report through the root session with their parent
+        // child's id. Their first update can arrive after the root turn settled.
+        const parentChildId = recordString(snapshot, "parentId");
+        const parentChild =
+          parentChildId === undefined ? undefined : rlmChildren.get(parentChildId);
         // A child outlives the run that spawned it; its card stays on that run.
-        const turn = previous?.turn ?? currentTurn;
+        const turn = previous?.turn ?? parentChild?.turn ?? currentTurn;
         if (turn === null) return;
         const status = statusOverride ?? rlmChildStatus(recordString(snapshot, "status"));
         const terminal = status !== "pending" && status !== "running";
@@ -1351,7 +1356,15 @@ export function makePiAdapterV2(
             id: subagentId,
             threadId: turn.turnInput.threadId,
             runId: turn.turnInput.runId,
-            parentNodeId: turn.turnInput.rootNodeId,
+            // Nesting under the parent subagent's node is what lets clients
+            // draw Prime Agent's subagent tree.
+            parentNodeId:
+              parentChildId === undefined
+                ? turn.turnInput.rootNodeId
+                : idAllocator.derive.nodeFromProviderItem({
+                    driver,
+                    nativeItemId: `rlm:${parentChildId}`,
+                  }),
             origin: "provider_native",
             createdBy: "agent",
             driver,

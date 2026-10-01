@@ -255,6 +255,10 @@
       "types": "./src/state/subagentRuntime.ts",
       "default": "./src/state/subagentRuntime.ts"
     },
+    "./state/subagent-tree": {
+      "types": "./src/state/subagentTree.ts",
+      "default": "./src/state/subagentTree.ts"
+    },
     "./state/thread-sort": {
       "types": "./src/state/threadSort.ts",
       "default": "./src/state/threadSort.ts"

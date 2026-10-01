@@ -2677,6 +2677,33 @@ describe("PiAdapterV2 with the Prime Agent flavor", () => {
     }).pipe(Effect.scoped, Effect.provide(testLayer)),
   );
 
+  it.effect("nests a subagent's own children under it, even after the turn settled", () =>
+    Effect.gen(function* () {
+      const fake = yield* makeFakePi;
+      const session = yield* openPrimeThread(fake);
+      const parent = yield* settleWithRunningChild(fake, session);
+      yield* fake.emit({
+        type: "rlm_child_update",
+        child: {
+          id: "sub-2",
+          parentId: "sub-1",
+          sessionName: "gamma",
+          label: "Run sleep 20",
+          status: "running",
+          sessionDir: "/fake/.prime/agent/session-artifacts/s/sub-2",
+        },
+      });
+      const nested = yield* session.takeEvent(
+        (event) => event.type === "subagent.updated" && event.subagent.title === "gamma",
+      );
+      assert.isTrue(
+        nested.type === "subagent.updated" &&
+          nested.subagent.parentNodeId === parent?.id &&
+          nested.subagent.runId === parent.runId,
+      );
+    }).pipe(Effect.scoped, Effect.provide(testLayer)),
+  );
+
   it.effect("stops background subagents from a settled turn by restarting the session", () =>
     Effect.gen(function* () {
       const fake = yield* makeFakePi;
