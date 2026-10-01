@@ -1,6 +1,6 @@
 import { describe, expect, it } from "@effect/vitest";
 
-import { classifyIpythonCell } from "./primeAgentIpythonCell.ts";
+import { classifyIpythonCell, previewPythonCell } from "./primeAgentIpythonCell.ts";
 
 describe("classifyIpythonCell", () => {
   it("treats a %%bash cell magic as a shell command", () => {
@@ -47,5 +47,13 @@ describe("classifyIpythonCell", () => {
     for (const code of cases) {
       expect(classifyIpythonCell(code)).toEqual({ kind: "python", code });
     }
+  });
+});
+
+describe("previewPythonCell", () => {
+  it("summarizes a cell by its first statement after imports and comments", () => {
+    expect(previewPythonCell("import os\n# compute\n\nprint(6 *   7)\nx = 1")).toBe("print(6 * 7)");
+    expect(previewPythonCell("from pathlib import Path")).toBe("");
+    expect(previewPythonCell(`data = ${"[1, 2, 3, 4, 5]".repeat(8)}`)).toHaveLength(64);
   });
 });

@@ -2551,7 +2551,10 @@ describe("PiAdapterV2 with the Prime Agent flavor", () => {
           isError: true,
           details: {
             status: "error",
-            diffs: [{ path: "src/a.ts", oldStr: "old", newStr: "new", startLine: 3 }],
+            // Prime Agent reports absolute paths; the timeline shows them workspace-relative.
+            diffs: [
+              { path: `${process.cwd()}/src/a.ts`, oldStr: "old", newStr: "new", startLine: 3 },
+            ],
           },
         },
         isError: false,
@@ -2566,6 +2569,7 @@ describe("PiAdapterV2 with the Prime Agent flavor", () => {
         python.type === "turn_item.updated" &&
           python.turnItem.type === "dynamic_tool" &&
           python.turnItem.toolName === "python" &&
+          python.turnItem.title === "Python: edit('src/a.ts', 'old', 'new')" &&
           python.turnItem.status === "failed",
       );
       const fileChange = yield* takeEvent(
