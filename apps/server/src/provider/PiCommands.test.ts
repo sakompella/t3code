@@ -3,6 +3,7 @@ import { expect, it } from "@effect/vitest";
 import {
   expandPiSkillReference,
   parsePiCompactCommand,
+  hasPiNavigateTreeCommand,
   parsePiDiscoveredCommands,
   PI_COMPACT_SLASH_COMMAND,
   withPiBuiltinSlashCommands,
@@ -124,4 +125,18 @@ it("preserves code indentation and line breaks when expanding a skill", () => {
   expect(expandPiSkillReference("$review\n```ts\n  const x = 1;\n```", new Set(["review"]))).toBe(
     "/skill:review ```ts\n  const x = 1;\n```",
   );
+});
+
+it("keeps T3's internal rollback command out of the slash menu", () => {
+  const data = {
+    commands: [
+      { name: "t3-navigate-tree", source: "extension" },
+      { name: "review", source: "extension" },
+    ],
+  };
+  expect(parsePiDiscoveredCommands(data).slashCommands.map((command) => command.name)).toEqual([
+    "review",
+  ]);
+  expect(hasPiNavigateTreeCommand(data)).toBe(true);
+  expect(hasPiNavigateTreeCommand({ commands: [{ name: "review" }] })).toBe(false);
 });
