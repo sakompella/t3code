@@ -35,6 +35,14 @@ export interface PiFlavor {
   readonly sessionTree: "entries" | "fork_messages";
   /** Pi's built-in bash/edit/write tools, or Prime Agent's single `ipython` tool. */
   readonly tools: "pi" | "ipython";
+  /**
+   * Whether a wake's continuation run gets a notice naming what woke the
+   * agent. Prime Agent wakes itself by design (heartbeats, schedules, finished
+   * background commands, agent messages), and the messages it was woken with
+   * say which, so the offer waits for its reply. Pi's extension wakes carry no
+   * such cause and are offered at once with the generic notice.
+   */
+  readonly wakeNotices: boolean;
 }
 
 export const PI_FLAVOR: PiFlavor = {
@@ -51,6 +59,7 @@ export const PI_FLAVOR: PiFlavor = {
   settleSignal: "agent_settled",
   sessionTree: "entries",
   tools: "pi",
+  wakeNotices: false,
 };
 
 export const PRIME_AGENT_FLAVOR: PiFlavor = {
@@ -66,4 +75,5 @@ export const PRIME_AGENT_FLAVOR: PiFlavor = {
   settleSignal: "idle_probe",
   sessionTree: "fork_messages",
   tools: "ipython",
+  wakeNotices: true,
 };
