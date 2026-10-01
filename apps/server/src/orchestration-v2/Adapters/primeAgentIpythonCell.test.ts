@@ -1,6 +1,11 @@
 import { describe, expect, it } from "@effect/vitest";
 
-import { classifyIpythonCell, previewPythonCell } from "./primeAgentIpythonCell.ts";
+import {
+  awaitsHandle,
+  classifyIpythonCell,
+  detachedBashJobs,
+  previewPythonCell,
+} from "./primeAgentIpythonCell.ts";
 
 describe("classifyIpythonCell", () => {
   it("treats a %%bash cell magic as a shell command", () => {
@@ -55,5 +60,31 @@ describe("previewPythonCell", () => {
     expect(previewPythonCell("import os\n# compute\n\nprint(6 *   7)\nx = 1")).toBe("print(6 * 7)");
     expect(previewPythonCell("from pathlib import Path")).toBe("");
     expect(previewPythonCell(`data = ${"[1, 2, 3, 4, 5]".repeat(8)}`)).toHaveLength(64);
+  });
+});
+
+describe("detachedBashJobs", () => {
+  it("finds handles the creating cell never awaits", () => {
+    // The shape Prime Agent used live for "run it in the background".
+    expect(
+      detachedBashJobs(
+        "late_job = bash('sleep 40 && echo late'); print(late_job.pid, late_job.running)",
+      ),
+    ).toEqual([{ variable: "late_job", command: "sleep 40 && echo late" }]);
+    expect(detachedBashJobs('import time\nbash("make watch")')).toEqual([
+      { variable: null, command: "make watch" },
+    ]);
+  });
+
+  it("ignores commands the cell waits for", () => {
+    expect(detachedBashJobs("r = await bash('pnpm test'); print(r.output)")).toEqual([]);
+    expect(detachedBashJobs("job = bash('sleep 1')\nprint(job.pid)\nres = await job")).toEqual([]);
+    expect(detachedBashJobs("print('no shell here')")).toEqual([]);
+  });
+
+  it("recognizes a later cell consuming a handle", () => {
+    expect(awaitsHandle("out = await late_job\nprint(out)", "late_job")).toBe(true);
+    expect(awaitsHandle("print(late_job.running)", "late_job")).toBe(false);
+    expect(awaitsHandle("await late_jobs_list", "late_job")).toBe(false);
   });
 });

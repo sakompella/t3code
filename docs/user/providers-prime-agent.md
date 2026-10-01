@@ -31,10 +31,12 @@ Agent is told this on its next turn.
 ## Subagents
 
 Child agents that Prime Agent starts with `rlm.spawn` appear as subagent cards with their task,
-model, live activity, and result. A turn stays open until its children finish, so a parent that
-waits for a child's reply finishes in the same turn. Stopping the turn restarts the Prime Agent
-session, which also stops its running children. Children run without a T3 Code thread of their
-own, so they cannot be opened or resumed from T3 Code.
+model, live activity, and result. When Prime Agent ends its turn while children are still working,
+the thread shows them above the composer as background work, and a child's reply starts a new
+run in the same thread. Commands Prime Agent leaves running in the background appear there too,
+until they finish. Stopping background work restarts the Prime Agent session, which ends its
+running children and commands. Children run without a T3 Code thread of their own, so they cannot
+be opened or resumed from T3 Code.
 
 ## Work Prime Agent Starts on Its Own
 

@@ -2604,66 +2604,151 @@ describe("PiAdapterV2 with the Prime Agent flavor", () => {
     },
   });
 
-  it.effect("keeps a turn open across the parent's idle gap until its subagent finishes", () =>
+  /** Starts a turn whose parent spawns a child and then ends its own run. */
+  const settleWithRunningChild = (
+    fake: FakePi,
+    session: Effect.Success<ReturnType<typeof openPrimeThread>>,
+  ) =>
     Effect.gen(function* () {
-      const fake = yield* makeFakePi;
-      const { runtime, takeEvent, providerThread } = yield* openPrimeThread(fake);
-      yield* startTurn(runtime, providerThread);
+      yield* startTurn(session.runtime, session.providerThread);
       yield* fake.takeRequest("prompt");
       yield* fake.emit({ type: "agent_start" });
       yield* fake.emit(rlmChild("queued"));
-      const pending = yield* takeEvent(
-        (event) => event.type === "subagent.updated" && event.subagent.status === "pending",
-      );
-      assert.isTrue(
-        pending.type === "subagent.updated" &&
-          pending.subagent.title === "worker" &&
-          pending.subagent.prompt === "Reply to your parent with child-ok" &&
-          pending.subagent.childThreadId === null,
-      );
       yield* fake.emit(
         rlmChild("running", { activity: { kind: "executing", toolName: "ipython" } }),
       );
-      const running = yield* takeEvent(
+      const running = yield* session.takeEvent(
         (event) => event.type === "subagent.updated" && event.subagent.status === "running",
       );
+      yield* fake.emit({ type: "agent_end", messages: [] });
+      yield* fake.takeRequest("get_state");
+      const terminal = yield* session.takeEvent((event) => event.type === "turn.terminal");
+      assert.isTrue(terminal.type === "turn.terminal" && terminal.status === "completed");
+      return running.type === "subagent.updated" ? running.subagent : undefined;
+    });
+
+  it.effect("settles the parent's turn and keeps a running subagent as background work", () =>
+    Effect.gen(function* () {
+      const fake = yield* makeFakePi;
+      const session = yield* openPrimeThread(fake);
+      const running = yield* settleWithRunningChild(fake, session);
       assert.isTrue(
-        running.type === "subagent.updated" && running.subagent.progress === "executing ipython",
+        running?.title === "worker" &&
+          running.prompt === "Reply to your parent with child-ok" &&
+          running.progress === "executing ipython",
+      );
+      // The settled turn still has work in flight, which keeps T3 listening
+      // and lets the composer offer to stop it.
+      assert.isTrue(yield* session.runtime.hasPendingBackgroundWork!);
+      assert.isTrue(
+        yield* session.runtime.hasPendingBackgroundWorkForThread!(session.providerThread),
       );
 
-      // The parent ends its run right after spawning; get_state shows it idle.
-      yield* fake.emit({ type: "agent_end", messages: [] });
-      yield* fake.takeRequest("get_state");
-      // The child's reply wakes the parent inside the same T3 turn.
-      yield* fake.emit({ type: "agent_start" });
-      yield* fake.emit({ type: "agent_end", messages: [] });
-      yield* fake.takeRequest("get_state");
-
       yield* fake.emit(rlmChild("done", { answerPreview: "I sent child-ok to the parent." }));
-      // Nothing may terminalize the turn before the child's completion arrives.
-      const done = yield* takeEvent(
-        (event) =>
-          event.type === "turn.terminal" ||
-          (event.type === "subagent.updated" && event.subagent.status === "completed"),
+      const done = yield* session.takeEvent(
+        (event) => event.type === "subagent.updated" && event.subagent.status === "completed",
       );
       assert.isTrue(
         done.type === "subagent.updated" &&
+          done.subagent.id === running?.id &&
+          done.subagent.runId === running.runId &&
           done.subagent.result === "I sent child-ok to the parent.",
       );
-      yield* fake.takeRequest("get_state");
-      const terminal = yield* takeEvent((event) => event.type === "turn.terminal");
-      assert.isTrue(terminal.type === "turn.terminal" && terminal.status === "completed");
+      assert.isFalse(yield* session.runtime.hasPendingBackgroundWork!);
 
       // A later turn deletes the finished child; its card from turn 1 stays completed.
-      yield* startTurn(runtime, providerThread, "default", [], "clean up", undefined, 2);
+      yield* startTurn(
+        session.runtime,
+        session.providerThread,
+        "default",
+        [],
+        "clean up",
+        undefined,
+        2,
+      );
       yield* fake.takeRequest("prompt");
       yield* fake.emit({ type: "agent_start" });
       yield* fake.emit(rlmChild("cancelled", { error: "Deleted by parent orchestrator" }));
       yield* fake.emit({ type: "agent_end", messages: [] });
-      const next = yield* takeEvent(
+      const next = yield* session.takeEvent(
         (event) => event.type === "turn.terminal" || event.type === "subagent.updated",
       );
       assert.equal(next.type, "turn.terminal");
+    }).pipe(Effect.scoped, Effect.provide(testLayer)),
+  );
+
+  it.effect("stops background subagents from a settled turn by restarting the session", () =>
+    Effect.gen(function* () {
+      const fake = yield* makeFakePi;
+      const session = yield* openPrimeThread(fake);
+      yield* settleWithRunningChild(fake, session);
+      yield* session.runtime.interruptTurn({
+        providerThread: session.providerThread,
+        providerTurnId: ProviderTurnId.make("provider-turn:settled"),
+        requestRuntimeRestart: true,
+      });
+      yield* fake.closeStdout;
+      const stopped = yield* session.takeEvent(
+        (event) => event.type === "subagent.updated" && event.subagent.status === "interrupted",
+      );
+      assert.equal(stopped.type, "subagent.updated");
+    }).pipe(Effect.scoped, Effect.provide(testLayer)),
+  );
+
+  it.effect("lists background shell jobs until the kernel reports them finished", () =>
+    Effect.gen(function* () {
+      const fake = yield* makeFakePi;
+      const { runtime, takeEvent, providerThread } = yield* openPrimeThreadWithWakes(fake);
+      yield* startTurn(runtime, providerThread);
+      yield* fake.takeRequest("prompt");
+      yield* fake.emit({ type: "agent_start" });
+      const code = "late_job = bash('sleep 30 && echo late'); print(late_job.pid)";
+      yield* fake.emit({
+        type: "tool_execution_start",
+        toolCallId: "cell_bg",
+        toolName: "ipython",
+        args: { code },
+      });
+      yield* fake.emit({
+        type: "tool_execution_end",
+        toolCallId: "cell_bg",
+        toolName: "ipython",
+        result: { content: [{ type: "text", text: "4242\n" }], details: { status: "ok" } },
+        isError: false,
+      });
+      const listed = yield* takeEvent(
+        (event) =>
+          event.type === "provider_thread.updated" &&
+          (event.providerThread.pendingBackgroundTasks?.length ?? 0) > 0,
+      );
+      assert.isTrue(
+        listed.type === "provider_thread.updated" &&
+          listed.providerThread.pendingBackgroundTasks?.[0]?.kind === "command" &&
+          listed.providerThread.pendingBackgroundTasks?.[0]?.description ===
+            "sleep 30 && echo late",
+      );
+      yield* fake.emit({ type: "agent_end", messages: [] });
+      yield* fake.takeRequest("get_state");
+      yield* takeEvent((event) => event.type === "turn.terminal");
+      assert.isTrue(yield* runtime.hasPendingBackgroundWork!);
+
+      // The finished job wakes the agent; its notice clears the list right away.
+      yield* fake.emit({ type: "agent_start" });
+      yield* fake.emit({
+        type: "message_start",
+        message: {
+          role: "custom",
+          customType: "async_bash_completion",
+          content: "[bash-done pid:4242 exit:0]",
+          details: { pid: 4242, command: "sleep 30 && echo late", exitCode: 0 },
+        },
+      });
+      const cleared = yield* takeEvent(
+        (event) =>
+          event.type === "provider_thread.updated" &&
+          (event.providerThread.pendingBackgroundTasks?.length ?? 0) === 0,
+      );
+      assert.equal(cleared.type, "provider_thread.updated");
     }).pipe(Effect.scoped, Effect.provide(testLayer)),
   );
 
