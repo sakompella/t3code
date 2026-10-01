@@ -24,6 +24,7 @@ import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
+import * as Option from "effect/Option";
 import * as PlatformError from "effect/PlatformError";
 import * as Queue from "effect/Queue";
 import * as Schema from "effect/Schema";
@@ -41,6 +42,7 @@ import {
   type ProviderAdapterV2SessionRuntime,
 } from "../ProviderAdapter.ts";
 import { handoffBudget } from "../ContextHandoffBudget.ts";
+import type { ProviderContinuationRequest } from "../ProviderContinuationRequests.ts";
 import { makePiAdapterV2, PI_PROVIDER } from "./PiAdapterV2.ts";
 import { PI_FLAVOR, PRIME_AGENT_FLAVOR, type PiFlavor } from "./PiFlavor.ts";
 import { makePiRpcConnection, type PiRpcRecord } from "./PiRpc.ts";
@@ -323,12 +325,14 @@ const makeAdapter = Effect.fnUntraced(function* (
   launchArgs = "",
   forkFake?: FakePi,
   flavor: PiFlavor = PI_FLAVOR,
+  continuationRequests?: Parameters<typeof makePiAdapterV2>[0]["continuationRequests"],
 ) {
   const idAllocator = yield* IdAllocator.IdAllocatorV2;
   const serverConfig = yield* ServerConfig.ServerConfig;
   const fileSystem = yield* FileSystem.FileSystem;
   return makePiAdapterV2({
     flavor,
+    ...(continuationRequests === undefined ? {} : { continuationRequests }),
     instanceId: PI_INSTANCE_ID,
     settings: { enabled: true, binaryPath: "pi", launchArgs, customModels: [] },
     environment: {},
@@ -353,8 +357,9 @@ const openRuntime = Effect.fnUntraced(function* (
   providerSessionId = SESSION_ID,
   forkFake?: FakePi,
   flavor: PiFlavor = PI_FLAVOR,
+  continuationRequests?: Parameters<typeof makePiAdapterV2>[0]["continuationRequests"],
 ) {
-  const adapter = yield* makeAdapter(fake, "", forkFake, flavor);
+  const adapter = yield* makeAdapter(fake, "", forkFake, flavor, continuationRequests);
   const runtime = yield* adapter.openSession({
     threadId,
     providerSessionId,
@@ -412,6 +417,7 @@ const startTurn = Effect.fnUntraced(function* (
   selection?: ModelSelection,
   runOrdinal = 1,
   threadId = THREAD_ID,
+  creationSource: "web" | "provider" = "web",
 ) {
   const appThread = yield* makeAppThread(model, threadId);
   const runId = RunId.make(`run:${threadId}:${runOrdinal}`);
@@ -428,8 +434,8 @@ const startTurn = Effect.fnUntraced(function* (
       messageId: `message:${threadId}:${runOrdinal}` as never,
       text,
       attachments,
-      createdBy: "user",
-      creationSource: "web",
+      createdBy: creationSource === "provider" ? "agent" : "user",
+      creationSource,
     },
     modelSelection: selection ?? modelSelection(model),
     runtimePolicy,
@@ -2687,6 +2693,136 @@ describe("PiAdapterV2 with the Prime Agent flavor", () => {
       assert.equal(stopped.type, "subagent.updated");
       const terminal = yield* takeEvent((event) => event.type === "turn.terminal");
       assert.isTrue(terminal.type === "turn.terminal" && terminal.status === "interrupted");
+    }).pipe(Effect.scoped, Effect.provide(testLayer)),
+  );
+
+  const openPrimeThreadWithWakes = Effect.fnUntraced(function* (fake: FakePi) {
+    const offers = yield* Queue.unbounded<ProviderContinuationRequest>();
+    const { runtime, takeEvent } = yield* openRuntime(
+      fake,
+      "default",
+      THREAD_ID,
+      SESSION_ID,
+      undefined,
+      PRIME_AGENT_FLAVOR,
+      { offer: (request) => Queue.offer(offers, request).pipe(Effect.asVoid) },
+    );
+    const providerThread = yield* runtime.ensureThread({
+      threadId: THREAD_ID,
+      modelSelection: modelSelection("default"),
+      runtimePolicy,
+    });
+    return { runtime, takeEvent, providerThread, offers };
+  });
+
+  /** What Prime Agent emits when a child's message wakes the idle parent. */
+  const emitChildMessageWake = (fake: FakePi) =>
+    Effect.gen(function* () {
+      yield* fake.emit({ type: "agent_start" });
+      // Prime Agent restores a parked kernel before delivering the wake message.
+      yield* fake.emit({
+        type: "message_start",
+        message: { role: "custom", customType: "ipython_state_restored", content: "" },
+      });
+      yield* fake.emit({
+        type: "message_start",
+        message: {
+          role: "custom",
+          customType: "agent_message",
+          content: "[agent-message from child:worker]\n\nchild-ok",
+          details: {
+            message: "child-ok",
+            from: { sessionName: "worker", runtimeKind: "subagent" },
+            fromRelationship: "child",
+          },
+        },
+      });
+      yield* fake.emit({ type: "message_start", message: { role: "assistant", content: [] } });
+      yield* fake.emit({
+        type: "message_update",
+        assistantMessageEvent: {
+          type: "text_delta",
+          contentIndex: 0,
+          delta: "The child said child-ok",
+        },
+      });
+      yield* fake.emit({
+        type: "message_update",
+        assistantMessageEvent: {
+          type: "text_end",
+          contentIndex: 0,
+          content: "The child said child-ok",
+        },
+      });
+      yield* fake.emit({ type: "agent_end", messages: [] });
+    });
+
+  it.effect("hands a self-wake to a continuation run instead of stopping the session", () =>
+    Effect.gen(function* () {
+      const fake = yield* makeFakePi;
+      const { runtime, takeEvent, providerThread, offers } = yield* openPrimeThreadWithWakes(fake);
+      yield* emitChildMessageWake(fake);
+
+      const offer = yield* Queue.take(offers);
+      assert.equal(offer.threadId, THREAD_ID);
+      assert.deepEqual(offer.notification?.source, { kind: "subagent" });
+      assert.equal(offer.notification?.summary, "Message from worker");
+      assert.equal(offer.notification?.detail, "child-ok");
+      const dispatched = yield* offer.dispatchIfCurrent!(Effect.succeed("dispatched"));
+      assert.isTrue(Option.isSome(dispatched));
+
+      const promptsBefore = fake.allRequests().filter((r) => r["type"] === "prompt").length;
+      yield* startTurn(
+        runtime,
+        providerThread,
+        "default",
+        [],
+        "Background activity updated",
+        undefined,
+        1,
+        THREAD_ID,
+        "provider",
+      );
+      const reply = yield* takeEvent(
+        (event) =>
+          event.type === "turn_item.updated" &&
+          event.turnItem.type === "assistant_message" &&
+          event.turnItem.status === "completed",
+      );
+      assert.isTrue(
+        reply.type === "turn_item.updated" &&
+          reply.turnItem.type === "assistant_message" &&
+          reply.turnItem.text === "The child said child-ok",
+      );
+      yield* fake.takeRequest("get_state");
+      const terminal = yield* takeEvent((event) => event.type === "turn.terminal");
+      assert.isTrue(terminal.type === "turn.terminal" && terminal.status === "completed");
+      assert.equal(
+        fake.allRequests().filter((r) => r["type"] === "prompt").length,
+        promptsBefore,
+        "a continuation run replays the wake and prompts nothing",
+      );
+    }).pipe(Effect.scoped, Effect.provide(testLayer)),
+  );
+
+  it.effect("lets the user's next turn adopt a pending wake and queue behind it", () =>
+    Effect.gen(function* () {
+      const fake = yield* makeFakePi;
+      const { runtime, takeEvent, providerThread, offers } = yield* openPrimeThreadWithWakes(fake);
+      yield* emitChildMessageWake(fake);
+      const offer = yield* Queue.take(offers);
+
+      yield* startTurn(runtime, providerThread, "default", [], "What happened?");
+      const prompt = yield* fake.takeRequest("prompt");
+      assert.equal(prompt["streamingBehavior"], "followUp");
+      yield* takeEvent(
+        (event) =>
+          event.type === "turn_item.updated" &&
+          event.turnItem.type === "assistant_message" &&
+          event.turnItem.status === "completed",
+      );
+      const stale = yield* offer.dispatchIfCurrent!(Effect.succeed("dispatched"));
+      assert.isTrue(Option.isNone(stale), "the adopted wake's continuation must not dispatch");
     }).pipe(Effect.scoped, Effect.provide(testLayer)),
   );
 

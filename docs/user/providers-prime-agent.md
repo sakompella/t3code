@@ -32,6 +32,13 @@ waits for a child's reply finishes in the same turn. Stopping the turn restarts 
 session, which also stops its running children. Children run without a T3 Code thread of their
 own, so they cannot be opened or resumed from T3 Code.
 
+## Work Prime Agent Starts on Its Own
+
+Prime Agent can resume work without a new message, for example when a background command it
+started finishes, a heartbeat or schedule fires, or another agent messages it. T3 Code shows that
+work as a new run in the same thread, introduced by a notice of what woke Prime Agent. If you send
+a message while that work is still running, your message waits until it finishes.
+
 ## Permission Modes
 
 - **Supervised** asks before every kernel cell and extension tool, showing the cell's code.
@@ -46,5 +53,3 @@ T3 Code cannot tell an edit from a command before approving it.
   reports version 0.9.6 or newer, then refresh the provider in Settings.
 - If no models appear, open Prime Agent directly and confirm its authentication and model
   configuration.
-- Heartbeats or schedules that start work in a session T3 Code owns, outside a T3 Code turn, stop
-  that session so the work does not run unseen.

@@ -32,6 +32,7 @@ import {
   type ChatAttachment,
   type ModelSelection,
   type OrchestrationV2ExecutionNode,
+  type OrchestrationV2Notification,
   type OrchestrationV2ProviderCapabilities,
   type OrchestrationV2ProviderFailure,
   type OrchestrationV2ProviderRef,
@@ -71,6 +72,7 @@ import {
 import { mergeProviderInstanceEnvironment } from "../../provider/ProviderInstanceEnvironment.ts";
 import * as IdAllocator from "../IdAllocator.ts";
 import * as ProviderAdapter from "../ProviderAdapter.ts";
+import * as ProviderContinuationRequests from "../ProviderContinuationRequests.ts";
 import {
   ProviderAdapterDriverCreateError,
   type ProviderAdapterDriver,
@@ -231,6 +233,12 @@ export interface PiAdapterV2Options {
   readonly fileSystem: FileSystem.FileSystem;
   readonly idAllocator: IdAllocator.IdAllocatorV2["Service"];
   readonly serverConfig: ServerConfig.ServerConfig["Service"];
+  /** Receives wake turns the agent started on its own; defaults to dropping them. */
+  readonly continuationRequests?: {
+    readonly offer: (
+      request: ProviderContinuationRequests.ProviderContinuationRequest,
+    ) => Effect.Effect<void>;
+  };
 }
 
 /** Concatenate the `text` fields of a Pi content-block array. */
@@ -373,6 +381,69 @@ function piApprovalRequestKind(title: string): "command" | "file-change" {
     (PI_FILE_CHANGE_TOOLS as ReadonlyArray<string>).includes(toolName)
     ? "file-change"
     : "command";
+}
+
+interface PendingPiWake {
+  readonly events: Array<PiRpcRecord>;
+  offered: boolean;
+  readonly generation: number;
+}
+
+/** Agent work that belongs to a wake turn; dialogs and acks keep flowing live. */
+function isPiWakeEvent(event: PiRpcRecord): boolean {
+  switch (event["type"]) {
+    case "response":
+    case "extension_ui_request":
+    case "extension_error":
+    case "t3.settle_probe":
+    case "t3.flush_extension_errors":
+      return false;
+    default:
+      return true;
+  }
+}
+
+/**
+ * Says what woke the agent, from the first message it was woken with that has
+ * a known meaning. Bookkeeping notices such as `ipython_state_restored` are
+ * skipped.
+ */
+function piWakeNotification(
+  events: ReadonlyArray<PiRpcRecord>,
+  agentName: string,
+): OrchestrationV2Notification {
+  for (const event of events) {
+    if (event["type"] !== "message_start") continue;
+    const message = event["message"];
+    if (recordString(message, "role") === "assistant") break;
+    const customType = recordString(message, "customType");
+    if (customType === "agent_message") {
+      const details = recordField(message, "details");
+      const sender = recordString(recordField(details, "from"), "sessionName") ?? "an agent";
+      const text = recordString(details, "message");
+      return {
+        source:
+          recordString(details, "fromRelationship") === "child"
+            ? { kind: "subagent" }
+            : { kind: "background_task" },
+        outcome: "updated",
+        summary: `Message from ${sender}`,
+        ...(text === undefined ? {} : { detail: text.slice(0, 2_000) }),
+      };
+    }
+    if (customType === "async_bash_completion") {
+      return {
+        source: { kind: "command" },
+        outcome: "completed",
+        summary: "Background command finished",
+      };
+    }
+  }
+  return {
+    source: { kind: "background_task" },
+    outcome: "updated",
+    summary: `${agentName} resumed work`,
+  };
 }
 
 interface PiRlmChildState {
@@ -556,6 +627,12 @@ export function makePiAdapterV2(
       // settled. Until orchestration has a first-class provider-initiated run,
       // stop that runtime before it can execute tools without a timeline owner.
       let unsolicitedActivityDetected = false;
+      /**
+       * Work the agent started on its own (a self-wake), buffered until the
+       * continuation run it requested, or the user's next turn, adopts it.
+       */
+      let pendingWake: PendingPiWake | null = null;
+      let wakeGeneration = 0;
       let appliedModel: string | null = null;
       let appliedThinking: string | null = null;
       /** Last thread title synced into pi's session name (`/resume` listing). */
@@ -1855,11 +1932,57 @@ export function makePiAdapterV2(
         );
       };
 
+      /**
+       * Ask the orchestrator for a run to attach this wake to. Deferred to the
+       * first message so the notification can say what woke the agent.
+       */
+      const offerWakeContinuation = Effect.fnUntraced(function* (
+        wake: PendingPiWake,
+        state: PiThreadState,
+      ) {
+        if (wake.offered || options.continuationRequests === undefined) return;
+        wake.offered = true;
+        const generation = wake.generation;
+        yield* Effect.logInfo("orchestration-v2.pi-wake-turn-detected", {
+          driver,
+          providerSessionId: input.providerSessionId,
+          providerThreadId: state.providerThread.id,
+        });
+        yield* options.continuationRequests.offer({
+          threadId: state.providerThread.appThreadId ?? input.threadId,
+          providerThreadId: state.providerThread.id,
+          driver,
+          detail: null,
+          notification: piWakeNotification(wake.events, name),
+          // A user turn that adopted the wake first makes this request stale.
+          dispatchIfCurrent: (dispatch) =>
+            pendingWake?.generation === generation
+              ? Effect.map(dispatch, Option.some)
+              : Effect.succeed(Option.none()),
+        });
+      });
+
       const handleSessionEvent = Effect.fnUntraced(function* (event: PiRpcRecord) {
         const state = threadState;
         const turn = state?.activeTurn ?? null;
+        if (turn === null && pendingWake !== null && isPiWakeEvent(event)) {
+          pendingWake.events.push(event);
+          // Wait for the agent's own reply, so every message it was woken
+          // with (kernel restore notices come first) is in the buffer.
+          const agentReplied =
+            event["type"] === "message_start" &&
+            recordString(event["message"], "role") === "assistant";
+          if (state !== null && (agentReplied || event["type"] === "agent_end")) {
+            yield* offerWakeContinuation(pendingWake, state);
+          }
+          return;
+        }
         switch (event["type"]) {
           case "agent_start": {
+            if (turn === null && flavor.selfWakes === "continuation" && state !== null) {
+              pendingWake = { events: [event], offered: false, generation: ++wakeGeneration };
+              return;
+            }
             if (turn === null) {
               unsolicitedActivityDetected = true;
               yield* updateProviderSession("error", unsolicitedActivityError);
@@ -2284,6 +2407,7 @@ export function makePiAdapterV2(
               // Transport death finalizes any live turn. Stop-with-restart
               // closes the provider stream cleanly; only an unexpected death
               // is surfaced as an event-stream failure.
+              pendingWake = null;
               const state = threadState;
               const interrupted = state?.activeTurn?.interrupted === true;
               if (state?.activeTurn != null) {
@@ -2641,9 +2765,14 @@ export function makePiAdapterV2(
             // extension's before_agent_start system-prompt hook, never by
             // wrapping the user text: a wrapped first message would no
             // longer start with "/" and slash commands would stop expanding.
-            const compactCommand = parsePiCompactCommand(turnInput.message.text);
+            // A continuation run for a self-wake carries placeholder text; the
+            // turn's content is the buffered wake, so nothing is prompted.
+            const isWakeContinuation = turnInput.message.creationSource === "provider";
+            const compactCommand = isWakeContinuation
+              ? null
+              : parsePiCompactCommand(turnInput.message.text);
             const payload =
-              compactCommand === null
+              compactCommand === null && !isWakeContinuation
                 ? yield* resolvePromptPayload(turnInput.message.text, turnInput.message.attachments)
                 : null;
             const startedAt = yield* DateTime.now;
@@ -2675,7 +2804,9 @@ export function makePiAdapterV2(
               interrupted: false,
               sawAgentActivity: false,
               promptMayBeCommandOnly:
-                compactCommand !== null || (payload?.message.trimStart().startsWith("/") ?? false),
+                isWakeContinuation ||
+                compactCommand !== null ||
+                (payload?.message.trimStart().startsWith("/") ?? false),
               latestCompactionAfterTokens: null,
               lastLiveUsedTokens: null,
               settleProbeGeneration: 0,
@@ -2692,6 +2823,10 @@ export function makePiAdapterV2(
             // and answered instead of deadlocking the caller.
             yield* Effect.gen(function* () {
               state.activeTurn = activeTurn;
+              // Read under the permit: the pump cannot buffer more wake events
+              // between taking the buffer and installing the turn.
+              const adoptedWake = pendingWake;
+              pendingWake = null;
               if (compactCommand !== null) {
                 yield* connection.send(compactRpcRecord(compactCommand));
                 pendingCompactResponses.push({
@@ -2702,6 +2837,8 @@ export function makePiAdapterV2(
                 yield* connection.send({
                   type: "prompt",
                   message: payload.message,
+                  // The agent is still busy with a wake; queue behind it.
+                  ...(adoptedWake === null ? {} : { streamingBehavior: "followUp" }),
                   ...(payload.images.length === 0 ? {} : { images: payload.images }),
                 });
                 pendingPromptResponses.push({
@@ -2721,6 +2858,13 @@ export function makePiAdapterV2(
                 lastRunOrdinal: turnInput.runOrdinal,
               });
               yield* updateProviderSession("running", null);
+              if (adoptedWake !== null) {
+                for (const wakeEvent of adoptedWake.events) yield* handleSessionEvent(wakeEvent);
+              } else if (isWakeContinuation) {
+                // The wake was already adopted by a user turn or ended with the
+                // process. Settle this run as soon as the agent is idle.
+                yield* scheduleSettleProbe(activeTurn);
+              }
               if (outOfTurnExtensionErrors.length > 0) {
                 yield* Queue.offer(connection.events, { type: "t3.flush_extension_errors" });
               }
@@ -3331,8 +3475,11 @@ function makePiFlavorAdapterV2Driver(
         const fileSystem = yield* FileSystem.FileSystem;
         const idAllocator = yield* IdAllocator.IdAllocatorV2;
         const serverConfig = yield* ServerConfig.ServerConfig;
+        const continuationRequests =
+          yield* ProviderContinuationRequests.ProviderContinuationRequests;
         return makePiAdapterV2({
           flavor,
+          continuationRequests,
           instanceId: input.instanceId,
           settings: { ...input.config, enabled: input.enabled },
           environment: mergeProviderInstanceEnvironment(input.environment, hostEnvironment),
