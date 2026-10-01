@@ -91,3 +91,18 @@ export function classifyIpythonCell(code: string): IpythonCell {
   const command = bashHelperCommand(code);
   return command === null ? { kind: "python", code } : { kind: "bash", command };
 }
+
+const PREVIEW_MAX_LENGTH = 64;
+const PREVIEW_SKIPPED_LINE = /^(?:$|#|import\s|from\s+\S+\s+import\s)/;
+
+/** One line summarizing a Python cell: its first statement that is not an import or comment. */
+export function previewPythonCell(code: string): string {
+  const line = code
+    .split("\n")
+    .map((candidate) => candidate.trim())
+    .find((candidate) => !PREVIEW_SKIPPED_LINE.test(candidate));
+  const collapsed = (line ?? "").replace(/\s+/g, " ");
+  return collapsed.length <= PREVIEW_MAX_LENGTH
+    ? collapsed
+    : `${collapsed.slice(0, PREVIEW_MAX_LENGTH - 1).trimEnd()}…`;
+}
