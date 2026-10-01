@@ -74,7 +74,7 @@ import {
 } from "./mcpInjection.ts";
 import { PI_FILE_CHANGE_TOOLS } from "./mcpExtensionSource.ts";
 import { PI_FLAVOR, PRIME_AGENT_FLAVOR, type PiFlavor } from "./flavor.ts";
-import { classifyIpythonCell } from "./primeAgentIpythonCell.ts";
+import { classifyIpythonCell, previewPythonCell } from "./primeAgentIpythonCell.ts";
 
 export const PI_PROVIDER = PI_FLAVOR.driverKind;
 const PI_DEFAULT_INSTANCE_ID = defaultInstanceIdForDriver(PI_PROVIDER);
@@ -308,6 +308,12 @@ function piToolOutput(result: unknown, toolName: string): unknown {
     ...(structured === undefined ? {} : { structuredContent: structured }),
   };
 }
+
+function pythonCellTitle(code: string): string {
+  const preview = previewPythonCell(code);
+  return preview.length === 0 ? "Python" : `Python: ${preview}`;
+}
+
 /**
  * Prime Agent runs every tool as an `ipython` cell, so only the T3 bridge's
  * own confirmation can gate it. Edits are only known from the cell's result,
@@ -462,6 +468,16 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
     ) {
       const scope = yield* Effect.scope;
       const cwd = input.runtimePolicy.cwd ?? host.paths.cwd;
+      // Prime Agent reports edited paths through realpath (/tmp is /private/tmp
+      // on macOS), so compare against both spellings of the workspace.
+      const workspaceRoots = [
+        cwd,
+        yield* fileSystem.realPath(cwd).pipe(Effect.orElseSucceed(() => cwd)),
+      ].map((root) => root.replace(/\/+$/, ""));
+      const workspaceRelativePath = (path: string) => {
+        const root = workspaceRoots.find((candidate) => path.startsWith(`${candidate}/`));
+        return root === undefined ? path : path.slice(root.length + 1);
+      };
       const mcpSession = yield* mcpSessions.read(input.threadId);
       const provideCacheFs = <A, E>(effect: Effect.Effect<A, E, FileSystem.FileSystem>) =>
         effect.pipe(
@@ -1056,7 +1072,7 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
                   }
                 : {
                     ...shared,
-                    title: "python",
+                    title: pythonCellTitle(cell.code),
                     type: "dynamic_tool",
                     toolName: "python",
                     input: { code: cell.code },
@@ -1140,7 +1156,9 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
         if (!Array.isArray(diffs)) return;
         const startedAt = turn.toolStartedAt.get(toolCallId) ?? emittedAt;
         for (const [index, diff] of diffs.entries()) {
-          const fileName = recordString(diff, "path")?.trim();
+          const reportedPath = recordString(diff, "path")?.trim();
+          const fileName =
+            reportedPath === undefined ? undefined : workspaceRelativePath(reportedPath);
           const oldStr = recordString(diff, "oldStr");
           const newStr = recordString(diff, "newStr");
           if (fileName === undefined || fileName.length === 0) continue;
