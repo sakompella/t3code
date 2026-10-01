@@ -9,6 +9,7 @@ import {
   type ChatAttachment,
   type ModelSelection,
   type OrchestrationV2ExecutionNode,
+  type OrchestrationV2Notification,
   type OrchestrationV2ProviderCapabilities,
   type OrchestrationV2ProviderFailure,
   type OrchestrationV2ProviderRef,
@@ -22,6 +23,7 @@ import {
   type ProviderApprovalDecision,
   type ProviderInstanceId,
   type OrchestrationV2ProviderTurnTokenUsage,
+  type ThreadId,
 } from "@t3tools/contracts";
 import { PiSettings, PrimeAgentSettings } from "../settings.ts";
 import * as Cause from "effect/Cause";
@@ -421,6 +423,49 @@ function piApprovalRequestKind(title: string): "command" | "file-change" {
     : "command";
 }
 
+/**
+ * Says what woke the agent, from the first message it was woken with that has
+ * a known meaning. Bookkeeping notices such as `ipython_state_restored` are
+ * skipped.
+ */
+function piWakeNotification(
+  events: ReadonlyArray<PiRpcRecord>,
+  agentName: string,
+): OrchestrationV2Notification {
+  for (const event of events) {
+    if (event["type"] !== "message_start") continue;
+    const message = event["message"];
+    if (recordString(message, "role") === "assistant") break;
+    const customType = recordString(message, "customType");
+    if (customType === "agent_message") {
+      const details = recordField(message, "details");
+      const sender = recordString(recordField(details, "from"), "sessionName") ?? "an agent";
+      const text = recordString(details, "message");
+      return {
+        source:
+          recordString(details, "fromRelationship") === "child"
+            ? { kind: "subagent" }
+            : { kind: "background_task" },
+        outcome: "updated",
+        summary: `Message from ${sender}`,
+        ...(text === undefined ? {} : { detail: text.slice(0, 2_000) }),
+      };
+    }
+    if (customType === "async_bash_completion") {
+      return {
+        source: { kind: "command" },
+        outcome: "completed",
+        summary: "Background command finished",
+      };
+    }
+  }
+  return {
+    source: { kind: "background_task" },
+    outcome: "updated",
+    summary: `${agentName} resumed work`,
+  };
+}
+
 interface PiRlmChildState {
   readonly snapshot: unknown;
   readonly startedAt: DateTime.Utc;
@@ -464,6 +509,8 @@ interface PiThreadState {
 interface PiWake {
   readonly state: PiThreadState;
   readonly events: Array<PiRpcRecord>;
+  /** Whether a continuation run was requested for it yet. */
+  offered: boolean;
 }
 
 export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
@@ -1970,6 +2017,44 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
         yield* connection.terminate;
       });
 
+      /**
+       * Ask the orchestrator for a run that adopts this wake. A flavor whose
+       * wakes carry their cause offers once the agent replies, so the notice
+       * can say what woke it.
+       */
+      const offerWake = Effect.fnUntraced(function* (wake: PiWake, threadId: ThreadId) {
+        if (wake.offered || continuationRequests === undefined) return;
+        wake.offered = true;
+        const state = wake.state;
+        yield* Effect.logInfo("orchestration-v2.pi-wake-turn-detected", {
+          driver,
+          providerSessionId: input.providerSessionId,
+          providerThreadId: state.providerThread.id,
+        });
+        yield* continuationRequests
+          .offer({
+            threadId,
+            providerThreadId: state.providerThread.id,
+            driver,
+            detail: null,
+            ...(flavor.wakeNotices ? { notification: piWakeNotification(wake.events, name) } : {}),
+            delivery: "adapter_buffered",
+            dispatchIfCurrent: (dispatch) =>
+              sessionEventPermit.withPermits(1)(
+                Effect.suspend(() =>
+                  pendingWake === wake && threadState === state && !closed
+                    ? dispatch.pipe(
+                        Effect.map(Option.some),
+                        Effect.tapError(() => stopPendingWake(wake)),
+                      )
+                    : Effect.succeed(Option.none()),
+                ),
+              ),
+            clearIfCurrent: () => sessionEventPermit.withPermits(1)(stopPendingWake(wake)),
+          })
+          .pipe(Effect.tapError(() => stopPendingWake(wake)));
+      });
+
       const handleSessionEvent = Effect.fnUntraced(function* (event: PiRpcRecord) {
         // Model-selection hooks can await a dialog before startTurn can claim
         // a wake. Keep interactive requests session-scoped until a turn owns
@@ -1984,9 +2069,23 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
           !String(event["type"]).startsWith("t3.") &&
           event["type"] !== "response"
         ) {
-          pendingWake.events.push(event);
+          const wake = pendingWake;
+          wake.events.push(event);
           if (event["type"] === "agent_start") yield* updateProviderSession("running", null);
           if (event["type"] === "agent_settled") yield* updateProviderSession("ready", null);
+          // Wait for the agent's own reply, so every message it was woken
+          // with (kernel restore notices come first) is in the buffer.
+          const agentReplied =
+            event["type"] === "message_start" &&
+            recordString(event["message"], "role") === "assistant";
+          const appThreadId = wake.state.providerThread.appThreadId;
+          if (
+            flavor.wakeNotices &&
+            appThreadId != null &&
+            (agentReplied || event["type"] === "agent_end")
+          ) {
+            yield* offerWake(wake, appThreadId);
+          }
           return;
         }
         const state = threadState;
@@ -2000,34 +2099,14 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
               !closed &&
               !stopRequested
             ) {
-              const wake: PiWake = { state, events: [event] };
+              const wake: PiWake = { state, events: [event], offered: false };
               pendingWake = wake;
               if (rollbackBarrier !== null) {
                 yield* stopPendingWake(wake);
                 return;
               }
               yield* updateProviderSession("running", null);
-              yield* continuationRequests
-                .offer({
-                  threadId: state.providerThread.appThreadId,
-                  providerThreadId: state.providerThread.id,
-                  driver,
-                  detail: null,
-                  delivery: "adapter_buffered",
-                  dispatchIfCurrent: (dispatch) =>
-                    sessionEventPermit.withPermits(1)(
-                      Effect.suspend(() =>
-                        pendingWake === wake && threadState === state && !closed
-                          ? dispatch.pipe(
-                              Effect.map(Option.some),
-                              Effect.tapError(() => stopPendingWake(wake)),
-                            )
-                          : Effect.succeed(Option.none()),
-                      ),
-                    ),
-                  clearIfCurrent: () => sessionEventPermit.withPermits(1)(stopPendingWake(wake)),
-                })
-                .pipe(Effect.tapError(() => stopPendingWake(wake)));
+              if (!flavor.wakeNotices) yield* offerWake(wake, state.providerThread.appThreadId);
               return;
             }
             if (turn === null) {
@@ -2476,6 +2555,7 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
         Effect.catchCause((cause) =>
           sessionEventPermit.withPermits(1)(
             Effect.gen(function* () {
+              pendingWake = null;
               const state = threadState;
               if (rollbackBarrier !== null)
                 yield* Deferred.fail(
@@ -3654,6 +3734,7 @@ function makePiFlavorAdapterV2Driver(
           yield* ProviderContinuationRequests.ProviderContinuationRequests;
         return yield* makePiAdapterV2({
           flavor,
+          continuationRequests,
           instanceId: input.instanceId,
           settings: { ...input.config, enabled: input.enabled },
           environment: yield* mergeProviderInstanceEnvironment(input.environment, hostEnvironment),
