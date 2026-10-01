@@ -44,8 +44,10 @@ work, and no event marks the end, so the adapter polls `get_state` until
 boundaries for rollback come from new user entries in `get_fork_messages`. Every tool call is one
 `ipython` cell, and a failed cell reports `isError` on its result while the event's own flag stays
 false. A parent usually ends its run right after `rlm.spawn` and is woken again by the child's
-reply, so a queued or running child from `rlm_child_update` keeps the turn open even when
-`get_state` is idle; the last child to finish re-probes. Prime Agent also wakes itself with no
+reply, so its turn settles while the child's subagent item stays running on the spawning run; that
+active item keeps the run's event stream open and drives the background-work banner. The kernel
+reports a detached `bash()` job only when it finishes, so the adapter lists un-awaited handles from
+the cell that started them as `pendingBackgroundTasks` until the `async_bash_completion` notice. Prime Agent also wakes itself with no
 turn (heartbeats, schedules, finished background commands, agent messages). It uses the same
 buffered provider continuation as Pi's extension wakes, but offers it only once the agent replies,
 so the run's notice can name what woke it. Prime Agent rollback moves

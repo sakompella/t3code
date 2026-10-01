@@ -106,3 +106,39 @@ export function previewPythonCell(code: string): string {
     ? collapsed
     : `${collapsed.slice(0, PREVIEW_MAX_LENGTH - 1).trimEnd()}…`;
 }
+
+export interface DetachedBashJob {
+  /** The handle's variable, or null when the handle was discarded. */
+  readonly variable: string | null;
+  readonly command: string;
+}
+
+const UNAWAITED_BASH_HELPER =
+  /(?:^|[\n;])[ \t]*(?:([A-Za-z_][A-Za-z0-9_]*)\s*=\s*)?bash\s*\(\s*([rR]?)("""|'''|"|')/g;
+
+/**
+ * Shell commands a cell started as background jobs. Prime Agent treats a
+ * `bash(...)` handle as detached when the cell that created it never awaits
+ * it; only those jobs report back later with an `async_bash_completion`.
+ */
+export function detachedBashJobs(code: string): ReadonlyArray<DetachedBashJob> {
+  const jobs: Array<DetachedBashJob> = [];
+  for (const match of code.matchAll(UNAWAITED_BASH_HELPER)) {
+    const variable = match[1] ?? null;
+    const literal = scanStringLiteral(
+      code,
+      (match.index ?? 0) + match[0].length,
+      match[3]!,
+      match[2] !== "",
+    );
+    if (literal === null || literal.value.length === 0) continue;
+    if (variable !== null && awaitsHandle(code, variable)) continue;
+    jobs.push({ variable, command: literal.value });
+  }
+  return jobs;
+}
+
+/** Whether a cell awaits a handle, which consumes its result and its completion notice. */
+export function awaitsHandle(code: string, variable: string): boolean {
+  return new RegExp(`\\bawait\\s+${variable}\\b`).test(code);
+}
