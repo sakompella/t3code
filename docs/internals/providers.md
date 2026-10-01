@@ -45,7 +45,10 @@ boundaries for rollback come from new user entries in `get_fork_messages`. Every
 `ipython` cell, and a failed cell reports `isError` on its result while the event's own flag stays
 false. A parent usually ends its run right after `rlm.spawn` and is woken again by the child's
 reply, so a queued or running child from `rlm_child_update` keeps the turn open even when
-`get_state` is idle; the last child to finish re-probes.
+`get_state` is idle; the last child to finish re-probes. Prime Agent also wakes itself with no
+turn (heartbeats, schedules, finished background commands, agent messages). Instead of stopping
+the session as Pi does, the adapter buffers that work and offers a provider continuation; the
+continuation run, or a user turn that arrives first, replays the buffer.
 
 Antigravity separates account profiles per instance while sharing installed executables across the
 environment. It forces file-based credential storage because the native macOS keychain entry would

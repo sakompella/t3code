@@ -35,6 +35,13 @@ export interface PiFlavor {
   readonly sessionTree: "entries" | "fork_messages";
   /** Pi's built-in bash/edit/write tools, or Prime Agent's single `ipython` tool. */
   readonly tools: "pi" | "ipython";
+  /**
+   * What happens when the agent starts work with no T3 turn. Pi only does that
+   * through a misbehaving extension, so the session stops. Prime Agent wakes
+   * itself by design (heartbeats, schedules, finished background commands,
+   * agent messages), so the work is buffered and handed to a continuation run.
+   */
+  readonly selfWakes: "stop" | "continuation";
 }
 
 export const PI_FLAVOR: PiFlavor = {
@@ -51,6 +58,7 @@ export const PI_FLAVOR: PiFlavor = {
   settleSignal: "agent_settled",
   sessionTree: "entries",
   tools: "pi",
+  selfWakes: "stop",
 };
 
 export const PRIME_AGENT_FLAVOR: PiFlavor = {
@@ -66,4 +74,5 @@ export const PRIME_AGENT_FLAVOR: PiFlavor = {
   settleSignal: "idle_probe",
   sessionTree: "fork_messages",
   tools: "ipython",
+  selfWakes: "continuation",
 };
