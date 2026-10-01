@@ -30,6 +30,7 @@ import * as Cause from "effect/Cause";
 import * as DateTime from "effect/DateTime";
 import * as Deferred from "effect/Deferred";
 import * as Option from "effect/Option";
+import * as Deferred from "effect/Deferred";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
@@ -44,7 +45,11 @@ import * as ChildProcessSpawner from "effect/process/ChildProcessSpawner";
 import * as ProviderHost from "@t3tools/provider-core/server/ProviderHost";
 import { mcpToolPresentation } from "@t3tools/provider-core/server/mcpToolPresentation";
 import * as McpProviderSessions from "@t3tools/provider-core/server/McpProviderSessions";
-import { parsePiCompactCommand, type PiCompactCommand } from "./commands.ts";
+import {
+  hasPiNavigateTreeCommand,
+  parsePiCompactCommand,
+  type PiCompactCommand,
+} from "./commands.ts";
 import { mergeProviderInstanceEnvironment } from "@t3tools/provider-core/server/instanceEnvironment";
 import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
 import * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
@@ -74,7 +79,11 @@ import {
   materializePiT3McpExtension,
   resolvePiLaunchArgs,
 } from "./mcpInjection.ts";
-import { PI_FILE_CHANGE_TOOLS } from "./mcpExtensionSource.ts";
+import {
+  PI_FILE_CHANGE_TOOLS,
+  T3_NAVIGATE_TREE_COMMAND,
+  T3_NAVIGATE_TREE_RESULT_MARKER,
+} from "./mcpExtensionSource.ts";
 import { PI_FLAVOR, PRIME_AGENT_FLAVOR, type PiFlavor } from "./flavor.ts";
 import { classifyIpythonCell, previewPythonCell } from "./primeAgentIpythonCell.ts";
 
@@ -423,6 +432,12 @@ function piApprovalRequestKind(title: string): "command" | "file-change" {
     : "command";
 }
 
+const decodeNavigateTreeResult = Schema.decodeUnknownOption(Schema.fromJsonString(Schema.Unknown));
+
+function parseNavigateTreeResult(json: string): unknown {
+  return Option.getOrUndefined(decodeNavigateTreeResult(json));
+}
+
 /**
  * Says what woke the agent, from the first message it was woken with that has
  * a known meaning. Bookkeeping notices such as `ipython_state_restored` are
@@ -622,6 +637,12 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
             }),
         ),
       );
+      /** Whether T3's extension command for in-place rollback is loaded; null until discovered. */
+      let navigateTreeAvailable: boolean | null = null;
+      /** In-place rollbacks waiting for the extension command's reported outcome. */
+      const pendingTreeNavigations = new Map<string, Deferred.Deferred<unknown>>();
+      let treeNavigationCounter = 0;
+
       const now = yield* DateTime.now;
       let sessionEntity: OrchestrationV2ProviderSession = {
         id: input.providerSessionId,
@@ -1510,6 +1531,15 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
         const method = recordString(event, "method");
         const nativeRequestId = recordString(event, "id");
         if (method === undefined) return;
+        const notifyMessage = method === "notify" ? recordString(event, "message") : undefined;
+        if (notifyMessage?.startsWith(T3_NAVIGATE_TREE_RESULT_MARKER) === true) {
+          const result = parseNavigateTreeResult(
+            notifyMessage.slice(T3_NAVIGATE_TREE_RESULT_MARKER.length),
+          );
+          const pending = pendingTreeNavigations.get(recordString(result, "requestId") ?? "");
+          if (pending !== undefined) yield* Deferred.succeed(pending, result);
+          return;
+        }
         if (method === "notify") {
           const state = threadState;
           const turn = state?.activeTurn ?? null;
@@ -2821,6 +2851,37 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
         return { message, images };
       });
 
+      /**
+       * Rolls the conversation back to just before `entryId` inside the same
+       * session file. RPC has no tree navigation, so T3's extension command
+       * calls `ctx.navigateTree` and reports back through a marked notify.
+       */
+      const navigateTreeInPlace = Effect.fnUntraced(function* (entryId: string) {
+        const requestId = `t3-nav-${++treeNavigationCounter}`;
+        const outcome = yield* Deferred.make<unknown>();
+        pendingTreeNavigations.set(requestId, outcome);
+        const result = yield* Effect.gen(function* () {
+          yield* request(
+            { type: "prompt", message: `/${T3_NAVIGATE_TREE_COMMAND} ${requestId} ${entryId}` },
+            PI_SESSION_TIMEOUT_MS,
+          );
+          return yield* Deferred.await(outcome).pipe(
+            Effect.timeoutOrElse({
+              duration: Duration.millis(PI_SESSION_TIMEOUT_MS),
+              orElse: () =>
+                Effect.fail(protocolError(`${name} did not report the in-place rollback`)),
+            }),
+          );
+        }).pipe(Effect.ensuring(Effect.sync(() => pendingTreeNavigations.delete(requestId))));
+        const status = recordString(result, "outcome");
+        if (status === "ok") return;
+        return yield* protocolError(
+          status === "cancelled"
+            ? `A ${name} extension cancelled the rollback`
+            : `${name} rollback failed: ${recordString(result, "error") ?? "unknown error"}`,
+        );
+      });
+
       const runtime: ProviderAdapter.ProviderAdapterV2SessionRuntime = {
         instanceId: options.instanceId,
         driver,
@@ -3377,6 +3438,61 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
               ),
               (barrier) =>
                 Effect.gen(function* () {
+                  // RPC responses bypass the pump. Drain preceding native events
+                  // before deciding whether this rewind can replace their binding.
+                  const commitAfterDrain = <A, E, R>(commit: Effect.Effect<A, E, R>) =>
+                    Effect.gen(function* () {
+                      const queued = yield* Queue.offer(connection.events, {
+                        type: "t3.rollback_barrier",
+                        barrier,
+                      });
+                      if (!queued)
+                        return yield* protocolError("Pi transport closed during rollback");
+                      yield* Deferred.await(barrier);
+                      return yield* sessionEventPermit.withPermits(1)(
+                        Effect.gen(function* () {
+                          if (pendingWake !== null) {
+                            yield* stopPendingWake(pendingWake);
+                            return yield* protocolError(
+                              "Native Pi work started while rollback was changing the session",
+                            );
+                          }
+                          if (
+                            threadState !== state ||
+                            state.activeTurn !== null ||
+                            closed ||
+                            stopRequested
+                          )
+                            return yield* protocolError(
+                              "Pi rollback ownership changed during its rewind",
+                            );
+                          const result = yield* commit;
+                          rollbackBarrier = null;
+                          return result;
+                        }),
+                      );
+                    });
+                  if (flavor.rollback === "tree") {
+                    const available =
+                      navigateTreeAvailable ??
+                      (yield* request({ type: "get_commands" }).pipe(
+                        Effect.map(hasPiNavigateTreeCommand),
+                        Effect.orElseSucceed(() => false),
+                      ));
+                    navigateTreeAvailable = available;
+                    if (available) {
+                      yield* navigateTreeInPlace(forkEntryId);
+                      const treeBaseline = yield* readSessionTreeBaseline();
+                      return yield* commitAfterDrain(
+                        Effect.gen(function* () {
+                          // Same session file and model; only the branch head moved.
+                          applySessionTreeBaseline(treeBaseline);
+                          yield* updateProviderThread(state, { nativeConversationHeadRef: null });
+                          return piThreadSnapshot(state.providerThread);
+                        }),
+                      );
+                    }
+                  }
                   const forkData = yield* lifecycleRequest({ type: "fork", entryId: forkEntryId });
                   if (recordField(forkData, "cancelled") === true)
                     return yield* protocolError("A Pi extension cancelled the session fork");
@@ -3395,31 +3511,8 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
                     );
                   }
                   const treeBaseline = yield* readSessionTreeBaseline();
-                  // RPC responses bypass the pump. Drain preceding native events
-                  // before deciding whether this fork can replace their binding.
-                  const queued = yield* Queue.offer(connection.events, {
-                    type: "t3.rollback_barrier",
-                    barrier,
-                  });
-                  if (!queued) return yield* protocolError("Pi transport closed during rollback");
-                  yield* Deferred.await(barrier);
-                  return yield* sessionEventPermit.withPermits(1)(
+                  return yield* commitAfterDrain(
                     Effect.gen(function* () {
-                      if (pendingWake !== null) {
-                        yield* stopPendingWake(pendingWake);
-                        return yield* protocolError(
-                          "Native Pi work started while rollback was changing the session",
-                        );
-                      }
-                      if (
-                        threadState !== state ||
-                        state.activeTurn !== null ||
-                        closed ||
-                        stopRequested
-                      )
-                        return yield* protocolError(
-                          "Pi rollback ownership changed during its fork",
-                        );
                       lastNativeThreadId = forkSessionFile;
                       appliedModel = null;
                       appliedThinking = null;
@@ -3429,7 +3522,6 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
                         nativeThreadRef: providerRef(forkSessionFile),
                         nativeConversationHeadRef: leafId === null ? null : providerRef(leafId),
                       });
-                      rollbackBarrier = null;
                       return piThreadSnapshot(state.providerThread);
                     }),
                   );
