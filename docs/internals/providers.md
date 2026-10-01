@@ -48,7 +48,11 @@ reply, so a queued or running child from `rlm_child_update` keeps the turn open 
 `get_state` is idle; the last child to finish re-probes. Prime Agent also wakes itself with no
 turn (heartbeats, schedules, finished background commands, agent messages). It uses the same
 buffered provider continuation as Pi's extension wakes, but offers it only once the agent replies,
-so the run's notice can name what woke it.
+so the run's notice can name what woke it. Prime Agent rollback moves
+the branch head in place instead of forking a new session file. RPC has no tree navigation, so the
+injected extension registers a hidden `/t3-navigate-tree` command that calls `ctx.navigateTree` and
+reports back through a marked `notify`; the adapter only sends it when `get_commands` lists it,
+since an unknown slash command would reach the model as a prompt.
 
 Antigravity separates account profiles per instance while sharing installed executables across the
 environment. It forces file-based credential storage because the native macOS keychain entry would

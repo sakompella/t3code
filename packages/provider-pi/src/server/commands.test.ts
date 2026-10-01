@@ -2,6 +2,7 @@ import { expect, it } from "@effect/vitest";
 
 import {
   parsePiCompactCommand,
+  hasPiNavigateTreeCommand,
   parsePiDiscoveredCommands,
   PI_COMPACT_SLASH_COMMAND,
   withPiBuiltinSlashCommands,
@@ -107,4 +108,18 @@ it("prepends the builtin compact command without duplicating a discovered one", 
       { name: "hello" },
     ]),
   ).toEqual([PI_COMPACT_SLASH_COMMAND, { name: "hello" }]);
+});
+
+it("keeps T3's internal rollback command out of the slash menu", () => {
+  const data = {
+    commands: [
+      { name: "t3-navigate-tree", source: "extension" },
+      { name: "review", source: "extension" },
+    ],
+  };
+  expect(parsePiDiscoveredCommands(data).slashCommands.map((command) => command.name)).toEqual([
+    "review",
+  ]);
+  expect(hasPiNavigateTreeCommand(data)).toBe(true);
+  expect(hasPiNavigateTreeCommand({ commands: [{ name: "review" }] })).toBe(false);
 });

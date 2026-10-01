@@ -6,8 +6,16 @@ import * as NodeModule from "node:module";
 import * as NodeVM from "node:vm";
 import { assert, describe, expect, it } from "@effect/vitest";
 
-import { PI_T3_MCP_EXTENSION_SOURCE } from "./mcpExtensionSource.ts";
+import * as Schema from "effect/Schema";
+
+import {
+  PI_T3_MCP_EXTENSION_SOURCE,
+  T3_NAVIGATE_TREE_COMMAND,
+  T3_NAVIGATE_TREE_RESULT_MARKER,
+} from "./mcpExtensionSource.ts";
 import { loadMcpBridge } from "./mcpBridge.testkit.ts";
+
+const decodeJson = Schema.decodeUnknownSync(Schema.fromJsonString(Schema.Unknown));
 
 type RequestHook = (
   event: { payload: unknown },
@@ -41,6 +49,7 @@ async function loadHooks(commands: ReadonlyArray<SkillCommand> = []) {
     pi: {
       on: (name: string, handler: unknown) => handlers.set(name, handler),
       getCommands: () => commands,
+      registerCommand: () => undefined,
     },
   });
   return handlers;
@@ -361,6 +370,7 @@ describe("Pi tool discovery permissions", () => {
           if (name === "tool_call") toolCall = handler;
         },
         getAllTools: () => [{ name: "tool_search", sourceInfo: { path: searchPath } }],
+        registerCommand: () => undefined,
       },
     });
     assert.isDefined(toolCall);
@@ -391,8 +401,21 @@ describe("Pi tool discovery permissions", () => {
   });
 });
 
-async function loadRequestHook(): Promise<RequestHook> {
+interface NavigateTreeContext {
+  readonly navigateTree: (entryId: string) => Promise<{ cancelled: boolean }>;
+  readonly ui: { readonly notify: (message: string, type: string) => void };
+}
+
+interface RegisteredCommand {
+  readonly handler: (args: string, ctx: NavigateTreeContext) => Promise<void>;
+}
+
+async function loadExtension(): Promise<{
+  readonly handlers: Map<string, RequestHook>;
+  readonly commands: Map<string, RegisteredCommand>;
+}> {
   const handlers = new Map<string, RequestHook>();
+  const commands = new Map<string, RegisteredCommand>();
   const source = NodeModule.stripTypeScriptTypes(
     PI_T3_MCP_EXTENSION_SOURCE.replace(/^import .*;$/gm, "").replace(
       "export default async function",
@@ -401,8 +424,16 @@ async function loadRequestHook(): Promise<RequestHook> {
   );
   await NodeVM.runInNewContext(`${source}\nt3McpExtension(pi)`, {
     process: { env: {} },
-    pi: { on: (name: string, handler: RequestHook) => handlers.set(name, handler) },
+    pi: {
+      on: (name: string, handler: RequestHook) => handlers.set(name, handler),
+      registerCommand: (name: string, command: RegisteredCommand) => commands.set(name, command),
+    },
   });
+  return { handlers, commands };
+}
+
+async function loadRequestHook(): Promise<RequestHook> {
+  const { handlers } = await loadExtension();
   const hook = handlers.get("before_provider_request");
   assert.isDefined(hook);
   return hook!;
@@ -540,5 +571,49 @@ describe("Pi skill references", () => {
     } finally {
       await NodeFSP.rm(directory, { recursive: true });
     }
+  });
+});
+
+describe("T3 in-place rollback command", () => {
+  const runCommand = async (args: string, navigateTree: NavigateTreeContext["navigateTree"]) => {
+    const { commands } = await loadExtension();
+    const command = commands.get(T3_NAVIGATE_TREE_COMMAND);
+    assert.isDefined(command);
+    const notices: Array<string> = [];
+    const navigatedTo: Array<string> = [];
+    await command!.handler(args, {
+      navigateTree: (entryId) => {
+        navigatedTo.push(entryId);
+        return navigateTree(entryId);
+      },
+      ui: { notify: (message) => notices.push(message) },
+    });
+    assert.lengthOf(notices, 1);
+    assert.isTrue(notices[0]!.startsWith(T3_NAVIGATE_TREE_RESULT_MARKER));
+    return {
+      navigatedTo,
+      result: decodeJson(notices[0]!.slice(T3_NAVIGATE_TREE_RESULT_MARKER.length)),
+    };
+  };
+
+  it("navigates to the requested entry and reports success with the request id", async () => {
+    const { navigatedTo, result } = await runCommand("  t3-nav-1   u2 ", async () => ({
+      cancelled: false,
+    }));
+    assert.deepEqual(navigatedTo, ["u2"]);
+    assert.deepEqual(result, { requestId: "t3-nav-1", outcome: "ok" });
+  });
+
+  it("reports extension vetoes and navigation errors instead of throwing", async () => {
+    const vetoed = await runCommand("t3-nav-2 u3", async () => ({ cancelled: true }));
+    assert.deepEqual(vetoed.result, { requestId: "t3-nav-2", outcome: "cancelled" });
+    const failed = await runCommand("t3-nav-3 missing", async () => {
+      throw new Error("Entry missing not found");
+    });
+    assert.deepEqual(failed.result, {
+      requestId: "t3-nav-3",
+      outcome: "error",
+      error: "Entry missing not found",
+    });
   });
 });
