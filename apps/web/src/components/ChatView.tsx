@@ -141,6 +141,7 @@ import {
 } from "@t3tools/shared/projectScripts";
 import { CHAT_LIST_ANCHOR_OFFSET } from "@t3tools/shared/chatList";
 import { derivePendingBackgroundWork } from "@t3tools/shared/orchestrationV2PendingBackgroundWork";
+import { buildLiveSubagentTree } from "@t3tools/client-runtime/state/subagent-tree";
 import {
   latestUnheldRun,
   usageLimitRunPresentedAsLatest,
@@ -587,6 +588,7 @@ import { useAtomCommand } from "../state/use-atom-command";
 import { useOrchestrationCommand } from "../state/use-orchestration-command";
 import { useAtomQueryRunner } from "../state/use-atom-query-runner";
 import { Button, InlineButton } from "./ui/button";
+import { SubagentTreeList } from "./chat/SubagentTree";
 import {
   AlertDialog,
   AlertDialogClose,
@@ -7205,10 +7207,68 @@ export default function ChatView(props: ChatViewProps) {
     };
   }, [activeGoal, activeThread, isWorking, sendStandaloneCommandStable]);
 
+  const liveSubagentTree = useMemo(
+    () => buildLiveSubagentTree(serverProjection?.subagents ?? []),
+    [serverProjection?.subagents],
+  );
+
   const backgroundWorkBannerItem = useMemo<ComposerBannerStackItem | null>(() => {
     const presentation = presentPendingBackgroundWork(activeBackgroundTasks);
     if (presentation === null || !activeThread) {
       return null;
+    }
+    if (liveSubagentTree.roots.length > 0) {
+      // Live subagents read as a tree, like Prime Agent's agents view; other
+      // background work is listed after them.
+      const otherWork = presentation.items
+        .filter((item) => item.kind !== "subagent")
+        .map((item) => ({ taskId: item.taskId, label: item.label }));
+      return {
+        id: `background-work:${activeThread.id}`,
+        variant: "default",
+        priority: "activity",
+        icon: (
+          <span
+            className="size-1.5 animate-status-pulse rounded-full bg-foreground"
+            aria-hidden="true"
+          />
+        ),
+        title: (
+          <span className="flex flex-wrap items-center gap-x-3">
+            <span>Subagents</span>
+            <span>
+              <span className="text-success">●</span> {liveSubagentTree.runningCount} running
+            </span>
+            {liveSubagentTree.waitingCount === 0 ? null : (
+              <span>
+                <span className="text-warning">◐</span> {liveSubagentTree.waitingCount} waiting
+              </span>
+            )}
+            {otherWork.length === 0 ? null : (
+              <span className="text-muted-foreground">
+                {otherWork.length} {otherWork.length === 1 ? "command" : "commands"}
+              </span>
+            )}
+          </span>
+        ),
+        children: (
+          <SubagentTreeList
+            tree={liveSubagentTree}
+            commands={otherWork}
+            onOpenThread={onOpenRelatedThreadStable}
+          />
+        ),
+        actions: (
+          <Button
+            size="xs"
+            variant="ghost"
+            disabled={isStoppingBackgroundWork}
+            onClick={() => void handleStopBackgroundWorkStable()}
+          >
+            {isStoppingBackgroundWork ? "Stopping..." : "Stop"}
+          </Button>
+        ),
+      };
     }
     return {
       id: `background-work:${activeThread.id}`,
@@ -7270,6 +7330,7 @@ export default function ChatView(props: ChatViewProps) {
     canOperateThread,
     handleStopBackgroundWorkStable,
     isStoppingBackgroundWork,
+    liveSubagentTree,
     onOpenRelatedThreadStable,
   ]);
   const threadStatusLine = useMemo(() => {
