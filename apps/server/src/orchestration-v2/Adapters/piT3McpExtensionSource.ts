@@ -25,6 +25,14 @@ export const T3_NAVIGATE_TREE_COMMAND = "t3-navigate-tree";
 export const T3_NAVIGATE_TREE_RESULT_MARKER = "t3-navigate-tree-result:";
 
 /**
+ * Sent to the agent with its next turn after an in-place rollback. Rewinding
+ * the conversation does not rewind live tool state such as Prime Agent's
+ * Python kernel, and neither RPC nor extensions can reset it.
+ */
+export const T3_ROLLBACK_NOTICE =
+  "[T3 Code rollback] The conversation was rewound to an earlier point. Live tool state from the discarded turns was not reset: Python variables, imports, and background jobs they created may still exist. Check that state before relying on it, and redo work from the discarded turns if you need it.";
+
+/**
  * Pi tools whose confirmations the bridge raises as file-change approvals.
  * Auto-accept edits skips them; the adapter keys the approval kind off them.
  */
@@ -41,6 +49,7 @@ const ORCHESTRATION_INSTRUCTIONS = ${JSON.stringify(T3_CODE_ORCHESTRATION_INSTRU
 const PROTOCOL = "2025-06-18";
 const NAVIGATE_TREE_COMMAND = ${JSON.stringify(T3_NAVIGATE_TREE_COMMAND)};
 const NAVIGATE_TREE_RESULT_MARKER = ${JSON.stringify(T3_NAVIGATE_TREE_RESULT_MARKER)};
+const ROLLBACK_NOTICE = ${JSON.stringify(T3_ROLLBACK_NOTICE)};
 const READ_ONLY_TOOLS = new Set(["read", "grep", "find", "ls"]);
 const FILE_CHANGE_TOOLS = new Set(${JSON.stringify(PI_FILE_CHANGE_TOOLS)});
 
@@ -252,6 +261,12 @@ export default async function t3McpExtension(pi: ExtensionAPI) {
         ctx.ui.notify(\`\${NAVIGATE_TREE_RESULT_MARKER}\${JSON.stringify({ requestId, ...result })}\`, "info");
       try {
         const result = await ctx.navigateTree(entryId);
+        if (!result.cancelled) {
+          pi.sendMessage(
+            { customType: "t3_rollback_notice", content: ROLLBACK_NOTICE, display: false },
+            { deliverAs: "nextTurn" },
+          );
+        }
         report({ outcome: result.cancelled ? "cancelled" : "ok" });
       } catch (error) {
         // Read the message by shape: extension runtimes may load this file in
