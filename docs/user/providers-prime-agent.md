@@ -24,6 +24,14 @@ file changes with their diffs.
 Threads use Prime Agent's native session files in `~/.prime/agent/sessions` for resume, rollback,
 and forks, so a thread started in T3 Code can be continued in the Prime Agent terminal UI.
 
+## Subagents
+
+Child agents that Prime Agent starts with `rlm.spawn` appear as subagent cards with their task,
+model, live activity, and result. A turn stays open until its children finish, so a parent that
+waits for a child's reply finishes in the same turn. Stopping the turn restarts the Prime Agent
+session, which also stops its running children. Children run without a T3 Code thread of their
+own, so they cannot be opened or resumed from T3 Code.
+
 ## Permission Modes
 
 - **Supervised** asks before every kernel cell and extension tool, showing the cell's code.
