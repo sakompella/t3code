@@ -2585,6 +2585,111 @@ describe("PiAdapterV2 with the Prime Agent flavor", () => {
     }).pipe(Effect.scoped, Effect.provide(testLayer)),
   );
 
+  const rlmChild = (status: string, extra: Record<string, unknown> = {}) => ({
+    type: "rlm_child_update",
+    child: {
+      id: "sub-1",
+      sessionName: "worker",
+      model: "cpa-claude/claude-opus-5-5",
+      label: "Reply to your parent with child-ok",
+      status,
+      sessionDir: "/fake/.prime/agent/session-artifacts/s/sub-1",
+      ...extra,
+    },
+  });
+
+  it.effect("keeps a turn open across the parent's idle gap until its subagent finishes", () =>
+    Effect.gen(function* () {
+      const fake = yield* makeFakePi;
+      const { runtime, takeEvent, providerThread } = yield* openPrimeThread(fake);
+      yield* startTurn(runtime, providerThread);
+      yield* fake.takeRequest("prompt");
+      yield* fake.emit({ type: "agent_start" });
+      yield* fake.emit(rlmChild("queued"));
+      const pending = yield* takeEvent(
+        (event) => event.type === "subagent.updated" && event.subagent.status === "pending",
+      );
+      assert.isTrue(
+        pending.type === "subagent.updated" &&
+          pending.subagent.title === "worker" &&
+          pending.subagent.prompt === "Reply to your parent with child-ok" &&
+          pending.subagent.childThreadId === null,
+      );
+      yield* fake.emit(
+        rlmChild("running", { activity: { kind: "executing", toolName: "ipython" } }),
+      );
+      const running = yield* takeEvent(
+        (event) => event.type === "subagent.updated" && event.subagent.status === "running",
+      );
+      assert.isTrue(
+        running.type === "subagent.updated" && running.subagent.progress === "executing ipython",
+      );
+
+      // The parent ends its run right after spawning; get_state shows it idle.
+      yield* fake.emit({ type: "agent_end", messages: [] });
+      yield* fake.takeRequest("get_state");
+      // The child's reply wakes the parent inside the same T3 turn.
+      yield* fake.emit({ type: "agent_start" });
+      yield* fake.emit({ type: "agent_end", messages: [] });
+      yield* fake.takeRequest("get_state");
+
+      yield* fake.emit(rlmChild("done", { answerPreview: "I sent child-ok to the parent." }));
+      // Nothing may terminalize the turn before the child's completion arrives.
+      const done = yield* takeEvent(
+        (event) =>
+          event.type === "turn.terminal" ||
+          (event.type === "subagent.updated" && event.subagent.status === "completed"),
+      );
+      assert.isTrue(
+        done.type === "subagent.updated" &&
+          done.subagent.result === "I sent child-ok to the parent.",
+      );
+      yield* fake.takeRequest("get_state");
+      const terminal = yield* takeEvent((event) => event.type === "turn.terminal");
+      assert.isTrue(terminal.type === "turn.terminal" && terminal.status === "completed");
+
+      // A later turn deletes the finished child; its card from turn 1 stays completed.
+      yield* startTurn(runtime, providerThread, "default", [], "clean up", undefined, 2);
+      yield* fake.takeRequest("prompt");
+      yield* fake.emit({ type: "agent_start" });
+      yield* fake.emit(rlmChild("cancelled", { error: "Deleted by parent orchestrator" }));
+      yield* fake.emit({ type: "agent_end", messages: [] });
+      const next = yield* takeEvent(
+        (event) => event.type === "turn.terminal" || event.type === "subagent.updated",
+      );
+      assert.equal(next.type, "turn.terminal");
+    }).pipe(Effect.scoped, Effect.provide(testLayer)),
+  );
+
+  it.effect("restarts Prime Agent when Stop interrupts a turn with a live subagent", () =>
+    Effect.gen(function* () {
+      const fake = yield* makeFakePi;
+      const { runtime, takeEvent, providerThread } = yield* openPrimeThread(fake);
+      yield* startTurn(runtime, providerThread);
+      yield* fake.takeRequest("prompt");
+      const runningTurn = yield* takeEvent(
+        (event) =>
+          event.type === "provider_turn.updated" && event.providerTurn.status === "running",
+      );
+      const providerTurnId =
+        runningTurn.type === "provider_turn.updated" ? runningTurn.providerTurn.id : undefined;
+      yield* fake.emit({ type: "agent_start" });
+      yield* fake.emit(rlmChild("running"));
+      yield* takeEvent(
+        (event) => event.type === "subagent.updated" && event.subagent.status === "running",
+      );
+
+      yield* runtime.interruptTurn({ providerThread, providerTurnId: providerTurnId! });
+      yield* fake.closeStdout;
+      const stopped = yield* takeEvent(
+        (event) => event.type === "subagent.updated" && event.subagent.status === "interrupted",
+      );
+      assert.equal(stopped.type, "subagent.updated");
+      const terminal = yield* takeEvent((event) => event.type === "turn.terminal");
+      assert.isTrue(terminal.type === "turn.terminal" && terminal.status === "interrupted");
+    }).pipe(Effect.scoped, Effect.provide(testLayer)),
+  );
+
   it.effect("rolls back at the first user entry the discarded turn added", () =>
     Effect.gen(function* () {
       const fake = yield* makeFakePi;

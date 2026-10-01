@@ -375,6 +375,41 @@ function piApprovalRequestKind(title: string): "command" | "file-change" {
     : "command";
 }
 
+interface PiRlmChildState {
+  readonly snapshot: unknown;
+  readonly startedAt: DateTime.Utc;
+  readonly terminal: boolean;
+  readonly turn: ActivePiTurn;
+}
+
+function rlmChildStatus(
+  status: string | undefined,
+): "pending" | "running" | "completed" | "failed" | "cancelled" {
+  switch (status) {
+    case "queued":
+      return "pending";
+    case "done":
+      return "completed";
+    case "error":
+      return "failed";
+    case "cancelled":
+      return "cancelled";
+    default:
+      return "running";
+  }
+}
+
+/** A short live status line: the child's own progress note, else what it is doing. */
+function rlmChildProgress(snapshot: unknown): string | undefined {
+  const note = recordString(snapshot, "progressNote");
+  if (note !== undefined && note.length > 0) return note.slice(0, 200);
+  const activity = recordField(snapshot, "activity");
+  const kind = recordString(activity, "kind");
+  if (kind === undefined) return undefined;
+  const toolName = recordString(activity, "toolName");
+  return toolName === undefined ? kind : `${kind} ${toolName}`;
+}
+
 interface PiThreadState {
   providerThread: OrchestrationV2ProviderThread;
   activeTurn: ActivePiTurn | null;
@@ -497,6 +532,14 @@ export function makePiAdapterV2(
       >();
       const pendingPrompts = new Map<string, PendingPiPrompt>();
       const sessionApprovals = new Set<string>();
+      /**
+       * Prime Agent subagents (`rlm.spawn`) by child id. A child that is queued
+       * or running keeps its turn open: the parent usually ends its own run
+       * right after spawning and is woken again by the child's reply.
+       */
+      const rlmChildren = new Map<string, PiRlmChildState>();
+      const hasLiveRlmChildren = () =>
+        Array.from(rlmChildren.values()).some((child) => !child.terminal);
       // Answering a dialog and terminalizing a turn both publish lifecycle
       // events. Pi can settle immediately after `extension_ui_response`, so
       // serialize the two paths to stop `turn.terminal` from overtaking the
@@ -1137,6 +1180,94 @@ export function makePiAdapterV2(
        * visible in T3's shared subagent UI without inventing a child thread.
        * Unknown or changed result shapes stay ordinary dynamic tool output.
        */
+      /** Mirrors one `rlm_child_update` roster snapshot onto T3's subagent surfaces. */
+      const emitRlmChild = Effect.fnUntraced(function* (
+        turn: ActivePiTurn,
+        snapshot: unknown,
+        statusOverride?: "interrupted",
+      ) {
+        const childId = recordString(snapshot, "id");
+        if (childId === undefined) return;
+        const emittedAt = yield* DateTime.now;
+        const previous = rlmChildren.get(childId);
+        const status = statusOverride ?? rlmChildStatus(recordString(snapshot, "status"));
+        const terminal = status !== "pending" && status !== "running";
+        // A child that finished in an earlier turn already shows its outcome.
+        // Later roster churn (the parent deleting it, a resynced roster) must
+        // not rewrite that card from an unrelated turn.
+        if (previous === undefined && terminal) return;
+        const state: PiRlmChildState = {
+          snapshot,
+          startedAt: previous?.startedAt ?? emittedAt,
+          terminal,
+          turn,
+        };
+        rlmChildren.set(childId, state);
+        const nativeTaskId = `rlm:${childId}`;
+        const subagentId = idAllocator.derive.nodeFromProviderItem({
+          driver,
+          nativeItemId: nativeTaskId,
+        });
+        const title = recordString(snapshot, "sessionName") ?? null;
+        const prompt = recordString(snapshot, "label") ?? title ?? "child agent";
+        const progress = terminal ? undefined : rlmChildProgress(snapshot);
+        const result = terminal
+          ? (recordString(snapshot, "error") ?? recordString(snapshot, "answerPreview") ?? null)
+          : null;
+        const completedAt = terminal ? emittedAt : null;
+        yield* emit({
+          type: "subagent.updated",
+          driver,
+          subagent: {
+            id: subagentId,
+            threadId: turn.turnInput.threadId,
+            runId: turn.turnInput.runId,
+            parentNodeId: turn.turnInput.rootNodeId,
+            origin: "provider_native",
+            createdBy: "agent",
+            driver,
+            providerInstanceId: options.instanceId,
+            providerThreadId: turn.turnInput.providerThread.id,
+            childThreadId: null,
+            nativeTaskRef: providerRef(nativeTaskId),
+            prompt,
+            title,
+            model: recordString(snapshot, "model") ?? null,
+            status,
+            ...(progress === undefined ? {} : { progress }),
+            result,
+            startedAt: state.startedAt,
+            completedAt,
+            updatedAt: emittedAt,
+          },
+        });
+        yield* emit({
+          type: "turn_item.updated",
+          driver,
+          turnItem: {
+            ...baseItemFields(turn, nativeTaskId, state.startedAt, emittedAt),
+            status,
+            title,
+            completedAt,
+            type: "subagent",
+            subagentId,
+            origin: "provider_native",
+            driver,
+            providerInstanceId: options.instanceId,
+            childThreadId: null,
+            prompt,
+            ...(progress === undefined ? {} : { progress }),
+            result,
+          },
+        });
+        // The parent may already be idle and waiting on this child. Its
+        // finishing is the only signal left to re-check for a settled turn.
+        if (terminal && previous?.terminal === false && turn.settleWhenIdle) {
+          turn.settleProbeGeneration += 1;
+          yield* scheduleSettleProbe(turn, true);
+        }
+      });
+
       const emitSubagentTasks = Effect.fnUntraced(function* (
         turn: ActivePiTurn,
         toolCallId: string,
@@ -1593,6 +1724,13 @@ export function makePiAdapterV2(
           }
         }
         yield* cancelPendingPrompts(completedAt);
+        // Only an interrupted turn ends with live children; restarting the
+        // process stopped them, so their cards must not keep spinning.
+        for (const [childId, child] of rlmChildren) {
+          if (child.turn !== turn) continue;
+          if (!child.terminal) yield* emitRlmChild(turn, child.snapshot, "interrupted");
+          rlmChildren.delete(childId);
+        }
         const treeRefs =
           turn.stopTreeRefs !== undefined ? turn.stopTreeRefs : yield* captureTurnTreeRefs();
         const tokenUsage = readUsage
@@ -1957,6 +2095,10 @@ export function makePiAdapterV2(
             yield* scheduleSettleProbe(turn, true);
             return;
           }
+          case "rlm_child_update": {
+            if (turn !== null) yield* emitRlmChild(turn, event["child"]);
+            return;
+          }
           case "agent_settled": {
             if (turn?.interrupted === true) {
               if (state !== null) yield* finalizeTurn(state);
@@ -2094,6 +2236,11 @@ export function makePiAdapterV2(
               }
               stopRequested = true;
               yield* connection.terminate;
+              return;
+            }
+            if (piStateIsIdle(data) && hasLiveRlmChildren()) {
+              // The parent is waiting on subagents; the last one to finish
+              // re-probes (see emitRlmChild) instead of polling here.
               return;
             }
             if (piStateIsIdle(data)) {
@@ -2680,7 +2827,9 @@ export function makePiAdapterV2(
               interruptInput.requestRuntimeRestart === true ||
               turn.settleWhenIdle ||
               turn.activeCompaction !== null ||
-              turn.manualCompactInFlight
+              turn.manualCompactInFlight ||
+              // RPC cannot cancel a subagent, but ending the session stops it.
+              hasLiveRlmChildren()
             ) {
               // Pi's generic abort does not cancel manual compaction. Terminate
               // so Stop covers user /compact as well as detached recovery compact.

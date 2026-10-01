@@ -43,7 +43,9 @@ work, and no event marks the end, so the adapter polls `get_state` until
 `sessionActions.active` clears; Prime Agent keeps that set through the whole retry chain. Turn
 boundaries for rollback come from new user entries in `get_fork_messages`. Every tool call is one
 `ipython` cell, and a failed cell reports `isError` on its result while the event's own flag stays
-false.
+false. A parent usually ends its run right after `rlm.spawn` and is woken again by the child's
+reply, so a queued or running child from `rlm_child_update` keeps the turn open even when
+`get_state` is idle; the last child to finish re-probes.
 
 Antigravity separates account profiles per instance while sharing installed executables across the
 environment. It forces file-based credential storage because the native macOS keychain entry would
