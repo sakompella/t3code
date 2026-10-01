@@ -24,7 +24,9 @@ file changes with their diffs.
 Threads use Prime Agent's native session files in `~/.prime/agent/sessions` for resume, rollback,
 and forks, so a thread started in T3 Code can be continued in the Prime Agent terminal UI. Rolling
 back rewinds the conversation inside the same session file, so the discarded turns remain as a
-branch that Prime Agent's `/tree` view can still show.
+branch that Prime Agent's `/tree` view can still show. Rolling back does not reset Prime Agent's
+Python kernel, so variables and background jobs from the discarded turns can still exist; Prime
+Agent is told this on its next turn.
 
 ## Subagents
 
