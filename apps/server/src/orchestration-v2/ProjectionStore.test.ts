@@ -2977,6 +2977,142 @@ it.layer(TestLayer)("ProjectionStoreV2", (it) => {
     }),
   );
 
+  it.effect("keeps rolled-back source runs out of a fork's inherited history", () =>
+    Effect.gen(function* () {
+      const projectionStore = yield* ProjectionStore.ProjectionStoreV2;
+      const now = yield* DateTime.now;
+      const projectId = ProjectId.make("project:projection-fork-rollback");
+      const sourceThreadId = ThreadId.make("thread:projection-fork-rollback:source");
+      const targetThreadId = ThreadId.make("thread:projection-fork-rollback:target");
+      const runIds = [1, 2, 3].map((ordinal) =>
+        RunId.make(`run:projection-fork-rollback:${ordinal}`),
+      );
+      const threadPayload = {
+        projectId,
+        providerInstanceId,
+        modelSelection,
+        runtimeMode: "full-access" as const,
+        interactionMode: "default" as const,
+        branch: null,
+        worktreePath: null,
+        activeProviderThreadId: null,
+        createdAt: now,
+        updatedAt: now,
+        archivedAt: null,
+        settledOverride: null,
+        settledAt: null,
+        lastVisitedAt: null,
+        deletedAt: null,
+      };
+
+      yield* projectionStore.apply({
+        id: EventId.make("event:projection-fork-rollback:source-thread"),
+        type: "thread.created",
+        threadId: sourceThreadId,
+        occurredAt: now,
+        payload: {
+          ...threadPayload,
+          createdBy: "user",
+          creationSource: "web",
+          id: sourceThreadId,
+          title: "Fork rollback source",
+          lineage: {
+            parentThreadId: null,
+            relationshipToParent: null,
+            rootThreadId: sourceThreadId,
+          },
+          forkedFrom: null,
+        },
+      });
+      for (const [index, runId] of runIds.entries()) {
+        const rootNodeId = NodeId.make(`node:projection-fork-rollback:${index + 1}`);
+        yield* projectionStore.apply({
+          id: EventId.make(`event:projection-fork-rollback:run:${index + 1}`),
+          type: "run.created",
+          threadId: sourceThreadId,
+          runId,
+          nodeId: rootNodeId,
+          driver,
+          occurredAt: now,
+          payload: {
+            id: runId,
+            threadId: sourceThreadId,
+            ordinal: index + 1,
+            providerInstanceId,
+            modelSelection,
+            providerThreadId: null,
+            userMessageId: MessageId.make(`message:projection-fork-rollback:user:${index + 1}`),
+            rootNodeId,
+            activeAttemptId: null,
+            // The middle run was rewound before the fork was taken.
+            status: index === 1 ? "rolled_back" : "completed",
+            requestedAt: now,
+            startedAt: now,
+            completedAt: now,
+            checkpointId: null,
+            contextHandoffId: null,
+          },
+        });
+        yield* projectionStore.apply({
+          id: EventId.make(`event:projection-fork-rollback:item:${index + 1}`),
+          type: "turn-item.updated",
+          threadId: sourceThreadId,
+          runId,
+          occurredAt: now,
+          payload: {
+            id: TurnItemId.make(`turn-item:projection-fork-rollback:${index + 1}`),
+            threadId: sourceThreadId,
+            runId,
+            nodeId: null,
+            providerThreadId: null,
+            providerTurnId: null,
+            nativeItemRef: null,
+            parentItemId: null,
+            ordinal: index + 1,
+            status: "completed",
+            title: null,
+            startedAt: now,
+            completedAt: now,
+            updatedAt: now,
+            type: "assistant_message",
+            messageId: MessageId.make(`message:projection-fork-rollback:assistant:${index + 1}`),
+            text: `run ${index + 1}`,
+            streaming: false,
+          },
+        });
+      }
+      yield* projectionStore.apply({
+        id: EventId.make("event:projection-fork-rollback:target-thread"),
+        type: "thread.created",
+        threadId: targetThreadId,
+        occurredAt: now,
+        payload: {
+          ...threadPayload,
+          createdBy: "user",
+          creationSource: "web",
+          id: targetThreadId,
+          title: "Fork rollback target",
+          lineage: {
+            parentThreadId: sourceThreadId,
+            relationshipToParent: "fork",
+            rootThreadId: sourceThreadId,
+          },
+          forkedFrom: { type: "run", threadId: sourceThreadId, runId: runIds[2]! },
+        },
+      });
+
+      const targetProjection = yield* projectionStore.getThreadProjection(targetThreadId);
+      const inheritedTexts = targetProjection.visibleTurnItems.flatMap((row) =>
+        row.item.type === "assistant_message" ? [row.item.text] : [],
+      );
+      assert.deepEqual(inheritedTexts, ["run 1", "run 3"]);
+      const shell = yield* projectionStore.getShellSnapshot();
+      const targetShell = shell.threads.find((thread) => thread.id === targetThreadId);
+      // Two inherited messages plus the fork marker.
+      assert.equal(targetShell?.visibleItemCount, 3);
+    }),
+  );
+
   it.effect("removes rolled back runs from the active visible projection", () =>
     Effect.gen(function* () {
       const projectionStore = yield* ProjectionStore.ProjectionStoreV2;
@@ -3782,7 +3918,9 @@ it.layer(TestLayer)("ProjectionStoreV2", (it) => {
             ? row.item.text
             : row.item.type,
         ),
-        ["source two", "two", "fork"],
+        // Run 2 was rolled back before the boundary run existed, so a fork from
+        // that live run inherits run 1 but never the rewound run 2.
+        ["source one", "one", "fork"],
       );
       yield* sql`
         UPDATE orchestration_v2_projection_threads
