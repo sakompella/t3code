@@ -104,7 +104,12 @@ import {
   T3_NAVIGATE_TREE_RESULT_MARKER,
 } from "./piT3McpExtensionSource.ts";
 import { PI_FLAVOR, PRIME_AGENT_FLAVOR, type PiFlavor } from "./PiFlavor.ts";
-import { classifyIpythonCell, previewPythonCell } from "./primeAgentIpythonCell.ts";
+import {
+  awaitsHandle,
+  classifyIpythonCell,
+  detachedBashJobs,
+  previewPythonCell,
+} from "./primeAgentIpythonCell.ts";
 
 export const PI_PROVIDER = PI_FLAVOR.driverKind;
 const PI_DEFAULT_INSTANCE_ID = defaultInstanceIdForDriver(PI_PROVIDER);
@@ -406,6 +411,7 @@ interface PendingPiWake {
 function isPiWakeEvent(event: PiRpcRecord): boolean {
   switch (event["type"]) {
     case "response":
+    case "rlm_child_update":
     case "extension_ui_request":
     case "extension_error":
     case "t3.settle_probe":
@@ -466,6 +472,11 @@ function piWakeNotification(
     outcome: "updated",
     summary: `${agentName} resumed work`,
   };
+}
+
+interface PiBackgroundJob {
+  readonly variable: string | null;
+  readonly command: string;
 }
 
 interface PiRlmChildState {
@@ -632,13 +643,23 @@ export function makePiAdapterV2(
       const pendingPrompts = new Map<string, PendingPiPrompt>();
       const sessionApprovals = new Set<string>();
       /**
-       * Prime Agent subagents (`rlm.spawn`) by child id. A child that is queued
-       * or running keeps its turn open: the parent usually ends its own run
-       * right after spawning and is woken again by the child's reply.
+       * Prime Agent subagents (`rlm.spawn`) by child id. The parent usually
+       * ends its run right after spawning, so its turn settles while the child
+       * keeps running as background work; the child's reply wakes the parent
+       * into a continuation run. Updates stay on the turn that spawned it.
        */
       const rlmChildren = new Map<string, PiRlmChildState>();
       const hasLiveRlmChildren = () =>
         Array.from(rlmChildren.values()).some((child) => !child.terminal);
+      /**
+       * Shell commands a cell left running in the background, by task id. The
+       * kernel only reports them when they finish (`async_bash_completion`),
+       * so they are listed from the cell that started them until then.
+       */
+      const backgroundJobs = new Map<string, PiBackgroundJob>();
+      let backgroundJobCounter = 0;
+      const hasPendingBackgroundWork = () =>
+        hasLiveRlmChildren() || backgroundJobs.size > 0 || pendingWake !== null;
       // Answering a dialog and terminalizing a turn both publish lifecycle
       // events. Pi can settle immediately after `extension_ui_response`, so
       // serialize the two paths to stop `turn.terminal` from overtaking the
@@ -1187,6 +1208,7 @@ export function makePiAdapterV2(
                   },
           });
           if (completed) yield* emitIpythonFileChanges(turn, toolCallId, resultRecord, emittedAt);
+          if (completed && !isError) yield* trackBackgroundJobs(recordString(args, "code") ?? "");
           return;
         }
         if (toolName === "bash") {
@@ -1296,14 +1318,17 @@ export function makePiAdapterV2(
        */
       /** Mirrors one `rlm_child_update` roster snapshot onto T3's subagent surfaces. */
       const emitRlmChild = Effect.fnUntraced(function* (
-        turn: ActivePiTurn,
         snapshot: unknown,
+        currentTurn: ActivePiTurn | null,
         statusOverride?: "interrupted",
       ) {
         const childId = recordString(snapshot, "id");
         if (childId === undefined) return;
         const emittedAt = yield* DateTime.now;
         const previous = rlmChildren.get(childId);
+        // A child outlives the run that spawned it; its card stays on that run.
+        const turn = previous?.turn ?? currentTurn;
+        if (turn === null) return;
         const status = statusOverride ?? rlmChildStatus(recordString(snapshot, "status"));
         const terminal = status !== "pending" && status !== "running";
         // A child that finished in an earlier turn already shows its outcome.
@@ -1374,11 +1399,50 @@ export function makePiAdapterV2(
             result,
           },
         });
-        // The parent may already be idle and waiting on this child. Its
-        // finishing is the only signal left to re-check for a settled turn.
-        if (terminal && previous?.terminal === false && turn.settleWhenIdle) {
-          turn.settleProbeGeneration += 1;
-          yield* scheduleSettleProbe(turn, true);
+        if (terminal) rlmChildren.delete(childId);
+      });
+
+      const publishBackgroundJobs = Effect.fnUntraced(function* () {
+        const state = threadState;
+        if (state === null) return;
+        yield* updateProviderThread(state, {
+          pendingBackgroundTasks: Array.from(backgroundJobs, ([taskId, job]) => ({
+            taskId,
+            kind: "command" as const,
+            description: job.command,
+          })),
+        });
+      });
+
+      /** Tracks jobs a finished cell started in the background, or consumed by awaiting. */
+      const trackBackgroundJobs = Effect.fnUntraced(function* (code: string) {
+        let changed = false;
+        for (const [taskId, job] of backgroundJobs) {
+          if (job.variable !== null && awaitsHandle(code, job.variable)) {
+            backgroundJobs.delete(taskId);
+            changed = true;
+          }
+        }
+        for (const job of detachedBashJobs(code)) {
+          backgroundJobs.set(`bash:${++backgroundJobCounter}`, job);
+          changed = true;
+        }
+        if (changed) yield* publishBackgroundJobs();
+      });
+
+      /** The kernel reports a detached job's end with an `async_bash_completion` message. */
+      const completeBackgroundJob = Effect.fnUntraced(function* (message: unknown) {
+        if (recordString(message, "customType") !== "async_bash_completion") return;
+        const reported = recordString(recordField(message, "details"), "command");
+        if (reported === undefined) return;
+        // Long commands arrive cut off with a truncation suffix.
+        const reportedPrefix = reported.replace(/\n\.\.\. \[command truncated\]$/, "");
+        for (const [taskId, job] of backgroundJobs) {
+          if (job.command === reported || job.command.startsWith(reportedPrefix)) {
+            backgroundJobs.delete(taskId);
+            yield* publishBackgroundJobs();
+            return;
+          }
         }
       });
 
@@ -1847,12 +1911,12 @@ export function makePiAdapterV2(
           }
         }
         yield* cancelPendingPrompts(completedAt);
-        // Only an interrupted turn ends with live children; restarting the
-        // process stopped them, so their cards must not keep spinning.
-        for (const [childId, child] of rlmChildren) {
-          if (child.turn !== turn) continue;
-          if (!child.terminal) yield* emitRlmChild(turn, child.snapshot, "interrupted");
-          rlmChildren.delete(childId);
+        // Stop restarts the process, which also ends this turn's children;
+        // otherwise they keep running as background work.
+        if (turn.interrupted) {
+          for (const child of Array.from(rlmChildren.values())) {
+            if (child.turn === turn) yield* emitRlmChild(child.snapshot, null, "interrupted");
+          }
         }
         const treeRefs =
           turn.stopTreeRefs !== undefined ? turn.stopTreeRefs : yield* captureTurnTreeRefs();
@@ -2013,6 +2077,7 @@ export function makePiAdapterV2(
         const turn = state?.activeTurn ?? null;
         if (turn === null && pendingWake !== null && isPiWakeEvent(event)) {
           pendingWake.events.push(event);
+          if (event["type"] === "message_start") yield* completeBackgroundJob(event["message"]);
           // Wait for the agent's own reply, so every message it was woken
           // with (kernel restore notices come first) is in the buffer.
           const agentReplied =
@@ -2040,6 +2105,7 @@ export function makePiAdapterV2(
             return;
           }
           case "message_start": {
+            yield* completeBackgroundJob(event["message"]);
             if (turn !== null && recordString(event["message"], "role") === "assistant") {
               turn.sawAgentActivity = true;
               turn.messageOrdinal += 1;
@@ -2265,7 +2331,7 @@ export function makePiAdapterV2(
             return;
           }
           case "rlm_child_update": {
-            if (turn !== null) yield* emitRlmChild(turn, event["child"]);
+            yield* emitRlmChild(event["child"], turn);
             return;
           }
           case "agent_settled": {
@@ -2407,11 +2473,6 @@ export function makePiAdapterV2(
               yield* connection.terminate;
               return;
             }
-            if (piStateIsIdle(data) && hasLiveRlmChildren()) {
-              // The parent is waiting on subagents; the last one to finish
-              // re-probes (see emitRlmChild) instead of polling here.
-              return;
-            }
             if (piStateIsIdle(data)) {
               turn.settleWhenIdle = false;
               if (state !== null) yield* finalizeTurn(state);
@@ -2456,6 +2517,14 @@ export function makePiAdapterV2(
               pendingWake = null;
               const state = threadState;
               const interrupted = state?.activeTurn?.interrupted === true;
+              // The kernel and its children died with the process.
+              for (const child of Array.from(rlmChildren.values())) {
+                if (!child.terminal) yield* emitRlmChild(child.snapshot, null, "interrupted");
+              }
+              if (backgroundJobs.size > 0) {
+                backgroundJobs.clear();
+                yield* publishBackgroundJobs();
+              }
               if (state?.activeTurn != null) {
                 state.activeTurn.failure = interrupted
                   ? null
@@ -3035,6 +3104,14 @@ export function makePiAdapterV2(
         interruptTurn: (interruptInput) =>
           Effect.gen(function* () {
             const turn = threadState?.activeTurn ?? null;
+            if (turn === null && hasPendingBackgroundWork()) {
+              // Stop from the background-work banner after the turn settled.
+              // Neither RPC nor extensions can cancel a subagent or a kernel
+              // job, so end the session; it resumes on the next turn.
+              stopRequested = true;
+              yield* connection.terminate;
+              return;
+            }
             // Stop on a settled turn: Pi runs nothing between prompts, so
             // nothing of that turn is left to stop.
             if (turn === null && interruptInput.requestRuntimeRestart === true) return;
@@ -3155,6 +3232,12 @@ export function makePiAdapterV2(
                   cause,
                 }),
             ),
+          ),
+        hasPendingBackgroundWork: Effect.sync(hasPendingBackgroundWork),
+        hasPendingBackgroundWorkForThread: (providerThread) =>
+          Effect.sync(
+            () =>
+              threadState?.providerThread.id === providerThread.id && hasPendingBackgroundWork(),
           ),
         readThreadSnapshot: (snapshotInput) =>
           Effect.gen(function* () {
