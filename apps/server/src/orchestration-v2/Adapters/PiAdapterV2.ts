@@ -438,6 +438,15 @@ function piWakeNotification(
         summary: "Background command finished",
       };
     }
+    if (customType === "heartbeat_prompt") {
+      return { source: { kind: "background_task" }, outcome: "updated", summary: "Heartbeat" };
+    }
+    if (customType === "rlm_child_failure") {
+      return { source: { kind: "subagent" }, outcome: "failed", summary: "Subagent failed" };
+    }
+    if (customType === "rlm_child_terminal_notice") {
+      return { source: { kind: "subagent" }, outcome: "completed", summary: "Subagent finished" };
+    }
   }
   return {
     source: { kind: "background_task" },
