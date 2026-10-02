@@ -394,6 +394,8 @@ interface ActivePiTurn {
     /** The row is only shown once the wait runs long enough to notice. */
     shown: boolean;
   } | null;
+  /** Counts synthetic notices so each gets its own id within the turn. */
+  noticeCount: number;
   failure: ReturnType<typeof makeProviderFailure> | null;
   /** Session-tree refs read just before Stop terminates Pi, when no read is possible later. */
   stopTreeRefs?: PiTurnTreeRefs | null;
@@ -1851,6 +1853,16 @@ export function makePiAdapterV2(
         });
       });
 
+      /**
+       * Notice ids are derived from the provider item id alone, so they need
+       * the provider turn id: item ordinals restart at the same value in every
+       * thread and attempt.
+       */
+      const nextNoticeId = (turn: ActivePiTurn, kind: string, key?: string) => {
+        turn.noticeCount += 1;
+        return `${turn.providerTurn.id}:${kind}:${key ?? turn.noticeCount}`;
+      };
+
       const emitNotice = Effect.fnUntraced(function* (
         turn: ActivePiTurn,
         nativeItemId: string,
@@ -1887,7 +1899,7 @@ export function makePiAdapterV2(
         }
         const startedAt = yield* DateTime.now;
         const finishingUp = {
-          nativeItemId: `finishing-up:${turn.nextItemOrdinal}`,
+          nativeItemId: nextNoticeId(turn, "finishing-up"),
           startedAt,
           shown: false,
         };
@@ -1932,12 +1944,12 @@ export function makePiAdapterV2(
 
       const emitRefineOutcome = Effect.fnUntraced(function* (event: PiRpcRecord) {
         const turn = threadState?.activeTurn ?? null;
-        if (turn === null) return;
+        if (turn === null || flavor.settleSignal !== "idle_probe") return;
         const emittedAt = yield* DateTime.now;
         if (event["type"] === "refine_complete") {
           const result = recordField(event, "result");
           const summary = recordString(result, "summary")?.trim();
-          const nativeItemId = `refine:${recordString(result, "id") ?? turn.nextItemOrdinal}`;
+          const nativeItemId = nextNoticeId(turn, "refine", recordString(result, "id"));
           const message =
             summary === undefined || summary.length === 0
               ? "Refined its harness."
@@ -1952,7 +1964,7 @@ export function makePiAdapterV2(
             : `Harness refinement failed: ${detail.slice(0, 500)}`;
         yield* emitNotice(
           turn,
-          `refine-failed:${turn.nextItemOrdinal}`,
+          nextNoticeId(turn, "refine-failed"),
           message,
           "completed",
           emittedAt,
@@ -3202,6 +3214,7 @@ export function makePiAdapterV2(
               activeCompaction: null,
               activeProviderRetry: null,
               finishingUp: null,
+              noticeCount: 0,
               failure: null,
             };
             // Only the install/send/start-event boundary excludes the event
