@@ -2656,6 +2656,164 @@ describe("PiAdapterV2 with the Prime Agent flavor", () => {
     }).pipe(Effect.scoped, Effect.provide(testLayer)),
   );
 
+  it.effect("emits no Finishing up row after a quick end, even once the delay has passed", () =>
+    Effect.gen(function* () {
+      const fake = yield* makeFakePi;
+      const { runtime, takeEvent, providerThread } = yield* openPrimeThread(fake);
+      yield* startTurn(runtime, providerThread);
+      yield* fake.takeRequest("prompt");
+      yield* fake.emit({ type: "agent_start" });
+      yield* fake.emit(finalReply);
+      yield* fake.emit({ type: "agent_end", messages: [] });
+      yield* fake.takeRequest("get_state");
+      yield* takeEvent((event) => event.type === "turn.terminal");
+
+      // A stale timer would wake here. The next turn's start events are
+      // handled after it, so a notice from the first turn would show up first.
+      yield* TestClock.adjust(Duration.millis(5_000));
+      yield* startTurn(runtime, providerThread, "default", [], "Again", undefined, 2);
+      yield* fake.takeRequest("prompt");
+      yield* fake.emit({ type: "agent_start" });
+      const seen: Array<ProviderAdapterV2Event> = [];
+      yield* takeEvent((event) => {
+        seen.push(event);
+        return event.type === "provider_turn.updated" && event.providerTurn.status === "running";
+      });
+      assert.deepStrictEqual(systemNotices(seen), []);
+    }).pipe(Effect.scoped, Effect.provide(testLayer)),
+  );
+
+  it.effect("shows no Finishing up row for a plain Pi final reply", () =>
+    Effect.gen(function* () {
+      const fake = yield* makeFakePi;
+      const { runtime, takeEvent } = yield* openRuntime(fake);
+      const providerThread = yield* runtime.ensureThread({
+        threadId: THREAD_ID,
+        modelSelection: modelSelection("default"),
+        runtimePolicy,
+      });
+      yield* startTurn(runtime, providerThread);
+      yield* fake.takeRequest("prompt");
+      yield* fake.emit({ type: "agent_start" });
+      yield* fake.emit(finalReply);
+      yield* TestClock.adjust(Duration.millis(5_000));
+      yield* fake.emit({ type: "agent_settled" });
+      const seen: Array<ProviderAdapterV2Event> = [];
+      yield* takeEvent((event) => {
+        seen.push(event);
+        return event.type === "turn.terminal";
+      });
+      assert.deepStrictEqual(systemNotices(seen), []);
+    }).pipe(Effect.scoped, Effect.provide(testLayer)),
+  );
+
+  type PrimeSession = Effect.Success<ReturnType<typeof openPrimeThread>>;
+  const endsTurn = (fake: FakePi) =>
+    Effect.gen(function* () {
+      yield* fake.emit({ type: "agent_end", messages: [] });
+      yield* fake.takeRequest("get_state");
+    });
+
+  const endings: ReadonlyArray<{
+    readonly name: string;
+    readonly end: (
+      fake: FakePi,
+      session: PrimeSession,
+      providerTurnId: string,
+    ) => Effect.Effect<void>;
+  }> = [
+    {
+      name: "turn_start",
+      end: (fake) => Effect.andThen(fake.emit({ type: "turn_start" }), endsTurn(fake)),
+    },
+    {
+      name: "agent_start",
+      end: (fake) => Effect.andThen(fake.emit({ type: "agent_start" }), endsTurn(fake)),
+    },
+    {
+      name: "assistant message_start",
+      end: (fake) =>
+        Effect.andThen(
+          fake.emit({ type: "message_start", message: { role: "assistant", content: [] } }),
+          endsTurn(fake),
+        ),
+    },
+    {
+      name: "tool start",
+      end: (fake) =>
+        Effect.gen(function* () {
+          yield* fake.emit({
+            type: "tool_execution_start",
+            toolCallId: "late_tool",
+            toolName: "read",
+            args: { path: "/tmp/a" },
+          });
+          yield* endsTurn(fake);
+        }),
+    },
+    {
+      name: "provider failure",
+      end: (fake) =>
+        Effect.gen(function* () {
+          yield* fake.emit({
+            type: "message_end",
+            message: { role: "assistant", content: [], stopReason: "error", errorMessage: "boom" },
+          });
+          yield* endsTurn(fake);
+        }),
+    },
+    {
+      name: "interrupt",
+      end: (fake, session, providerTurnId) =>
+        Effect.gen(function* () {
+          yield* session.runtime
+            .interruptTurn({
+              providerThread: session.providerThread,
+              providerTurnId: providerTurnId as never,
+            })
+            .pipe(Effect.orDie);
+          yield* fake.takeRequest("abort");
+          yield* fake.closeStdout;
+        }),
+    },
+    { name: "stdout closure", end: (fake) => fake.closeStdout },
+  ];
+
+  for (const { name, end } of endings) {
+    it.effect(`completes a shown Finishing up row once on ${name}`, () =>
+      Effect.gen(function* () {
+        const fake = yield* makeFakePi;
+        const session = yield* openPrimeThread(fake);
+        yield* startTurn(session.runtime, session.providerThread);
+        yield* fake.takeRequest("prompt");
+        const running = yield* showFinishingUp(fake, session.takeEvent);
+        assert.isTrue(running.type === "turn_item.updated");
+        if (running.type !== "turn_item.updated") return;
+
+        yield* end(fake, session, running.turnItem.providerTurnId ?? "");
+        const seen: Array<ProviderAdapterV2Event> = [];
+        yield* session.takeEvent((event) => {
+          seen.push(event);
+          return event.type === "turn.terminal";
+        });
+        // Time passing after the end must not bring the row back.
+        yield* TestClock.adjust(Duration.millis(5_000));
+
+        const notices = seen.filter(isSystemNotice);
+        assert.lengthOf(notices, 1);
+        const [completed] = notices;
+        assert.isTrue(
+          completed?.type === "turn_item.updated" &&
+            completed.turnItem.type === "system_notice" &&
+            completed.turnItem.status === "completed" &&
+            completed.turnItem.message === "Finished up" &&
+            completed.turnItem.id === running.turnItem.id &&
+            completed.turnItem.ordinal === running.turnItem.ordinal,
+        );
+      }).pipe(Effect.scoped, Effect.provide(testLayer)),
+    );
+  }
+
   it.effect("reports a finished refinement and a failed one as notices", () =>
     Effect.gen(function* () {
       const fake = yield* makeFakePi;
