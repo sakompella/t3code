@@ -362,7 +362,7 @@ function snapshotBlock(
 
 function pythonCellTitle(code: string): string {
   const preview = previewPythonCell(code);
-  return preview.length === 0 ? "Python" : `Python: ${preview}`;
+  return preview.length === 0 ? "Python" : preview;
 }
 
 /**
