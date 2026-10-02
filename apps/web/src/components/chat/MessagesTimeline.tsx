@@ -209,6 +209,7 @@ import {
   shouldPreserveAssistantLineBreaks,
   toolGroupAction,
   workEntryDisplayLabel,
+  workEntryLabelCode,
   workEntryReadOutput,
   workEntryIsVisibleInGroup,
   worktreeSetupAgentStarted,
@@ -5140,6 +5141,7 @@ function WorkEntryLogRow(props: WorkEntryRowProps) {
         ? "Thinking"
         : "Thought"
       : questionHeading || (displayLabel ?? workEntryDisplayLabel(workEntry, workspaceRoot));
+  const labelCode = questionHeading ? null : workEntryLabelCode(workEntry, previewText);
   const answerPreview =
     workEntry.questionAnswer && hasQuestionAnswer(workEntry.questionAnswer)
       ? getQuestionAnswerPreview(workEntry.questionAnswer)
@@ -5282,6 +5284,13 @@ function WorkEntryLogRow(props: WorkEntryRowProps) {
                 >
                   {workEntry.detail ?? previewText}
                 </ReactMarkdown>
+              ) : labelCode ? (
+                <>
+                  {labelCode.prefix ? `${labelCode.prefix}: ` : null}
+                  <span className="font-mono text-(length:--font-size-code,var(--text-xs))">
+                    {labelCode.code}
+                  </span>
+                </>
               ) : (
                 previewText
               )}
