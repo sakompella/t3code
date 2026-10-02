@@ -3002,6 +3002,54 @@ describe("PiAdapterV2 with the Prime Agent flavor", () => {
     }).pipe(Effect.scoped, Effect.provide(testLayer)),
   );
 
+  it.effect("records a running turn's start entry before a steer adds another", () =>
+    Effect.gen(function* () {
+      const fake = yield* makeFakePi;
+      fake.queueForkMessages({ messages: [] });
+      const session = yield* openPrimeThread(fake);
+      yield* runPrimeTurn(session, fake, 1, ["u1"]);
+
+      yield* startTurn(
+        session.runtime,
+        session.providerThread,
+        "default",
+        [],
+        "turn 2",
+        undefined,
+        2,
+      );
+      yield* fake.takeRequest("prompt");
+      fake.queueForkMessages({ messages: [{ entryId: "u1" }, { entryId: "u2" }] });
+      yield* fake.emit({ type: "agent_start" });
+      yield* fake.emit({ type: "message_start", message: { role: "assistant", content: [] } });
+      // A fork from turn 1 cuts at this ref, so it must exist while turn 2 runs.
+      const running = yield* session.takeEvent(
+        (event) =>
+          event.type === "provider_turn.updated" &&
+          event.providerTurn.status === "running" &&
+          event.providerTurn.nativeTurnRef?.strength === "strong",
+      );
+      assert.isTrue(running.type === "provider_turn.updated");
+      if (running.type === "provider_turn.updated") {
+        assert.equal(running.providerTurn.nativeTurnRef?.nativeId, "u2");
+      }
+
+      // The steer's user entry is new at the end of the turn, but not its start.
+      fake.queueForkMessages({
+        messages: [{ entryId: "u1" }, { entryId: "u2" }, { entryId: "u3" }],
+      });
+      yield* fake.emit({ type: "agent_end", messages: [] });
+      const settled = yield* session.takeEvent(
+        (event) =>
+          event.type === "provider_turn.updated" && event.providerTurn.status === "completed",
+      );
+      assert.isTrue(settled.type === "provider_turn.updated");
+      if (settled.type === "provider_turn.updated") {
+        assert.equal(settled.providerTurn.nativeTurnRef?.nativeId, "u2");
+      }
+    }).pipe(Effect.scoped, Effect.provide(testLayer)),
+  );
+
   const T3_COMMANDS = { commands: [{ name: "t3-navigate-tree", source: "extension" }] };
 
   /** Answers the next in-place rollback command the way T3's extension reports it. */

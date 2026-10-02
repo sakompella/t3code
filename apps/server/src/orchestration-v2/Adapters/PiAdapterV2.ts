@@ -364,6 +364,12 @@ interface ActivePiTurn {
   failure: ReturnType<typeof makeProviderFailure> | null;
   /** Session-tree refs read just before Stop terminates Pi, when no read is possible later. */
   stopTreeRefs?: PiTurnTreeRefs | null;
+  /**
+   * The turn's start entry, read once its prompt is persisted. A fork from an
+   * earlier turn needs it while this turn still runs, and a later read would
+   * mistake a steer's user entry for the turn start.
+   */
+  startEntryId?: string | null;
 }
 
 interface PiTurnTreeRefs {
@@ -1889,6 +1895,19 @@ export function makePiAdapterV2(
         };
       });
 
+      const recordTurnStartEntry = Effect.fnUntraced(function* (turn: ActivePiTurn) {
+        // Keep the read short: it holds the event stream mid-reply.
+        const refs = yield* captureTurnTreeRefs(2_000);
+        turn.startEntryId = refs?.turnStartEntryId ?? null;
+        if (turn.startEntryId === null) return;
+        yield* emit({
+          type: "provider_turn.updated",
+          driver,
+          threadId: turn.turnInput.threadId,
+          providerTurn: { ...turn.providerTurn, nativeTurnRef: providerRef(turn.startEntryId) },
+        });
+      });
+
       const finalizeTurn = Effect.fnUntraced(function* (state: PiThreadState, readUsage = true) {
         const turn = state.activeTurn;
         if (turn === null) return;
@@ -1923,6 +1942,7 @@ export function makePiAdapterV2(
         }
         const treeRefs =
           turn.stopTreeRefs !== undefined ? turn.stopTreeRefs : yield* captureTurnTreeRefs();
+        const turnStartEntryId = turn.startEntryId ?? treeRefs?.turnStartEntryId ?? null;
         const tokenUsage = readUsage
           ? yield* readTokenUsage(turn.latestCompactionAfterTokens, completedAt)
           : undefined;
@@ -1933,9 +1953,7 @@ export function makePiAdapterV2(
           threadId: turn.turnInput.threadId,
           providerTurn: {
             ...turn.providerTurn,
-            ...(treeRefs?.turnStartEntryId == null
-              ? {}
-              : { nativeTurnRef: providerRef(treeRefs.turnStartEntryId) }),
+            ...(turnStartEntryId === null ? {} : { nativeTurnRef: providerRef(turnStartEntryId) }),
             status: turn.interrupted ? "interrupted" : failure !== null ? "failed" : "completed",
             completedAt,
             ...(tokenUsage === undefined ? {} : { tokenUsage }),
@@ -2112,6 +2130,13 @@ export function makePiAdapterV2(
             if (turn !== null && recordString(event["message"], "role") === "assistant") {
               turn.sawAgentActivity = true;
               turn.messageOrdinal += 1;
+              // Pi persists the prompt before it emits the reply, so the
+              // first reply is the earliest point the start entry is readable.
+              // Pi's recorded replay fixtures predate this read, so only the
+              // Prime Agent flavor takes it.
+              if (flavor.sessionTree === "fork_messages" && turn.startEntryId === undefined) {
+                yield* recordTurnStartEntry(turn);
+              }
             }
             return;
           }
