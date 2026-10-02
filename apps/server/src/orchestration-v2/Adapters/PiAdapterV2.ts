@@ -568,6 +568,8 @@ interface PiChildTranscript {
   readonly streamItems: Map<string, PiStreamItemState>;
   readonly toolArgs: Map<string, unknown>;
   readonly toolStartedAt: Map<string, DateTime.Utc>;
+  /** Latest start/update event of each tool that has not ended, to settle it on teardown. */
+  readonly openTools: Map<string, PiRpcRecord>;
   /** Last status emitted on the child's root node. */
   status: OrchestrationV2ExecutionNode["status"] | null;
   /** The session this adapter observes, once `observe` succeeded. */
@@ -1296,6 +1298,8 @@ export function makePiAdapterV2(
         turn: PiItemSink,
         event: PiRpcRecord,
         phase: "start" | "update" | "end",
+        /** Ends a tool whose end event never came, with the outcome the caller knows. */
+        settledAs?: "completed" | "failed" | "interrupted",
       ) {
         const toolCallId = recordString(event, "toolCallId");
         const toolName = recordString(event, "toolName") ?? "tool";
@@ -1319,13 +1323,15 @@ export function makePiAdapterV2(
         const outputText = contentText(recordField(resultRecord, "content"));
         // A Stop aborts in-flight tools, and pi reports those as error ends.
         // Present them as interrupted (matching the run) rather than failed.
-        const status = completed
-          ? isError
-            ? "interrupted" in turn && turn.interrupted
-              ? "interrupted"
-              : "failed"
-            : "completed"
-          : "running";
+        const status = settledAs
+          ? settledAs
+          : completed
+            ? isError
+              ? "interrupted" in turn && turn.interrupted
+                ? "interrupted"
+                : "failed"
+              : "completed"
+            : "running";
         const base = baseItemFields(turn, toolCallId, startedAt, emittedAt);
         yield* emitItemNode(
           turn,
@@ -1498,6 +1504,7 @@ export function makePiAdapterV2(
           streamItems: new Map(),
           toolArgs: new Map(),
           toolStartedAt: new Map(),
+          openTools: new Map(),
           status: null,
           observedSessionId: null,
           failedSessionIds: new Set(),
@@ -1628,14 +1635,27 @@ export function makePiAdapterV2(
             return;
           }
           case "tool_execution_start":
-            yield* emitToolItem(transcript, event, "start");
+          case "tool_execution_update": {
+            const toolCallId = recordString(event, "toolCallId");
+            if (toolCallId !== undefined) {
+              transcript.openTools.set(toolCallId, {
+                ...transcript.openTools.get(toolCallId),
+                ...event,
+              });
+            }
+            yield* emitToolItem(
+              transcript,
+              event,
+              event["type"] === "tool_execution_start" ? "start" : "update",
+            );
             return;
-          case "tool_execution_update":
-            yield* emitToolItem(transcript, event, "update");
-            return;
-          case "tool_execution_end":
+          }
+          case "tool_execution_end": {
+            const toolCallId = recordString(event, "toolCallId");
+            if (toolCallId !== undefined) transcript.openTools.delete(toolCallId);
             yield* emitToolItem(transcript, event, "end");
             return;
+          }
           default:
             return;
         }
@@ -1675,6 +1695,28 @@ export function makePiAdapterV2(
         }
       });
 
+      /**
+       * Ends a child's transcript for good: open text closes (which also turns
+       * its pending flushes into no-ops) and tools without an end event settle
+       * as `toolStatus`. The child's RPC drops events, so none of this can wait
+       * for the stream to say so.
+       */
+      const finalizeChildTranscript = Effect.fnUntraced(function* (
+        transcript: PiChildTranscript,
+        toolStatus: "completed" | "failed" | "interrupted",
+      ) {
+        yield* completeOpenStreamItems(transcript);
+        for (const [toolCallId, event] of Array.from(transcript.openTools)) {
+          transcript.openTools.delete(toolCallId);
+          yield* emitToolItem(
+            transcript,
+            { ...event, type: "tool_execution_end", result: event["partialResult"] },
+            "end",
+            toolStatus,
+          );
+        }
+      });
+
       const stopObservingChild = Effect.fnUntraced(function* (
         transcript: PiChildTranscript,
         sessionIsAlive: boolean,
@@ -1689,20 +1731,42 @@ export function makePiAdapterV2(
       });
 
       /**
+       * Ends a child's observation once the child is terminal. While its
+       * session is still reachable, its history is read one last time so a lost
+       * end event does not cut the final answer; what is still open after that
+       * settles to match the child's outcome.
+       */
+      const finishChildObservation = Effect.fnUntraced(function* (
+        transcript: PiChildTranscript,
+        status: OrchestrationV2ExecutionNode["status"],
+        sessionIsAlive: boolean,
+      ) {
+        const sessionId = transcript.observedSessionId;
+        if (sessionIsAlive && sessionId !== null) {
+          const observed = yield* request({ type: "observe", activeSessionId: sessionId }).pipe(
+            Effect.option,
+          );
+          if (Option.isSome(observed)) {
+            const history = recordField(observed.value, "messages");
+            yield* replayChildHistory(transcript, Array.isArray(history) ? history : []);
+          }
+        }
+        yield* finalizeChildTranscript(
+          transcript,
+          status === "completed" || status === "failed" ? status : "interrupted",
+        );
+        yield* stopObservingChild(transcript, sessionIsAlive);
+      });
+
+      /**
        * Streams a running child's session into its thread: one observation per
-       * live child, started when its session id first shows up and dropped once
-       * it ends. A failed `observe` is not retried for the same session.
+       * live child, started when its session id first shows up. A failed
+       * `observe` is not retried for the same session.
        */
       const syncChildObservation = Effect.fnUntraced(function* (
         transcript: PiChildTranscript,
         snapshot: unknown,
-        terminal: boolean,
-        sessionIsAlive: boolean,
       ) {
-        if (terminal) {
-          yield* stopObservingChild(transcript, sessionIsAlive);
-          return;
-        }
         const sessionId = recordString(snapshot, "activeSessionId");
         if (
           sessionId === undefined ||
@@ -1788,6 +1852,9 @@ export function makePiAdapterV2(
             })))
           : undefined;
         if (transcript !== undefined) {
+          // Close the transcript before the root reports the outcome.
+          if (terminal)
+            yield* finishChildObservation(transcript, status, statusOverride === undefined);
           yield* emitChildRootNode(transcript, status, nativeTaskId, state.startedAt, completedAt);
         }
         yield* emit({
@@ -1843,8 +1910,8 @@ export function makePiAdapterV2(
             result,
           },
         });
-        if (transcript !== undefined) {
-          yield* syncChildObservation(transcript, snapshot, terminal, statusOverride === undefined);
+        if (transcript !== undefined && !terminal) {
+          yield* syncChildObservation(transcript, snapshot);
         }
         if (terminal) rlmChildren.delete(childId);
       });
@@ -2973,6 +3040,7 @@ export function makePiAdapterV2(
             if (sessionId !== undefined && transcript !== undefined) {
               // The session is gone; observing it again would only fail.
               transcript.failedSessionIds.add(sessionId);
+              yield* finalizeChildTranscript(transcript, "interrupted");
               yield* stopObservingChild(transcript, false);
             }
             return;

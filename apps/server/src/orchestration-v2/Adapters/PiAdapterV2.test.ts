@@ -3211,6 +3211,194 @@ describe("PiAdapterV2 with the Prime Agent flavor", () => {
     }).pipe(Effect.scoped, Effect.provide(testLayer)),
   );
 
+  /** Starts a child with an observed session, and leaves it with a running tool and an open reply. */
+  const startChildWithOpenWork = (
+    fake: FakePi,
+    session: Effect.Success<ReturnType<typeof openPrimeThread>>,
+  ) =>
+    Effect.gen(function* () {
+      yield* startTurn(session.runtime, session.providerThread);
+      yield* fake.takeRequest("prompt");
+      yield* fake.emit({ type: "agent_start" });
+      yield* fake.emit(rlmChild("queued"));
+      yield* fake.emit(rlmChild("running", { activeSessionId: "active-1" }));
+      const running = yield* session.takeEvent(
+        (event) => event.type === "subagent.updated" && event.subagent.childThreadId !== null,
+      );
+      yield* fake.takeRequest("observe");
+      yield* fake.emit(sentinelChild("running"));
+      yield* session.takeEvent(
+        (event) => event.type === "subagent.updated" && event.subagent.title === "sentinel",
+      );
+      yield* fake.emit({ type: "agent_end", messages: [] });
+      yield* fake.takeRequest("get_state");
+      yield* session.takeEvent((event) => event.type === "turn.terminal");
+
+      const observed = (event: Record<string, unknown>) =>
+        fake.emit({ type: "observed_session_event", activeSessionId: "active-1", event });
+      yield* observed({
+        type: "tool_execution_start",
+        toolCallId: "child-tool",
+        toolName: "bash",
+        args: { command: "sleep 30" },
+      });
+      yield* observed({
+        type: "message_update",
+        message: assistantSnapshot(1001, "Half an ans"),
+        assistantMessageEvent: { type: "text_delta", contentIndex: 0, delta: "Half an ans" },
+      });
+      // Once the sentinel answers, the pump has handled both events above.
+      yield* fake.emit(sentinelChild("running"));
+      yield* session.takeEvent(
+        (event) => event.type === "subagent.updated" && event.subagent.title === "sentinel",
+      );
+      return running.type === "subagent.updated" ? running.subagent.childThreadId : null;
+    });
+
+  /** A second child that is updated last, so its update marks the end of the child's events. */
+  const sentinelChild = (status: string) => ({
+    type: "rlm_child_update",
+    child: {
+      id: "sub-sentinel",
+      sessionName: "sentinel",
+      label: "sentinel",
+      status,
+      sessionDir: "/fake/.prime/agent/session-artifacts/s/sub-sentinel",
+    },
+  });
+
+  /** The child thread's items up to the sentinel's end. */
+  const childItemsUntilSentinelEnds = (
+    session: Effect.Success<ReturnType<typeof openPrimeThread>>,
+    childThreadId: unknown,
+  ) =>
+    Effect.gen(function* () {
+      const items: Array<{ type: string; status: string; streaming?: boolean }> = [];
+      for (;;) {
+        const event = yield* session.takeEvent(() => true);
+        if (
+          event.type === "subagent.updated" &&
+          event.subagent.title === "sentinel" &&
+          event.subagent.status !== "running"
+        ) {
+          return items;
+        }
+        if (event.type === "turn_item.updated" && event.turnItem.threadId === childThreadId) {
+          items.push({
+            type: event.turnItem.type,
+            status: event.turnItem.status,
+            ...("streaming" in event.turnItem ? { streaming: event.turnItem.streaming } : {}),
+          });
+        }
+      }
+    });
+
+  /** Lets a scheduled 50 ms stream flush come due, then checks it published nothing running. */
+  const assertNoLaterRunningItem = (
+    session: Effect.Success<ReturnType<typeof openPrimeThread>>,
+    childThreadId: unknown,
+  ) =>
+    Effect.gen(function* () {
+      const late = yield* session
+        .takeEvent(
+          (event) =>
+            event.type === "turn_item.updated" &&
+            event.turnItem.threadId === childThreadId &&
+            event.turnItem.status === "running",
+        )
+        .pipe(Effect.timeoutOption(Duration.seconds(1)), Effect.forkScoped);
+      yield* TestClock.adjust(Duration.millis(200));
+      yield* Effect.yieldNow;
+      yield* TestClock.adjust(Duration.seconds(1));
+      assert.isTrue(Option.isNone(yield* Fiber.join(late)));
+    });
+
+  it.effect("finishes a child's open reply and tool from its final history when done", () =>
+    Effect.gen(function* () {
+      const fake = yield* makeFakePi;
+      const session = yield* openPrimeThread(fake);
+      const childThreadId = yield* startChildWithOpenWork(fake, session);
+
+      // The stream lost the child's last events; its history still has them.
+      fake.queueObserved([
+        {
+          ...assistantSnapshot(1001, "Half an answer, now whole."),
+          content: [
+            { type: "text", text: "Half an answer, now whole." },
+            {
+              type: "toolCall",
+              id: "child-tool",
+              name: "bash",
+              arguments: { command: "sleep 30" },
+            },
+          ],
+        },
+        {
+          role: "toolResult",
+          toolCallId: "child-tool",
+          toolName: "bash",
+          content: [{ type: "text", text: "" }],
+          isError: false,
+          timestamp: 1002,
+        },
+      ]);
+      yield* fake.emit(rlmChild("done", { activeSessionId: "active-1" }));
+      yield* fake.takeRequest("observe");
+      assert.equal((yield* fake.takeRequest("unobserve"))["activeSessionId"], "active-1");
+      yield* fake.emit(sentinelChild("done"));
+
+      const items = yield* childItemsUntilSentinelEnds(session, childThreadId);
+      const last = (type: string) => items.findLast((item) => item.type === type);
+      assert.deepEqual(last("assistant_message"), {
+        type: "assistant_message",
+        status: "completed",
+        streaming: false,
+      });
+      assert.equal(last("command_execution")?.status, "completed");
+    }).pipe(Effect.scoped, Effect.provide(testLayer)),
+  );
+
+  it.effect("settles a child's tool and stops its pending flush when the process dies", () =>
+    Effect.gen(function* () {
+      const fake = yield* makeFakePi;
+      const session = yield* openPrimeThread(fake);
+      const childThreadId = yield* startChildWithOpenWork(fake, session);
+
+      yield* session.runtime.interruptTurn({
+        providerThread: session.providerThread,
+        providerTurnId: ProviderTurnId.make("provider-turn:settled"),
+        requestRuntimeRestart: true,
+      });
+      yield* fake.closeStdout;
+      const items = yield* childItemsUntilSentinelEnds(session, childThreadId);
+      const last = (type: string) => items.findLast((item) => item.type === type);
+      assert.equal(last("command_execution")?.status, "interrupted");
+      assert.equal(last("assistant_message")?.status, "completed");
+      // The 50 ms flush scheduled by the half reply must not publish a running item now.
+      yield* assertNoLaterRunningItem(session, childThreadId);
+    }).pipe(Effect.scoped, Effect.provide(testLayer)),
+  );
+
+  it.effect("settles a child's running tool as interrupted when its session closes", () =>
+    Effect.gen(function* () {
+      const fake = yield* makeFakePi;
+      const session = yield* openPrimeThread(fake);
+      const childThreadId = yield* startChildWithOpenWork(fake, session);
+
+      yield* fake.emit({ type: "observed_session_closed", activeSessionId: "active-1" });
+      yield* fake.emit(sentinelChild("done"));
+      const items = yield* childItemsUntilSentinelEnds(session, childThreadId);
+      const last = (type: string) => items.findLast((item) => item.type === type);
+      assert.equal(last("command_execution")?.status, "interrupted");
+      assert.deepEqual(last("assistant_message"), {
+        type: "assistant_message",
+        status: "completed",
+        streaming: false,
+      });
+      yield* assertNoLaterRunningItem(session, childThreadId);
+    }).pipe(Effect.scoped, Effect.provide(testLayer)),
+  );
+
   it.effect("nests a subagent's own children under it, even after the turn settled", () =>
     Effect.gen(function* () {
       const fake = yield* makeFakePi;
