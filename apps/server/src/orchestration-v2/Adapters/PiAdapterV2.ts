@@ -31,6 +31,7 @@ import {
   PrimeAgentSettings,
   type ChatAttachment,
   type ModelSelection,
+  type NodeId,
   type OrchestrationV2ExecutionNode,
   type OrchestrationV2Notification,
   type OrchestrationV2ProviderCapabilities,
@@ -45,11 +46,16 @@ import {
   type OrchestrationV2UserInputQuestion,
   type ProviderApprovalDecision,
   type ProviderInstanceId,
+  type ProviderThreadId,
+  type ProviderTurnId,
+  type RunId,
+  type ThreadId,
   type OrchestrationV2ProviderTurnTokenUsage,
 } from "@t3tools/contracts";
 import * as Cause from "effect/Cause";
 import * as DateTime from "effect/DateTime";
 import * as Option from "effect/Option";
+import * as Predicate from "effect/Predicate";
 import * as Deferred from "effect/Deferred";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
@@ -81,6 +87,11 @@ import {
   type ProviderAdapterDriverCreateInput,
 } from "../ProviderAdapterDriver.ts";
 import { makeProviderFailure, makeProviderRetryTurnItem } from "../ProviderFailure.ts";
+import {
+  makeSubagentChildThread,
+  makeSubagentConversationArtifacts,
+  subagentThreadTitle,
+} from "../SubagentProjection.ts";
 import { turnScopedSelectionTransition } from "../ProviderSelectionTransition.ts";
 import {
   makePiRpcConnection,
@@ -522,6 +533,57 @@ interface PiRlmChildState {
   readonly turn: ActivePiTurn;
 }
 
+/** Where emitted items land: a turn on the parent thread, or a child's own thread. */
+interface PiItemScope {
+  readonly threadId: ThreadId;
+  readonly runId: RunId | null;
+  readonly rootNodeId: NodeId;
+  readonly providerThreadId: ProviderThreadId | null;
+  readonly providerTurnId: ProviderTurnId | null;
+  /** Keeps native item ids unique per turn or child. */
+  readonly idPrefix: string;
+}
+
+/**
+ * The transcript of one Prime Agent child, kept in the child's own T3 thread.
+ * It carries the same item bookkeeping as `ActivePiTurn`, so the turn's item
+ * emitters serve both.
+ */
+interface PiChildTranscript {
+  readonly scope: PiItemScope;
+  readonly childThreadId: ThreadId;
+  readonly childRootNodeId: NodeId;
+  /** Parent thread, which sends the child's task prompt. */
+  readonly parentThreadId: ThreadId;
+  readonly itemOrdinals: Map<string, number>;
+  nextItemOrdinal: number;
+  /** The timestamp of the message being streamed; see `observeChildEvent`. */
+  messageOrdinal: number;
+  readonly streamItems: Map<string, PiStreamItemState>;
+  readonly toolArgs: Map<string, unknown>;
+  readonly toolStartedAt: Map<string, DateTime.Utc>;
+  /** Last status emitted on the child's root node. */
+  status: OrchestrationV2ExecutionNode["status"] | null;
+  /** The session this adapter observes, once `observe` succeeded. */
+  observedSessionId: string | null;
+  /** Sessions `observe` already failed for, so a busy roster does not retry in a loop. */
+  readonly failedSessionIds: Set<string>;
+}
+
+type PiItemSink = ActivePiTurn | PiChildTranscript;
+
+function itemScope(sink: PiItemSink): PiItemScope {
+  if ("scope" in sink) return sink.scope;
+  return {
+    threadId: sink.turnInput.threadId,
+    runId: sink.turnInput.runId,
+    rootNodeId: sink.turnInput.rootNodeId,
+    providerThreadId: sink.turnInput.providerThread.id,
+    providerTurnId: sink.providerTurn.id,
+    idPrefix: sink.providerTurn.id,
+  };
+}
+
 function rlmChildStatus(
   status: string | undefined,
 ): "pending" | "running" | "completed" | "failed" | "cancelled" {
@@ -685,6 +747,14 @@ export function makePiAdapterV2(
        * into a continuation run. Updates stay on the turn that spawned it.
        */
       const rlmChildren = new Map<string, PiRlmChildState>();
+      /**
+       * The T3 thread of each Prime Agent child, kept after the child ends. Its
+       * ids derive from the child id, so a child that wakes again continues
+       * the same transcript.
+       */
+      const rlmTranscripts = new Map<string, PiChildTranscript>();
+      /** Observed child sessions by `activeSessionId`, to route their events. */
+      const observedTranscripts = new Map<string, PiChildTranscript>();
       const hasLiveRlmChildren = () =>
         Array.from(rlmChildren.values()).some((child) => !child.terminal);
       /**
@@ -799,7 +869,7 @@ export function makePiAdapterV2(
           });
         });
 
-      const itemOrdinal = (turn: ActivePiTurn, nativeItemId: string): number => {
+      const itemOrdinal = (turn: PiItemSink, nativeItemId: string): number => {
         const existing = turn.itemOrdinals.get(nativeItemId);
         if (existing !== undefined) return existing;
         const ordinal = turn.nextItemOrdinal++;
@@ -924,39 +994,43 @@ export function makePiAdapterV2(
         });
 
       const baseItemFields = (
-        turn: ActivePiTurn,
+        turn: PiItemSink,
         nativeItemId: string,
         startedAt: DateTime.Utc,
         updatedAt: DateTime.Utc,
-      ) => ({
-        id: idAllocator.derive.turnItemFromProviderItem({
-          driver,
-          nativeItemId,
-        }),
-        threadId: turn.turnInput.threadId,
-        runId: turn.turnInput.runId,
-        nodeId: idAllocator.derive.nodeFromProviderItem({
-          driver,
-          nativeItemId,
-        }),
-        providerThreadId: turn.turnInput.providerThread.id,
-        providerTurnId: turn.providerTurn.id,
-        nativeItemRef: providerRef(nativeItemId),
-        parentItemId: null,
-        ordinal: itemOrdinal(turn, nativeItemId),
-        startedAt,
-        updatedAt,
-      });
+      ) => {
+        const scope = itemScope(turn);
+        return {
+          id: idAllocator.derive.turnItemFromProviderItem({
+            driver,
+            nativeItemId,
+          }),
+          threadId: scope.threadId,
+          runId: scope.runId,
+          nodeId: idAllocator.derive.nodeFromProviderItem({
+            driver,
+            nativeItemId,
+          }),
+          providerThreadId: scope.providerThreadId,
+          providerTurnId: scope.providerTurnId,
+          nativeItemRef: providerRef(nativeItemId),
+          parentItemId: null,
+          ordinal: itemOrdinal(turn, nativeItemId),
+          startedAt,
+          updatedAt,
+        };
+      };
 
       const emitItemNode = (
-        turn: ActivePiTurn,
+        turn: PiItemSink,
         nativeItemId: string,
         kind: OrchestrationV2ExecutionNode["kind"],
         status: OrchestrationV2ExecutionNode["status"],
         startedAt: DateTime.Utc,
         completedAt: DateTime.Utc | null,
-      ) =>
-        emit({
+      ) => {
+        const scope = itemScope(turn);
+        return emit({
           type: "node.updated",
           driver,
           node: {
@@ -964,15 +1038,15 @@ export function makePiAdapterV2(
               driver,
               nativeItemId,
             }),
-            threadId: turn.turnInput.threadId,
-            runId: turn.turnInput.runId,
-            parentNodeId: turn.turnInput.rootNodeId,
-            rootNodeId: turn.turnInput.rootNodeId,
+            threadId: scope.threadId,
+            runId: scope.runId,
+            parentNodeId: scope.rootNodeId,
+            rootNodeId: scope.rootNodeId,
             kind,
             status,
             countsForRun: false,
-            providerThreadId: turn.turnInput.providerThread.id,
-            providerTurnId: turn.providerTurn.id,
+            providerThreadId: scope.providerThreadId,
+            providerTurnId: scope.providerTurnId,
             nativeItemRef: providerRef(nativeItemId),
             runtimeRequestId: null,
             checkpointScopeId: null,
@@ -980,6 +1054,7 @@ export function makePiAdapterV2(
             completedAt,
           },
         });
+      };
 
       const emitProviderRetry = Effect.fnUntraced(function* (
         turn: ActivePiTurn,
@@ -1048,8 +1123,9 @@ export function makePiAdapterV2(
 
       // ── streaming text / reasoning ────────────────────────
 
-      const emitStreamItem = (turn: ActivePiTurn, item: PiStreamItemState, streaming: boolean) =>
+      const emitStreamItem = (turn: PiItemSink, item: PiStreamItemState, streaming: boolean) =>
         Effect.gen(function* () {
+          const scope = itemScope(turn);
           const emittedAt = yield* DateTime.now;
           const base = baseItemFields(turn, item.nativeItemId, item.startedAt, emittedAt);
           yield* emitItemNode(
@@ -1084,8 +1160,8 @@ export function makePiAdapterV2(
               driver,
               message: {
                 id: messageId,
-                threadId: turn.turnInput.threadId,
-                runId: turn.turnInput.runId,
+                threadId: scope.threadId,
+                runId: scope.runId,
                 nodeId: idAllocator.derive.nodeFromProviderItem({
                   driver,
                   nativeItemId: item.nativeItemId,
@@ -1117,7 +1193,7 @@ export function makePiAdapterV2(
           });
         });
 
-      const scheduleStreamFlush = (turn: ActivePiTurn, item: PiStreamItemState) =>
+      const scheduleStreamFlush = (turn: PiItemSink, item: PiStreamItemState) =>
         Effect.gen(function* () {
           if (item.flushScheduled || item.completed) return;
           item.flushScheduled = true;
@@ -1133,11 +1209,11 @@ export function makePiAdapterV2(
         });
 
       const streamItemFor = Effect.fnUntraced(function* (
-        turn: ActivePiTurn,
+        turn: PiItemSink,
         kind: PiStreamItemState["kind"],
         contentIndex: number,
       ) {
-        const nativeItemId = `${turn.providerTurn.id}:m${turn.messageOrdinal}:c${contentIndex}`;
+        const nativeItemId = `${itemScope(turn).idPrefix}:m${turn.messageOrdinal}:c${contentIndex}`;
         const existing = turn.streamItems.get(nativeItemId);
         if (existing !== undefined) return existing;
         const startedAt = yield* DateTime.now;
@@ -1155,7 +1231,7 @@ export function makePiAdapterV2(
         return item;
       });
 
-      const completeStreamItem = (turn: ActivePiTurn, item: PiStreamItemState, text?: string) =>
+      const completeStreamItem = (turn: PiItemSink, item: PiStreamItemState, text?: string) =>
         Effect.suspend(() => {
           if (item.completed) return Effect.void;
           item.completed = true;
@@ -1163,7 +1239,7 @@ export function makePiAdapterV2(
           return item.text.length === 0 ? Effect.void : emitStreamItem(turn, item, false);
         });
 
-      const completeOpenStreamItems = (turn: ActivePiTurn) =>
+      const completeOpenStreamItems = (turn: PiItemSink) =>
         Effect.forEach(
           Array.from(turn.streamItems.values()).filter((item) => !item.completed),
           (item) => completeStreamItem(turn, item),
@@ -1177,7 +1253,7 @@ export function makePiAdapterV2(
        * its items open; the final message completes them.
        */
       const adoptSnapshot = Effect.fnUntraced(function* (
-        turn: ActivePiTurn,
+        turn: PiItemSink,
         message: unknown,
         final: boolean,
       ) {
@@ -1197,7 +1273,7 @@ export function makePiAdapterV2(
       // ── tools ─────────────────────────────────────────────
 
       const emitToolItem = Effect.fnUntraced(function* (
-        turn: ActivePiTurn,
+        turn: PiItemSink,
         event: PiRpcRecord,
         phase: "start" | "update" | "end",
       ) {
@@ -1225,7 +1301,7 @@ export function makePiAdapterV2(
         // Present them as interrupted (matching the run) rather than failed.
         const status = completed
           ? isError
-            ? turn.interrupted
+            ? "interrupted" in turn && turn.interrupted
               ? "interrupted"
               : "failed"
             : "completed"
@@ -1268,7 +1344,10 @@ export function makePiAdapterV2(
                   },
           });
           if (completed) yield* emitIpythonFileChanges(turn, toolCallId, resultRecord, emittedAt);
-          if (completed && !isError) yield* trackBackgroundJobs(recordString(args, "code") ?? "");
+          // A child's cells run in the child's kernel, not the parent's.
+          if (completed && !isError && "turnInput" in turn) {
+            yield* trackBackgroundJobs(recordString(args, "code") ?? "");
+          }
           return;
         }
         if (toolName === "bash") {
@@ -1315,7 +1394,7 @@ export function makePiAdapterV2(
             ...(outputText.length > 0 ? { output: outputText } : {}),
           },
         });
-        if (toolName === "subagent") {
+        if (toolName === "subagent" && "turnInput" in turn) {
           yield* emitSubagentTasks(turn, toolCallId, resultRecord, completed);
         }
       });
@@ -1326,7 +1405,7 @@ export function makePiAdapterV2(
        * changes under the cell so the diff view works like other providers'.
        */
       const emitIpythonFileChanges = Effect.fnUntraced(function* (
-        turn: ActivePiTurn,
+        turn: PiItemSink,
         toolCallId: string,
         resultRecord: unknown,
         emittedAt: DateTime.Utc,
@@ -1359,6 +1438,272 @@ export function makePiAdapterV2(
             },
           });
         }
+      });
+
+      // ── child threads ─────────────────────────────────────
+
+      const openChildTranscript = Effect.fnUntraced(function* (input: {
+        readonly turn: ActivePiTurn;
+        readonly childId: string;
+        readonly subagentId: NodeId;
+        readonly snapshot: unknown;
+        readonly title: string | null;
+        readonly prompt: string;
+        readonly now: DateTime.Utc;
+      }) {
+        const { turnInput } = input.turn;
+        const childThreadId = idAllocator.derive.threadFromProviderThread({
+          driver,
+          nativeThreadId: `${turnInput.providerThread.id}:rlm:${input.childId}`,
+        });
+        const childRootNodeId = idAllocator.derive.nodeFromProviderItem({
+          driver,
+          nativeItemId: `rlm:${input.childId}:thread-root`,
+        });
+        const transcript: PiChildTranscript = {
+          scope: {
+            threadId: childThreadId,
+            runId: null,
+            rootNodeId: childRootNodeId,
+            providerThreadId: null,
+            providerTurnId: null,
+            idPrefix: `rlm:${input.childId}`,
+          },
+          childThreadId,
+          childRootNodeId,
+          parentThreadId: turnInput.threadId,
+          itemOrdinals: new Map(),
+          nextItemOrdinal: 0,
+          messageOrdinal: 0,
+          streamItems: new Map(),
+          toolArgs: new Map(),
+          toolStartedAt: new Map(),
+          status: null,
+          observedSessionId: null,
+          failedSessionIds: new Set(),
+        };
+        rlmTranscripts.set(input.childId, transcript);
+        const model = recordString(input.snapshot, "model");
+        yield* emit({
+          type: "app_thread.created",
+          driver,
+          appThread: makeSubagentChildThread({
+            parentThread: turnInput.appThread,
+            childThreadId,
+            parentNodeId: input.subagentId,
+            activeProviderThreadId: null,
+            providerInstanceId: options.instanceId,
+            modelSelection:
+              model !== undefined && model !== turnInput.modelSelection.model
+                ? { instanceId: options.instanceId, model }
+                : turnInput.modelSelection,
+            title: subagentThreadTitle({
+              parentTitle: turnInput.appThread.title,
+              prompt: input.prompt,
+              title: input.title,
+              ordinal: rlmTranscripts.size,
+            }),
+            now: input.now,
+            createdBy: "agent",
+            creationSource: "provider",
+          }),
+        });
+        return transcript;
+      });
+
+      /** The child thread's root turn carries the child's status for clients. */
+      const emitChildRootNode = (
+        transcript: PiChildTranscript,
+        status: OrchestrationV2ExecutionNode["status"],
+        nativeTaskId: string,
+        startedAt: DateTime.Utc,
+        completedAt: DateTime.Utc | null,
+      ) =>
+        Effect.suspend(() => {
+          if (transcript.status === status) return Effect.void;
+          transcript.status = status;
+          return emit({
+            type: "node.updated",
+            driver,
+            node: {
+              id: transcript.childRootNodeId,
+              threadId: transcript.childThreadId,
+              runId: null,
+              parentNodeId: null,
+              rootNodeId: transcript.childRootNodeId,
+              kind: "root_turn",
+              status,
+              countsForRun: false,
+              providerThreadId: null,
+              providerTurnId: null,
+              nativeItemRef: providerRef(nativeTaskId),
+              runtimeRequestId: null,
+              checkpointScopeId: null,
+              startedAt,
+              completedAt,
+            },
+          });
+        });
+
+      /** A user turn in a child: its task from the parent, or a later agent message. */
+      const emitChildUserMessage = Effect.fnUntraced(function* (
+        transcript: PiChildTranscript,
+        message: unknown,
+      ) {
+        const text = contentText(recordField(message, "content")).trim();
+        if (text.length === 0) return;
+        const timestamp = recordNumber(message, "timestamp");
+        // Timestamps keep a replayed history and the live stream from
+        // emitting the same message twice.
+        const nativeItemId = `${transcript.scope.idPrefix}:u${timestamp ?? transcript.nextItemOrdinal}`;
+        const now = yield* DateTime.now;
+        const artifacts = makeSubagentConversationArtifacts({
+          messageId: idAllocator.derive.messageFromProviderItem({ driver, nativeItemId }),
+          senderThreadId: transcript.parentThreadId,
+          turnItemId: idAllocator.derive.turnItemFromProviderItem({ driver, nativeItemId }),
+          threadId: transcript.childThreadId,
+          rootNodeId: transcript.childRootNodeId,
+          providerThreadId: null,
+          providerTurnId: null,
+          nativeItemRef: providerRef(nativeItemId),
+          role: "user",
+          text,
+          ordinal: itemOrdinal(transcript, nativeItemId),
+          now: Option.getOrElse(DateTime.make(timestamp ?? Number.NaN), () => now),
+        });
+        yield* emit({ type: "message.updated", driver, message: artifacts.message });
+        yield* emit({ type: "turn_item.updated", driver, turnItem: artifacts.turnItem });
+      });
+
+      /**
+       * Routes one event of an observed child session onto its thread. The
+       * child's RPC drops events like the main one, so assistant text comes
+       * from message snapshots, and each message is keyed by its own timestamp:
+       * a lost `message_start` cannot shift ids, and replaying history over
+       * live events is idempotent.
+       */
+      const observeChildEvent = Effect.fnUntraced(function* (
+        transcript: PiChildTranscript,
+        event: PiRpcRecord,
+      ) {
+        switch (event["type"]) {
+          case "message_update":
+          case "message_end": {
+            const message = event["message"];
+            const role = recordString(message, "role");
+            if (role === "assistant") {
+              transcript.messageOrdinal =
+                recordNumber(message, "timestamp") ?? transcript.messageOrdinal + 1;
+              const final = event["type"] === "message_end";
+              yield* adoptSnapshot(transcript, message, final);
+              if (final) yield* completeOpenStreamItems(transcript);
+              return;
+            }
+            if (event["type"] === "message_end" && role !== "toolResult") {
+              // Custom messages show only when the agent marks them for display.
+              if (role === "user" || recordField(message, "display") === true) {
+                yield* emitChildUserMessage(transcript, message);
+              }
+            }
+            return;
+          }
+          case "tool_execution_start":
+            yield* emitToolItem(transcript, event, "start");
+            return;
+          case "tool_execution_update":
+            yield* emitToolItem(transcript, event, "update");
+            return;
+          case "tool_execution_end":
+            yield* emitToolItem(transcript, event, "end");
+            return;
+          default:
+            return;
+        }
+      });
+
+      /** Replays `observe`'s history as the events that would have produced it. */
+      const replayChildHistory = Effect.fnUntraced(function* (
+        transcript: PiChildTranscript,
+        messages: ReadonlyArray<unknown>,
+      ) {
+        for (const message of messages) {
+          const role = recordString(message, "role");
+          if (role === "toolResult") {
+            yield* observeChildEvent(transcript, {
+              type: "tool_execution_end",
+              toolCallId: recordString(message, "toolCallId"),
+              toolName: recordString(message, "toolName"),
+              result: {
+                content: recordField(message, "content"),
+                details: recordField(message, "details"),
+              },
+              isError: recordField(message, "isError") === true,
+            });
+            continue;
+          }
+          yield* observeChildEvent(transcript, { type: "message_end", message });
+          const content = role === "assistant" ? recordField(message, "content") : undefined;
+          for (const block of Array.isArray(content) ? content : []) {
+            if (recordField(block, "type") !== "toolCall") continue;
+            yield* observeChildEvent(transcript, {
+              type: "tool_execution_start",
+              toolCallId: recordString(block, "id"),
+              toolName: recordString(block, "name"),
+              args: recordField(block, "arguments"),
+            });
+          }
+        }
+      });
+
+      const stopObservingChild = Effect.fnUntraced(function* (
+        transcript: PiChildTranscript,
+        sessionIsAlive: boolean,
+      ) {
+        const sessionId = transcript.observedSessionId;
+        if (sessionId === null) return;
+        transcript.observedSessionId = null;
+        observedTranscripts.delete(sessionId);
+        if (sessionIsAlive) {
+          yield* request({ type: "unobserve", activeSessionId: sessionId }).pipe(Effect.ignore);
+        }
+      });
+
+      /**
+       * Streams a running child's session into its thread: one observation per
+       * live child, started when its session id first shows up and dropped once
+       * it ends. A failed `observe` is not retried for the same session.
+       */
+      const syncChildObservation = Effect.fnUntraced(function* (
+        transcript: PiChildTranscript,
+        snapshot: unknown,
+        terminal: boolean,
+        sessionIsAlive: boolean,
+      ) {
+        if (terminal) {
+          yield* stopObservingChild(transcript, sessionIsAlive);
+          return;
+        }
+        const sessionId = recordString(snapshot, "activeSessionId");
+        if (
+          sessionId === undefined ||
+          transcript.observedSessionId === sessionId ||
+          transcript.failedSessionIds.has(sessionId)
+        ) {
+          return;
+        }
+        yield* stopObservingChild(transcript, true);
+        const observed = yield* request({ type: "observe", activeSessionId: sessionId }).pipe(
+          Effect.option,
+        );
+        if (Option.isNone(observed)) {
+          transcript.failedSessionIds.add(sessionId);
+          yield* Effect.logWarning(`${name} could not observe a child session`, { sessionId });
+          return;
+        }
+        transcript.observedSessionId = sessionId;
+        observedTranscripts.set(sessionId, transcript);
+        const history = recordField(observed.value, "messages");
+        yield* replayChildHistory(transcript, Array.isArray(history) ? history : []);
       });
 
       /**
@@ -1410,6 +1755,21 @@ export function makePiAdapterV2(
           ? (recordString(snapshot, "error") ?? recordString(snapshot, "answerPreview") ?? null)
           : null;
         const completedAt = terminal ? emittedAt : null;
+        const transcript = flavor.childThreads
+          ? (rlmTranscripts.get(childId) ??
+            (yield* openChildTranscript({
+              turn,
+              childId,
+              subagentId,
+              snapshot,
+              title,
+              prompt,
+              now: emittedAt,
+            })))
+          : undefined;
+        if (transcript !== undefined) {
+          yield* emitChildRootNode(transcript, status, nativeTaskId, state.startedAt, completedAt);
+        }
         yield* emit({
           type: "subagent.updated",
           driver,
@@ -1431,7 +1791,7 @@ export function makePiAdapterV2(
             driver,
             providerInstanceId: options.instanceId,
             providerThreadId: turn.turnInput.providerThread.id,
-            childThreadId: null,
+            childThreadId: transcript?.childThreadId ?? null,
             nativeTaskRef: providerRef(nativeTaskId),
             prompt,
             title,
@@ -1457,12 +1817,15 @@ export function makePiAdapterV2(
             origin: "provider_native",
             driver,
             providerInstanceId: options.instanceId,
-            childThreadId: null,
+            childThreadId: transcript?.childThreadId ?? null,
             prompt,
             ...(progress === undefined ? {} : { progress }),
             result,
           },
         });
+        if (transcript !== undefined) {
+          yield* syncChildObservation(transcript, snapshot, terminal, statusOverride === undefined);
+        }
         if (terminal) rlmChildren.delete(childId);
       });
 
@@ -2569,6 +2932,27 @@ export function makePiAdapterV2(
           }
           case "rlm_child_update": {
             yield* emitRlmChild(event["child"], turn);
+            return;
+          }
+          case "observed_session_event": {
+            const sessionId = recordString(event, "activeSessionId");
+            const transcript =
+              sessionId === undefined ? undefined : observedTranscripts.get(sessionId);
+            const observed = event["event"];
+            if (transcript !== undefined && Predicate.isObject(observed)) {
+              yield* observeChildEvent(transcript, observed);
+            }
+            return;
+          }
+          case "observed_session_closed": {
+            const sessionId = recordString(event, "activeSessionId");
+            const transcript =
+              sessionId === undefined ? undefined : observedTranscripts.get(sessionId);
+            if (sessionId !== undefined && transcript !== undefined) {
+              // The session is gone; observing it again would only fail.
+              transcript.failedSessionIds.add(sessionId);
+              yield* stopObservingChild(transcript, false);
+            }
             return;
           }
           case "agent_settled": {
