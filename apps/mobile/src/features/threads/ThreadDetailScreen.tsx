@@ -41,6 +41,7 @@ import {
   presentPendingBackgroundWork,
   presentProviderGoal,
 } from "@t3tools/client-runtime/state/thread-execution";
+import { resolveBackgroundWorkPillSegment } from "@t3tools/client-runtime/state/thread-background-work";
 import { resolveSubagentPillSegment } from "@t3tools/client-runtime/state/thread-subagents";
 import {
   formatModelSelectionEffort,
@@ -150,7 +151,7 @@ import {
 } from "./ThreadComposer";
 import { ComposerPopoverHost } from "./ComposerPopoverHost";
 import { ThreadFeed, type ThreadFeedHistoryControls } from "./ThreadFeed";
-import { useThreadTurnSubagents } from "./ThreadAgentsSheet";
+import { useThreadRunningTurnBackgroundWork, useThreadTurnSubagents } from "./ThreadAgentsSheet";
 import { ComposerQueuedEditBanner } from "./ComposerQueuedEdit";
 import { useThreadQueuedCount } from "./ThreadQueueControl";
 import type { ThreadContentPresentation } from "./threadContentPresentation";
@@ -411,6 +412,13 @@ export const ThreadDetailScreen = memo(function ThreadDetailScreen(props: Thread
   const queuedCount = useThreadQueuedCount(props.selectedThreadDetailRef);
   const turnSubagents = useThreadTurnSubagents(props.selectedThreadDetailRef);
   const agentsSegment = resolveSubagentPillSegment(turnSubagents);
+  // The server's roster lists background work only after the turn settles; this
+  // is the projection's view of what the running turn left behind.
+  const runningTurnBackgroundWork = useThreadRunningTurnBackgroundWork({
+    environmentId: props.environmentId,
+    threadId: props.selectedThread.id,
+  });
+  const backgroundSegment = resolveBackgroundWorkPillSegment(runningTurnBackgroundWork);
   const composerEditorRef = useRef<ComposerEditorHandle>(null);
   const isProviderSubagent = isProviderNativeSubagentThread(props.selectedThread.source);
   const editingRunId = props.queuedRunEdit?.runId ?? null;
@@ -1183,6 +1191,7 @@ export const ThreadDetailScreen = memo(function ThreadDetailScreen(props: Thread
                   showScrollToEnd={showScrollToEndButton}
                   onScrollToEnd={handleScrollToEnd}
                   agents={agentsSegment}
+                  background={floatingStatus?.kind === "working" ? backgroundSegment : null}
                   onOpenAgents={() => {
                     Keyboard.dismiss();
                     navigation.navigate("ThreadAgents", {
