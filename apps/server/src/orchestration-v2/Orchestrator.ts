@@ -4901,8 +4901,9 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           : undefined;
       const queueBehindRun = activeRun ?? worktreeMissingRun;
       const pendingMergeBackTransfers = pendingMergeBackTransfersForThread(projection);
+      const holdInQueue = command.holdInQueue === true;
       const shouldQueue =
-        queueBehindRun !== undefined &&
+        (queueBehindRun !== undefined || holdInQueue) &&
         (dispatchMode.type === "defer_start" ||
           dispatchMode.type === "start_immediately" ||
           dispatchMode.type === "queue_after_active");
@@ -4917,13 +4918,13 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         const queueProviderThread =
           activeProviderThread ??
           projection.providerThreads.find(
-            (candidate) => candidate.id === queueBehindRun.providerThreadId,
+            (candidate) => candidate.id === queueBehindRun?.providerThreadId,
           );
         if (queueProviderThread === undefined) {
           return yield* new OrchestratorDispatchError({
             commandId: command.commandId,
             commandType: command.type,
-            cause: `Active run ${queueBehindRun.id} has no provider thread for queued dispatch.`,
+            cause: `Thread ${command.threadId} has no provider thread for queued dispatch.`,
           });
         }
         const now = yield* DateTime.now;
@@ -4977,7 +4978,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         const attemptId = idAllocator.derive.runAttempt({ runId, attemptOrdinal: 1 });
         const rootNodeId = idAllocator.derive.rootNode({ runId });
         const checkpointScope =
-          queueBehindRun.status === "preparing" || worktreeMissingRun !== undefined
+          queueBehindRun?.status === "preparing" || worktreeMissingRun !== undefined
             ? null
             : yield* runtimePolicy.resolve({ thread: projection.thread, modelSelection }).pipe(
                 Effect.flatMap((resolvedRuntimePolicy) =>
@@ -5014,7 +5015,8 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           rootNodeId,
           activeAttemptId: attemptId,
           status: "queued",
-          ...(worktreeMissingRun !== undefined ||
+          ...(holdInQueue ||
+          worktreeMissingRun !== undefined ||
           projection.runs.some(
             (candidate) => candidate.status === "queued" && candidate.queueHeld === true,
           )
