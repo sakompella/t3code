@@ -2414,17 +2414,17 @@ describe("PiRpc early process exit", () => {
 });
 
 describe("PiAdapterV2 with the Prime Agent flavor", () => {
-  const openPrimeThread = Effect.fnUntraced(function* (fake: FakePi) {
+  const openPrimeThread = Effect.fnUntraced(function* (fake: FakePi, threadId = THREAD_ID) {
     const { runtime, takeEvent } = yield* openRuntime(
       fake,
       "default",
-      THREAD_ID,
+      threadId,
       SESSION_ID,
       undefined,
       PRIME_AGENT_FLAVOR,
     );
     const providerThread = yield* runtime.ensureThread({
-      threadId: THREAD_ID,
+      threadId,
       modelSelection: modelSelection("default"),
       runtimePolicy,
     });
@@ -2567,6 +2567,86 @@ describe("PiAdapterV2 with the Prime Agent flavor", () => {
       yield* fake.emit(finalReply);
       yield* fake.emit({ type: "agent_end", messages: [] });
       yield* fake.takeRequest("get_state");
+      const seen: Array<ProviderAdapterV2Event> = [];
+      yield* takeEvent((event) => {
+        seen.push(event);
+        return event.type === "turn.terminal";
+      });
+      assert.deepStrictEqual(systemNotices(seen), []);
+    }).pipe(Effect.scoped, Effect.provide(testLayer)),
+  );
+
+  /**
+   * Shows the Finishing up row for the turn that just started. The refine
+   * notice is a barrier: events are handled in order, so once it arrives the
+   * final reply has armed the delay and the test clock can run it out.
+   */
+  const showFinishingUp = Effect.fnUntraced(function* (
+    fake: FakePi,
+    takeEvent: (
+      predicate: (event: ProviderAdapterV2Event) => boolean,
+    ) => Effect.Effect<ProviderAdapterV2Event>,
+  ) {
+    yield* fake.emit({ type: "agent_start" });
+    yield* fake.emit(finalReply);
+    yield* fake.emit({ type: "refine_complete", result: { id: "barrier", summary: "barrier" } });
+    yield* takeEvent(isSystemNotice);
+    yield* TestClock.adjust(Duration.millis(1_500));
+    const running = yield* takeEvent(isSystemNotice);
+    assert.isTrue(running.type === "turn_item.updated" && running.turnItem.status === "running");
+    return running;
+  });
+
+  const isSystemNotice = (event: ProviderAdapterV2Event) =>
+    event.type === "turn_item.updated" && event.turnItem.type === "system_notice";
+
+  const noticeIds = (event: ProviderAdapterV2Event) =>
+    event.type === "turn_item.updated"
+      ? { id: event.turnItem.id, nodeId: event.turnItem.nodeId }
+      : undefined;
+
+  it.effect("gives threads at the same turn ordinal their own notice ids", () =>
+    Effect.gen(function* () {
+      const threadA = ThreadId.make("thread:notice-a");
+      const threadB = ThreadId.make("thread:notice-b");
+      const fakeA = yield* makeFakePi;
+      const fakeB = yield* makeFakePi;
+      const a = yield* openPrimeThread(fakeA, threadA);
+      const b = yield* openPrimeThread(fakeB, threadB);
+      yield* startTurn(a.runtime, a.providerThread, "default", [], "Hello", undefined, 1, threadA);
+      yield* startTurn(b.runtime, b.providerThread, "default", [], "Hello", undefined, 1, threadB);
+      yield* fakeA.takeRequest("prompt");
+      yield* fakeB.takeRequest("prompt");
+
+      const runningA = yield* showFinishingUp(fakeA, a.takeEvent);
+      const runningB = yield* showFinishingUp(fakeB, b.takeEvent);
+      yield* fakeA.emit({ type: "agent_end", messages: [] });
+      yield* fakeB.emit({ type: "agent_end", messages: [] });
+      const doneA = yield* a.takeEvent(isSystemNotice);
+      const doneB = yield* b.takeEvent(isSystemNotice);
+
+      assert.deepStrictEqual(noticeIds(doneA), noticeIds(runningA));
+      assert.deepStrictEqual(noticeIds(doneB), noticeIds(runningB));
+      assert.notStrictEqual(noticeIds(runningA)?.id, noticeIds(runningB)?.id);
+      assert.notStrictEqual(noticeIds(runningA)?.nodeId, noticeIds(runningB)?.nodeId);
+    }).pipe(Effect.scoped, Effect.provide(testLayer)),
+  );
+
+  it.effect("ignores refine events on plain Pi", () =>
+    Effect.gen(function* () {
+      const fake = yield* makeFakePi;
+      const { runtime, takeEvent } = yield* openRuntime(fake);
+      const providerThread = yield* runtime.ensureThread({
+        threadId: THREAD_ID,
+        modelSelection: modelSelection("default"),
+        runtimePolicy,
+      });
+      yield* startTurn(runtime, providerThread);
+      yield* fake.takeRequest("prompt");
+      yield* fake.emit({ type: "agent_start" });
+      yield* fake.emit({ type: "refine_complete", result: { id: "r1", summary: "x" } });
+      yield* fake.emit({ type: "refine_failed", error: "boom" });
+      yield* fake.emit({ type: "agent_settled" });
       const seen: Array<ProviderAdapterV2Event> = [];
       yield* takeEvent((event) => {
         seen.push(event);
