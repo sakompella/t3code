@@ -48,6 +48,14 @@ export interface PiFlavor {
    * extension command, falling back to `fork` when the extension is absent.
    */
   readonly rollback: "fork" | "tree";
+  /**
+   * Whether the RPC can drop stream events. Prime Agent's RPC rides its
+   * daemon socket and resyncs instead of queueing when that socket backs up,
+   * so deltas, `text_end`, and `message_start` can go missing. Every update
+   * and the final message still carry the whole message so far, and the
+   * adapter treats that snapshot as the truth. Pi's stream is lossless.
+   */
+  readonly lossyStream: boolean;
 }
 
 export const PI_FLAVOR: PiFlavor = {
@@ -66,6 +74,7 @@ export const PI_FLAVOR: PiFlavor = {
   tools: "pi",
   selfWakes: "stop",
   rollback: "fork",
+  lossyStream: false,
 };
 
 export const PRIME_AGENT_FLAVOR: PiFlavor = {
@@ -83,4 +92,5 @@ export const PRIME_AGENT_FLAVOR: PiFlavor = {
   tools: "ipython",
   selfWakes: "continuation",
   rollback: "tree",
+  lossyStream: true,
 };
