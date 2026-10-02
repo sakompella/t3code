@@ -141,6 +141,12 @@ export function workEntryDisplayLabel(entry: WorkLogEntry, workspaceRoot: string
   const providerRetry =
     entry.projectedItem?.item.type === "error" && entry.projectedItem.item.retry !== undefined;
   const item = entry.structuredPayload;
+  if (item?.type === "dynamic_tool" && item.toolName === "python") {
+    const heading = entry.toolTitle || entry.label;
+    return heading.startsWith(LEGACY_PYTHON_LABEL_PREFIX)
+      ? heading.slice(LEGACY_PYTHON_LABEL_PREFIX.length)
+      : heading;
+  }
   const title = item?.type === "dynamic_tool" ? dynamicToolTitle(item.toolName, item.input) : null;
   if (title) return title;
   const compactDetail = entry.detail?.trim();

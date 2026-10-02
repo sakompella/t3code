@@ -188,6 +188,8 @@ describe("work entry labels", () => {
       } as NonNullable<WorkLogEntry["structuredPayload"]>,
     };
     expect(workEntryLabelCode(python, "print(1)")).toBe("print(1)");
+    // Prose headings may capitalize words; code must preserve the provider's spelling.
+    expect(workEntryDisplayLabel({ ...python, toolTitle: "print(1)" }, undefined)).toBe("print(1)");
     // Rows stored before the prefix was dropped still show only the code.
     expect(workEntryLabelCode(python, "Python: print(1)")).toBe("print(1)");
     expect(workEntryLabelCode(python, "Python")).toBeNull();
