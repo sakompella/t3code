@@ -57,6 +57,12 @@ export interface PiFlavor {
    * adapter treats that snapshot as the truth. Pi's stream is lossless.
    */
   readonly lossyStream: boolean;
+  /**
+   * Whether `rlm_child_update` children get their own T3 thread. The RPC lets
+   * a client `observe` a child's session, which streams the same events as the
+   * main one. Pi has no child sessions to observe.
+   */
+  readonly childThreads: boolean;
 }
 
 export const PI_FLAVOR: PiFlavor = {
@@ -76,6 +82,7 @@ export const PI_FLAVOR: PiFlavor = {
   wakeNotices: false,
   rollback: "fork",
   lossyStream: false,
+  childThreads: false,
 };
 
 export const PRIME_AGENT_FLAVOR: PiFlavor = {
@@ -94,4 +101,5 @@ export const PRIME_AGENT_FLAVOR: PiFlavor = {
   wakeNotices: true,
   rollback: "tree",
   lossyStream: true,
+  childThreads: true,
 };
