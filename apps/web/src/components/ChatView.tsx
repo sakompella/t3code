@@ -420,7 +420,11 @@ import type { AssistantCitationRequest } from "./chat/AssistantCitationSource";
 import { MessagesTimeline, type MessagesTimelineHistoryControls } from "./chat/MessagesTimeline";
 import { ProviderSubagentBar } from "./chat/ProviderSubagentBar";
 import { getTriggerDisplayModelName } from "./chat/providerIconUtils";
-import { resolveTimelineIsAtEnd, worktreeSetupAgentStarted } from "./chat/MessagesTimeline.logic";
+import {
+  deriveTimelineLiveRunIds,
+  resolveTimelineIsAtEnd,
+  worktreeSetupAgentStarted,
+} from "./chat/MessagesTimeline.logic";
 import {
   overlayComposerIsResting,
   resolveComposerTimelineInset,
@@ -3480,42 +3484,6 @@ export default function ChatView(props: ChatViewProps) {
       ),
     [activeThreadLiveTokenUsage, serverVisibleTurnItems, serverProjection],
   );
-  const pendingBackgroundTasks = useMemo(() => {
-    if (serverProjection === null || serverProjection === undefined) {
-      return [];
-    }
-    const sessionError =
-      serverProjection.providerSessions.findLast(
-        (session) => session.providerInstanceId === serverProjection.thread.providerInstanceId,
-      )?.lastError ?? null;
-    const latestRun =
-      usageLimitRunPresentedAsLatest(
-        serverProjection.runs,
-        serverProjection.turnItems,
-        sessionError,
-      ) ?? latestUnheldRun(serverProjection.runs);
-    // One derivation per projection update: while a turn runs, only work that
-    // outlived the step that started it; once settled, everything still pending.
-    if (isWorking) {
-      return [
-        ...deriveOutlivingBackgroundWork({
-          providerThreads: serverProjection.providerThreads,
-          turnItems: serverProjection.turnItems,
-          activeProviderThreadId: serverProjection.thread.activeProviderThreadId,
-          runs: serverProjection.runs,
-        }),
-      ];
-    }
-    return [
-      ...derivePendingBackgroundWork({
-        latestRun,
-        providerThreads: serverProjection.providerThreads,
-        turnItems: serverProjection.turnItems,
-        activeProviderThreadId: serverProjection.thread.activeProviderThreadId,
-        runs: serverProjection.runs,
-      }),
-    ];
-  }, [isWorking, serverProjection]);
   const activeWorkStartedAt =
     deriveActiveWorkStartedAt(activeActivityRun, activeRuntime, localDispatchStartedAt) ??
     runlessWorkStartedAt;
@@ -3812,6 +3780,55 @@ export default function ChatView(props: ChatViewProps) {
     [optimisticUserMessages],
   );
   const timelineEntries = isServerThread ? serverTimelineEntries : draftTimelineEntries;
+  // The runs the timeline presents as live, from the inputs it gets, so the
+  // banner leaves out exactly the work the live row shows.
+  const timelineLiveRunIds = useMemo(
+    () =>
+      deriveTimelineLiveRunIds({
+        timelineEntries,
+        latestRun: activeActivityRun,
+        runningRunId: activeRuntime?.activeRunId ?? null,
+        isWorking,
+      }),
+    [activeActivityRun, activeRuntime?.activeRunId, isWorking, timelineEntries],
+  );
+  const pendingBackgroundTasks = useMemo(() => {
+    if (serverProjection === null || serverProjection === undefined) {
+      return [];
+    }
+    const sessionError =
+      serverProjection.providerSessions.findLast(
+        (session) => session.providerInstanceId === serverProjection.thread.providerInstanceId,
+      )?.lastError ?? null;
+    const latestRun =
+      usageLimitRunPresentedAsLatest(
+        serverProjection.runs,
+        serverProjection.turnItems,
+        sessionError,
+      ) ?? latestUnheldRun(serverProjection.runs);
+    // One derivation per projection update: while a turn runs, everything the
+    // timeline's live row does not already show; once settled, everything pending.
+    if (isWorking) {
+      return [
+        ...deriveOutlivingBackgroundWork({
+          providerThreads: serverProjection.providerThreads,
+          turnItems: serverProjection.turnItems,
+          activeProviderThreadId: serverProjection.thread.activeProviderThreadId,
+          runs: serverProjection.runs,
+          foregroundRunIds: timelineLiveRunIds,
+        }),
+      ];
+    }
+    return [
+      ...derivePendingBackgroundWork({
+        latestRun,
+        providerThreads: serverProjection.providerThreads,
+        turnItems: serverProjection.turnItems,
+        activeProviderThreadId: serverProjection.thread.activeProviderThreadId,
+        runs: serverProjection.runs,
+      }),
+    ];
+  }, [isWorking, serverProjection, timelineLiveRunIds]);
   const timelineMessages = useMemo(
     () => timelineEntries.flatMap((entry) => (entry.kind === "message" ? [entry.message] : [])),
     [timelineEntries],

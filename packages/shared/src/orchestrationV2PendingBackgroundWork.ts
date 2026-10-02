@@ -98,8 +98,6 @@ type PendingBackgroundWorkTurnItem = {
   readonly title: string | null;
   /** When present and the run is rolled_back, the item is abandoned, not pending. */
   readonly runId?: OrchestrationV2Run["id"] | string | null;
-  /** Thread-wide position; lets a running turn tell which items came later. */
-  readonly ordinal?: number;
   readonly nativeItemRef?: {
     readonly nativeId: string | null;
   } | null;
@@ -282,15 +280,16 @@ function collectPendingBackgroundTasks(input: {
 }
 
 /**
- * Background work to show while a turn is still running: only work that
- * outlives the step that started it, so nothing shows both in the live
- * timeline row and in the banner.
+ * Background work to show while a turn is still running: everything pending
+ * except what the timeline already shows as a live row, so no task appears in
+ * both places.
  *
- * - Roster tasks qualify: providers add them after the starting tool call
- *   returns (Claude background tasks, Prime Agent `bash()` jobs).
- * - A turn item qualifies once a later item has finished, i.e. the turn
- *   moved on while the item kept running. Parallel items that were all just
- *   started stay in the live row.
+ * The timeline keeps the in-progress steps of the runs in the current
+ * response in its live activity row, so `foregroundRunIds` names the items to
+ * leave out, and any roster task sharing their id. What remains is work that
+ * outlived its step: roster tasks that providers add after the starting tool
+ * call returns (Claude background tasks, Prime Agent `bash()` jobs) and active
+ * items left behind by earlier runs.
  *
  * Once the turn settles, `derivePendingBackgroundWork` takes over.
  */
@@ -299,18 +298,20 @@ export function deriveOutlivingBackgroundWork(input: {
   readonly turnItems: ReadonlyArray<PendingBackgroundWorkTurnItem>;
   readonly activeProviderThreadId?: string | null;
   readonly runs?: ReadonlyArray<PendingBackgroundWorkRun>;
+  /** Runs whose in-progress items the timeline already shows as live rows. */
+  readonly foregroundRunIds: ReadonlySet<string>;
 }): ReadonlyArray<PendingBackgroundWorkTask> {
-  let latestFinishedOrdinal = -1;
-  for (const item of input.turnItems) {
-    if (!isOrchestrationV2WorkActive(item.status) && item.ordinal !== undefined) {
-      latestFinishedOrdinal = Math.max(latestFinishedOrdinal, item.ordinal);
-    }
-  }
+  const activeItems = pendingBackgroundTurnItems(input);
+  const isForeground = (item: PendingBackgroundWorkTurnItem) =>
+    item.runId !== undefined &&
+    item.runId !== null &&
+    input.foregroundRunIds.has(String(item.runId));
+  const foregroundTaskIds = new Set(
+    activeItems.filter(isForeground).map((item) => nativeTaskIdFromTurnItem(item)),
+  );
   return collectPendingBackgroundTasks({
     providerThreads: input.providerThreads,
     activeProviderThreadId: input.activeProviderThreadId,
-    turnItems: pendingBackgroundTurnItems(input).filter(
-      (item) => item.ordinal !== undefined && item.ordinal < latestFinishedOrdinal,
-    ),
-  });
+    turnItems: activeItems.filter((item) => !isForeground(item)),
+  }).filter((task) => !foregroundTaskIds.has(task.taskId));
 }

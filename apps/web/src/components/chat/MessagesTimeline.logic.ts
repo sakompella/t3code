@@ -818,6 +818,23 @@ function lastResponseBoundaryIndex(timelineEntries: ReadonlyArray<TimelineEntry>
   return timelineEntries.findLastIndex(timelineEntryStartsResponse);
 }
 
+/**
+ * The runs whose in-progress work the timeline presents as live rows. The
+ * composer banner leaves these out so no task shows in both places.
+ */
+export function deriveTimelineLiveRunIds(input: {
+  timelineEntries: ReadonlyArray<TimelineEntry>;
+  latestRun: TimelineLatestRun | null;
+  runningRunId: RunId | null;
+  isWorking: boolean;
+}): ReadonlySet<RunId> {
+  return deriveActiveVisualResponseRunIds({
+    timelineEntries: input.timelineEntries,
+    unsettledRunId: deriveUnsettledRunId(input.latestRun, input.runningRunId),
+    isWorking: input.isWorking,
+  });
+}
+
 function deriveActiveVisualResponseRunIds(input: {
   timelineEntries: ReadonlyArray<TimelineEntry>;
   unsettledRunId: RunId | null;
