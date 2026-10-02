@@ -2601,6 +2601,72 @@ describe("PiAdapterV2 with the Prime Agent flavor", () => {
     }).pipe(Effect.scoped, Effect.provide(testLayer)),
   );
 
+  it.effect("rebuilds streamed text from message snapshots when Prime Agent drops events", () =>
+    Effect.gen(function* () {
+      const fake = yield* makeFakePi;
+      const { runtime, takeEvent, providerThread } = yield* openPrimeThread(fake);
+      yield* startTurn(runtime, providerThread);
+      yield* fake.takeRequest("prompt");
+      yield* fake.emit({ type: "agent_start" });
+      yield* fake.emit({ type: "message_start", message: { role: "assistant", content: [] } });
+
+      // Each update carries the message so far, but the deltas between them,
+      // both block ends, and the whole third block never reach the adapter.
+      yield* fake.emit({
+        type: "message_update",
+        message: { role: "assistant", content: [{ type: "thinking", thinking: "Plan: check" }] },
+        assistantMessageEvent: { type: "thinking_delta", contentIndex: 0, delta: "check" },
+      });
+      yield* fake.emit({
+        type: "message_update",
+        message: {
+          role: "assistant",
+          content: [
+            { type: "thinking", thinking: "Plan: check, then reply" },
+            { type: "text", text: "Hello, wor" },
+          ],
+        },
+        assistantMessageEvent: { type: "text_delta", contentIndex: 1, delta: "wor" },
+      });
+      yield* fake.emit({
+        type: "message_end",
+        message: {
+          role: "assistant",
+          content: [
+            { type: "thinking", thinking: "Plan: check, then reply" },
+            { type: "text", text: "Hello, world. All done." },
+            { type: "text", text: "Second block." },
+          ],
+          stopReason: "stop",
+        },
+      });
+
+      yield* fake.emit({ type: "agent_end", messages: [] });
+      yield* fake.takeRequest("get_state");
+
+      const completedTexts: Array<string> = [];
+      for (;;) {
+        const event = yield* takeEvent(
+          (candidate) =>
+            candidate.type === "turn.terminal" ||
+            (candidate.type === "turn_item.updated" &&
+              (candidate.turnItem.type === "assistant_message" ||
+                candidate.turnItem.type === "reasoning") &&
+              candidate.turnItem.status === "completed"),
+        );
+        if (event.type === "turn.terminal") break;
+        if (event.type === "turn_item.updated" && "text" in event.turnItem) {
+          completedTexts.push(event.turnItem.text);
+        }
+      }
+      assert.sameMembers(completedTexts, [
+        "Plan: check, then reply",
+        "Hello, world. All done.",
+        "Second block.",
+      ]);
+    }).pipe(Effect.scoped, Effect.provide(testLayer)),
+  );
+
   it.effect("shows ipython cells as bash commands, python tools, and file changes", () =>
     Effect.gen(function* () {
       const fake = yield* makeFakePi;

@@ -268,6 +268,25 @@ function contentText(content: unknown): string {
     .join("");
 }
 
+/** The streamable text a Pi message snapshot holds for one content block. */
+function snapshotBlock(
+  message: unknown,
+  contentIndex: number,
+): { readonly kind: PiStreamItemState["kind"]; readonly text: string } | undefined {
+  const content = recordField(message, "content");
+  if (!Array.isArray(content)) return undefined;
+  const block: unknown = content[contentIndex];
+  const type = recordField(block, "type");
+  const text =
+    type === "text"
+      ? recordString(block, "text")
+      : type === "thinking"
+        ? recordString(block, "thinking")
+        : undefined;
+  if (text === undefined || text.length === 0) return undefined;
+  return { kind: type === "text" ? "assistant_message" : "reasoning", text };
+}
+
 function pythonCellTitle(code: string): string {
   const preview = previewPythonCell(code);
   return preview.length === 0 ? "Python" : `Python: ${preview}`;
@@ -1151,6 +1170,30 @@ export function makePiAdapterV2(
           (item) => completeStreamItem(turn, item),
           { discard: true },
         );
+
+      /**
+       * Take the text of every block in a message snapshot as the truth. The
+       * lossy streams (see `PiFlavor.lossyStream`) skip deltas, block ends, and
+       * whole blocks, but a snapshot is cumulative. A running snapshot keeps
+       * its items open; the final message completes them.
+       */
+      const adoptSnapshot = Effect.fnUntraced(function* (
+        turn: ActivePiTurn,
+        message: unknown,
+        final: boolean,
+      ) {
+        const content = recordField(message, "content");
+        if (!Array.isArray(content)) return;
+        for (let contentIndex = 0; contentIndex < content.length; contentIndex += 1) {
+          const block = snapshotBlock(message, contentIndex);
+          if (block === undefined) continue;
+          const item = yield* streamItemFor(turn, block.kind, contentIndex);
+          if (item.completed) continue;
+          item.text = block.text;
+          if (final) yield* completeStreamItem(turn, item);
+          else yield* scheduleStreamFlush(turn, item);
+        }
+      });
 
       // ── tools ─────────────────────────────────────────────
 
@@ -2300,13 +2343,17 @@ export function makePiAdapterV2(
             const delta = event["assistantMessageEvent"];
             const deltaType = recordString(delta, "type");
             const contentIndex = recordNumber(delta, "contentIndex") ?? 0;
+            if (flavor.lossyStream) yield* adoptSnapshot(turn, event["message"], false);
             if (deltaType === "text_delta" || deltaType === "thinking_delta") {
               const item = yield* streamItemFor(
                 turn,
                 deltaType === "text_delta" ? "assistant_message" : "reasoning",
                 contentIndex,
               );
-              item.text += recordString(delta, "delta") ?? "";
+              // A snapshot already holds this delta.
+              if (!(flavor.lossyStream && snapshotBlock(event["message"], contentIndex))) {
+                item.text += recordString(delta, "delta") ?? "";
+              }
               yield* scheduleStreamFlush(turn, item);
               return;
             }
@@ -2329,6 +2376,7 @@ export function makePiAdapterV2(
             if (turn === null) return;
             const message = event["message"];
             if (recordString(message, "role") !== "assistant") return;
+            if (flavor.lossyStream) yield* adoptSnapshot(turn, message, true);
             yield* completeOpenStreamItems(turn);
             if (recordString(message, "stopReason") === "error" && turn.failure === null) {
               turn.failure = makeProviderFailure({
