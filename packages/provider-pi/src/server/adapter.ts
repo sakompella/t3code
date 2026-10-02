@@ -88,8 +88,10 @@ import { PI_FLAVOR, PRIME_AGENT_FLAVOR, type PiFlavor } from "./flavor.ts";
 import {
   awaitsHandle,
   classifyIpythonCell,
+  reportedCommandMatches,
   detachedBashJobs,
   previewPythonCell,
+  type DetachedBashJob,
 } from "./primeAgentIpythonCell.ts";
 
 export const PI_PROVIDER = PI_FLAVOR.driverKind;
@@ -535,11 +537,6 @@ function piWakeNotification(
   };
 }
 
-interface PiBackgroundJob {
-  readonly variable: string | null;
-  readonly command: string;
-}
-
 interface PiRlmChildState {
   readonly snapshot: unknown;
   readonly startedAt: DateTime.Utc;
@@ -726,7 +723,7 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
        * kernel only reports them when they finish (`async_bash_completion`),
        * so they are listed from the cell that started them until then.
        */
-      const backgroundJobs = new Map<string, PiBackgroundJob>();
+      const backgroundJobs = new Map<string, DetachedBashJob>();
       let backgroundJobCounter = 0;
       const hasPendingBackgroundWork = () =>
         hasLiveRlmChildren() || backgroundJobs.size > 0 || pendingWake !== null;
@@ -1519,10 +1516,8 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
         if (recordString(message, "customType") !== "async_bash_completion") return;
         const reported = recordString(recordField(message, "details"), "command");
         if (reported === undefined) return;
-        // Long commands arrive cut off with a truncation suffix.
-        const reportedPrefix = reported.replace(/\n\.\.\. \[command truncated\]$/, "");
         for (const [taskId, job] of backgroundJobs) {
-          if (job.command === reported || job.command.startsWith(reportedPrefix)) {
+          if (reportedCommandMatches(job, reported)) {
             backgroundJobs.delete(taskId);
             yield* publishBackgroundJobs();
             return;
