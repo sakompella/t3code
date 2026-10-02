@@ -132,7 +132,10 @@ import {
   deriveOutlivingBackgroundWork,
   derivePendingBackgroundWork,
 } from "@t3tools/shared/orchestrationV2PendingBackgroundWork";
-import { buildLiveSubagentTree } from "@t3tools/client-runtime/state/subagent-tree";
+import {
+  buildLiveSubagentTree,
+  selectSubagentsForBackgroundTasks,
+} from "@t3tools/client-runtime/state/subagent-tree";
 import {
   latestUnheldRun,
   usageLimitRunPresentedAsLatest,
@@ -7361,9 +7364,19 @@ export default function ChatView(props: ChatViewProps) {
     };
   }, [activeGoal, activeThread, isWorking, sendStandaloneCommand]);
 
+  // While a turn runs, only subagents the background list names; a subagent
+  // the timeline already shows live must not reappear in the banner's tree.
   const liveSubagentTree = useMemo(
-    () => buildLiveSubagentTree(serverProjection?.subagents ?? []),
-    [serverProjection?.subagents],
+    () =>
+      buildLiveSubagentTree(
+        isWorking
+          ? selectSubagentsForBackgroundTasks(
+              serverProjection?.subagents ?? [],
+              activeBackgroundTasks,
+            )
+          : (serverProjection?.subagents ?? []),
+      ),
+    [activeBackgroundTasks, isWorking, serverProjection?.subagents],
   );
 
   const backgroundWorkBannerItem = useMemo<ComposerBannerStackItem | null>(() => {

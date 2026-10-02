@@ -6,7 +6,10 @@
  * follows `parentNodeId`. Only live subagents appear; a live child whose
  * parent already finished becomes a root rather than disappearing.
  */
-import type { OrchestrationV2Subagent } from "@t3tools/contracts";
+import type {
+  OrchestrationV2PendingBackgroundTask,
+  OrchestrationV2Subagent,
+} from "@t3tools/contracts";
 import { isOrchestrationV2WorkActive } from "@t3tools/contracts";
 import * as DateTime from "effect/DateTime";
 
@@ -96,4 +99,46 @@ export function buildLiveSubagentTree(subagents: ReadonlyArray<SubagentTreeSourc
     runningCount: live.filter((subagent) => subagent.status === "running").length,
     waitingCount: live.filter((subagent) => subagent.status !== "running").length,
   };
+}
+
+/**
+ * The live subagents that pending background tasks name, plus their live
+ * ancestors so the tree keeps its structure. Other live subagents, such as a
+ * foreground one the timeline already shows, stay out.
+ */
+export function selectSubagentsForBackgroundTasks<
+  Source extends SubagentTreeSource & {
+    readonly nativeTaskRef?: OrchestrationV2Subagent["nativeTaskRef"];
+  },
+>(
+  subagents: ReadonlyArray<Source>,
+  tasks: ReadonlyArray<OrchestrationV2PendingBackgroundTask>,
+): ReadonlyArray<Source> {
+  const subagentTasks = tasks.filter((task) => task.kind === "subagent");
+  const taskIds = new Set(subagentTasks.map((task) => task.taskId));
+  const childThreadIds = new Set(
+    subagentTasks.flatMap((task) =>
+      task.kind === "subagent" && task.childThreadId ? [task.childThreadId] : [],
+    ),
+  );
+  const live = subagents.filter((subagent) => isOrchestrationV2WorkActive(subagent.status));
+  const liveById = new Map(live.map((subagent) => [String(subagent.id), subagent]));
+  const selectedIds = new Set<string>();
+  for (const subagent of live) {
+    const nativeId = subagent.nativeTaskRef?.nativeId;
+    const named =
+      taskIds.has(String(subagent.id)) ||
+      (nativeId != null && taskIds.has(nativeId)) ||
+      (subagent.childThreadId !== null && childThreadIds.has(subagent.childThreadId));
+    if (!named) continue;
+    // Walk up through live parents; the visited check also stops a parent cycle.
+    for (
+      let node: Source | undefined = subagent;
+      node !== undefined && !selectedIds.has(String(node.id));
+      node = liveById.get(String(node.parentNodeId))
+    ) {
+      selectedIds.add(String(node.id));
+    }
+  }
+  return live.filter((subagent) => selectedIds.has(String(subagent.id)));
 }

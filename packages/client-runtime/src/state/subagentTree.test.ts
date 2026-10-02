@@ -2,7 +2,11 @@ import { NodeId, type OrchestrationV2Subagent } from "@t3tools/contracts";
 import * as DateTime from "effect/DateTime";
 import { describe, expect, it } from "vite-plus/test";
 
-import { buildLiveSubagentTree, type SubagentTreeSource } from "./subagentTree.js";
+import {
+  buildLiveSubagentTree,
+  selectSubagentsForBackgroundTasks,
+  type SubagentTreeSource,
+} from "./subagentTree.js";
 
 const ROOT = NodeId.make("node:run:root");
 
@@ -72,5 +76,77 @@ describe("buildLiveSubagentTree", () => {
       runningCount: 0,
       waitingCount: 0,
     });
+  });
+});
+
+describe("selectSubagentsForBackgroundTasks", () => {
+  const titles = (
+    subagents: ReadonlyArray<SubagentTreeSource>,
+    tasks: Parameters<typeof selectSubagentsForBackgroundTasks>[1],
+  ) => selectSubagentsForBackgroundTasks(subagents, tasks).map((subagent) => subagent.title);
+
+  it("leaves out a live subagent that no task names", () => {
+    expect(
+      titles(
+        [subagent("old", { startedSecond: 1 }), subagent("fresh", { startedSecond: 2 })],
+        [
+          { taskId: "bash:1", kind: "command" },
+          { taskId: "old", kind: "subagent" },
+        ],
+      ),
+    ).toEqual(["old"]);
+  });
+
+  it("selects nothing when only commands are pending", () => {
+    expect(titles([subagent("fresh")], [{ taskId: "bash:1", kind: "command" }])).toEqual([]);
+  });
+
+  it("keeps live ancestors for structure but not their other children", () => {
+    const subagents = [
+      subagent("parent", { startedSecond: 1 }),
+      subagent("named-child", { parent: "parent", startedSecond: 2 }),
+      subagent("fresh-sibling", { parent: "parent", startedSecond: 3 }),
+    ];
+    const tree = buildLiveSubagentTree(
+      selectSubagentsForBackgroundTasks(subagents, [{ taskId: "named-child", kind: "subagent" }]),
+    );
+    expect(shape(tree.roots)).toEqual([["parent", 1, [["named-child", 0, []]]]]);
+    expect([tree.runningCount, tree.waitingCount]).toEqual([2, 0]);
+  });
+
+  it("matches by native task id or child thread", () => {
+    const byNative = {
+      ...subagent("node-a"),
+      nativeTaskRef: { driver: "claudeAgent", nativeId: "toolu_1", strength: "strong" },
+    } as unknown as SubagentTreeSource;
+    const byThread = {
+      ...subagent("node-b"),
+      childThreadId: "child-1",
+    } as unknown as SubagentTreeSource;
+    expect(
+      titles(
+        [byNative, byThread, subagent("other")],
+        [
+          { taskId: "toolu_1", kind: "subagent" },
+          { taskId: "x", kind: "subagent", childThreadId: "child-1" as never },
+        ],
+      ),
+    ).toEqual(["node-a", "node-b"]);
+  });
+
+  it("ignores finished subagents and survives a parent cycle", () => {
+    expect(
+      titles(
+        [
+          subagent("done", { status: "completed" }),
+          subagent("a", { parent: "b" }),
+          subagent("b", { parent: "a" }),
+        ],
+        [
+          { taskId: "done", kind: "subagent" },
+          { taskId: "a", kind: "subagent" },
+        ],
+      ),
+    ).toEqual(["a", "b"]);
   });
 });
