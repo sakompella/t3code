@@ -497,6 +497,17 @@ function parseNavigateTreeResult(json: string): unknown {
 }
 
 /**
+ * Events that stay live while a wake is buffered. Child session observation
+ * must not wait on the parent's turn, or its roster update can drop the route
+ * first.
+ */
+const PI_SESSION_SCOPED_EVENTS: ReadonlySet<string> = new Set([
+  "rlm_child_update",
+  "observed_session_event",
+  "observed_session_closed",
+]);
+
+/**
  * Says what woke the agent, from the first message it was woken with that has
  * a known meaning. Bookkeeping notices such as `ipython_state_restored` are
  * skipped.
@@ -2753,8 +2764,7 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
           !interactiveUiRequest &&
           !String(event["type"]).startsWith("t3.") &&
           event["type"] !== "response" &&
-          // Child updates are session-scoped; they settle subagent items live.
-          event["type"] !== "rlm_child_update"
+          !PI_SESSION_SCOPED_EVENTS.has(String(event["type"]))
         ) {
           const wake = pendingWake;
           wake.events.push(event);
