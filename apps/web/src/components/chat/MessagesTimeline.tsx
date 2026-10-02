@@ -5284,13 +5284,10 @@ function WorkEntryLogRow(props: WorkEntryRowProps) {
                 >
                   {workEntry.detail ?? previewText}
                 </ReactMarkdown>
-              ) : labelCode ? (
-                <>
-                  {labelCode.prefix ? `${labelCode.prefix}: ` : null}
-                  <span className="font-mono text-(length:--font-size-code,var(--text-xs))">
-                    {labelCode.code}
-                  </span>
-                </>
+              ) : labelCode !== null ? (
+                <span className="font-mono text-(length:--font-size-code,var(--text-xs))">
+                  {labelCode}
+                </span>
               ) : (
                 previewText
               )}
