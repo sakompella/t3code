@@ -3403,6 +3403,52 @@ describe("PiAdapterV2 with the Prime Agent flavor", () => {
       yield* fake.emit({ type: "agent_end", messages: [] });
     });
 
+  it.effect("routes a child's final message while the parent's wake is still buffered", () =>
+    Effect.gen(function* () {
+      const fake = yield* makeFakePi;
+      const session = yield* openPrimeThreadWithWakes(fake);
+      yield* startTurn(session.runtime, session.providerThread);
+      yield* fake.takeRequest("prompt");
+      yield* fake.emit({ type: "agent_start" });
+      yield* fake.emit(rlmChild("queued"));
+      yield* fake.emit(rlmChild("running", { activeSessionId: "active-1" }));
+      const running = yield* session.takeEvent(
+        (event) => event.type === "subagent.updated" && event.subagent.childThreadId !== null,
+      );
+      const childThreadId =
+        running.type === "subagent.updated" ? running.subagent.childThreadId : null;
+      yield* fake.takeRequest("observe");
+      yield* fake.emit({ type: "agent_end", messages: [] });
+      yield* fake.takeRequest("get_state");
+      yield* session.takeEvent((event) => event.type === "turn.terminal");
+
+      // The parent wakes on its own; its events now wait for a continuation.
+      yield* fake.emit({ type: "agent_start" });
+      yield* fake.emit({
+        type: "observed_session_event",
+        activeSessionId: "active-1",
+        event: {
+          type: "message_end",
+          message: {
+            role: "assistant",
+            content: [{ type: "text", text: "child-ok sent." }],
+            timestamp: 1002,
+          },
+        },
+      });
+      const reply = yield* session.takeEvent(
+        (event) =>
+          event.type === "message.updated" &&
+          event.message.threadId === childThreadId &&
+          event.message.text === "child-ok sent.",
+      );
+      assert.equal(reply.type, "message.updated");
+      // The terminal roster update drops the route only after the message used it.
+      yield* fake.emit(rlmChild("done", { activeSessionId: "active-1" }));
+      assert.equal((yield* fake.takeRequest("unobserve"))["activeSessionId"], "active-1");
+    }).pipe(Effect.scoped, Effect.provide(testLayer)),
+  );
+
   it.effect("hands a self-wake to a continuation run instead of stopping the session", () =>
     Effect.gen(function* () {
       const fake = yield* makeFakePi;

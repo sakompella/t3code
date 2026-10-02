@@ -459,11 +459,17 @@ interface PendingPiWake {
   readonly generation: number;
 }
 
-/** Agent work that belongs to a wake turn; dialogs and acks keep flowing live. */
+/**
+ * Agent work that belongs to a wake turn. Dialogs, acks, and child session
+ * observation keep flowing live: a child's events must not wait on the
+ * parent's turn, or its roster update can drop the route first.
+ */
 function isPiWakeEvent(event: PiRpcRecord): boolean {
   switch (event["type"]) {
     case "response":
     case "rlm_child_update":
+    case "observed_session_event":
+    case "observed_session_closed":
     case "extension_ui_request":
     case "extension_error":
     case "t3.settle_probe":
