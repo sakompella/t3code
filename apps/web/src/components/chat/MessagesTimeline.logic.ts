@@ -510,6 +510,7 @@ type MessagesTimelineRowContent =
       createdAt: string;
       groupedEntries: WorkLogEntry[];
       isExpandedToolGroup: boolean;
+      liveEntryId?: string;
       displayLabel?: string;
     }
   | {
@@ -661,6 +662,7 @@ function expandedWorkGroupRow(
   groupId: string,
   createdAt: string,
   groupedEntries: WorkLogEntry[],
+  liveEntryId?: string,
 ): Extract<MessagesTimelineRow, { kind: "work" }> {
   return {
     kind: "work",
@@ -668,6 +670,7 @@ function expandedWorkGroupRow(
     createdAt,
     groupedEntries,
     isExpandedToolGroup: true,
+    ...(liveEntryId === undefined ? {} : { liveEntryId }),
   };
 }
 
@@ -1519,16 +1522,29 @@ export function deriveMessagesTimelineRows(input: {
   };
   let hasActivityRow = false;
   let hasActiveCompaction = false;
-  const appendActiveWorkRows = () => {
-    if (activeWorkRow === null) return;
-    nextRows.push(activeWorkRow);
-    hasActivityRow ||= activeWorkRow.active;
-    if (!activeWorkRow.expanded) return;
+  const appendLiveWorkRows = (row: Extract<MessagesTimelineRow, { kind: "work-live" }>) => {
+    hasActivityRow ||= row.active;
+    if (!row.expanded) {
+      nextRows.push(row);
+      return;
+    }
+    nextRows.push({
+      kind: "work-toggle",
+      id: row.id,
+      createdAt: row.createdAt,
+      groupId: row.groupId,
+      hiddenCount: row.groupedEntries.length,
+      expanded: true,
+      summary: `${row.groupedEntries.length} ${row.groupedEntries.length === 1 ? "step" : "steps"}`,
+      summaryKind: "mixed",
+      hasFailure: false,
+    });
     nextRows.push(
       expandedWorkGroupRow(
-        activeWorkRow.groupId,
-        activeWorkRow.createdAt,
-        activeWorkRow.groupedEntries,
+        row.groupId,
+        row.createdAt,
+        row.groupedEntries,
+        row.active ? row.entry.id : undefined,
       ),
     );
   };
@@ -1544,7 +1560,7 @@ export function deriveMessagesTimelineRows(input: {
     }
 
     if (timelineEntry.id === activeWorkPlacementEntryId) {
-      appendActiveWorkRows();
+      if (activeWorkRow !== null) appendLiveWorkRows(activeWorkRow);
     }
 
     if (
@@ -1660,7 +1676,7 @@ export function deriveMessagesTimelineRows(input: {
           const groupId = workGroupId(timelineEntry.id);
           const expanded = input.expandedWorkGroupIds?.has(groupId) ?? false;
           const latestActiveToolEntry = activeInProgressToolEntries.at(-1)!;
-          nextRows.push({
+          appendLiveWorkRows({
             kind: "work-live",
             id: `work-live:${timelineEntry.id}`,
             createdAt: timelineEntry.createdAt,
@@ -1670,12 +1686,6 @@ export function deriveMessagesTimelineRows(input: {
             expanded,
             active: true,
           });
-          hasActivityRow = true;
-          if (expanded) {
-            nextRows.push(
-              expandedWorkGroupRow(groupId, timelineEntry.createdAt, visibleGroupedEntries),
-            );
-          }
         } else if (
           visibleGroupedEntries.length === 1 &&
           workLogEntryIsToolLike(visibleGroupedEntries[0]!)
