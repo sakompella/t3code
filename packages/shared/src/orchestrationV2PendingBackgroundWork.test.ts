@@ -2,6 +2,7 @@ import { describe, expect, it } from "vite-plus/test";
 import type { OrchestrationV2PendingBackgroundTask } from "@t3tools/contracts";
 import {
   backgroundWorkHoldsCompletion,
+  deriveOutlivingBackgroundWork,
   derivePendingBackgroundWork,
   turnItemUpdateCanEndBackgroundWork,
 } from "./orchestrationV2PendingBackgroundWork.ts";
@@ -516,5 +517,77 @@ describe("derivePendingBackgroundWork kinds", () => {
       },
       { taskId: "cmd", description: "npm test", kind: "command" },
     ]);
+  });
+});
+
+describe("deriveOutlivingBackgroundWork", () => {
+  const item = (
+    id: string,
+    ordinal: number,
+    type: "command_execution" | "subagent" | "assistant_message",
+    status: "running" | "completed",
+  ) => ({ id, ordinal, type, status, title: id });
+
+  it("lists a roster job that a finished cell left behind", () => {
+    expect(
+      deriveOutlivingBackgroundWork({
+        providerThreads: [
+          {
+            id: "pt-1" as never,
+            pendingBackgroundTasks: [
+              { taskId: "bash:1", description: "sleep 60", kind: "command" },
+            ],
+          },
+        ],
+        turnItems: [item("cell-1", 1, "command_execution", "completed")],
+      }),
+    ).toEqual([{ taskId: "bash:1", description: "sleep 60", kind: "command" }]);
+  });
+
+  it("keeps the step that is still the live row out of the list", () => {
+    expect(
+      deriveOutlivingBackgroundWork({
+        providerThreads: [],
+        turnItems: [
+          item("earlier", 1, "assistant_message", "completed"),
+          item("live", 2, "command_execution", "running"),
+        ],
+      }),
+    ).toEqual([]);
+  });
+
+  it("keeps parallel running items out until a later item has finished", () => {
+    expect(
+      deriveOutlivingBackgroundWork({
+        providerThreads: [],
+        turnItems: [item("a", 1, "subagent", "running"), item("b", 2, "subagent", "running")],
+      }),
+    ).toEqual([]);
+  });
+
+  it("lists an item the turn has moved past", () => {
+    expect(
+      deriveOutlivingBackgroundWork({
+        providerThreads: [],
+        turnItems: [
+          item("dev-server", 1, "command_execution", "running"),
+          item("edit", 2, "assistant_message", "completed"),
+          item("review", 3, "subagent", "running"),
+        ],
+      }),
+    ).toEqual([{ taskId: "dev-server", description: "dev-server", kind: "command" }]);
+  });
+
+  it("drops work from rolled back runs", () => {
+    expect(
+      deriveOutlivingBackgroundWork({
+        providerThreads: [],
+        runs: [{ id: "run-1" as never, ordinal: 1, status: "rolled_back" }],
+        turnItems: [
+          { ...item("old", 1, "command_execution", "running"), runId: "run-1" },
+          item("later", 2, "assistant_message", "completed"),
+        ],
+      }),
+    ).toEqual([]);
   });
 });
