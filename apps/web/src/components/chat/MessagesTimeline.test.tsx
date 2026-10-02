@@ -535,7 +535,8 @@ describe("MessagesTimeline", () => {
         expect(isResting).toBe(true);
 
         timelineIsAtEnd = false;
-        await act(() => toggle.props.onClick());
+        const expandedToggle = renderer!.root.findByProps({ "aria-expanded": true });
+        await act(() => expandedToggle.props.onClick());
         await flushFrame();
         timelineIsAtEnd = isAtEnd;
         await flushFrame();

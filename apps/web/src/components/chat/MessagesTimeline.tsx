@@ -1790,6 +1790,7 @@ const TimelineRowContent = memo(function TimelineRowContent({ row }: { row: Time
               groupedEntries={row.groupedEntries}
               isExpandedToolGroup={row.isExpandedToolGroup}
               displayLabel={row.displayLabel}
+              liveEntryId={row.liveEntryId}
             />
           ) : null}
           {row.kind === "work-live" ? <LiveWorkEntryTimelineRow row={row} /> : null}
@@ -3100,12 +3101,14 @@ const WorkGroupSection = memo(function WorkGroupSection({
   groupedEntries,
   isExpandedToolGroup,
   displayLabel,
+  liveEntryId,
 }: {
   anchorKey: string;
   disclosureAnchorKey?: string;
   groupedEntries: Extract<MessagesTimelineRow, { kind: "work" }>["groupedEntries"];
   isExpandedToolGroup: boolean;
   displayLabel?: string | undefined;
+  liveEntryId?: string | undefined;
 }) {
   const { workspaceRoot, routeThreadKey, onToggleWorkEntry } = use(TimelineRowCtx);
   const onToggleStandaloneEntry = useCallback(
@@ -3128,6 +3131,7 @@ const WorkGroupSection = memo(function WorkGroupSection({
         anchorKey={anchorKey}
         disclosureAnchorKey={disclosureAnchorKey}
         entries={nonEmptyEntries}
+        liveEntryId={liveEntryId}
         workspaceRoot={workspaceRoot}
       />
     );
@@ -3197,10 +3201,12 @@ function ExpandedWorkGroupEntries({
   disclosureAnchorKey,
   entries,
   workspaceRoot,
+  liveEntryId,
 }: {
   anchorKey: string;
   disclosureAnchorKey: string;
   entries: TimelineWorkEntry[];
+  liveEntryId?: string | undefined;
   workspaceRoot: string | undefined;
 }) {
   const { workGroupViewState: viewState, onToggleWorkEntry } = use(TimelineRowCtx);
@@ -3287,9 +3293,14 @@ function ExpandedWorkGroupEntries({
 
   const renderEntry = useCallback(
     ({ item }: { item: TimelineWorkEntry }) => (
-      <SimpleWorkEntryRow key={item.id} workEntry={item} workspaceRoot={workspaceRoot} />
+      <SimpleWorkEntryRow
+        key={item.id}
+        workEntry={item}
+        workspaceRoot={workspaceRoot}
+        active={item.id === liveEntryId}
+      />
     ),
-    [workspaceRoot],
+    [workspaceRoot, liveEntryId],
   );
 
   const updateExpandedContentHeight = useCallback(() => {
@@ -3583,6 +3594,7 @@ function LiveWorkEntryTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "
     : "";
   const label = questionHeading || liveWorkEntryLabel(row.entry, ctx.workspaceRoot, row.active);
   const failed = workEntryDisplayIndicatesToolFailure(row.entry);
+  const labelCode = questionHeading ? null : workEntryLabelCode(row.entry, label);
 
   return (
     <button
@@ -3610,6 +3622,10 @@ function LiveWorkEntryTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "
             >
               {row.entry.detail ?? label}
             </ReactMarkdown>
+          ) : labelCode !== null ? (
+            <span className="font-mono text-(length:--font-size-code,var(--text-xs))">
+              {labelCode}
+            </span>
           ) : (
             label
           )
@@ -4938,6 +4954,7 @@ const SimpleWorkEntryRow = memo(function SimpleWorkEntryRow(props: {
   workspaceRoot: string | undefined;
   displayLabel?: string | undefined;
   onToggleEntry?: ((collapsed: boolean) => void) | undefined;
+  active?: boolean;
 }) {
   const { workEntry, workspaceRoot, displayLabel } = props;
   const ctx = use(TimelineRowCtx);
@@ -5147,7 +5164,13 @@ const SimpleWorkEntryRow = memo(function SimpleWorkEntryRow(props: {
         <div className="min-w-0 flex-1 overflow-hidden">
           <p className="flex min-w-0 w-full items-baseline gap-1.5 text-sm leading-relaxed">
             <span
-              className={cn(answerPreview ? "min-w-0" : "min-w-0 flex-1", "truncate", headingClass)}
+              ref={props.active && !showFailedIndicator ? observeVisibleAnimation : undefined}
+              className={cn(
+                answerPreview ? "min-w-0" : "min-w-0 flex-1",
+                "truncate",
+                headingClass,
+                props.active && !showFailedIndicator && "live-tool-shine",
+              )}
             >
               {isReasoning && !expanded ? (
                 <ReactMarkdown

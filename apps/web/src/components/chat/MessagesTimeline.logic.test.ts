@@ -2018,6 +2018,46 @@ describe("deriveMessagesTimelineRows", () => {
     expect(rows.some((row) => row.kind === "thinking")).toBe(false);
   });
 
+  it("moves the live cell into the expanded step list without repeating its heading", () => {
+    const rows = deriveMessagesTimelineRows({
+      timelineEntries: [
+        {
+          id: "python-entry",
+          kind: "work",
+          createdAt: "2026-01-01T00:00:05Z",
+          entry: {
+            id: "python-cell",
+            createdAt: "2026-01-01T00:00:05Z",
+            runId: RunId.make("turn-1"),
+            label: "print(1)",
+            tone: "tool",
+            itemType: "dynamic_tool",
+            toolLifecycleStatus: "inProgress",
+          },
+        },
+      ],
+      latestRun: {
+        runId: RunId.make("turn-1"),
+        status: "running",
+        startedAt: "2026-01-01T00:00:00Z",
+        completedAt: null,
+      },
+      expandedWorkGroupIds: new Set(["work-group:python-entry"]),
+      isWorking: true,
+      turnDiffSummaries: [],
+      supportsConversationRollback: false,
+    });
+    expect(rows.some((row) => row.kind === "work-live")).toBe(false);
+    expect(rows.find((row) => row.kind === "work-toggle")).toMatchObject({
+      summary: "1 step",
+      expanded: true,
+    });
+    expect(rows.find((row) => row.kind === "work")).toMatchObject({
+      liveEntryId: "python-cell",
+      groupedEntries: [{ id: "python-cell" }],
+    });
+  });
+
   it("keeps an actually running tool in the shared activity row", () => {
     const rows = deriveMessagesTimelineRows({
       timelineEntries: [
