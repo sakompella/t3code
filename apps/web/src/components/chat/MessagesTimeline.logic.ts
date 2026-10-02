@@ -200,6 +200,31 @@ export function threadReadLabelPrefix(label: string) {
     : null;
 }
 
+const PYTHON_LABEL_PREFIX = "Python: ";
+
+/**
+ * Splits a row label into its code part, a shell command or a Python cell
+ * preview, so the row can render that part in the code font. Returns null
+ * when the label is prose.
+ */
+export function workEntryLabelCode(
+  entry: WorkLogEntry,
+  label: string,
+): { readonly prefix: string | null; readonly code: string } | null {
+  if (entry.command && label === commandDisplayText(entry.command)) {
+    return { prefix: null, code: label };
+  }
+  const item = entry.structuredPayload;
+  if (
+    item?.type === "dynamic_tool" &&
+    item.toolName === "python" &&
+    label.startsWith(PYTHON_LABEL_PREFIX)
+  ) {
+    return { prefix: "Python", code: label.slice(PYTHON_LABEL_PREFIX.length) };
+  }
+  return null;
+}
+
 export function workEntryReadOutput(
   entry: Pick<
     WorkLogEntry,
