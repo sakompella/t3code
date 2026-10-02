@@ -2681,6 +2681,11 @@ export const OrchestrationV2Command = Schema.Union([
     usageLimitContinuationOfRunId: Schema.optional(RunId),
     manualContinuationOfRunId: Schema.optional(RunId),
     usageLimitRecoveryRequestId: Schema.optional(CommandId),
+    /**
+     * Queue the message as a held run even when nothing is running, so the
+     * user decides when it is sent (the state Stop gives queued messages).
+     */
+    holdInQueue: Schema.optional(Schema.Boolean),
     /** Resolve untargeted delivery against the server's serialized thread state. */
     deliveryIntent: Schema.optional(Schema.Literals(["auto", "steer", "restart"])),
     delegatedCompletion: Schema.optional(

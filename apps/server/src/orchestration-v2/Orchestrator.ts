@@ -4659,8 +4659,9 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       );
       const activeRun = projection.runs.find(isBlockingRun);
       const pendingMergeBackTransfers = pendingMergeBackTransfersForThread(projection);
+      const holdInQueue = command.holdInQueue === true;
       const shouldQueue =
-        activeRun !== undefined &&
+        (activeRun !== undefined || holdInQueue) &&
         (dispatchMode.type === "defer_start" ||
           dispatchMode.type === "start_immediately" ||
           dispatchMode.type === "queue_after_active");
@@ -4675,13 +4676,13 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         const queueProviderThread =
           activeProviderThread ??
           projection.providerThreads.find(
-            (candidate) => candidate.id === activeRun.providerThreadId,
+            (candidate) => candidate.id === activeRun?.providerThreadId,
           );
         if (queueProviderThread === undefined) {
           return yield* new OrchestratorDispatchError({
             commandId: command.commandId,
             commandType: command.type,
-            cause: `Active run ${activeRun.id} has no provider thread for queued dispatch.`,
+            cause: `Thread ${command.threadId} has no provider thread for queued dispatch.`,
           });
         }
         const now = yield* DateTime.now;
@@ -4735,7 +4736,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         const attemptId = idAllocator.derive.runAttempt({ runId, attemptOrdinal: 1 });
         const rootNodeId = idAllocator.derive.rootNode({ runId });
         const checkpointScope =
-          activeRun.status === "preparing"
+          activeRun?.status === "preparing"
             ? null
             : yield* runtimePolicy.resolve({ thread: projection.thread, modelSelection }).pipe(
                 Effect.flatMap((resolvedRuntimePolicy) =>
@@ -4772,7 +4773,8 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           rootNodeId,
           activeAttemptId: attemptId,
           status: "queued",
-          ...(projection.runs.some(
+          ...(holdInQueue ||
+          projection.runs.some(
             (candidate) => candidate.status === "queued" && candidate.queueHeld === true,
           )
             ? { queueHeld: true }
