@@ -125,7 +125,10 @@ import {
   resolveProjectScripts,
 } from "@t3tools/shared/projectScripts";
 import { CHAT_LIST_ANCHOR_OFFSET } from "@t3tools/shared/chatList";
-import { derivePendingBackgroundWork } from "@t3tools/shared/orchestrationV2PendingBackgroundWork";
+import {
+  deriveOutlivingBackgroundWork,
+  derivePendingBackgroundWork,
+} from "@t3tools/shared/orchestrationV2PendingBackgroundWork";
 import { buildLiveSubagentTree } from "@t3tools/client-runtime/state/subagent-tree";
 import {
   latestUnheldRun,
@@ -3491,6 +3494,18 @@ export default function ChatView(props: ChatViewProps) {
         serverProjection.turnItems,
         sessionError,
       ) ?? latestUnheldRun(serverProjection.runs);
+    // One derivation per projection update: while a turn runs, only work that
+    // outlived the step that started it; once settled, everything still pending.
+    if (isWorking) {
+      return [
+        ...deriveOutlivingBackgroundWork({
+          providerThreads: serverProjection.providerThreads,
+          turnItems: serverProjection.turnItems,
+          activeProviderThreadId: serverProjection.thread.activeProviderThreadId,
+          runs: serverProjection.runs,
+        }),
+      ];
+    }
     return [
       ...derivePendingBackgroundWork({
         latestRun,
@@ -3500,7 +3515,7 @@ export default function ChatView(props: ChatViewProps) {
         runs: serverProjection.runs,
       }),
     ];
-  }, [serverProjection]);
+  }, [isWorking, serverProjection]);
   const activeWorkStartedAt =
     deriveActiveWorkStartedAt(activeActivityRun, activeRuntime, localDispatchStartedAt) ??
     runlessWorkStartedAt;
@@ -6865,7 +6880,10 @@ export default function ChatView(props: ChatViewProps) {
   // the turn; once it settles, the composer stop button is gone, so this
   // banner is the only visible stop affordance. The interrupt path also
   // accepts a completed run while its provider still has background work.
-  const activeBackgroundTasks = !isWorking && activeThread ? pendingBackgroundTasks : [];
+  // While a turn runs, the banner lists only work that outlived the step that
+  // started it. Its Stop would send the same interrupt as the composer's Stop,
+  // so the banner shows no Stop then.
+  const activeBackgroundTasks = activeThread ? pendingBackgroundTasks : [];
   const [stoppingBackgroundWorkKey, setStoppingBackgroundWorkKey] = useState<string | null>(null);
   const isStoppingBackgroundWork =
     stoppingBackgroundWorkKey === `${environmentId}:${activeThreadId}`;
@@ -6906,10 +6924,22 @@ export default function ChatView(props: ChatViewProps) {
   );
 
   const backgroundWorkBannerItem = useMemo<ComposerBannerStackItem | null>(() => {
-    const presentation = presentPendingBackgroundWork(activeBackgroundTasks);
+    const presentation = presentPendingBackgroundWork(activeBackgroundTasks, {
+      turnRunning: isWorking,
+    });
     if (presentation === null || !activeThread) {
       return null;
     }
+    const stopAction = isWorking ? undefined : (
+      <Button
+        size="xs"
+        variant="ghost"
+        disabled={isStoppingBackgroundWork}
+        onClick={() => void handleStopBackgroundWork()}
+      >
+        {isStoppingBackgroundWork ? "Stopping..." : "Stop"}
+      </Button>
+    );
     if (liveSubagentTree.roots.length > 0) {
       // Live subagents read as a tree, like Prime Agent's agents view; other
       // background work is listed after them.
@@ -6951,16 +6981,7 @@ export default function ChatView(props: ChatViewProps) {
             onOpenThread={onOpenRelatedThread}
           />
         ),
-        actions: (
-          <Button
-            size="xs"
-            variant="ghost"
-            disabled={isStoppingBackgroundWork}
-            onClick={() => void handleStopBackgroundWork()}
-          >
-            {isStoppingBackgroundWork ? "Stopping..." : "Stop"}
-          </Button>
-        ),
+        actions: stopAction,
       };
     }
     return {
@@ -7002,22 +7023,14 @@ export default function ChatView(props: ChatViewProps) {
                 </Fragment>
               );
             }),
-      actions: (
-        <Button
-          size="xs"
-          variant="ghost"
-          disabled={isStoppingBackgroundWork}
-          onClick={() => void handleStopBackgroundWork()}
-        >
-          {isStoppingBackgroundWork ? "Stopping..." : "Stop"}
-        </Button>
-      ),
+      actions: stopAction,
     };
   }, [
     activeBackgroundTasks,
     activeThread,
     handleStopBackgroundWork,
     isStoppingBackgroundWork,
+    isWorking,
     liveSubagentTree,
     onOpenRelatedThread,
   ]);
