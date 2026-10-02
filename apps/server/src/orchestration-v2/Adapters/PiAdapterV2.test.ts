@@ -2513,6 +2513,85 @@ describe("PiAdapterV2 with the Prime Agent flavor", () => {
     }).pipe(Effect.scoped, Effect.provide(testLayer)),
   );
 
+  type TakeEvent = (
+    predicate: (event: ProviderAdapterV2Event) => boolean,
+  ) => Effect.Effect<ProviderAdapterV2Event>;
+
+  /** Completed assistant texts of a turn, in order, until the turn ends. */
+  const takeCompletedReplies = (takeEvent: TakeEvent) =>
+    Effect.gen(function* () {
+      const texts: Array<string> = [];
+      for (;;) {
+        const event = yield* takeEvent(
+          (candidate) =>
+            candidate.type === "turn.terminal" ||
+            (candidate.type === "turn_item.updated" &&
+              candidate.turnItem.type === "assistant_message" &&
+              candidate.turnItem.status === "completed"),
+        );
+        if (event.type === "turn.terminal") return texts;
+        if (event.type === "turn_item.updated" && "text" in event.turnItem) {
+          texts.push(event.turnItem.text);
+        }
+      }
+    });
+
+  const assistantSnapshot = (timestamp: number, text: string) => ({
+    role: "assistant",
+    content: [{ type: "text", text }],
+    timestamp,
+  });
+
+  it.effect("keeps a reply whose message_start was dropped apart from the previous reply", () =>
+    Effect.gen(function* () {
+      const fake = yield* makeFakePi;
+      const { runtime, takeEvent, providerThread } = yield* openPrimeThread(fake);
+      yield* startTurn(runtime, providerThread);
+      yield* fake.takeRequest("prompt");
+      yield* fake.emit({ type: "agent_start" });
+      yield* fake.emit({ type: "message_start", message: assistantSnapshot(1000, "") });
+      yield* fake.emit({ type: "message_end", message: assistantSnapshot(1000, "First reply.") });
+      // The second message's start is lost.
+      yield* fake.emit({
+        type: "message_update",
+        message: assistantSnapshot(2000, "Second"),
+        assistantMessageEvent: { type: "text_delta", contentIndex: 0, delta: "Second" },
+      });
+      yield* fake.emit({ type: "message_end", message: assistantSnapshot(2000, "Second reply.") });
+      yield* fake.emit({ type: "agent_end", messages: [] });
+      yield* fake.takeRequest("get_state");
+
+      assert.deepEqual(yield* takeCompletedReplies(takeEvent), ["First reply.", "Second reply."]);
+    }).pipe(Effect.scoped, Effect.provide(testLayer)),
+  );
+
+  it.effect(
+    "keeps replies apart when the first message_start is dropped but a later one arrives",
+    () =>
+      Effect.gen(function* () {
+        const fake = yield* makeFakePi;
+        const { runtime, takeEvent, providerThread } = yield* openPrimeThread(fake);
+        yield* startTurn(runtime, providerThread);
+        yield* fake.takeRequest("prompt");
+        yield* fake.emit({ type: "agent_start" });
+        yield* fake.emit({ type: "message_end", message: assistantSnapshot(1000, "First reply.") });
+        yield* fake.emit({ type: "message_start", message: assistantSnapshot(2000, "") });
+        yield* fake.emit({
+          type: "message_update",
+          message: assistantSnapshot(2000, "Second"),
+          assistantMessageEvent: { type: "text_delta", contentIndex: 0, delta: "Second" },
+        });
+        yield* fake.emit({
+          type: "message_end",
+          message: assistantSnapshot(2000, "Second reply."),
+        });
+        yield* fake.emit({ type: "agent_end", messages: [] });
+        yield* fake.takeRequest("get_state");
+
+        assert.deepEqual(yield* takeCompletedReplies(takeEvent), ["First reply.", "Second reply."]);
+      }).pipe(Effect.scoped, Effect.provide(testLayer)),
+  );
+
   const finalReply = {
     type: "turn_end",
     message: { role: "assistant", content: [{ type: "text", text: "done" }], stopReason: "stop" },
