@@ -32,6 +32,7 @@ import {
   type MessagesTimelineRow,
   resolveTimelineToolPresentation,
   workEntryDisplayLabel,
+  workEntryLabelCode,
   workEntryReadOutput,
   workEntryIsVisibleInGroup,
 } from "./MessagesTimeline.logic";
@@ -168,6 +169,30 @@ describe("work entry labels", () => {
     expect(liveWorkEntryLabel(browserEntry, undefined, false)).toBe(
       "Clicked in the preview browser",
     );
+  });
+
+  it("marks only the code part of command and Python labels for the code font", () => {
+    const command = { ...entry, itemType: "command_execution" as const, command: "ls -la src" };
+    const commandLabel = workEntryDisplayLabel(command, undefined);
+    expect(workEntryLabelCode(command, commandLabel)).toEqual({ prefix: null, code: commandLabel });
+    // A group heading over the same command is prose.
+    expect(workEntryLabelCode(command, "Ran 3 commands")).toBeNull();
+
+    const python = {
+      ...entry,
+      itemType: "dynamic_tool" as const,
+      structuredPayload: {
+        type: "dynamic_tool",
+        toolName: "python",
+        input: { code: "print(1)" },
+      } as NonNullable<WorkLogEntry["structuredPayload"]>,
+    };
+    expect(workEntryLabelCode(python, "Python: print(1)")).toEqual({
+      prefix: "Python",
+      code: "print(1)",
+    });
+    expect(workEntryLabelCode(python, "Python")).toBeNull();
+    expect(workEntryLabelCode(entry, "Tool call")).toBeNull();
   });
 
   it("labels file reads with the path and never the file body", () => {
