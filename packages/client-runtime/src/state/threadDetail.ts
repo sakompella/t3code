@@ -1,4 +1,8 @@
-import type { OrchestrationV2ThreadProjection, ScopedThreadRef } from "@t3tools/contracts";
+import type {
+  OrchestrationV2PendingBackgroundTask,
+  OrchestrationV2ThreadProjection,
+  ScopedThreadRef,
+} from "@t3tools/contracts";
 import * as Option from "effect/Option";
 import { AsyncResult, Atom } from "effect/unstable/reactivity";
 
@@ -8,6 +12,10 @@ import {
   type ThreadQueueWorkflowState,
 } from "./threadWorkflows.ts";
 import { deriveThreadTurnSubagents, type ThreadTurnSubagents } from "./threadSubagents.ts";
+import {
+  backgroundWorkTasksEqual,
+  deriveRunningTurnBackgroundWork,
+} from "./threadBackgroundWork.ts";
 import type { EnvironmentThread } from "./models.ts";
 import { EMPTY_ENVIRONMENT_THREAD_STATE, type EnvironmentThreadState } from "./threadState.ts";
 import {
@@ -123,6 +131,21 @@ export function createEnvironmentThreadDetailAtoms<E>(
     }).pipe(Atom.setIdleTTL(0), Atom.withLabel(`environment-thread-turn-subagents:${key}`));
   });
 
+  const runningTurnBackgroundWorkAtomFamily = Atom.family((key: string) => {
+    const none: ReadonlyArray<OrchestrationV2PendingBackgroundTask> = [];
+    let value = none;
+    return Atom.make((get) => {
+      const projection = Option.getOrNull(get(threadStateValueAtomFamily(key)).data);
+      const next = projection === null ? none : deriveRunningTurnBackgroundWork(projection);
+      // Fresh task objects every projection update; keep the old array when unchanged.
+      if (!backgroundWorkTasksEqual(value, next)) value = next;
+      return value;
+    }).pipe(
+      Atom.setIdleTTL(0),
+      Atom.withLabel(`environment-thread-running-turn-background-work:${key}`),
+    );
+  });
+
   const worktreePathAtomFamily = Atom.family((key: string) =>
     Atom.make(
       (get) =>
@@ -189,6 +212,8 @@ export function createEnvironmentThreadDetailAtoms<E>(
     queueWorkflowAtom: (ref: ScopedThreadRef) => queueWorkflowAtomFamily(threadKey(ref)),
     queuedCountAtom: (ref: ScopedThreadRef) => queuedCountAtomFamily(threadKey(ref)),
     turnSubagentsAtom: (ref: ScopedThreadRef) => turnSubagentsAtomFamily(threadKey(ref)),
+    runningTurnBackgroundWorkAtom: (ref: ScopedThreadRef) =>
+      runningTurnBackgroundWorkAtomFamily(threadKey(ref)),
     stateAtom: (ref: ScopedThreadRef) => threadStateValueAtomFamily(threadKey(ref)),
     threadAtom: (ref: ScopedThreadRef) => threadAtomFamily(threadKey(ref)),
     visibleTurnItemsAtom: (ref: ScopedThreadRef) => visibleTurnItemsAtomFamily(threadKey(ref)),

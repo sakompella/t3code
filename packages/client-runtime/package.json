@@ -287,6 +287,10 @@
       "types": "./src/state/composerDispatch.ts",
       "default": "./src/state/composerDispatch.ts"
     },
+    "./state/thread-background-work": {
+      "types": "./src/state/threadBackgroundWork.ts",
+      "default": "./src/state/threadBackgroundWork.ts"
+    },
     "./state/thread-subagents": {
       "types": "./src/state/threadSubagents.ts",
       "default": "./src/state/threadSubagents.ts"
