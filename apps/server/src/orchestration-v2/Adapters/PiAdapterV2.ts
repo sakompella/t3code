@@ -121,6 +121,9 @@ const DEFAULT_PI_SETTINGS = Schema.decodeSync(PiSettings)({});
 const PI_INHERIT_MODEL_SLUG = "default";
 
 const STREAM_FLUSH_MS = 50;
+const FINISHING_UP_LABEL = "Finishing up…";
+const FINISHED_UP_LABEL = "Finished up";
+const FINISHING_UP_DELAY = Duration.millis(1_500);
 const PI_REQUEST_TIMEOUT_MS = 15_000;
 // Session lifecycle hooks reload extensions, MCP servers and language servers.
 const PI_SESSION_TIMEOUT_MS = 60_000;
@@ -361,6 +364,16 @@ interface ActivePiTurn {
   manualCompactInFlight: boolean;
   activeCompaction: PiCompactionState | null;
   activeProviderRetry: PiProviderRetryState | null;
+  /**
+   * The "Finishing up…" row shown between the final reply and the end of the
+   * run, while Prime Agent still reviews its own harness.
+   */
+  finishingUp: {
+    readonly nativeItemId: string;
+    readonly startedAt: DateTime.Utc;
+    /** The row is only shown once the wait runs long enough to notice. */
+    shown: boolean;
+  } | null;
   failure: ReturnType<typeof makeProviderFailure> | null;
   /** Session-tree refs read just before Stop terminates Pi, when no read is possible later. */
   stopTreeRefs?: PiTurnTreeRefs | null;
@@ -1785,6 +1798,115 @@ export function makePiAdapterV2(
         });
       });
 
+      const emitNotice = Effect.fnUntraced(function* (
+        turn: ActivePiTurn,
+        nativeItemId: string,
+        message: string,
+        status: "running" | "completed",
+        startedAt: DateTime.Utc,
+        emittedAt: DateTime.Utc,
+      ) {
+        const completedAt = status === "completed" ? emittedAt : null;
+        yield* emitItemNode(turn, nativeItemId, "system", status, startedAt, completedAt);
+        yield* emit({
+          type: "turn_item.updated",
+          driver,
+          turnItem: {
+            ...baseItemFields(turn, nativeItemId, startedAt, emittedAt),
+            status,
+            title: message,
+            completedAt,
+            type: "system_notice",
+            message,
+          },
+        });
+      });
+
+      /**
+       * Prime Agent runs a model call for its own harness review after the
+       * final reply and before `agent_end`, and says nothing while it does.
+       * Without a row the turn looks like it is still thinking. Most turns
+       * skip the review, so the row waits a moment before it appears.
+       */
+      const openFinishingUp = Effect.fnUntraced(function* (turn: ActivePiTurn) {
+        if (flavor.settleSignal !== "idle_probe" || turn.finishingUp !== null || turn.interrupted) {
+          return;
+        }
+        const startedAt = yield* DateTime.now;
+        const finishingUp = {
+          nativeItemId: `finishing-up:${turn.nextItemOrdinal}`,
+          startedAt,
+          shown: false,
+        };
+        turn.finishingUp = finishingUp;
+        yield* Effect.sleep(FINISHING_UP_DELAY).pipe(
+          Effect.andThen(
+            sessionEventPermit.withPermits(1)(
+              Effect.gen(function* () {
+                if (turn.finishingUp !== finishingUp || threadState?.activeTurn !== turn) return;
+                finishingUp.shown = true;
+                const shownAt = yield* DateTime.now;
+                yield* emitNotice(
+                  turn,
+                  finishingUp.nativeItemId,
+                  FINISHING_UP_LABEL,
+                  "running",
+                  startedAt,
+                  shownAt,
+                );
+              }),
+            ),
+          ),
+          Effect.forkIn(scope),
+        );
+      });
+
+      const closeFinishingUp = Effect.fnUntraced(function* (turn: ActivePiTurn) {
+        const finishingUp = turn.finishingUp;
+        if (finishingUp === null) return;
+        turn.finishingUp = null;
+        if (!finishingUp.shown) return;
+        const completedAt = yield* DateTime.now;
+        yield* emitNotice(
+          turn,
+          finishingUp.nativeItemId,
+          FINISHED_UP_LABEL,
+          "completed",
+          finishingUp.startedAt,
+          completedAt,
+        );
+      });
+
+      const emitRefineOutcome = Effect.fnUntraced(function* (event: PiRpcRecord) {
+        const turn = threadState?.activeTurn ?? null;
+        if (turn === null) return;
+        const emittedAt = yield* DateTime.now;
+        if (event["type"] === "refine_complete") {
+          const result = recordField(event, "result");
+          const summary = recordString(result, "summary")?.trim();
+          const nativeItemId = `refine:${recordString(result, "id") ?? turn.nextItemOrdinal}`;
+          const message =
+            summary === undefined || summary.length === 0
+              ? "Refined its harness."
+              : `Refined its harness: ${summary}`;
+          yield* emitNotice(turn, nativeItemId, message, "completed", emittedAt, emittedAt);
+          return;
+        }
+        const detail = recordString(event, "error")?.trim();
+        const message =
+          detail === undefined || detail.length === 0
+            ? "Harness refinement failed."
+            : `Harness refinement failed: ${detail.slice(0, 500)}`;
+        yield* emitNotice(
+          turn,
+          `refine-failed:${turn.nextItemOrdinal}`,
+          message,
+          "completed",
+          emittedAt,
+          emittedAt,
+        );
+      });
+
       // ── turn lifecycle ────────────────────────────────────
 
       /**
@@ -1914,6 +2036,7 @@ export function makePiAdapterV2(
         state.activeTurn = null;
         const completedAt = yield* DateTime.now;
         yield* completeOpenStreamItems(turn);
+        yield* closeFinishingUp(turn);
         if (turn.activeCompaction !== null) {
           const status = turn.interrupted
             ? "cancelled"
@@ -2123,11 +2246,41 @@ export function makePiAdapterV2(
             }
             turn.sawAgentActivity = true;
             turn.settleProbeGeneration += 1;
+            yield* closeFinishingUp(turn);
+            return;
+          }
+          case "turn_start": {
+            // The run went on after the reply, e.g. to answer a steer.
+            if (turn !== null) yield* closeFinishingUp(turn);
+            return;
+          }
+          case "turn_end": {
+            if (turn === null) return;
+            const message = event["message"];
+            const content = recordField(message, "content");
+            const callsTools =
+              Array.isArray(content) &&
+              content.some((part) => recordString(part, "type") === "toolCall");
+            const stopReason = recordString(message, "stopReason");
+            if (
+              recordString(message, "role") === "assistant" &&
+              !callsTools &&
+              stopReason !== "error" &&
+              stopReason !== "aborted"
+            ) {
+              yield* openFinishingUp(turn);
+            }
+            return;
+          }
+          case "refine_complete":
+          case "refine_failed": {
+            yield* emitRefineOutcome(event);
             return;
           }
           case "message_start": {
             yield* completeBackgroundJob(event["message"]);
             if (turn !== null && recordString(event["message"], "role") === "assistant") {
+              yield* closeFinishingUp(turn);
               turn.sawAgentActivity = true;
               turn.messageOrdinal += 1;
               // Pi persists the prompt before it emits the reply, so the
@@ -2187,6 +2340,7 @@ export function makePiAdapterV2(
           }
           case "tool_execution_start":
             if (turn !== null) {
+              yield* closeFinishingUp(turn);
               turn.sawAgentActivity = true;
               yield* emitToolItem(turn, event, "start");
             }
@@ -2989,6 +3143,7 @@ export function makePiAdapterV2(
               manualCompactInFlight: compactCommand !== null,
               activeCompaction: null,
               activeProviderRetry: null,
+              finishingUp: null,
               failure: null,
             };
             // Only the install/send/start-event boundary excludes the event

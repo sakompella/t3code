@@ -2507,6 +2507,100 @@ describe("PiAdapterV2 with the Prime Agent flavor", () => {
     }).pipe(Effect.scoped, Effect.provide(testLayer)),
   );
 
+  const finalReply = {
+    type: "turn_end",
+    message: { role: "assistant", content: [{ type: "text", text: "done" }], stopReason: "stop" },
+  } as const;
+
+  const systemNotices = (events: ReadonlyArray<ProviderAdapterV2Event>) =>
+    events.flatMap((event) =>
+      event.type === "turn_item.updated" && event.turnItem.type === "system_notice"
+        ? [{ message: event.turnItem.message, status: event.turnItem.status }]
+        : [],
+    );
+
+  it.effect("shows a Finishing up row while Prime Agent is busy after the final reply", () =>
+    Effect.gen(function* () {
+      const fake = yield* makeFakePi;
+      const { runtime, takeEvent, providerThread } = yield* openPrimeThread(fake);
+      yield* startTurn(runtime, providerThread);
+      yield* fake.takeRequest("prompt");
+      yield* fake.emit({ type: "agent_start" });
+      yield* fake.emit(finalReply);
+      const runningRow = yield* takeEvent(
+        (event) =>
+          event.type === "turn_item.updated" &&
+          event.turnItem.type === "system_notice" &&
+          event.turnItem.status === "running",
+      ).pipe(Effect.forkScoped);
+      // The row appears after a delay on the test clock.
+      for (let step = 0; step < 40 && runningRow.pollUnsafe() === undefined; step += 1) {
+        yield* TestClock.adjust(Duration.millis(100));
+        yield* Effect.yieldNow;
+      }
+      const running = yield* Fiber.join(runningRow);
+      assert.isTrue(
+        running.type === "turn_item.updated" &&
+          running.turnItem.type === "system_notice" &&
+          running.turnItem.message === "Finishing up…",
+      );
+
+      yield* fake.emit({ type: "agent_end", messages: [] });
+      const seen: Array<ProviderAdapterV2Event> = [];
+      yield* takeEvent((event) => {
+        seen.push(event);
+        return event.type === "turn.terminal";
+      });
+      assert.deepStrictEqual(systemNotices(seen), [
+        { message: "Finished up", status: "completed" },
+      ]);
+    }).pipe(Effect.scoped, Effect.provide(testLayer)),
+  );
+
+  it.effect("shows no Finishing up row when the run ends right after the final reply", () =>
+    Effect.gen(function* () {
+      const fake = yield* makeFakePi;
+      const { runtime, takeEvent, providerThread } = yield* openPrimeThread(fake);
+      yield* startTurn(runtime, providerThread);
+      yield* fake.takeRequest("prompt");
+      yield* fake.emit({ type: "agent_start" });
+      yield* fake.emit(finalReply);
+      yield* fake.emit({ type: "agent_end", messages: [] });
+      yield* fake.takeRequest("get_state");
+      const seen: Array<ProviderAdapterV2Event> = [];
+      yield* takeEvent((event) => {
+        seen.push(event);
+        return event.type === "turn.terminal";
+      });
+      assert.deepStrictEqual(systemNotices(seen), []);
+    }).pipe(Effect.scoped, Effect.provide(testLayer)),
+  );
+
+  it.effect("reports a finished refinement and a failed one as notices", () =>
+    Effect.gen(function* () {
+      const fake = yield* makeFakePi;
+      const { runtime, takeEvent, providerThread } = yield* openPrimeThread(fake);
+      yield* startTurn(runtime, providerThread);
+      yield* fake.takeRequest("prompt");
+      yield* fake.emit({ type: "agent_start" });
+      yield* fake.emit({
+        type: "refine_complete",
+        result: { id: "refine_1", summary: "Create a memory for the fork fix.", appliedEdits: [] },
+      });
+      yield* fake.emit({ type: "refine_failed", error: "planner timed out" });
+      yield* fake.emit({ type: "agent_end", messages: [] });
+      const seen: Array<ProviderAdapterV2Event> = [];
+      yield* takeEvent((event) => {
+        seen.push(event);
+        return event.type === "turn.terminal";
+      });
+      assert.deepStrictEqual(systemNotices(seen), [
+        { message: "Refined its harness: Create a memory for the fork fix.", status: "completed" },
+        { message: "Harness refinement failed: planner timed out", status: "completed" },
+      ]);
+    }).pipe(Effect.scoped, Effect.provide(testLayer)),
+  );
+
   it.effect("shows ipython cells as bash commands, python tools, and file changes", () =>
     Effect.gen(function* () {
       const fake = yield* makeFakePi;
