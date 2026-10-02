@@ -319,12 +319,17 @@ function joinWithAnd(parts: ReadonlyArray<string>): string {
   return `${parts.slice(0, -1).join(", ")} and ${parts.at(-1)}`;
 }
 
-/** Names what a settled thread still runs, grouped by kind, for the composer strip. */
+/**
+ * Names what a thread still runs, grouped by kind, for the composer strip.
+ * While a turn runs the agent is not waiting, so the title reads "Running ..."
+ * whatever the work is.
+ */
 export function presentPendingBackgroundWork(
   tasks: ReadonlyArray<OrchestrationV2PendingBackgroundTask>,
+  options: { readonly turnRunning?: boolean } = {},
 ): PendingBackgroundWorkPresentation | null {
   if (tasks.length === 0) return null;
-  const waiting = backgroundWorkHoldsCompletion(tasks);
+  const waiting = options.turnRunning !== true && backgroundWorkHoldsCompletion(tasks);
   const items = tasks
     .map((task): PendingBackgroundWorkItem => {
       const description = task.description?.trim();

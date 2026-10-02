@@ -576,6 +576,26 @@ describe("presentPendingBackgroundWork", () => {
     ).toMatchObject({ title: "Waiting on 1 command and 1 monitor", waiting: true });
   });
 
+  it("reads as running, not waiting, while a turn runs", () => {
+    expect(
+      presentPendingBackgroundWork(
+        [
+          { taskId: "a", kind: "command", description: "npm run dev" },
+          { taskId: "b", kind: "subagent" },
+        ],
+        { turnRunning: true },
+      ),
+    ).toMatchObject({ title: "Running 1 subagent and 1 command", waiting: false });
+    expect(
+      presentPendingBackgroundWork([{ taskId: "a", kind: "monitor", description: "Watch PR" }], {
+        turnRunning: true,
+      }),
+    ).toMatchObject({ title: "Running: Watch PR", waiting: false });
+    expect(
+      presentPendingBackgroundWork([{ taskId: "a", kind: "monitor", description: "Watch PR" }]),
+    ).toMatchObject({ title: "Waiting on monitor Watch PR", waiting: true });
+  });
+
   it("groups work by kind, subagents first, and keeps each name", () => {
     const presentation = presentPendingBackgroundWork([
       { taskId: "cmd", kind: "command", description: "npm test" },
