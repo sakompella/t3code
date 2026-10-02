@@ -100,7 +100,11 @@ interface FakePi {
   readonly queueModels: (models: ReadonlyArray<unknown>) => void;
   readonly vetoNextNewSession: () => void;
   readonly allRequests: () => ReadonlyArray<PiRpcRecord>;
+  /** History returned by the next `observe` ack. */
+  readonly queueObserved: (messages: ReadonlyArray<unknown>) => void;
   readonly queueStats: (data: unknown) => void;
+  /** Data returned by the next `get_commands` acks, consumed in order. */
+  readonly queueCommands: (data: unknown) => void;
   readonly closeStdout: Effect.Effect<void>;
   readonly lastSpawn: () => {
     readonly args: ReadonlyArray<string>;
@@ -134,6 +138,8 @@ const makeFakePi: Effect.Effect<FakePi> = Effect.gen(function* () {
   const forkMessagesQueue: Array<unknown> = [];
   const stateQueue: Array<Record<string, unknown>> = [];
   const statsQueue: Array<unknown> = [];
+  const observedQueue: Array<ReadonlyArray<unknown>> = [];
+  const commandsQueue: Array<{ readonly success: boolean; readonly data?: unknown }> = [];
   const allRequests: Array<PiRpcRecord> = [];
   let deferState = false;
   let deferredStateRequest: PiRpcRecord | undefined;
@@ -208,8 +214,12 @@ const makeFakePi: Effect.Effect<FakePi> = Effect.gen(function* () {
         return { ...base, data: messagesQueue.shift() ?? { messages: [] } };
       case "get_fork_messages":
         return { ...base, data: forkMessagesQueue.shift() ?? { messages: [] } };
+      case "observe":
+        return { ...base, data: { messages: observedQueue.shift() ?? [] } };
       case "get_session_stats":
         return { ...base, data: statsQueue.shift() ?? {} };
+      case "get_commands":
+        return { ...base, ...(commandsQueue.shift() ?? { data: { commands: [] } }) };
       case "fork":
         return { ...base, data: { text: "Hello pi", cancelled: false } };
       default:
@@ -325,7 +335,9 @@ const makeFakePi: Effect.Effect<FakePi> = Effect.gen(function* () {
     setStreaming: (streaming) => {
       isStreaming = streaming;
     },
+    queueObserved: (messages) => observedQueue.push(messages),
     queueStats: (data) => statsQueue.push(data),
+    queueCommands: (data) => commandsQueue.push({ success: true, data }),
     closeStdout: Queue.end(stdout),
     lastSpawn: () => lastSpawn,
   } satisfies FakePi;
@@ -4856,6 +4868,57 @@ describe("PiAdapterV2 with the Prime Agent flavor", () => {
         (event) => event.type === "turn.terminal" || event.type === "subagent.updated",
       );
       assert.equal(next.type, "turn.terminal");
+    }).pipe(Effect.scoped, Effect.provide(testLayer)),
+  );
+
+  it.effect("streams a running child's session into its own thread", () =>
+    Effect.gen(function* () {
+      const fake = yield* makeFakePi;
+      const session = yield* openPrimeThread(fake);
+      fake.queueObserved([
+        { role: "user", content: "Reply to your parent with child-ok", timestamp: 1000 },
+        { role: "assistant", content: [{ type: "text", text: "On it." }], timestamp: 1001 },
+      ]);
+      yield* startTurn(session.runtime, session.providerThread);
+      yield* fake.takeRequest("prompt");
+      yield* fake.emit({ type: "agent_start" });
+      yield* fake.emit(rlmChild("queued"));
+      yield* fake.emit(rlmChild("running", { activeSessionId: "active-1" }));
+      const running = yield* session.takeEvent(
+        (event) =>
+          event.type === "subagent.updated" &&
+          event.subagent.status === "running" &&
+          event.subagent.childThreadId !== null,
+      );
+      const childThreadId =
+        running.type === "subagent.updated" ? running.subagent.childThreadId : null;
+      assert.isNotNull(childThreadId);
+      assert.equal((yield* fake.takeRequest("observe"))["activeSessionId"], "active-1");
+
+      // The history lands in the child thread, and live events follow it.
+      yield* fake.emit({
+        type: "observed_session_event",
+        activeSessionId: "active-1",
+        event: {
+          type: "message_end",
+          message: {
+            role: "assistant",
+            content: [{ type: "text", text: "child-ok sent." }],
+            timestamp: 1002,
+          },
+        },
+      });
+      const reply = yield* session.takeEvent(
+        (event) =>
+          event.type === "message.updated" &&
+          event.message.threadId === childThreadId &&
+          event.message.role === "assistant" &&
+          event.message.text === "child-ok sent.",
+      );
+      assert.equal(reply.type, "message.updated");
+
+      yield* fake.emit(rlmChild("done", { activeSessionId: "active-1" }));
+      assert.equal((yield* fake.takeRequest("unobserve"))["activeSessionId"], "active-1");
     }).pipe(Effect.scoped, Effect.provide(testLayer)),
   );
 
