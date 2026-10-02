@@ -5,6 +5,7 @@ import {
   classifyIpythonCell,
   detachedBashJobs,
   previewPythonCell,
+  reportedCommandMatches,
 } from "./primeAgentIpythonCell.ts";
 
 describe("classifyIpythonCell", () => {
@@ -40,6 +41,70 @@ describe("classifyIpythonCell", () => {
     });
   });
 
+  it.each([
+    {
+      name: "assigned await of an f-string, printing output",
+      code: "r = await bash(f'''sed -n 1842,1900p {dac}; rg -n \"x\" {src}/main.ts''')\nprint(r.output)",
+      command: 'sed -n 1842,1900p {dac}; rg -n "x" {src}/main.ts',
+    },
+    {
+      name: "sliced output print",
+      code: "r = await bash(f'ls {d}')\nprint(r.output[:4000])",
+      command: "ls {d}",
+    },
+    {
+      name: "background handle",
+      code: "h = bash('npx vp test run a.test.ts')",
+      command: "npx vp test run a.test.ts",
+    },
+    {
+      name: "background handle printing its pid",
+      code: "h = bash('npx vp test run a.test.ts')\nprint(h.pid)",
+      command: "npx vp test run a.test.ts",
+    },
+    { name: "bare await", code: 'await bash("make")', command: "make" },
+    {
+      name: "keyword args on several lines",
+      code: "x = await bash(\n  f'pnpm -C {pkg} test',\n  timeout=120,\n)\nprint(x.exit_code)",
+      command: "pnpm -C {pkg} test",
+    },
+    {
+      name: "escaped braces in an f-string",
+      code: "await bash(f\"awk '{{print $1}}' {path}\")",
+      command: "awk '{print $1}' {path}",
+    },
+    {
+      name: "raw f-string",
+      code: "await bash(rf'grep -E \"\\d+\" {path}')",
+      command: 'grep -E "\\d+" {path}',
+    },
+    {
+      name: "plain string is not an f-string",
+      code: "await bash('echo {not_a_placeholder}')",
+      command: "echo {not_a_placeholder}",
+    },
+  ])("treats $name as a shell command", ({ code, command }) => {
+    expect(classifyIpythonCell(code)).toEqual({ kind: "bash", command });
+  });
+
+  it("keeps noise and result prints from changing a bash classification", () => {
+    const prefixes = ["", "import os\n", "# go\n", "print('start')\n"];
+    const calls = ["r = await bash(f'ls {d}')", "h = bash('ls')", "await bash('ls', timeout=5)"];
+    const suffixes = [
+      "",
+      "\nprint(r.output)",
+      "\nprint(r.output[:4000])",
+      "; print(r.exit_code)",
+      "\nprint(h.pid, h.running)",
+      "\n\n# done",
+    ];
+    for (const prefix of prefixes)
+      for (const call of calls)
+        for (const suffix of suffixes) {
+          expect(classifyIpythonCell(prefix + call + suffix).kind).toBe("bash");
+        }
+  });
+
   it("keeps cells that do more than run one command as Python", () => {
     const cases = [
       "from pathlib import Path; Path('x.txt').write_text('a')",
@@ -48,6 +113,14 @@ describe("classifyIpythonCell", () => {
       "await bash('ls' + suffix)",
       'bash("\\x41")',
       "print('%%bash')",
+      "await bash('a')\nawait bash('b')",
+      "r = await bash(f'a {x}')\nr2 = await bash(f'b {r.output}')",
+      "print(await bash('ls'))",
+      "for d in dirs:\n    await bash(f'ls {d}')",
+      "await bash(f'ls {d}' + suffix)",
+      "await bash(f'ls {d}') and cleanup()",
+      "r = await bash(f'ls')\nvalue = r.output.split()",
+      "await bash(f'ls {d}', timeout=compute(3))",
     ];
     for (const code of cases) {
       expect(classifyIpythonCell(code)).toEqual({ kind: "python", code });
@@ -70,9 +143,12 @@ describe("detachedBashJobs", () => {
       detachedBashJobs(
         "late_job = bash('sleep 40 && echo late'); print(late_job.pid, late_job.running)",
       ),
-    ).toEqual([{ variable: "late_job", command: "sleep 40 && echo late" }]);
+    ).toEqual([{ variable: "late_job", command: "sleep 40 && echo late", isTemplate: false }]);
     expect(detachedBashJobs('import time\nbash("make watch")')).toEqual([
-      { variable: null, command: "make watch" },
+      { variable: null, command: "make watch", isTemplate: false },
+    ]);
+    expect(detachedBashJobs("h = bash(f'npx vp test run {file}')\nprint(h.pid)")).toEqual([
+      { variable: "h", command: "npx vp test run {file}", isTemplate: true },
     ]);
   });
 
@@ -86,5 +162,24 @@ describe("detachedBashJobs", () => {
     expect(awaitsHandle("out = await late_job\nprint(out)", "late_job")).toBe(true);
     expect(awaitsHandle("print(late_job.running)", "late_job")).toBe(false);
     expect(awaitsHandle("await late_jobs_list", "late_job")).toBe(false);
+  });
+});
+
+describe("reportedCommandMatches", () => {
+  const literal = { variable: "h", command: "sleep 40 && echo late", isTemplate: false };
+  const template = { variable: "h", command: "npx vp test run {file} --bail", isTemplate: true };
+
+  it("matches a literal command, whole or truncated", () => {
+    expect(reportedCommandMatches(literal, "sleep 40 && echo late")).toBe(true);
+    expect(reportedCommandMatches(literal, "sleep 40\n... [command truncated]")).toBe(true);
+    expect(reportedCommandMatches(literal, "sleep 41")).toBe(false);
+  });
+
+  it("matches an f-string job against its expanded command", () => {
+    expect(reportedCommandMatches(template, "npx vp test run a/b.test.ts --bail")).toBe(true);
+    expect(reportedCommandMatches(template, "npx vp test run  --bail")).toBe(true);
+    expect(reportedCommandMatches(template, "npx vp test run a.ts")).toBe(false);
+    expect(reportedCommandMatches(template, "npx vp te\n... [command truncated]")).toBe(true);
+    expect(reportedCommandMatches(template, "make\n... [command truncated]")).toBe(false);
   });
 });
