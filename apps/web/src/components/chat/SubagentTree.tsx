@@ -1,10 +1,11 @@
 import type { SubagentTree, SubagentTreeNode } from "@t3tools/client-runtime/state/subagent-tree";
 import type { ThreadId } from "@t3tools/contracts";
 import * as DateTime from "effect/DateTime";
-import { Fragment, useState } from "react";
+import { Fragment, useState, type ReactNode } from "react";
 
 import { AgentElapsed } from "./AgentElapsed";
 import { InlineButton } from "../ui/button";
+import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
 
 /**
  * Live subagents as an indented tree, modeled on Prime Agent's agents view:
@@ -60,8 +61,13 @@ export function SubagentTreeList(props: {
           <span aria-hidden className="w-3 shrink-0 text-center font-semibold text-foreground">
             ◈
           </span>
-          <span className="min-w-0 truncate font-mono text-foreground">{command.label}</span>
-          <span className="ms-auto shrink-0 text-muted-foreground/70">command</span>
+          <FullTextOnHover
+            text={command.label}
+            className="min-w-0 flex-1 truncate font-mono text-foreground"
+          >
+            {command.label}
+          </FullTextOnHover>
+          <span className="shrink-0 text-muted-foreground/70">command</span>
         </li>
       ))}
     </ul>
@@ -92,25 +98,38 @@ function SubagentTreeRow(props: {
       >
         {running ? "◈" : "◐"}
       </span>
-      <span className="min-w-0 shrink truncate font-semibold text-foreground">
+      <FullTextOnHover
+        text={title}
+        className="flex min-w-0 max-w-40 shrink-0 font-semibold text-foreground"
+      >
         {childThreadId === null ? (
-          title
+          <span className="truncate">{title}</span>
         ) : (
           <InlineButton
             aria-label={`Open subagent ${title}`}
+            className="min-w-0 max-w-full shrink"
             onClick={() => props.onOpenThread(childThreadId)}
           >
-            {title}
+            <span className="truncate">{title}</span>
           </InlineButton>
         )}
-      </span>
+      </FullTextOnHover>
       {subagent.model === null ? null : (
-        <span className="min-w-0 shrink-[2] truncate text-muted-foreground">{subagent.model}</span>
+        <span className="min-w-0 max-w-32 shrink truncate text-muted-foreground">
+          {subagent.model}
+        </span>
       )}
-      {activity === undefined || activity.length === 0 ? null : (
-        <span className="min-w-0 shrink-[3] truncate text-muted-foreground/70">{activity}</span>
+      {activity === undefined || activity.length === 0 ? (
+        <span className="flex-1" />
+      ) : (
+        <FullTextOnHover
+          text={activity}
+          className="min-w-0 flex-1 basis-0 truncate text-muted-foreground/70"
+        >
+          {activity}
+        </FullTextOnHover>
       )}
-      <span className="ms-auto shrink-0 text-muted-foreground/70">
+      <span className="shrink-0 text-muted-foreground/70">
         <AgentElapsed
           agent={{
             status: subagent.status,
@@ -121,5 +140,21 @@ function SubagentTreeRow(props: {
         />
       </span>
     </li>
+  );
+}
+
+/** A single-line span whose full text shows in a tooltip, for content clipped by the row. */
+function FullTextOnHover(props: {
+  readonly text: string;
+  readonly className: string;
+  readonly children: ReactNode;
+}) {
+  return (
+    <Tooltip>
+      <TooltipTrigger render={<span className={props.className} />}>
+        {props.children}
+      </TooltipTrigger>
+      <TooltipPopup side="top">{props.text}</TooltipPopup>
+    </Tooltip>
   );
 }
