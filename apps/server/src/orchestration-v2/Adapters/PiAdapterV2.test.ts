@@ -3058,7 +3058,7 @@ describe("PiAdapterV2 with the Prime Agent flavor", () => {
         python.type === "turn_item.updated" &&
           python.turnItem.type === "dynamic_tool" &&
           python.turnItem.toolName === "python" &&
-          python.turnItem.title === "Python: edit('src/a.ts', 'old', 'new')" &&
+          python.turnItem.title === "edit('src/a.ts', 'old', 'new')" &&
           python.turnItem.status === "failed",
       );
       const fileChange = yield* takeEvent(

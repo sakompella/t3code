@@ -163,29 +163,22 @@ export function workEntryDisplayLabel(entry: WorkLogEntry, workspaceRoot: string
   return `${heading.charAt(0).toUpperCase()}${heading.slice(1)}`;
 }
 
-const PYTHON_LABEL_PREFIX = "Python: ";
+// Older Prime Agent rows were titled "Python: <preview>"; the code alone is enough.
+const LEGACY_PYTHON_LABEL_PREFIX = "Python: ";
 
 /**
- * Splits a row label into its code part, a shell command or a Python cell
- * preview, so the row can render that part in the code font. Returns null
- * when the label is prose.
+ * The code a row label shows, a shell command or a Python cell preview, so the
+ * row can render it in the code font. Returns null when the label is prose.
  */
-export function workEntryLabelCode(
-  entry: WorkLogEntry,
-  label: string,
-): { readonly prefix: string | null; readonly code: string } | null {
-  if (entry.command && label === commandDisplayText(entry.command)) {
-    return { prefix: null, code: label };
-  }
+export function workEntryLabelCode(entry: WorkLogEntry, label: string): string | null {
+  if (entry.command && label === commandDisplayText(entry.command)) return label;
   const item = entry.structuredPayload;
-  if (
-    item?.type === "dynamic_tool" &&
-    item.toolName === "python" &&
-    label.startsWith(PYTHON_LABEL_PREFIX)
-  ) {
-    return { prefix: "Python", code: label.slice(PYTHON_LABEL_PREFIX.length) };
+  if (item?.type !== "dynamic_tool" || item.toolName !== "python" || label === "Python") {
+    return null;
   }
-  return null;
+  return label.startsWith(LEGACY_PYTHON_LABEL_PREFIX)
+    ? label.slice(LEGACY_PYTHON_LABEL_PREFIX.length)
+    : label;
 }
 
 /** Inspectable read-file output is the path when we have one, otherwise nothing. */
