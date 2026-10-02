@@ -1232,6 +1232,20 @@ export function makePiAdapterV2(
         return item;
       });
 
+      /**
+       * Lossy streams (see `PiFlavor.lossyStream`) can drop `message_start`, so
+       * counting starts would give a later message the id of an earlier,
+       * completed one. Their messages are keyed by the snapshot's own
+       * timestamp instead, on every event. Returns whether the snapshot had one.
+       */
+      const adoptMessageIdentity = (turn: PiItemSink, message: unknown) => {
+        if (!flavor.lossyStream) return false;
+        const timestamp = recordNumber(message, "timestamp");
+        if (timestamp === undefined) return false;
+        turn.messageOrdinal = timestamp;
+        return true;
+      };
+
       const completeStreamItem = (turn: PiItemSink, item: PiStreamItemState, text?: string) =>
         Effect.suspend(() => {
           if (item.completed) return Effect.void;
@@ -2705,7 +2719,7 @@ export function makePiAdapterV2(
             if (turn !== null && recordString(event["message"], "role") === "assistant") {
               yield* closeFinishingUp(turn);
               turn.sawAgentActivity = true;
-              turn.messageOrdinal += 1;
+              if (!adoptMessageIdentity(turn, event["message"])) turn.messageOrdinal += 1;
               // Pi persists the prompt before it emits the reply, so the
               // first reply is the earliest point the start entry is readable.
               // Pi's recorded replay fixtures predate this read, so only the
@@ -2723,6 +2737,7 @@ export function makePiAdapterV2(
             const delta = event["assistantMessageEvent"];
             const deltaType = recordString(delta, "type");
             const contentIndex = recordNumber(delta, "contentIndex") ?? 0;
+            adoptMessageIdentity(turn, event["message"]);
             if (flavor.lossyStream) yield* adoptSnapshot(turn, event["message"], false);
             if (deltaType === "text_delta" || deltaType === "thinking_delta") {
               const item = yield* streamItemFor(
@@ -2756,6 +2771,7 @@ export function makePiAdapterV2(
             if (turn === null) return;
             const message = event["message"];
             if (recordString(message, "role") !== "assistant") return;
+            adoptMessageIdentity(turn, message);
             if (flavor.lossyStream) yield* adoptSnapshot(turn, message, true);
             yield* completeOpenStreamItems(turn);
             if (recordString(message, "stopReason") === "error" && turn.failure === null) {
