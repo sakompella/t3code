@@ -43,6 +43,7 @@ import {
   RunId,
 } from "@t3tools/contracts";
 import type { ThreadRunSummary } from "@t3tools/client-runtime/state/shell";
+import { noticeExpandedText } from "@t3tools/client-runtime/state/turn-item-presentation";
 import {
   resolveT3McpToolDefinition,
   resolveT3McpToolPresentation,
@@ -231,12 +232,13 @@ export function liveWorkEntryLabel(
 
 /**
  * Whether a work row's projected item has anything to show when expanded. A
- * notification is its summary, so without a detail the row stays closed
- * instead of opening an empty panel.
+ * notice or notification is its one-line label, so it stays closed instead of
+ * opening an empty or repeating panel, unless the row can cut its text off.
  */
 export function workEntryHasInspectableContent(entry: WorkLogEntry): boolean {
   const item = entry.projectedItem?.item;
-  return item?.type !== "notification" || Boolean(item.detail?.trim());
+  if (item?.type !== "notification" && item?.type !== "system_notice") return true;
+  return noticeExpandedText(item) !== null;
 }
 
 export function workEntryIsVisibleInGroup(

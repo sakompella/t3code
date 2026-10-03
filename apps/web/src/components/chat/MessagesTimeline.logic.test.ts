@@ -6,6 +6,7 @@ import {
   TurnItemId,
   RuntimeRequestId,
   type OrchestrationV2ProjectedTurnItem,
+  type OrchestrationV2TurnItem,
 } from "@t3tools/contracts";
 import * as DateTime from "effect/DateTime";
 import {
@@ -5102,28 +5103,23 @@ describe("replies inside a run that received steers or notifications", () => {
 
 describe("workEntryHasInspectableContent", () => {
   const now = DateTime.makeUnsafe("2026-09-09T00:00:00Z");
-  const workEntryFor = (detail?: string) => {
-    const item = {
-      id: TurnItemId.make("notice"),
-      threadId: ThreadId.make("parent"),
-      runId: RunId.make("run"),
-      nodeId: null,
-      providerThreadId: null,
-      providerTurnId: null,
-      nativeItemRef: null,
-      parentItemId: null,
-      ordinal: 0,
-      status: "completed" as const,
-      title: null,
-      startedAt: now,
-      completedAt: now,
-      updatedAt: now,
-      type: "notification" as const,
-      source: { kind: "command" as const },
-      outcome: "completed" as const,
-      summary: "Background command finished",
-      ...(detail === undefined ? {} : { detail }),
-    };
+  const base = {
+    id: TurnItemId.make("notice"),
+    threadId: ThreadId.make("parent"),
+    runId: RunId.make("run"),
+    nodeId: null,
+    providerThreadId: null,
+    providerTurnId: null,
+    nativeItemRef: null,
+    parentItemId: null,
+    ordinal: 0,
+    status: "completed" as const,
+    title: null,
+    startedAt: now,
+    completedAt: now,
+    updatedAt: now,
+  };
+  const workEntryFor = (item: OrchestrationV2TurnItem) => {
     const [entry] = deriveTimelineEntriesFromVisibleTurnItems({
       optimisticMessages: [],
       visibleTurnItems: [
@@ -5140,11 +5136,40 @@ describe("workEntryHasInspectableContent", () => {
     return entry.entry;
   };
 
+  const notification = (summary: string, detail?: string) =>
+    workEntryFor({
+      ...base,
+      type: "notification",
+      source: { kind: "command" },
+      outcome: "completed",
+      summary,
+      ...(detail === undefined ? {} : { detail }),
+    });
+  const longMessage =
+    "Refined its harness: Update local Windows SSH, exit-node, and RustDesk handoff";
+
   it("opens a notification that carries a detail", () => {
-    expect(workEntryHasInspectableContent(workEntryFor("make build\n\nExit code 0"))).toBe(true);
+    expect(
+      workEntryHasInspectableContent(
+        notification("Background command finished", "make build\n\nExit code 0"),
+      ),
+    ).toBe(true);
   });
 
   it.each([undefined, "", "  \n"])("keeps a notification with detail %j closed", (detail) => {
-    expect(workEntryHasInspectableContent(workEntryFor(detail))).toBe(false);
+    expect(
+      workEntryHasInspectableContent(notification("Background command finished", detail)),
+    ).toBe(false);
+  });
+
+  it("opens a notification whose summary a row can cut off", () => {
+    expect(workEntryHasInspectableContent(notification(longMessage))).toBe(true);
+  });
+
+  it("keeps a short system notice closed and opens a long or multi-line one", () => {
+    const notice = (message: string) => workEntryFor({ ...base, type: "system_notice", message });
+    expect(workEntryHasInspectableContent(notice("Finished up"))).toBe(false);
+    expect(workEntryHasInspectableContent(notice(longMessage))).toBe(true);
+    expect(workEntryHasInspectableContent(notice("Failed\nretrying"))).toBe(true);
   });
 });

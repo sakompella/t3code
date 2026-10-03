@@ -5133,13 +5133,10 @@ const SimpleWorkEntryRow = memo(function SimpleWorkEntryRow(props: {
             bodyCode,
           )
       : null;
-  // A system notice's whole message is its label, so expanding would repeat it.
-  // A notification without a detail has nothing more to show either.
   const canExpandProjectedItem =
     plainOutput !== undefined
       ? Boolean(plainOutput || viewedImage || workEntry.questionAnswer)
-      : workEntry.itemType !== "system_notice" &&
-        workEntryHasInspectableContent(workEntry) &&
+      : workEntryHasInspectableContent(workEntry) &&
         (canExpand || workEntry.projectedItem !== undefined);
   // Reserve destructive row styling for severe failures, not routine tool errors.
   const iconWrapperClass = cn(
