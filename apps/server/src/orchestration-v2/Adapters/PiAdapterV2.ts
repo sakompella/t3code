@@ -149,6 +149,14 @@ const SETTLE_PROBE_RETRY_DELAY = Duration.millis(100);
 /** Idle-probe flavors re-read state while a retry, compaction, or queued action is still running. */
 const BUSY_PROBE_INITIAL_DELAY_MS = 100;
 const BUSY_PROBE_MAX_DELAY_MS = 1_000;
+/**
+ * How often an idle-probe flavor checks for a turn that went silent. Its RPC
+ * drops events without a trace when the daemon socket backs up, and `agent_end`
+ * is among them, so a quiet turn is confirmed against `get_state`.
+ */
+const QUIET_TURN_PROBE_INTERVAL = Duration.seconds(15);
+/** A busy re-probe chain logs its first poll and then one in this many. */
+const BUSY_PROBE_LOG_EVERY = 30;
 
 const PiProviderCapabilitiesV2 = {
   runtimePolicy: { enforcement: "client-boundary" },
@@ -1794,6 +1802,7 @@ export function makePiAdapterV2(
         settleAfterAgentActivity = false,
         attempt = 1,
         busyPolls = 0,
+        quiet = false,
       ) => {
         const providerTurnId = turn.providerTurn.id;
         const settleProbeGeneration = turn.settleProbeGeneration;
@@ -1807,6 +1816,7 @@ export function makePiAdapterV2(
                 settleProbeGeneration,
                 attempt,
                 busyPolls,
+                quiet,
                 data,
               }),
             // A failed probe still has to reach the pump. Dropping it would
@@ -1819,12 +1829,41 @@ export function makePiAdapterV2(
                 settleAfterAgentActivity,
                 settleProbeGeneration,
                 attempt,
+                quiet,
                 probeFailed: true,
               }),
           }),
           Effect.ignore,
           Effect.forkIn(scope),
         );
+      };
+
+      /**
+       * Records why a settle probe found the agent busy. It gets a span of its
+       * own because only logs inside a span reach the trace file.
+       */
+      const logBusySettleProbe = (
+        turn: ActivePiTurn,
+        data: unknown,
+        probe: { readonly quiet: boolean; readonly busyPolls: number },
+      ) => {
+        const sessionActions = recordField(data, "sessionActions");
+        const active = recordField(sessionActions, "active");
+        return Effect.logInfo("orchestration-v2.pi-settle-probe-busy", {
+          driver,
+          providerSessionId: input.providerSessionId,
+          providerTurnId: turn.providerTurn.id,
+          quiet: probe.quiet,
+          busyPolls: probe.busyPolls,
+          sessionEventCount: turn.sessionEventCount,
+          settleWhenIdle: turn.settleWhenIdle,
+          isStreaming: recordField(data, "isStreaming"),
+          isCompacting: recordField(data, "isCompacting"),
+          pendingMessageCount: recordNumber(data, "pendingMessageCount"),
+          queuedCount: recordNumber(sessionActions, "queuedCount"),
+          activeKind: recordString(active, "kind"),
+          activePhase: recordString(active, "phase"),
+        }).pipe(Effect.withSpan("PiAdapterV2.settleProbeBusy"));
       };
 
       /**
@@ -2281,17 +2320,23 @@ export function makePiAdapterV2(
             const data = event["data"];
             const probeFailed = event["probeFailed"] === true;
             const settleAfterAgentActivity = event["settleAfterAgentActivity"] === true;
+            const quiet = event["quiet"] === true;
             const attempt = Math.max(1, Math.trunc(recordNumber(event, "attempt") ?? 1));
             if (
               turn === null ||
               turn.providerTurn.id !== event["providerTurnId"] ||
               turn.settleProbeGeneration !== event["settleProbeGeneration"] ||
               (!settleAfterAgentActivity && turn.sawAgentActivity) ||
-              turn.activeCompaction !== null
+              // A quiet turn may have lost its compaction_end, and idle state
+              // already rules out a compaction that is still running.
+              (!quiet && turn.activeCompaction !== null)
             ) {
               return;
             }
             if (probeFailed) {
+              // The next quiet check asks again. A turn that is merely slow to
+              // answer get_state must not cost the session its process.
+              if (quiet) return;
               if (!settleAfterAgentActivity) {
                 if (state !== null) yield* finalizeTurn(state);
                 return;
@@ -2312,12 +2357,18 @@ export function makePiAdapterV2(
               if (state !== null) yield* finalizeTurn(state);
               return;
             }
+            const busyPolls = Math.max(0, Math.trunc(recordNumber(event, "busyPolls") ?? 0));
+            if (quiet || busyPolls % BUSY_PROBE_LOG_EVERY === 0) {
+              yield* logBusySettleProbe(turn, data, { quiet, busyPolls });
+            }
+            // A quiet check is its own timer: it asks again after the next
+            // silent interval, so a long tool call is not polled every second.
+            if (quiet) return;
             // Pi follows busy work with events that re-probe. Without
             // agent_settled, the end of a retry wait or a queued action has no
             // event of its own, so keep reading state until it goes idle.
             // New work bumps the generation, which retires this chain.
             if (flavor.settleSignal === "idle_probe") {
-              const busyPolls = Math.max(0, Math.trunc(recordNumber(event, "busyPolls") ?? 0));
               const delayMs = Math.min(
                 BUSY_PROBE_INITIAL_DELAY_MS * 2 ** busyPolls,
                 BUSY_PROBE_MAX_DELAY_MS,
@@ -2339,7 +2390,16 @@ export function makePiAdapterV2(
       yield* Effect.gen(function* () {
         while (true) {
           const event = yield* Queue.take(connection.events);
-          yield* sessionEventPermit.withPermits(1)(handleSessionEvent(event));
+          yield* sessionEventPermit.withPermits(1)(
+            Effect.suspend(() => {
+              const active = threadState?.activeTurn;
+              // Synthetic `t3.*` records are the adapter talking to itself.
+              if (active != null && !String(event["type"]).startsWith("t3.")) {
+                active.sessionEventCount += 1;
+              }
+              return handleSessionEvent(event);
+            }),
+          );
         }
       }).pipe(
         Effect.catchCause((cause) =>
@@ -2391,6 +2451,30 @@ export function makePiAdapterV2(
         ),
         Effect.forkIn(scope),
       );
+
+      // The RPC can lose `agent_end` along with the rest of a reply's closing
+      // events and never says so, so a turn that goes silent after real agent
+      // activity is checked against get_state. A turn that is still running
+      // answers busy and stays open.
+      if (flavor.settleSignal === "idle_probe") {
+        yield* Effect.gen(function* () {
+          let lastSeen: { readonly turn: ActivePiTurn; readonly eventCount: number } | null = null;
+          while (true) {
+            yield* Effect.sleep(QUIET_TURN_PROBE_INTERVAL);
+            const turn = threadState?.activeTurn ?? null;
+            const previous = lastSeen;
+            lastSeen = turn === null ? null : { turn, eventCount: turn.sessionEventCount };
+            if (
+              turn !== null &&
+              turn.sawAgentActivity &&
+              previous?.turn === turn &&
+              previous.eventCount === turn.sessionEventCount
+            ) {
+              yield* scheduleSettleProbe(turn, true, 1, 0, true);
+            }
+          }
+        }).pipe(Effect.forkIn(scope));
+      }
 
       // Discovery can invoke extension code and therefore raise a blocking
       // UI request. Start it only after the event pump exists, and never hold
@@ -2803,6 +2887,7 @@ export function makePiAdapterV2(
               lastLiveUsedTokens: null,
               settleProbeGeneration: 0,
               settleWhenIdle: false,
+              sessionEventCount: 0,
               sawCompaction: false,
               manualCompactInFlight: compactCommand !== null,
               activeCompaction: null,

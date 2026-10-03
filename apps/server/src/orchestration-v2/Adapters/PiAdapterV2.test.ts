@@ -2600,6 +2600,62 @@ describe("PiAdapterV2 with the Prime Agent flavor", () => {
     timestamp,
   });
 
+  /** Steps virtual time until the fake sees a `get_state`, as a quiet-turn probe would send. */
+  const takeQuietProbe = (fake: FakePi) =>
+    Effect.gen(function* () {
+      const probe = yield* fake.takeRequest("get_state").pipe(Effect.forkScoped);
+      for (let step = 0; step < 20 && probe.pollUnsafe() === undefined; step += 1) {
+        yield* TestClock.adjust(Duration.seconds(5));
+        yield* Effect.yieldNow;
+      }
+      return yield* Fiber.join(probe);
+    });
+
+  // Prime Agent's daemon socket drops events when it backs up, and its RPC
+  // never says so. A dropped agent_end must not leave the turn running.
+  it.effect("settles a turn whose message_end, turn_end and agent_end were all dropped", () =>
+    Effect.gen(function* () {
+      const fake = yield* makeFakePi;
+      const { runtime, takeEvent, providerThread } = yield* openPrimeThread(fake);
+      yield* startTurn(runtime, providerThread);
+      yield* fake.takeRequest("prompt");
+      yield* fake.emit({ type: "agent_start" });
+      yield* fake.emit({
+        type: "message_update",
+        message: assistantSnapshot(1000, "The final reply."),
+        assistantMessageEvent: { type: "text_delta", contentIndex: 0, delta: "The final reply." },
+      });
+
+      yield* takeQuietProbe(fake);
+
+      assert.deepEqual(yield* takeCompletedReplies(takeEvent), ["The final reply."]);
+    }).pipe(Effect.scoped, Effect.provide(testLayer)),
+  );
+
+  it.effect("keeps a quiet turn open while get_state shows the agent still running", () =>
+    Effect.gen(function* () {
+      const fake = yield* makeFakePi;
+      const { runtime, takeEvent, providerThread } = yield* openPrimeThread(fake);
+      yield* startTurn(runtime, providerThread);
+      yield* fake.takeRequest("prompt");
+      yield* fake.emit({ type: "agent_start" });
+
+      const terminalFiber = yield* takeEvent((event) => event.type === "turn.terminal").pipe(
+        Effect.forkScoped,
+      );
+      // A long tool call says nothing, and get_state reports it as streaming.
+      fake.queueState({ isStreaming: true });
+      fake.queueState({ isStreaming: true });
+      yield* takeQuietProbe(fake);
+      yield* takeQuietProbe(fake);
+      assert.isUndefined(terminalFiber.pollUnsafe());
+
+      yield* takeQuietProbe(fake);
+      const terminal = yield* Fiber.join(terminalFiber);
+      assert.isTrue(terminal.type === "turn.terminal" && terminal.status === "completed");
+    }).pipe(Effect.scoped, Effect.provide(testLayer)),
+  );
+
   it.effect("keeps a reply whose message_start was dropped apart from the previous reply", () =>
     Effect.gen(function* () {
       const fake = yield* makeFakePi;
