@@ -586,6 +586,21 @@ describe("PiAdapterV2", () => {
     }).pipe(Effect.scoped, Effect.provide(testLayer)),
   );
 
+  it.effect("leaves Pi's retries alone when it replaces the session", () =>
+    Effect.gen(function* () {
+      const fake = yield* makeFakePi;
+      const { runtime } = yield* openRuntime(fake);
+      const providerThread = yield* runtime.ensureThread({
+        threadId: THREAD_ID,
+        modelSelection: modelSelection("default"),
+        runtimePolicy,
+      });
+      yield* runtime.resumeThread({ providerThread });
+      assert.isTrue(fake.allRequests().some((request) => request.type === "switch_session"));
+      assert.isFalse(fake.allRequests().some((request) => request.type === "abort_retry"));
+    }).pipe(Effect.scoped, Effect.provide(testLayer)),
+  );
+
   it.effect("waits for a slow Pi resume without starting a replacement", () =>
     Effect.gen(function* () {
       const fake = yield* makeFakePi;
@@ -2485,6 +2500,21 @@ describe("PiAdapterV2 with the Prime Agent flavor", () => {
       }
       return yield* Fiber.join(reprobe);
     });
+
+  it.effect("cancels a pending auto-retry before it replaces the session", () =>
+    Effect.gen(function* () {
+      const fake = yield* makeFakePi;
+      const { runtime, providerThread } = yield* openPrimeThread(fake);
+      const requestTypes = () => fake.allRequests().map((request) => request.type);
+      assert.notInclude(requestTypes(), "abort_retry");
+
+      yield* runtime.resumeThread({ providerThread });
+
+      const types = requestTypes();
+      assert.isAbove(types.indexOf("abort_retry"), -1);
+      assert.isBelow(types.indexOf("abort_retry"), types.indexOf("switch_session"));
+    }).pipe(Effect.scoped, Effect.provide(testLayer)),
+  );
 
   it.effect("settles a turn after agent_end only once get_state shows no active work", () =>
     Effect.gen(function* () {
