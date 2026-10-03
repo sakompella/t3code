@@ -129,6 +129,7 @@ import {
 } from "./ThreadComposer";
 import { ThreadFeed, type ThreadFeedHistoryControls } from "./ThreadFeed";
 import { useThreadRunningTurnBackgroundWork, useThreadTurnSubagents } from "./ThreadAgentsSheet";
+import { ComposerHeartbeat } from "./ComposerHeartbeat";
 import { ComposerQueuedEditBanner } from "./ComposerQueuedEdit";
 import { useThreadQueuedCount } from "./ThreadQueueControl";
 import type { ThreadContentPresentation } from "./threadContentPresentation";
@@ -1194,6 +1195,12 @@ export const ThreadDetailScreen = memo(function ThreadDetailScreen(props: Thread
                     onDismiss={() => props.onDismissFeedback(submission.id)}
                   />
                 ))}
+                {activeUserInputRequestId === null ? (
+                  <ComposerHeartbeat
+                    environmentId={props.environmentId}
+                    threadId={props.selectedThread.id}
+                  />
+                ) : null}
                 {usageLimitsReport && activeUserInputRequestId === null ? (
                   <Animated.View
                     className="shrink-0 px-4 pb-3"
