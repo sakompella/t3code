@@ -210,6 +210,7 @@ import {
   toolGroupAction,
   workEntryDisplayLabel,
   workEntryLabelCode,
+  workEntryHasInspectableContent,
   workEntryReadOutput,
   workEntryIsVisibleInGroup,
   worktreeSetupAgentStarted,
@@ -5218,7 +5219,8 @@ function WorkEntryLogRow(props: WorkEntryRowProps) {
     turnItemNeedsDetailFetch(workEntry.projectedItem.item);
   // A system notice already displays its whole message in the label.
   const canExpandProjectedItem =
-    workEntry.itemType !== "system_notice" && (plainOutput !== undefined
+    workEntry.itemType !== "system_notice" &&
+    workEntryHasInspectableContent(workEntry) && (plainOutput !== undefined
       ? Boolean(plainOutput || viewedImage || workEntry.questionAnswer || plainOutputFetches)
       : workEntry.projectedItem === undefined
         ? canExpand
