@@ -3649,6 +3649,91 @@ describe("PiAdapterV2 with the Prime Agent flavor", () => {
     }).pipe(Effect.scoped, Effect.provide(testLayer)),
   );
 
+  /** A cell that started but whose end event never arrives. */
+  const emitLostCell = (fake: FakePi, toolCallId: string, code: string) =>
+    fake.emit({ type: "tool_execution_start", toolCallId, toolName: "ipython", args: { code } });
+
+  const cellStatuses = (events: ReadonlyArray<ProviderAdapterV2Event>, toolCallId: string) =>
+    events.flatMap((event) =>
+      event.type === "turn_item.updated" && event.turnItem.nativeItemRef?.nativeId === toolCallId
+        ? [event.turnItem.status]
+        : [],
+    );
+
+  it.effect("does not list a job for a cell whose end was lost when the turn ends", () =>
+    Effect.gen(function* () {
+      const fake = yield* makeFakePi;
+      const { runtime, takeEvent, providerThread } = yield* openPrimeThreadWithWakes(fake);
+      yield* startTurn(runtime, providerThread);
+      yield* fake.takeRequest("prompt");
+      yield* fake.emit({ type: "agent_start" });
+      yield* emitLostCell(fake, "cell_lost", "job = bash('sleep 300'); print(job.pid)");
+      yield* fake.emit({ type: "agent_end", messages: [] });
+      yield* fake.takeRequest("get_state");
+      const seen = yield* drainUntilTerminal(takeEvent);
+      assert.deepEqual(cellStatuses(seen, "cell_lost").at(-1), "completed");
+      assert.isTrue(rosterLengths(seen).every((length) => length === 0));
+      assert.isFalse(yield* runtime.hasPendingBackgroundWork!);
+    }).pipe(Effect.scoped, Effect.provide(testLayer)),
+  );
+
+  it.effect("keeps a running job when a cell that would kill it never reported its end", () =>
+    Effect.gen(function* () {
+      const fake = yield* makeFakePi;
+      const { runtime, takeEvent, providerThread } = yield* openPrimeThreadWithWakes(fake);
+      yield* startTurn(runtime, providerThread);
+      yield* fake.takeRequest("prompt");
+      yield* fake.emit({ type: "agent_start" });
+      yield* emitCell(fake, "cell_start", "job = bash('sleep 300'); print(job.pid)");
+      yield* emitLostCell(fake, "cell_kill", "job.kill()");
+      yield* fake.emit({ type: "agent_end", messages: [] });
+      yield* fake.takeRequest("get_state");
+      yield* drainUntilTerminal(takeEvent);
+      assert.isTrue(yield* runtime.hasPendingBackgroundWork!);
+    }).pipe(Effect.scoped, Effect.provide(testLayer)),
+  );
+
+  it.effect("fails a cell whose end was lost and lists no job when the process dies", () =>
+    Effect.gen(function* () {
+      const fake = yield* makeFakePi;
+      const { runtime, takeEvent, providerThread } = yield* openPrimeThreadWithWakes(fake);
+      yield* startTurn(runtime, providerThread);
+      yield* fake.takeRequest("prompt");
+      yield* fake.emit({ type: "agent_start" });
+      yield* emitLostCell(fake, "cell_lost", "job = bash('sleep 300'); print(job.pid)");
+      yield* fake.closeStdout;
+      const seen = yield* drainUntilTerminal(takeEvent);
+      assert.deepEqual(cellStatuses(seen, "cell_lost").at(-1), "failed");
+      assert.isTrue(rosterLengths(seen).every((length) => length === 0));
+      assert.isFalse(yield* runtime.hasPendingBackgroundWork!);
+    }).pipe(Effect.scoped, Effect.provide(testLayer)),
+  );
+
+  it.effect(
+    "interrupts a cell whose end was lost and lists no job when Stop kills the process",
+    () =>
+      Effect.gen(function* () {
+        const fake = yield* makeFakePi;
+        const { runtime, takeEvent, providerThread } = yield* openPrimeThreadWithWakes(fake);
+        yield* startTurn(runtime, providerThread);
+        yield* fake.takeRequest("prompt");
+        const runningTurn = yield* takeEvent(
+          (event) =>
+            event.type === "provider_turn.updated" && event.providerTurn.status === "running",
+        );
+        const providerTurnId =
+          runningTurn.type === "provider_turn.updated" ? runningTurn.providerTurn.id : undefined;
+        yield* fake.emit({ type: "agent_start" });
+        yield* emitLostCell(fake, "cell_lost", "job = bash('sleep 300'); print(job.pid)");
+        yield* runtime.interruptTurn({ providerThread, providerTurnId: providerTurnId! });
+        yield* fake.closeStdout;
+        const seen = yield* drainUntilTerminal(takeEvent);
+        assert.deepEqual(cellStatuses(seen, "cell_lost").at(-1), "interrupted");
+        assert.isTrue(rosterLengths(seen).every((length) => length === 0));
+        assert.isFalse(yield* runtime.hasPendingBackgroundWork!);
+      }).pipe(Effect.scoped, Effect.provide(testLayer)),
+  );
+
   it.effect("drops a persisted job roster the reopened process never started", () =>
     Effect.gen(function* () {
       const fake = yield* makeFakePi;
