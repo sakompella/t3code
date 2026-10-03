@@ -795,6 +795,23 @@ export const OrchestrationV2PendingBackgroundTask = kindUnionWithFallback(
 );
 export type OrchestrationV2PendingBackgroundTask = typeof OrchestrationV2PendingBackgroundTask.Type;
 
+/**
+ * A recurring prompt the provider's session runs on its own while it stays
+ * alive (a Prime Agent heartbeat). It is configuration, not pending work: it
+ * never keeps a thread working and is not part of the background roster.
+ * `schedule` is the provider's own text, such as "every 15m".
+ */
+export const OrchestrationV2ProviderHeartbeat = Schema.Struct({
+  id: TrimmedNonEmptyString,
+  /** The heartbeat's label, or the start of its prompt. */
+  description: Schema.optional(TrimmedNonEmptyString),
+  schedule: TrimmedNonEmptyString,
+  paused: Schema.Boolean,
+  /** When it fires next. Absent while paused or when the provider has not planned one. */
+  nextRunAt: Schema.optional(IsoDateTime),
+});
+export type OrchestrationV2ProviderHeartbeat = typeof OrchestrationV2ProviderHeartbeat.Type;
+
 /** Provider and adapter metadata that should not overwrite the app thread's title. */
 export const OrchestrationV2ProviderThreadNativeMetadata = Schema.Struct({
   /** Provider-reported selection for display, separate from the app's saved preferences. */
@@ -829,6 +846,10 @@ export const OrchestrationV2ProviderThread = Schema.Struct({
   ),
   // Optional Type so adapters can omit empty rosters; historical JSON decodes to [].
   pendingBackgroundTasks: Schema.optional(Schema.Array(OrchestrationV2PendingBackgroundTask)).pipe(
+    Schema.withDecodingDefault(Effect.succeed([])),
+  ),
+  /** Heartbeats the provider's live session runs. Cleared when the session ends. */
+  heartbeats: Schema.optional(Schema.Array(OrchestrationV2ProviderHeartbeat)).pipe(
     Schema.withDecodingDefault(Effect.succeed([])),
   ),
   contextUsage: Schema.optional(Schema.NullOr(ThreadTokenUsageSnapshot)).pipe(

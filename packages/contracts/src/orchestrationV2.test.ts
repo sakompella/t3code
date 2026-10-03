@@ -969,6 +969,7 @@ describe("orchestration V2 contracts", () => {
     });
 
     expect(providerThread.pendingBackgroundTasks).toEqual([]);
+    expect(providerThread.heartbeats).toEqual([]);
     expect(providerThread.contextUsage).toBeNull();
     expect(providerThread.nativeMetadata).toBeNull();
 
@@ -992,6 +993,49 @@ describe("orchestration V2 contracts", () => {
     expect(runtimeThread.pendingBackgroundTasks).toEqual([]);
     expect(runtimeThread.contextUsage).toBeNull();
     expect(runtimeThread.nativeMetadata).toBeNull();
+  });
+
+  it("round-trips a provider thread's heartbeats without touching its background roster", () => {
+    const providerThread = decodeOrchestrationV2ProviderThreadJson({
+      id: "provider-thread-1",
+      driver: "primeAgent",
+      providerInstanceId: "primeAgent",
+      providerSessionId: null,
+      appThreadId: "thread-1",
+      ownerNodeId: null,
+      nativeThreadRef: null,
+      nativeConversationHeadRef: null,
+      status: "idle",
+      firstRunOrdinal: null,
+      lastRunOrdinal: null,
+      handoffIds: [],
+      forkedFrom: null,
+      heartbeats: [
+        {
+          id: "job-1",
+          description: "check the deploy",
+          schedule: "every 15m",
+          paused: false,
+          nextRunAt: "2026-10-03T15:40:00.000Z",
+        },
+        { id: "job-2", schedule: "every 5m", paused: true },
+      ],
+      createdAt: "2026-04-20T00:00:00.000Z",
+      updatedAt: "2026-04-20T00:00:00.000Z",
+    });
+
+    expect(providerThread.pendingBackgroundTasks).toEqual([]);
+    expect(providerThread.heartbeats?.map((heartbeat) => heartbeat.id)).toEqual(["job-1", "job-2"]);
+    expect(encodeOrchestrationV2ProviderThreadJson(providerThread).heartbeats).toEqual([
+      {
+        id: "job-1",
+        description: "check the deploy",
+        schedule: "every 15m",
+        paused: false,
+        nextRunAt: "2026-10-03T15:40:00.000Z",
+      },
+      { id: "job-2", schedule: "every 5m", paused: true },
+    ]);
   });
 
   it("decodes historical thread shell JSON without pendingBackgroundTasks as empty roster", () => {
