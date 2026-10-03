@@ -3,6 +3,9 @@ import { cn } from "../../lib/cn";
 import type { ComponentProps, ReactNode } from "react";
 import { Pressable, View } from "react-native";
 import { THREAD_WORK_ROW_MIN_HEIGHT, type deriveThreadWorkLogSizing } from "../../lib/layout";
+import type { WorkEntryCode } from "@t3tools/client-runtime/work-log/entry-code";
+import type { ReviewDiffTheme } from "../review/shikiReviewHighlighter";
+import { HighlightedCodeText } from "./HighlightedCodeText";
 
 export function WorkLogBlock({
   children,
@@ -70,5 +73,19 @@ export function WorkLogLabel({
     >
       {children}
     </Text>
+  );
+}
+
+/** A `WorkLogLabel` for a row whose label is code: one monospace line with syntax colors. */
+export function WorkLogCodeLabel({ code, theme }: { code: WorkEntryCode; theme: ReviewDiffTheme }) {
+  return (
+    <HighlightedCodeText
+      code={code.code}
+      language={code.language}
+      theme={theme}
+      kind="label"
+      numberOfLines={1}
+      className="min-w-0 flex-1 text-xs text-foreground-muted"
+    />
   );
 }
