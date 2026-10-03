@@ -2041,6 +2041,82 @@ const multiSelectQuestion = {
   multiSelect: true,
 } as const;
 
+describe("code rows", () => {
+  const timestamp = "2026-06-20T00:00:02.000Z";
+  function pythonCell(
+    overrides: Partial<Extract<OrchestrationV2TurnItem, { type: "dynamic_tool" }>> = {},
+  ) {
+    return {
+      ...base("item-python", timestamp, 1),
+      type: "dynamic_tool" as const,
+      toolName: "python",
+      title: "import os",
+      input: { code: "import os\nprint(os.getcwd())" },
+      ...overrides,
+    } satisfies OrchestrationV2TurnItem;
+  }
+  // Items outside a run are never folded into a run summary.
+  const settledToggle = (...items: OrchestrationV2TurnItem[]) =>
+    deriveThreadFeedPresentation(
+      buildThreadFeed(items.map((item, index) => projected({ ...item, runId: null }, index))),
+      null,
+      new Set(),
+    ).find((entry) => entry.type === "work-toggle");
+
+  it("labels a Python cell with the code as the provider spelled it", () => {
+    const feed = buildThreadFeed([projected(pythonCell(), 0)]);
+    const activity = feed[0]?.type === "activity-group" ? feed[0].activities[0] : null;
+    // Prose labels capitalize the first letter; code must not change.
+    expect(workEntryRowLabel(activity!.workEntry)).toBe("import os");
+  });
+
+  it("marks a one-call group summary as code", () => {
+    expect(settledToggle(pythonCell())).toMatchObject({
+      summary: "import os",
+      summaryCode: { code: "import os", language: "python" },
+    });
+    expect(settledToggle({ ...command(), input: "/bin/zsh -lc 'ls -la src'" })).toMatchObject({
+      summary: "ls -la src",
+      summaryCode: { code: "ls -la src", language: "shellscript" },
+    });
+  });
+
+  it("leaves a group of several calls as prose", () => {
+    const toggle = settledToggle(command("2026-06-20T00:00:02.000Z"), {
+      ...command("2026-06-20T00:00:03.000Z"),
+      id: TurnItemId.make("item-command-2"),
+    });
+    expect(toggle).toMatchObject({ summary: "Ran 2 commands" });
+    expect(toggle).not.toHaveProperty("summaryCode");
+  });
+
+  it("highlights a running Python cell but keeps the 'Running vp' label as prose", () => {
+    const startedAt = "2026-06-20T00:00:01.000Z";
+    const live = (item: OrchestrationV2TurnItem) =>
+      deriveThreadFeedPresentation(
+        buildThreadFeed([
+          projected({ ...userMessage(), runId: null }, 0),
+          projected({ ...item, runId: null, status: "running", completedAt: null }, 1),
+        ]),
+        null,
+        new Set(),
+        new Set(),
+        startedAt,
+        true,
+      ).find((entry) => entry.type === "work-toggle");
+
+    expect(live(pythonCell())).toMatchObject({
+      live: true,
+      shimmer: true,
+      summary: "import os",
+      summaryCode: { code: "import os", language: "python" },
+    });
+    const runningCommand = live(command());
+    expect(runningCommand).toMatchObject({ summary: "Running vp" });
+    expect(runningCommand).not.toHaveProperty("summaryCode");
+  });
+});
+
 describe("pending user input answers", () => {
   it("replaces single-select options and toggles multi-select options", () => {
     expect(

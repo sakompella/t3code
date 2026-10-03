@@ -16,6 +16,11 @@ import {
   commandProgramName,
 } from "@t3tools/client-runtime/work-log/command-label";
 import {
+  pythonCellLabel,
+  workEntryLabelCode,
+  type WorkEntryCode,
+} from "@t3tools/client-runtime/work-log/entry-code";
+import {
   contextCompactionLabel,
   toolItemForDisplay,
   workEntryDisplayIndicatesToolFailure,
@@ -180,6 +185,8 @@ type ThreadFeedEntryContent =
       readonly toolSurface?: WorkLogPresentationEntry["toolSurface"];
       readonly toolIcon?: WorkLogPresentationEntry["toolIcon"];
       readonly summaryToolIcon?: "browser" | "device" | "t3-code" | "pull-request";
+      /** Set when the summary is one call's code, so the header can highlight it. */
+      readonly summaryCode?: WorkEntryCode;
       readonly hasFailure: boolean;
       readonly live: boolean;
       readonly shimmer: boolean;
@@ -230,6 +237,8 @@ export function workEntryRowLabel(entry: WorkLogPresentationEntry, expanded = fa
   const presentation = resolveWorkEntryToolPresentation(entry);
   if (presentation) return presentation.displayName;
   if (entry.command?.trim()) return compactWorkEntryText(commandDisplayText(entry.command));
+  const pythonLabel = pythonCellLabel(entry);
+  if (pythonLabel !== null) return compactWorkEntryText(pythonLabel) || entry.label;
   const action = toolGroupAction(entry);
   const isToolRead = action === "read" && entry.itemType === "dynamic_tool";
   if (action === "code-search" || action === "search") {
@@ -805,7 +814,9 @@ function singleToolCallLabel(activity: ThreadFeedActivity, expanded: boolean): s
   const presentation = resolveWorkEntryToolPresentation(activity.workEntry, "completed");
   if (presentation) return presentation.displayName;
   const command = activity.workEntry.command?.trim();
-  return command || activity.summary;
+  if (command) return compactWorkEntryText(commandDisplayText(command));
+  const pythonLabel = pythonCellLabel(activity.workEntry);
+  return pythonLabel !== null ? compactWorkEntryText(pythonLabel) : activity.summary;
 }
 
 function isEmptyMessage(entry: RawThreadFeedEntry): boolean {
@@ -1504,6 +1515,15 @@ function appendToolGroupRows(
         toolGroupAction(singleActivity.workEntry) !== "edit"
       ? resolveWorkEntryToolPresentation(singleActivity.workEntry, "completed")?.icon
       : undefined;
+  const summaryActivity = live
+    ? latestActivity
+    : singleActivity !== null &&
+        singleActivity.toolLike &&
+        toolGroupAction(singleActivity.workEntry) !== "edit"
+      ? singleActivity
+      : null;
+  const summaryCode =
+    summaryActivity === null ? null : workEntryLabelCode(summaryActivity.workEntry, summary);
   result.push({
     type: "work-toggle",
     id: shimmer ? LIVE_ACTIVITY_ROW_ID : `${live ? "work-live" : "work-toggle"}:${groupId}`,
@@ -1519,6 +1539,7 @@ function appendToolGroupRows(
     ...(groupToolSurface ? { toolSurface: groupToolSurface } : {}),
     ...(groupToolIcon ? { toolIcon: groupToolIcon } : {}),
     ...(summaryToolIcon ? { summaryToolIcon } : {}),
+    ...(summaryCode ? { summaryCode } : {}),
     hasFailure: (() => {
       const lastToolLike = activities.findLast((activity) => activity.toolLike);
       return (
@@ -1574,6 +1595,8 @@ function liveToolActivitySummary(activity: ThreadFeedActivity, presentTense: boo
               : "Ran";
     return `${verb} ${program ?? "command"}`;
   }
+  const pythonLabel = pythonCellLabel(activity.workEntry);
+  if (pythonLabel !== null) return compactWorkEntryText(pythonLabel);
   return activity.detail ?? activity.summary;
 }
 
