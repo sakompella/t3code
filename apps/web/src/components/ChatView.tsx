@@ -34,6 +34,7 @@ import {
   isUsageLimitsCommand,
 } from "@t3tools/shared/usageLimits";
 import { feedbackBannerItem } from "./chat/ComposerFeedback";
+import { heartbeatBannerItem } from "./chat/ComposerHeartbeat";
 import { usageLimitsBannerItem } from "./chat/ComposerUsageLimits";
 import { getTerminalLabel } from "@t3tools/shared/terminalLabels";
 import * as Schema from "effect/Schema";
@@ -97,6 +98,10 @@ import {
   presentPendingBackgroundWork,
 } from "@t3tools/client-runtime/state/thread-execution";
 import { threadSupportsProviderHandoff } from "@t3tools/client-runtime/state/thread-workflows";
+import {
+  deriveThreadHeartbeats,
+  presentHeartbeats,
+} from "@t3tools/client-runtime/state/thread-heartbeats";
 import {
   codexFeedbackMessage,
   parseCodexFeedbackCommand,
@@ -7064,6 +7069,18 @@ export default function ChatView(props: ChatViewProps) {
     liveSubagentTree,
     onOpenRelatedThread,
   ]);
+  // Configuration, not work: shown quietly, and never part of the background list.
+  const threadHeartbeats = useMemo(
+    () => (serverProjection === null ? [] : deriveThreadHeartbeats(serverProjection)),
+    [serverProjection],
+  );
+  const heartbeatThreadId = activeThread?.id ?? null;
+  const heartbeatBanner = useMemo<ComposerBannerStackItem | null>(() => {
+    const presentation = presentHeartbeats(threadHeartbeats, new Date());
+    return presentation === null || heartbeatThreadId === null
+      ? null
+      : heartbeatBannerItem(heartbeatThreadId, presentation);
+  }, [heartbeatThreadId, threadHeartbeats]);
   // A woken thread announces itself in the open view, not just the sidebar
   // pill. Dismissing marks the wake as seen (same acknowledgment as the
   // pill); sending a message clears it as a side effect of the send path.
@@ -7273,6 +7290,7 @@ export default function ChatView(props: ChatViewProps) {
       resumeCompactionBannerItem === null ? [] : [resumeCompactionBannerItem];
     const wokeThreadItems = wokeThreadBannerItem === null ? [] : [wokeThreadBannerItem];
     const parkedThreadItems = parkedThreadBannerItem === null ? [] : [parkedThreadBannerItem];
+    const heartbeatItems = heartbeatBanner === null ? [] : [heartbeatBanner];
     // The user asked for this one, so it leads the notice tier instead of trailing it.
     const usageLimitsItems = usageLimitsBanner === null ? [] : [usageLimitsBanner];
     const projectCloneItems = projectCloneBannerItem === null ? [] : [projectCloneBannerItem];
@@ -7287,6 +7305,7 @@ export default function ChatView(props: ChatViewProps) {
         ...resumeCompactionItems,
         ...wokeThreadItems,
         ...parkedThreadItems,
+        ...heartbeatItems,
       ];
     }
     return [
@@ -7337,6 +7356,7 @@ export default function ChatView(props: ChatViewProps) {
         },
       },
       ...parkedThreadItems,
+      ...heartbeatItems,
     ];
   }, [
     activeBranchMismatchKey,
@@ -7345,6 +7365,7 @@ export default function ChatView(props: ChatViewProps) {
     feedbackBannerItems,
     limitRecoveryBanner,
     handleRestoreThreadBranch,
+    heartbeatBanner,
     isRestoringThreadBranch,
     backgroundWorkBannerItem,
     localCheckoutBranchMismatch,
