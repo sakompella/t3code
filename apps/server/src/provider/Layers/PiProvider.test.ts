@@ -1,8 +1,10 @@
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, describe, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
+import * as Fiber from "effect/Fiber";
 import * as Sink from "effect/Sink";
 import * as Stream from "effect/Stream";
+import { TestClock } from "effect/testing";
 import { ChildProcess, ChildProcessSpawner } from "effect/unstable/process";
 
 import { PI_FLAVOR, PRIME_AGENT_FLAVOR } from "../../orchestration-v2/Adapters/PiFlavor.ts";
@@ -111,4 +113,39 @@ describe("PiProvider", () => {
       );
     }).pipe(Effect.provide(NodeServices.layer)),
   );
+
+  for (const flavor of [PI_FLAVOR, PRIME_AGENT_FLAVOR]) {
+    it.effect(`waits out a ${flavor.displayName} --version that a busy machine slows down`, () =>
+      Effect.gen(function* () {
+        const slowVersionSpawner = ChildProcessSpawner.make((command) => {
+          const args = ChildProcess.isStandardCommand(command) ? command.args : [];
+          return Effect.succeed(
+            args.includes("--version")
+              ? ChildProcessSpawner.makeHandle({
+                  ...processHandle({}),
+                  stdout: Stream.fromEffect(
+                    Effect.sleep("8 seconds").pipe(
+                      Effect.as(
+                        encoder.encode(`${flavor.defaultBinary} ${flavor.minimumVersion}\n`),
+                      ),
+                    ),
+                  ),
+                })
+              : processHandle({ stderr: "RPC startup failed", exitCode: 1 }),
+          );
+        });
+        const probe = yield* checkPiProviderStatus(flavor, {
+          ...settings,
+          binaryPath: "",
+        }).pipe(
+          Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, slowVersionSpawner),
+          Effect.forkChild,
+        );
+        yield* TestClock.adjust("8 seconds");
+        const snapshot = yield* Fiber.join(probe);
+        assert.equal(snapshot.status, "ready");
+        assert.equal(snapshot.version, flavor.minimumVersion);
+      }).pipe(Effect.provide(NodeServices.layer)),
+    );
+  }
 });
