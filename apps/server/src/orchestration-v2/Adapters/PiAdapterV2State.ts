@@ -77,6 +77,11 @@ export interface ActivePiTurn {
   settleProbeGeneration: number;
   /** An extension may start compaction immediately after Pi emits agent_settled. */
   settleWhenIdle: boolean;
+  /**
+   * Session events the pump has read since the turn began. A turn whose count
+   * stops moving may have lost its closing events (see `PiFlavor.lossyStream`).
+   */
+  sessionEventCount: number;
   sawCompaction: boolean;
   /** RPC compact is in flight; Pi abort does not cancel it. */
   manualCompactInFlight: boolean;
