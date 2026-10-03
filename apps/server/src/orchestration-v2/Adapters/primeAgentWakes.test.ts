@@ -157,6 +157,90 @@ describe("makePrimeAgentBackgroundJobs", () => {
     }),
   );
 
+  describe("when a cell assigns a handle's name again", () => {
+    const descriptions = (jobs: ReturnType<typeof makePrimeAgentBackgroundJobs>) =>
+      jobs.tasks().map((task) => task.description);
+
+    it.effect("ends only the job the name holds when it is awaited", () =>
+      Effect.gen(function* () {
+        const jobs = makePrimeAgentBackgroundJobs(() => Effect.void);
+        yield* jobs.trackBackgroundJobs("h = bash('long-A')");
+        yield* jobs.trackBackgroundJobs("h = bash('short-B')");
+        yield* jobs.trackBackgroundJobs("await h");
+
+        expect(descriptions(jobs)).toEqual(["long-A"]);
+        expect(jobs.hasPendingJobs()).toBe(true);
+
+        // The detached job still ends by its own notice, and keeps the name it started with.
+        const finished = completion({ pid: 7, command: "long-A", exitCode: 0 });
+        yield* jobs.completeBackgroundJob(finished);
+        expect(jobs.hasPendingJobs()).toBe(false);
+        expect(jobs.handleOf(finished)).toBe("h");
+      }),
+    );
+
+    it.effect("ends only the job the name holds when it is killed", () =>
+      Effect.gen(function* () {
+        const jobs = makePrimeAgentBackgroundJobs(() => Effect.void);
+        yield* jobs.trackBackgroundJobs("h = bash('long-A')");
+        yield* jobs.trackBackgroundJobs("h = bash('long-B')");
+        yield* jobs.trackBackgroundJobs("h.kill()");
+
+        expect(descriptions(jobs)).toEqual(["long-A"]);
+      }),
+    );
+
+    it.effect("takes only the job the name holds off the roster when it is read", () =>
+      Effect.gen(function* () {
+        const jobs = makePrimeAgentBackgroundJobs(() => Effect.void);
+        yield* jobs.trackBackgroundJobs("h = bash('long-A')");
+        yield* jobs.trackBackgroundJobs("h = bash('long-B')");
+        yield* jobs.trackBackgroundJobs("print(h.output())");
+
+        expect(descriptions(jobs)).toEqual(["long-A"]);
+        expect(jobs.hasPendingJobs()).toBe(true);
+      }),
+    );
+
+    it.effect("keeps a job reachable through the name until a cell assigns it again", () =>
+      Effect.gen(function* () {
+        const jobs = makePrimeAgentBackgroundJobs(() => Effect.void);
+        yield* jobs.trackBackgroundJobs("h = bash('long-A')");
+        yield* jobs.trackBackgroundJobs("print(h.output())");
+        // Using the old job, then starting another under the same name.
+        yield* jobs.trackBackgroundJobs("h.kill()\nh = bash('long-B')");
+
+        expect(descriptions(jobs)).toEqual(["long-B"]);
+        yield* jobs.trackBackgroundJobs("await h");
+        expect(jobs.hasPendingJobs()).toBe(false);
+      }),
+    );
+
+    it.effect("does not apply what a cell does with the new value to the old job", () =>
+      Effect.gen(function* () {
+        const jobs = makePrimeAgentBackgroundJobs(() => Effect.void);
+        yield* jobs.trackBackgroundJobs("h = bash('long-A')");
+        yield* jobs.trackBackgroundJobs("h = await bash('short-B')\nprint(h.output)");
+        yield* jobs.trackBackgroundJobs("h = bash('long-C'); await h");
+
+        expect(descriptions(jobs)).toEqual(["long-A"]);
+      }),
+    );
+
+    it.effect("separates jobs started under one name within a single cell", () =>
+      Effect.gen(function* () {
+        const jobs = makePrimeAgentBackgroundJobs(() => Effect.void);
+        yield* jobs.trackBackgroundJobs("h = bash('long-A')\nh = bash('long-B')\nawait h");
+
+        expect(descriptions(jobs)).toEqual(["long-A"]);
+
+        yield* jobs.trackBackgroundJobs("h = bash('long-C')\nh = bash('long-D')");
+        yield* jobs.trackBackgroundJobs("await h");
+        expect(descriptions(jobs)).toEqual(["long-A", "long-C"]);
+      }),
+    );
+  });
+
   it.effect("ends the jobs of awaited, gathered, and killed handles", () =>
     Effect.gen(function* () {
       const jobs = makePrimeAgentBackgroundJobs(() => Effect.void);

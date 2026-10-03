@@ -2,6 +2,7 @@ import { describe, expect, it } from "@effect/vitest";
 
 import {
   awaitsHandle,
+  assignmentOffset,
   endsHandle,
   classifyIpythonCell,
   detachedBashJobs,
@@ -184,6 +185,24 @@ describe("detachedBashJobs", () => {
     expect(
       detachedBashJobs("a = bash('sleep 1')\nb = bash('sleep 2')\nawait asyncio.gather(a, b)"),
     ).toEqual([]);
+  });
+
+  it("ignores a wait only for the job whose name it still holds", () => {
+    expect(detachedBashJobs("h = bash('sleep 1')\nh = bash('sleep 2')\nawait h")).toEqual([
+      { variable: "h", command: "sleep 1", isTemplate: false },
+    ]);
+    expect(detachedBashJobs("h = bash('sleep 1')\nawait h\nh = bash('sleep 2')")).toEqual([
+      { variable: "h", command: "sleep 2", isTemplate: false },
+    ]);
+  });
+
+  it("finds where a cell assigns a name again", () => {
+    expect(assignmentOffset("print(h.pid)\nh = bash('x')", "h")).toBe("print(h.pid)".length);
+    expect(assignmentOffset("a = 1; h = 2", "h")).toBe("a = 1".length);
+    expect(assignmentOffset("h = 1\nh = 2", "h", 1)).toBe("h = 1".length);
+    expect(assignmentOffset("if h == 1: pass\nx_h = 3\nh += 1", "h")).toBe(
+      "if h == 1: pass\nx_h = 3\nh += 1".length,
+    );
   });
 
   it("ignores a command with nothing in it", () => {
