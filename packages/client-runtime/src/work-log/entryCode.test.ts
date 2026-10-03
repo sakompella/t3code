@@ -2,7 +2,12 @@ import { describe, expect, it } from "vite-plus/test";
 
 import type { OrchestrationV2TurnItem } from "@t3tools/contracts";
 
-import { pythonCellLabel, workEntryBodyCode, workEntryLabelCode } from "./entryCode.js";
+import {
+  pythonCellLabel,
+  splitCodeHighlightWindow,
+  workEntryBodyCode,
+  workEntryLabelCode,
+} from "./entryCode.js";
 import { commandDisplayText } from "./commandLabel.js";
 import type { WorkLogPresentationEntry } from "./presentation.js";
 
@@ -61,7 +66,7 @@ describe("workEntryLabelCode", () => {
   });
 
   it("marks a Python cell label as Python and drops the legacy prefix", () => {
-    const python = pythonEntry("print(1)");
+    const python = pythonEntry("print(1)", { toolTitle: "print(1)" });
     expect(workEntryLabelCode(python, "print(1)")).toEqual({
       code: "print(1)",
       language: "python",
@@ -70,7 +75,14 @@ describe("workEntryLabelCode", () => {
       code: "print(1)",
       language: "python",
     });
-    expect(workEntryLabelCode(python, "Python")).toBeNull();
+    expect(
+      workEntryLabelCode(pythonEntry("print(1)", { toolTitle: "Python" }), "Python"),
+    ).toBeNull();
+  });
+
+  it("does not mark a prose label over a Python cell as code", () => {
+    const python = pythonEntry("print(1)", { toolTitle: "print(1)" });
+    expect(workEntryLabelCode(python, "Used 3 tools")).toBeNull();
   });
 });
 
@@ -88,7 +100,7 @@ describe("pythonCellLabel", () => {
 
 describe("workEntryBodyCode", () => {
   it("selects the whole Python cell", () => {
-    const python = pythonEntry("import os\nprint(os.getcwd())");
+    const python = pythonEntry("import os\nprint(os.getcwd())", { toolTitle: "import os" });
     expect(workEntryBodyCode(python, "import os")).toEqual({
       code: "import os\nprint(os.getcwd())",
       language: "python",
@@ -96,8 +108,8 @@ describe("workEntryBodyCode", () => {
   });
 
   it("has no body for a cell without source", () => {
-    expect(workEntryBodyCode(pythonEntry(undefined), "Python")).toBeNull();
-    expect(workEntryBodyCode(pythonEntry("  \n"), "print(1)")).toBeNull();
+    expect(workEntryBodyCode(pythonEntry(undefined, { toolTitle: "x" }), "x")).toBeNull();
+    expect(workEntryBodyCode(pythonEntry("  \n", { toolTitle: "x" }), "x")).toBeNull();
   });
 
   it("selects the raw command rather than the unwrapped label", () => {
@@ -111,5 +123,29 @@ describe("workEntryBodyCode", () => {
   it("has no body for prose labels", () => {
     expect(workEntryBodyCode(commandEntry("ls"), "Ran 3 commands")).toBeNull();
     expect(workEntryBodyCode(entry, "Tool call")).toBeNull();
+  });
+});
+
+describe("splitCodeHighlightWindow", () => {
+  it("highlights only the first line of a label", () => {
+    expect(splitCodeHighlightWindow("import os\nprint(1)", "label")).toEqual({
+      head: "import os",
+      tail: "\nprint(1)",
+    });
+  });
+
+  it("caps how much of a long label is tokenized and keeps every character", () => {
+    const code = "x".repeat(1_000);
+    const { head, tail } = splitCodeHighlightWindow(code, "label");
+    expect(head.length).toBeLessThan(code.length);
+    expect(head + tail).toBe(code);
+  });
+
+  it("keeps multiple lines in a body and caps very large ones", () => {
+    expect(splitCodeHighlightWindow("a\nb", "body")).toEqual({ head: "a\nb", tail: "" });
+    const huge = "y".repeat(100_000);
+    const { head, tail } = splitCodeHighlightWindow(huge, "body");
+    expect(head.length).toBeLessThan(huge.length);
+    expect(head + tail).toBe(huge);
   });
 });

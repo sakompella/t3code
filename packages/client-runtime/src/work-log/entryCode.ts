@@ -51,8 +51,12 @@ export function workEntryLabelCode(entry: CodeEntry, label: string): WorkEntryCo
   ) {
     return { code: label, language: "shellscript" };
   }
-  if (pythonCellLabel(entry) === null || label === "Python") return null;
-  return { code: withoutLegacyPythonPrefix(label), language: "python" };
+  const python = pythonCellLabel(entry);
+  if (python === null || python === "Python") return null;
+  const code = withoutLegacyPythonPrefix(label);
+  return collapseWhitespace(code) === collapseWhitespace(python)
+    ? { code, language: "python" }
+    : null;
 }
 
 function pythonCellSource(entry: CodeEntry): string | null {
@@ -78,4 +82,27 @@ export function workEntryBodyCode(entry: CodeEntry, label: string): WorkEntryCod
   }
   const command = (entry.rawCommand ?? entry.command)?.trim();
   return command ? { code: command, language: labelCode.language } : null;
+}
+
+/** How much of a piece of code is worth tokenizing for the place it is shown. */
+export type CodeHighlightWindowKind = "label" | "body";
+
+// A row label is one truncated line; nothing past the visible width is tokenized.
+const MAX_LABEL_HIGHLIGHT_CHARS = 400;
+// An expanded body scrolls inside a small box. Past this, plain text is fine.
+const MAX_BODY_HIGHLIGHT_CHARS = 20_000;
+
+/**
+ * Splits code into the part that is tokenized and the rest, which renders as
+ * plain text so the visible characters never change. A label highlights its
+ * first line only.
+ */
+export function splitCodeHighlightWindow(
+  code: string,
+  kind: CodeHighlightWindowKind,
+): { readonly head: string; readonly tail: string } {
+  const limit = kind === "label" ? MAX_LABEL_HIGHLIGHT_CHARS : MAX_BODY_HIGHLIGHT_CHARS;
+  const firstLineEnd = kind === "label" ? code.indexOf("\n") : -1;
+  const end = Math.min(limit, firstLineEnd === -1 ? code.length : firstLineEnd);
+  return { head: code.slice(0, end), tail: code.slice(end) };
 }
