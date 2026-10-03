@@ -33,6 +33,7 @@ import {
   resolveTimelineToolPresentation,
   workEntryDisplayLabel,
   workEntryLabelCode,
+  workEntryHasInspectableContent,
   workEntryReadOutput,
   workEntryIsVisibleInGroup,
 } from "./MessagesTimeline.logic";
@@ -5105,5 +5106,54 @@ describe("replies inside a run that received steers or notifications", () => {
       message("reply", 4, "assistant"),
     ]);
     expect(visibleIds(rows)).toEqual(["prompt", "reply"]);
+  });
+});
+
+describe("workEntryHasInspectableContent", () => {
+  const now = DateTime.makeUnsafe("2026-09-09T00:00:00Z");
+  const workEntryFor = (detail?: string) => {
+    const item = {
+      id: TurnItemId.make("notice"),
+      threadId: ThreadId.make("parent"),
+      runId: RunId.make("run"),
+      nodeId: null,
+      providerThreadId: null,
+      providerTurnId: null,
+      nativeItemRef: null,
+      parentItemId: null,
+      ordinal: 0,
+      status: "completed" as const,
+      title: null,
+      startedAt: now,
+      completedAt: now,
+      updatedAt: now,
+      type: "notification" as const,
+      source: { kind: "command" as const },
+      outcome: "completed" as const,
+      summary: "Background command finished",
+      ...(detail === undefined ? {} : { detail }),
+    };
+    const [entry] = deriveTimelineEntriesFromVisibleTurnItems({
+      optimisticMessages: [],
+      visibleTurnItems: [
+        {
+          item,
+          position: 0,
+          visibility: "local" as const,
+          sourceThreadId: item.threadId,
+          sourceItemId: item.id,
+        },
+      ],
+    });
+    if (entry?.kind !== "work") throw new Error("expected a work entry");
+    return entry.entry;
+  };
+
+  it("opens a notification that carries a detail", () => {
+    expect(workEntryHasInspectableContent(workEntryFor("make build\n\nExit code 0"))).toBe(true);
+  });
+
+  it.each([undefined, "", "  \n"])("keeps a notification with detail %j closed", (detail) => {
+    expect(workEntryHasInspectableContent(workEntryFor(detail))).toBe(false);
   });
 });

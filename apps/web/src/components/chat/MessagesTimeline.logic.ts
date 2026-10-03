@@ -250,6 +250,16 @@ export function liveWorkEntryLabel(
   return workEntryDisplayLabel(entry, workspaceRoot);
 }
 
+/**
+ * Whether a work row's projected item has anything to show when expanded. A
+ * notification is its summary, so without a detail the row stays closed
+ * instead of opening an empty panel.
+ */
+export function workEntryHasInspectableContent(entry: WorkLogEntry): boolean {
+  const item = entry.projectedItem?.item;
+  return item?.type !== "notification" || Boolean(item.detail?.trim());
+}
+
 export function workEntryIsVisibleInGroup(
   entry: WorkLogEntry,
   expandedToolGroupEntry = false,
