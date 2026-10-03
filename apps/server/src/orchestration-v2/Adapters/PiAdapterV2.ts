@@ -92,6 +92,7 @@ import {
 import {
   buildPiRpcLaunch,
   materializePiT3McpExtension,
+  materializePiT3Skill,
   resolvePiLaunchArgs,
 } from "./piT3McpInjection.ts";
 import {
@@ -100,6 +101,7 @@ import {
   T3_NAVIGATE_TREE_RESULT_MARKER,
 } from "./piT3McpExtensionSource.ts";
 import { PI_FLAVOR, PRIME_AGENT_FLAVOR, type PiFlavor } from "./PiFlavor.ts";
+import { resolveKernelMcpAccess } from "./primeAgentT3Mcp.ts";
 
 import type {
   ActivePiTurn,
@@ -352,6 +354,8 @@ export function makePiAdapterV2(
   const name = flavor.displayName;
   const binary = options.settings.binaryPath || flavor.defaultBinary;
   const capabilities = piProviderCapabilities(flavor);
+  /** The undeclared-MCP hint is shown once per adapter, not on every session open. */
+  let mcpSetupHintShown = false;
   const unsolicitedActivityError = `${name} started agent work outside an active T3 turn. The session was stopped to prevent invisible tool execution.`;
   const providerRef = (
     nativeId: string,
@@ -404,6 +408,25 @@ export function makePiAdapterV2(
       const extensionPath = yield* provideCacheFs(
         materializePiT3McpExtension(options.serverConfig.providerStatusCacheDir),
       );
+      // An agent with its own MCP client reaches T3 through the t3-code skill,
+      // but only once the user declared the server in its settings. Otherwise
+      // the extension keeps registering T3's tools and the user gets a hint.
+      const kernelMcpAccess =
+        mcpSession === undefined || flavor.kernelMcp === null
+          ? undefined
+          : yield* resolveKernelMcpAccess({
+              displayName: name,
+              kernelMcp: flavor.kernelMcp,
+              environment: options.environment,
+              endpoint: mcpSession.endpoint,
+            }).pipe(Effect.provideService(FileSystem.FileSystem, options.fileSystem));
+      const skillPath = kernelMcpAccess?.declared
+        ? yield* provideCacheFs(materializePiT3Skill(options.serverConfig.providerStatusCacheDir))
+        : undefined;
+      const mcpSetupHint =
+        kernelMcpAccess !== undefined && !kernelMcpAccess.declared
+          ? kernelMcpAccess.hint
+          : undefined;
       const resolvedLaunchArgs = resolvePiLaunchArgs(options.settings.launchArgs);
       if (!resolvedLaunchArgs.ok) {
         return yield* protocolError(resolvedLaunchArgs.message);
@@ -413,6 +436,7 @@ export function makePiAdapterV2(
         environment: options.environment,
         mcpSession,
         extensionPath,
+        ...(skillPath === undefined ? {} : { skillPath }),
         runtimeMode: input.runtimePolicy.runtimeMode,
       });
       const connection: PiRpcConnection = yield* makePiRpcConnection({
@@ -1422,6 +1446,25 @@ export function makePiAdapterV2(
         });
         yield* emit({ type: "node.updated", driver, node });
         yield* emit({ type: "turn_item.updated", driver, turnItem });
+      });
+
+      const emitMcpSetupHint = Effect.fnUntraced(function* (turn: ActivePiTurn, hint: string) {
+        const emittedAt = yield* DateTime.now;
+        const nativeItemId = `${turn.providerTurn.id}:t3-mcp-setup`;
+        yield* emitItemNode(turn, nativeItemId, "system", "completed", emittedAt, emittedAt);
+        yield* emit({
+          type: "turn_item.updated",
+          driver,
+          turnItem: {
+            ...baseItemFields(turn, nativeItemId, emittedAt, emittedAt),
+            status: "completed",
+            title: "T3 Code MCP setup",
+            completedAt: emittedAt,
+            type: "system_notice",
+            message: hint,
+            tone: "warning",
+          },
+        });
       });
 
       const emitExtensionError = Effect.fnUntraced(function* (event: PiRpcRecord) {
@@ -2773,6 +2816,10 @@ export function makePiAdapterV2(
                 lastRunOrdinal: turnInput.runOrdinal,
               });
               yield* updateProviderSession("running", null);
+              if (mcpSetupHint !== undefined && !mcpSetupHintShown) {
+                mcpSetupHintShown = true;
+                yield* emitMcpSetupHint(activeTurn, mcpSetupHint);
+              }
               if (adoptedWake !== null) {
                 if (isWakeContinuation)
                   activeTurn.wakeTrigger = piWakeTrigger(adoptedWake.events)?.message;

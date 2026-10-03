@@ -334,6 +334,7 @@ const makeAdapter = Effect.fnUntraced(function* (
   forkFake?: FakePi,
   flavor: PiFlavor = PI_FLAVOR,
   continuationRequests?: Parameters<typeof makePiAdapterV2>[0]["continuationRequests"],
+  environment: NodeJS.ProcessEnv = {},
 ) {
   const idAllocator = yield* IdAllocator.IdAllocatorV2;
   const serverConfig = yield* ServerConfig.ServerConfig;
@@ -343,7 +344,7 @@ const makeAdapter = Effect.fnUntraced(function* (
     ...(continuationRequests === undefined ? {} : { continuationRequests }),
     instanceId: PI_INSTANCE_ID,
     settings: { enabled: true, binaryPath: "pi", launchArgs, customModels: [] },
-    environment: {},
+    environment,
     spawner:
       forkFake === undefined
         ? fake.spawner
@@ -366,8 +367,9 @@ const openRuntime = Effect.fnUntraced(function* (
   forkFake?: FakePi,
   flavor: PiFlavor = PI_FLAVOR,
   continuationRequests?: Parameters<typeof makePiAdapterV2>[0]["continuationRequests"],
+  environment: NodeJS.ProcessEnv = {},
 ) {
-  const adapter = yield* makeAdapter(fake, "", forkFake, flavor, continuationRequests);
+  const adapter = yield* makeAdapter(fake, "", forkFake, flavor, continuationRequests, environment);
   const runtime = yield* adapter.openSession({
     threadId,
     providerSessionId,
@@ -4569,5 +4571,153 @@ describe("PiAdapterV2 with the Prime Agent flavor", () => {
       assert.include(String(error.cause), "cancelled the rollback");
       assert.isFalse(fake.allRequests().some((request) => request["type"] === "fork"));
     }).pipe(Effect.scoped, Effect.provide(testLayer)),
+  );
+});
+
+describe("PiAdapterV2 reaching T3 through the kernel's MCP client", () => {
+  const encodeJson = Schema.encodeSync(Schema.fromJsonString(Schema.Unknown));
+  const ENDPOINT = "http://127.0.0.1:43123/mcp";
+
+  /** A Prime Agent config dir whose settings file declares `mcpServers`, or has no file. */
+  const makeAgentDir = Effect.fnUntraced(function* (mcpServers?: Record<string, unknown>) {
+    const fs = yield* FileSystem.FileSystem;
+    const agentDir = yield* fs.makeTempDirectoryScoped({ prefix: "t3-prime-agent-dir-" });
+    if (mcpServers !== undefined) {
+      yield* fs.writeFileString(`${agentDir}/settings.json`, encodeJson({ mcpServers }));
+    }
+    return agentDir;
+  });
+
+  const declaredEntry = {
+    "t3-code": { type: "http", url: ENDPOINT, bearerTokenEnvVar: "T3_MCP_BEARER_TOKEN" },
+  };
+
+  const withMcpSession = <A, E, R>(effect: Effect.Effect<A, E, R>) =>
+    Effect.sync(() =>
+      McpProviderSession.setMcpProviderSession({
+        environmentId: EnvironmentId.make("environment-pi-mcp"),
+        threadId: THREAD_ID,
+        providerSessionId: "mcp-session-prime",
+        providerInstanceId: PI_INSTANCE_ID,
+        endpoint: ENDPOINT,
+        authorizationHeader: "Bearer secret-prime-token",
+        browserToolsAvailable: true,
+      }),
+    ).pipe(
+      Effect.andThen(effect),
+      Effect.ensuring(Effect.sync(() => McpProviderSession.clearMcpProviderSession(THREAD_ID))),
+    );
+
+  const openPrime = (fake: FakePi, agentDir: string) =>
+    openRuntime(fake, "default", THREAD_ID, SESSION_ID, undefined, PRIME_AGENT_FLAVOR, undefined, {
+      PRIME_AGENT_CODING_AGENT_DIR: agentDir,
+    });
+
+  const t3SetupNotices = (events: ReadonlyArray<ProviderAdapterV2Event>) =>
+    events.flatMap((event) =>
+      event.type === "turn_item.updated" &&
+      event.turnItem.type === "system_notice" &&
+      event.turnItem.title === "T3 Code MCP setup"
+        ? [event.turnItem]
+        : [],
+    );
+
+  it.effect("loads the t3-code skill and no native T3 tools once the server is declared", () =>
+    withMcpSession(
+      Effect.gen(function* () {
+        const agentDir = yield* makeAgentDir(declaredEntry);
+        const fake = yield* makeFakePi;
+        yield* openPrime(fake, agentDir);
+        const { args, env } = fake.lastSpawn();
+        const skillIndex = args.indexOf("--skill");
+        assert.isAbove(skillIndex, -1);
+        assert.match(args[skillIndex + 1] ?? "", /\/pi-t3-skills\/t3-code$/);
+        assert.equal(env.T3_PI_MCP_TOOLS, "kernel");
+        assert.equal(env.T3_MCP_BEARER_TOKEN, "secret-prime-token");
+      }),
+    ).pipe(Effect.scoped, Effect.provide(testLayer)),
+  );
+
+  it.effect("keeps native tools and says once what to add when the server is not declared", () =>
+    withMcpSession(
+      Effect.gen(function* () {
+        const agentDir = yield* makeAgentDir();
+        const fake = yield* makeFakePi;
+        const { runtime, takeEvent } = yield* openPrime(fake, agentDir);
+        const { args, env } = fake.lastSpawn();
+        assert.notInclude(args, "--skill");
+        assert.notProperty(env, "T3_PI_MCP_TOOLS");
+
+        const providerThread = yield* runtime.ensureThread({
+          threadId: THREAD_ID,
+          modelSelection: modelSelection("default"),
+          runtimePolicy,
+        });
+        const finishTurn = Effect.fnUntraced(function* (ordinal: number) {
+          yield* startTurn(runtime, providerThread, "default", [], "Hello", undefined, ordinal);
+          yield* fake.takeRequest("prompt");
+          yield* fake.emit({ type: "agent_start" });
+          yield* fake.emit({ type: "agent_end", messages: [] });
+          yield* fake.takeRequest("get_state");
+          const seen: Array<ProviderAdapterV2Event> = [];
+          yield* takeEvent((event) => {
+            seen.push(event);
+            return event.type === "turn.terminal";
+          });
+          return t3SetupNotices(seen);
+        });
+
+        const [hint, ...extra] = yield* finishTurn(1);
+        assert.lengthOf(extra, 0);
+        assert.equal(hint?.type === "system_notice" ? hint.tone : undefined, "warning");
+        const message = hint?.type === "system_notice" ? hint.message : "";
+        assert.include(message, `${agentDir}/settings.json`);
+        assert.include(
+          message,
+          encodeJson({
+            "t3-code": { type: "http", url: ENDPOINT, bearerTokenEnvVar: "T3_MCP_BEARER_TOKEN" },
+          }),
+        );
+        assert.lengthOf(yield* finishTurn(2), 0);
+      }),
+    ).pipe(Effect.scoped, Effect.provide(testLayer)),
+  );
+
+  it.effect("treats a server declared for another port as undeclared", () =>
+    withMcpSession(
+      Effect.gen(function* () {
+        const agentDir = yield* makeAgentDir({
+          "t3-code": { ...declaredEntry["t3-code"], url: "http://127.0.0.1:3773/mcp" },
+        });
+        const fake = yield* makeFakePi;
+        yield* openPrime(fake, agentDir);
+        assert.notInclude(fake.lastSpawn().args, "--skill");
+      }),
+    ).pipe(Effect.scoped, Effect.provide(testLayer)),
+  );
+
+  it.effect("never uses the skill for plain Pi, even with a declared server", () =>
+    withMcpSession(
+      Effect.gen(function* () {
+        const agentDir = yield* makeAgentDir(declaredEntry);
+        const fake = yield* makeFakePi;
+        yield* openRuntime(
+          fake,
+          "default",
+          THREAD_ID,
+          SESSION_ID,
+          undefined,
+          PI_FLAVOR,
+          undefined,
+          {
+            PI_CODING_AGENT_DIR: agentDir,
+            PRIME_AGENT_CODING_AGENT_DIR: agentDir,
+          },
+        );
+        const { args, env } = fake.lastSpawn();
+        assert.notInclude(args, "--skill");
+        assert.notProperty(env, "T3_PI_MCP_TOOLS");
+      }),
+    ).pipe(Effect.scoped, Effect.provide(testLayer)),
   );
 });
