@@ -1,8 +1,8 @@
 import * as Effect from "effect/Effect";
 import type { OrchestrationV2ProviderThread } from "@t3tools/contracts";
 import {
-  awaitsHandle,
   detachedBashJobs,
+  endsHandle,
   reportedCommandMatches,
   type DetachedBashJob,
 } from "./primeAgentIpythonCell.ts";
@@ -103,11 +103,11 @@ export function makePrimeAgentBackgroundJobs(
     });
   });
 
-  /** Tracks jobs a finished cell started in the background, or consumed by awaiting. */
+  /** Tracks jobs a finished cell started in the background, and drops those it awaited or killed. */
   const trackBackgroundJobs = Effect.fnUntraced(function* (code: string) {
     let changed = false;
     for (const [taskId, job] of backgroundJobs) {
-      if (job.variable !== null && awaitsHandle(code, job.variable)) {
+      if (job.variable !== null && endsHandle(code, job.variable)) {
         backgroundJobs.delete(taskId);
         changed = true;
       }
