@@ -11,6 +11,7 @@ import {
   turnItemOutputImages,
   turnItemOutputText,
 } from "@t3tools/client-runtime/work-log/item-detail";
+import { noticeExpandedText } from "@t3tools/client-runtime/state/turn-item-presentation";
 import { ExternalLinkIcon, GitBranchIcon, RotateCcwIcon } from "lucide-react";
 import { memo, Suspense, use, useMemo } from "react";
 
@@ -367,7 +368,9 @@ export const V2ItemInspector = memo(function V2ItemInspector(props: V2ItemInspec
       {item.type === "user_input_request" ? (
         <StructuredValue value={item.questions.map((question) => question.question).join("\n\n")} />
       ) : null}
-      {item.type === "notification" ? <StructuredValue value={item.detail} /> : null}
+      {item.type === "notification" || item.type === "system_notice" ? (
+        <StructuredValue value={noticeExpandedText(item)} />
+      ) : null}
       {item.type === "error" ? <StructuredValue value={item.failure.message} /> : null}
       {item.type === "proposed_plan" ? <StructuredValue value={item.markdown} /> : null}
       {item.type === "todo_list" ? (
