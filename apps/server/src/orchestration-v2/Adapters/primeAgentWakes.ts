@@ -1,5 +1,6 @@
+import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
-import type { OrchestrationV2ProviderThread } from "@t3tools/contracts";
+import type { OrchestrationV2ProviderThread, ProviderDriverKind } from "@t3tools/contracts";
 import {
   detachedBashJobs,
   endsHandle,
@@ -12,6 +13,7 @@ import {
   piRecordString as recordString,
   type PiRpcRecord,
 } from "./PiRpc.ts";
+import type { ActivePiTurn, PiItemHooks } from "./PiAdapterV2State.ts";
 
 /**
  * Agent work that belongs to a wake turn. Dialogs, acks, and child session
@@ -35,55 +37,117 @@ export function isPiWakeEvent(event: PiRpcRecord): boolean {
 }
 
 /**
- * Says what woke the agent, from the first message it was woken with that has
- * a known meaning. Bookkeeping notices such as `ipython_state_restored` are
- * skipped.
+ * What a custom message Prime Agent injected means to the user, or null for
+ * messages with no known meaning. Bookkeeping notices such as
+ * `ipython_state_restored` have none.
  */
+export function piCustomMessageNotification(message: unknown): OrchestrationV2Notification | null {
+  const customType = recordString(message, "customType");
+  if (customType === "agent_message") {
+    const details = recordField(message, "details");
+    const sender = recordString(recordField(details, "from"), "sessionName") ?? "an agent";
+    const text = recordString(details, "message");
+    return {
+      source:
+        recordString(details, "fromRelationship") === "child"
+          ? { kind: "subagent" }
+          : { kind: "background_task" },
+      outcome: "updated",
+      summary: `Message from ${sender}`,
+      ...(text === undefined ? {} : { detail: text.slice(0, 2_000) }),
+    };
+  }
+  if (customType === "async_bash_completion") {
+    return {
+      source: { kind: "command" },
+      outcome: "completed",
+      summary: "Background command finished",
+    };
+  }
+  if (customType === "heartbeat_prompt") {
+    return { source: { kind: "background_task" }, outcome: "updated", summary: "Heartbeat" };
+  }
+  if (customType === "rlm_child_failure") {
+    return { source: { kind: "subagent" }, outcome: "failed", summary: "Subagent failed" };
+  }
+  if (customType === "rlm_child_terminal_notice") {
+    return { source: { kind: "subagent" }, outcome: "completed", summary: "Subagent finished" };
+  }
+  return null;
+}
+
+/**
+ * The first message an idle agent was woken with that has a known meaning,
+ * ahead of its own reply.
+ */
+export function piWakeTrigger(events: ReadonlyArray<PiRpcRecord>): {
+  readonly message: unknown;
+  readonly notification: OrchestrationV2Notification;
+} | null {
+  for (const event of events) {
+    if (event["type"] !== "message_start") continue;
+    const message = event["message"];
+    if (recordString(message, "role") === "assistant") return null;
+    const notification = piCustomMessageNotification(message);
+    if (notification !== null) return { message, notification };
+  }
+  return null;
+}
+
+/** Says what woke the agent, or that it resumed work when nothing says more. */
 export function piWakeNotification(
   events: ReadonlyArray<PiRpcRecord>,
   agentName: string,
 ): OrchestrationV2Notification {
-  for (const event of events) {
-    if (event["type"] !== "message_start") continue;
-    const message = event["message"];
-    if (recordString(message, "role") === "assistant") break;
-    const customType = recordString(message, "customType");
-    if (customType === "agent_message") {
-      const details = recordField(message, "details");
-      const sender = recordString(recordField(details, "from"), "sessionName") ?? "an agent";
-      const text = recordString(details, "message");
-      return {
-        source:
-          recordString(details, "fromRelationship") === "child"
-            ? { kind: "subagent" }
-            : { kind: "background_task" },
-        outcome: "updated",
-        summary: `Message from ${sender}`,
-        ...(text === undefined ? {} : { detail: text.slice(0, 2_000) }),
-      };
+  return (
+    piWakeTrigger(events)?.notification ?? {
+      source: { kind: "background_task" },
+      outcome: "updated",
+      summary: `${agentName} resumed work`,
     }
-    if (customType === "async_bash_completion") {
-      return {
-        source: { kind: "command" },
-        outcome: "completed",
-        summary: "Background command finished",
-      };
-    }
-    if (customType === "heartbeat_prompt") {
-      return { source: { kind: "background_task" }, outcome: "updated", summary: "Heartbeat" };
-    }
-    if (customType === "rlm_child_failure") {
-      return { source: { kind: "subagent" }, outcome: "failed", summary: "Subagent failed" };
-    }
-    if (customType === "rlm_child_terminal_notice") {
-      return { source: { kind: "subagent" }, outcome: "completed", summary: "Subagent finished" };
-    }
-  }
-  return {
-    source: { kind: "background_task" },
-    outcome: "updated",
-    summary: `${agentName} resumed work`,
-  };
+  );
+}
+
+/**
+ * Prime Agent can inject a message into a run that is already going, e.g. a
+ * background command that finished. The agent answers it in the same run, so
+ * without a row the reply looks like it came from nowhere, and the run folds
+ * the earlier reply away. The row is display only: Prime Agent already
+ * consumed the message, so nothing is queued or woken.
+ */
+export function makePrimeAgentWakeNotices(input: {
+  readonly enabled: boolean;
+  readonly driver: ProviderDriverKind;
+  readonly items: Pick<PiItemHooks, "emit" | "emitItemNode" | "baseItemFields">;
+}) {
+  const { enabled, driver } = input;
+  const { emit, emitItemNode, baseItemFields } = input.items;
+
+  const emitMidRunWakeNotice = Effect.fnUntraced(function* (turn: ActivePiTurn, message: unknown) {
+    if (!enabled || message === turn.wakeTrigger) return;
+    const notification = piCustomMessageNotification(message);
+    if (notification === null) return;
+    const emittedAt = yield* DateTime.now;
+    // Provider item ordinals restart in every thread and attempt, so the id
+    // needs the provider turn id; the count tells one message from the next.
+    turn.noticeCount += 1;
+    const nativeItemId = `${turn.providerTurn.id}:wake:${turn.noticeCount}`;
+    yield* emitItemNode(turn, nativeItemId, "system", "completed", emittedAt, emittedAt);
+    yield* emit({
+      type: "turn_item.updated",
+      driver,
+      turnItem: {
+        ...baseItemFields(turn, nativeItemId, emittedAt, emittedAt),
+        status: "completed",
+        title: notification.summary,
+        completedAt: emittedAt,
+        type: "notification",
+        ...notification,
+      },
+    });
+  });
+
+  return { emitMidRunWakeNotice };
 }
 
 export function makePrimeAgentBackgroundJobs(

@@ -3691,6 +3691,174 @@ describe("PiAdapterV2 with the Prime Agent flavor", () => {
     }).pipe(Effect.scoped, Effect.provide(testLayer)),
   );
 
+  /** One assistant reply, as Prime Agent streams it. */
+  const emitAssistantReply = (fake: FakePi, text: string) =>
+    Effect.gen(function* () {
+      yield* fake.emit({ type: "message_start", message: { role: "assistant", content: [] } });
+      yield* fake.emit({
+        type: "message_update",
+        assistantMessageEvent: { type: "text_end", contentIndex: 0, content: text },
+      });
+      yield* fake.emit({
+        type: "message_end",
+        message: { role: "assistant", content: [{ type: "text", text }], stopReason: "stop" },
+      });
+    });
+
+  const takeCompletedReply = (
+    takeEvent: (
+      predicate: (event: ProviderAdapterV2Event) => boolean,
+    ) => Effect.Effect<ProviderAdapterV2Event>,
+  ) =>
+    takeEvent(
+      (event) =>
+        event.type === "turn_item.updated" &&
+        event.turnItem.type === "assistant_message" &&
+        event.turnItem.status === "completed",
+    );
+
+  it.effect("shows why the agent went on when a finished background command joins its run", () =>
+    Effect.gen(function* () {
+      // Thread a8bf335f, run 32: the plan reply, then a `bash()` job that was
+      // started earlier finished and the agent wrote a second reply.
+      const fake = yield* makeFakePi;
+      const { runtime, takeEvent, providerThread } = yield* openPrimeThread(fake);
+      yield* startTurn(runtime, providerThread);
+      yield* fake.takeRequest("prompt");
+      yield* fake.emit({ type: "agent_start" });
+      yield* emitAssistantReply(fake, "Here is the plan.");
+      yield* takeCompletedReply(takeEvent);
+
+      yield* fake.emit({
+        type: "message_start",
+        message: {
+          role: "custom",
+          customType: "async_bash_completion",
+          content: "[bash-done pid:69972 exit:0]",
+          details: { pid: 69972, command: "tailcat ssh verify", exitCode: 0 },
+        },
+      });
+      const notice = yield* takeEvent(
+        (event) => event.type === "turn_item.updated" && event.turnItem.type === "notification",
+      );
+      yield* emitAssistantReply(fake, "The previously started verification finished.");
+      const second = yield* takeCompletedReply(takeEvent);
+
+      assert.isTrue(notice.type === "turn_item.updated");
+      if (notice.type !== "turn_item.updated" || notice.turnItem.type !== "notification") return;
+      assert.equal(notice.turnItem.summary, "Background command finished");
+      assert.deepEqual(notice.turnItem.source, { kind: "command" });
+      assert.equal(notice.turnItem.outcome, "completed");
+      assert.equal(notice.turnItem.status, "completed");
+      assert.equal(
+        notice.turnItem.nativeItemRef?.nativeId,
+        `${notice.turnItem.providerTurnId}:wake:1`,
+      );
+      // The notification sits in the run before the reply it explains.
+      assert.isTrue(
+        second.type === "turn_item.updated" && second.turnItem.ordinal > notice.turnItem.ordinal,
+      );
+    }).pipe(Effect.scoped, Effect.provide(testLayer)),
+  );
+
+  it.effect("names a message from a child agent that joins a running turn", () =>
+    Effect.gen(function* () {
+      const fake = yield* makeFakePi;
+      const { runtime, takeEvent, providerThread } = yield* openPrimeThread(fake);
+      yield* startTurn(runtime, providerThread);
+      yield* fake.takeRequest("prompt");
+      yield* fake.emit({ type: "agent_start" });
+      // Kernel bookkeeping says nothing a user needs.
+      yield* fake.emit({
+        type: "message_start",
+        message: { role: "custom", customType: "ipython_state_restored", content: "" },
+      });
+      yield* fake.emit({
+        type: "message_start",
+        message: {
+          role: "custom",
+          customType: "agent_message",
+          content: "[agent-message from child:worker]\n\nchild-ok",
+          details: {
+            message: "child-ok",
+            from: { sessionName: "worker", runtimeKind: "subagent" },
+            fromRelationship: "child",
+          },
+        },
+      });
+      yield* fake.emit({
+        type: "message_start",
+        message: { role: "custom", customType: "async_bash_completion", details: {} },
+      });
+      const first = yield* takeEvent(
+        (event) => event.type === "turn_item.updated" && event.turnItem.type === "notification",
+      );
+      const second = yield* takeEvent(
+        (event) => event.type === "turn_item.updated" && event.turnItem.type === "notification",
+      );
+
+      assert.isTrue(first.type === "turn_item.updated" && first.turnItem.type === "notification");
+      if (first.type !== "turn_item.updated" || first.turnItem.type !== "notification") return;
+      if (second.type !== "turn_item.updated" || second.turnItem.type !== "notification") return;
+      assert.equal(first.turnItem.summary, "Message from worker");
+      assert.equal(first.turnItem.detail, "child-ok");
+      assert.deepEqual(first.turnItem.source, { kind: "subagent" });
+      assert.equal(second.turnItem.summary, "Background command finished");
+      assert.notEqual(first.turnItem.id, second.turnItem.id);
+      assert.notEqual(first.turnItem.nodeId, second.turnItem.nodeId);
+    }).pipe(Effect.scoped, Effect.provide(testLayer)),
+  );
+
+  it.effect("does not repeat a continuation run's own wake notification", () =>
+    Effect.gen(function* () {
+      const fake = yield* makeFakePi;
+      const { runtime, takeEvent, providerThread, offers } = yield* openPrimeThreadWithWakes(fake);
+      yield* emitChildMessageWake(fake);
+      yield* Queue.take(offers);
+      yield* startTurn(
+        runtime,
+        providerThread,
+        "default",
+        [],
+        "Background activity updated",
+        undefined,
+        1,
+        THREAD_ID,
+        "provider",
+      );
+      yield* fake.takeRequest("get_state");
+      const adapterNotices: string[] = [];
+      yield* takeEvent((event) => {
+        if (event.type === "turn_item.updated" && event.turnItem.type === "notification") {
+          adapterNotices.push(event.turnItem.summary);
+        }
+        return event.type === "turn.terminal";
+      });
+      // The orchestrator shows the first wake message as the run's own
+      // notification, so the adapter says nothing more about it.
+      assert.deepEqual(adapterNotices, []);
+    }).pipe(Effect.scoped, Effect.provide(testLayer)),
+  );
+
+  it.effect("names the wake message when the user's turn adopts it", () =>
+    Effect.gen(function* () {
+      const fake = yield* makeFakePi;
+      const { runtime, takeEvent, providerThread, offers } = yield* openPrimeThreadWithWakes(fake);
+      yield* emitChildMessageWake(fake);
+      yield* Queue.take(offers);
+      yield* startTurn(runtime, providerThread, "default", [], "What happened?");
+      yield* fake.takeRequest("prompt");
+      const notice = yield* takeEvent(
+        (event) => event.type === "turn_item.updated" && event.turnItem.type === "notification",
+      );
+      assert.isTrue(
+        notice.type === "turn_item.updated" &&
+          notice.turnItem.type === "notification" &&
+          notice.turnItem.summary === "Message from worker",
+      );
+    }).pipe(Effect.scoped, Effect.provide(testLayer)),
+  );
+
   it.effect("restarts Prime Agent when Stop interrupts a turn with a live subagent", () =>
     Effect.gen(function* () {
       const fake = yield* makeFakePi;

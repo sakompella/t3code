@@ -121,7 +121,9 @@ import { makePrimeAgentSettle } from "./primeAgentSettle.ts";
 import {
   isPiWakeEvent,
   piWakeNotification,
+  piWakeTrigger,
   makePrimeAgentBackgroundJobs,
+  makePrimeAgentWakeNotices,
 } from "./primeAgentWakes.ts";
 
 export const PI_PROVIDER = PI_FLAVOR.driverKind;
@@ -1464,6 +1466,12 @@ export function makePiAdapterV2(
         items: { emit, emitItemNode, baseItemFields },
       });
 
+      const { emitMidRunWakeNotice } = makePrimeAgentWakeNotices({
+        enabled: flavor.selfWakes === "continuation",
+        driver,
+        items: { emit, emitItemNode, baseItemFields },
+      });
+
       // ── turn lifecycle ────────────────────────────────────
 
       /**
@@ -1838,6 +1846,9 @@ export function makePiAdapterV2(
           }
           case "message_start": {
             yield* completeBackgroundJob(event["message"]);
+            if (turn !== null && recordString(event["message"], "role") !== "assistant") {
+              yield* emitMidRunWakeNotice(turn, event["message"]);
+            }
             if (turn !== null && recordString(event["message"], "role") === "assistant") {
               yield* closeFinishingUp(turn);
               turn.sawAgentActivity = true;
@@ -2757,6 +2768,8 @@ export function makePiAdapterV2(
               });
               yield* updateProviderSession("running", null);
               if (adoptedWake !== null) {
+                if (isWakeContinuation)
+                  activeTurn.wakeTrigger = piWakeTrigger(adoptedWake.events)?.message;
                 for (const wakeEvent of adoptedWake.events) yield* handleSessionEvent(wakeEvent);
               } else if (isWakeContinuation) {
                 // The wake was already adopted by a user turn or ended with the
