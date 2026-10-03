@@ -266,13 +266,22 @@ function Actions({ className, ...props }: ComponentProps<"span">) {
   );
 }
 
-/** Child rows keep their parent's columns and begin immediately after its header. */
+/**
+ * Child rows keep their parent's columns and begin immediately after its header.
+ * The single track is `minmax(0, 1fr)`: an `auto` track grows to its widest row's
+ * unclipped text and pushes truncating rows past the banner's edge.
+ */
 function Children({ className, render, ...props }: useRender.ComponentProps<"div">) {
   return useRender({
     defaultTagName: "div",
     render,
     props: mergeProps<"div">(
-      { className: cn("grid gap-px [&_[data-composer-banner-row]]:min-h-5", className) },
+      {
+        className: cn(
+          "grid grid-cols-[minmax(0,1fr)] gap-px [&_[data-composer-banner-row]]:min-h-5",
+          className,
+        ),
+      },
       props,
     ),
   });
