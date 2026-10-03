@@ -519,6 +519,38 @@ html[data-mobile-composer-route-transition="true"]::view-transition-old(t3-mobil
   }
 }
 
+/*
+ * Running-tool shine for rows whose label is syntax-highlighted code. The
+ * shine above paints the text itself, which would replace the token colors,
+ * so this one sweeps an opacity band across the text and leaves colors alone.
+ */
+@keyframes live-code-shine {
+  from {
+    mask-position:
+      -4.5rem 0,
+      0 0;
+  }
+  to {
+    mask-position:
+      calc(100% + 4.5rem) 0,
+      0 0;
+  }
+}
+
+@utility live-code-shine {
+  @media (prefers-reduced-motion: no-preference) and (forced-colors: none) {
+    mask-image:
+      linear-gradient(to right, transparent, black, transparent),
+      linear-gradient(rgb(0 0 0 / 0.62), rgb(0 0 0 / 0.62));
+    mask-size:
+      4.5rem 100%,
+      100% 100%;
+    mask-repeat: no-repeat;
+    animation: live-code-shine 2.2s steps(30) infinite;
+    animation-play-state: var(--visible-animation-state, paused);
+  }
+}
+
 @utility visible-animate-spin {
   animation: var(--animate-spin);
   animation-play-state: var(--visible-animation-state, paused);
