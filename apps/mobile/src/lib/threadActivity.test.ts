@@ -421,6 +421,28 @@ describe("buildThreadFeed", () => {
     expect(activityFor(undefined)).toMatchObject({ icon: "warning", canExpand: false });
   });
 
+  it.each([
+    { message: "Finished up", canExpand: false },
+    {
+      message:
+        "Refined its harness: Update local Windows SSH, exit-node, and RustDesk handoff state",
+      canExpand: true,
+    },
+    { message: "Refined\nits harness", canExpand: true },
+  ])("opens a notice to its whole message only when a row can cut it: $message", (testCase) => {
+    const item = {
+      ...base("item-notice", "2026-06-20T00:00:02.000Z", 1),
+      type: "system_notice" as const,
+      message: testCase.message,
+      tone: "info" as const,
+    };
+    const activity = buildThreadFeed([projected(item, 0)]).flatMap((entry) =>
+      entry.type === "activity-group" ? entry.activities : [],
+    )[0];
+    expect(activity?.canExpand).toBe(testCase.canExpand);
+    if (testCase.canExpand) expect(activity?.getFullDetail()).toBe(testCase.message);
+  });
+
   it("drops a finished progress notice from the feed but keeps it while it runs", () => {
     const feedFor = (status: "running" | "completed") =>
       buildThreadFeed([
@@ -2254,6 +2276,22 @@ it.each([
     entry.type === "activity-group" ? entry.activities : [],
   )[0];
   expect(activity?.canExpand).toBe(canExpand);
+});
+
+it("lets a notification expand to a summary that a row can cut off", () => {
+  const summary = "Background command finished: make build && make test && make deploy-preview";
+  const item = {
+    ...base("notification", "2026-06-20T00:00:01.000Z", 0),
+    type: "notification" as const,
+    source: { kind: "command" as const },
+    outcome: "completed" as const,
+    summary,
+  };
+  const activity = buildThreadFeed([projected(item, 0)]).flatMap((entry) =>
+    entry.type === "activity-group" ? entry.activities : [],
+  )[0];
+  expect(activity?.canExpand).toBe(true);
+  expect(activity?.getFullDetail()).toBe(summary);
 });
 
 it("uses a compact reasoning preview and a short expanded heading", () => {
