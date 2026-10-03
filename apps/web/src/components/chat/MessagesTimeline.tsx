@@ -201,9 +201,6 @@ import {
   shouldPreserveAssistantLineBreaks,
   toolGroupAction,
   workEntryDisplayLabel,
-  workEntryBodyCode,
-  workEntryLabelCode,
-  type WorkEntryCode,
   workEntryHasInspectableContent,
   workEntryReadOutput,
   workEntryIsVisibleInGroup,
@@ -214,6 +211,11 @@ import {
   type TimelineLatestRun,
   type WorkGroupScrollAnchor,
 } from "./MessagesTimeline.logic";
+import {
+  workEntryBodyCode,
+  workEntryLabelCode,
+  type WorkEntryCode,
+} from "@t3tools/client-runtime/work-log/entry-code";
 import { TerminalContextInlineChip } from "./TerminalContextInlineChip";
 import { Popover, PopoverPopup, PopoverTrigger } from "../ui/popover";
 import { Spinner } from "../ui/spinner";

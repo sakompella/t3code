@@ -1,9 +1,10 @@
 import type { DiffsHighlighter } from "@pierre/diffs";
+import type { WorkEntryCodeLanguage } from "@t3tools/client-runtime/work-log/entry-code";
 
 import { resolveDiffThemeName } from "./diffRendering";
 import { LRUCache } from "./lruCache";
 
-export type HighlightLanguage = "python" | "shellscript";
+export type HighlightLanguage = WorkEntryCodeLanguage;
 
 export interface CodeToken {
   readonly content: string;

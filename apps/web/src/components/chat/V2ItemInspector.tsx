@@ -13,7 +13,7 @@ import { Button } from "../ui/button";
 import ChatMarkdown from "../ChatMarkdown";
 import { useTheme } from "../../hooks/useTheme";
 import { HighlightedCode } from "./HighlightedCode";
-import type { WorkEntryCode } from "./MessagesTimeline.logic";
+import type { WorkEntryCode } from "@t3tools/client-runtime/work-log/entry-code";
 import { resolveExternalWebLinkHref } from "./externalLinkContextMenu";
 
 interface V2ItemInspectorProps {

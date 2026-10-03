@@ -323,6 +323,10 @@
       "types": "./src/work-log/toolPresentation.ts",
       "default": "./src/work-log/toolPresentation.ts"
     },
+    "./work-log/entry-code": {
+      "types": "./src/work-log/entryCode.ts",
+      "default": "./src/work-log/entryCode.ts"
+    },
     "./work-log/command-label": {
       "types": "./src/work-log/commandLabel.ts",
       "default": "./src/work-log/commandLabel.ts"
