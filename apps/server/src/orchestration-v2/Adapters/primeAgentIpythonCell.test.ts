@@ -6,6 +6,7 @@ import {
   classifyIpythonCell,
   detachedBashJobs,
   previewPythonCell,
+  readsHandle,
   reportedCommandMatches,
 } from "./primeAgentIpythonCell.ts";
 
@@ -188,6 +189,14 @@ describe("detachedBashJobs", () => {
   it("ignores a command with nothing in it", () => {
     expect(detachedBashJobs("job = bash('  ')")).toEqual([]);
     expect(detachedBashJobs("job = bash('')")).toEqual([]);
+  });
+
+  it("recognizes a later cell reading a handle's result without awaiting it", () => {
+    expect(readsHandle("print(job.running)\nout = job.output()", "job")).toBe(true);
+    expect(readsHandle("print(job . tail (5))", "job")).toBe(true);
+    expect(readsHandle("if job.poll() is None: pass", "job")).toBe(true);
+    expect(readsHandle("print(job.running, job.pid)", "job")).toBe(false);
+    expect(readsHandle("print(other_job.output())", "job")).toBe(false);
   });
 });
 

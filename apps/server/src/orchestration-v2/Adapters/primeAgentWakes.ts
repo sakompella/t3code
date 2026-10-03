@@ -4,6 +4,7 @@ import type { OrchestrationV2ProviderThread, ProviderDriverKind } from "@t3tools
 import {
   detachedBashJobs,
   endsHandle,
+  readsHandle,
   reportedCommandMatches,
   type DetachedBashJob,
 } from "./primeAgentIpythonCell.ts";
@@ -221,41 +222,62 @@ export function makePrimeAgentWakeNotices(input: {
   return { emitMidRunWakeNotice };
 }
 
+/**
+ * The jobs a Prime Agent kernel runs in the background, as the adapter infers
+ * them from the cells it saw.
+ *
+ * Prime Agent gives RPC clients no list of live jobs, and reports a job's end
+ * only with a notice that it withdraws when a later cell reads the finished
+ * result first. So a job a cell has read may have ended without any signal.
+ * Such a job stays tracked, to keep the session alive in case it still runs
+ * and its notice is yet to come, but it leaves the roster the composer shows.
+ */
 export function makePrimeAgentBackgroundJobs(
   publish: (
     patch: Pick<OrchestrationV2ProviderThread, "pendingBackgroundTasks">,
   ) => Effect.Effect<void>,
 ) {
-  const backgroundJobs = new Map<string, DetachedBashJob>();
+  const backgroundJobs = new Map<string, { job: DetachedBashJob; read: boolean }>();
   /** Completion messages by the job they reported, which has left the roster by the time a row is built. */
   const finishedJobs = new WeakMap<object, DetachedBashJob>();
   /** A wake's messages are handled when they arrive and again when a continuation run replays them. */
   const handledNotices = new WeakSet<object>();
   let backgroundJobCounter = 0;
   const tasks = () =>
-    Array.from(backgroundJobs, ([taskId, job]) => ({
-      taskId,
-      kind: "command" as const,
-      description: job.command,
-    }));
+    Array.from(backgroundJobs)
+      .filter(([, { read }]) => !read)
+      .map(([taskId, { job }]) => ({
+        taskId,
+        kind: "command" as const,
+        description: job.command,
+      }));
   const publishBackgroundJobs = Effect.fnUntraced(function* () {
     yield* publish({ pendingBackgroundTasks: tasks() });
   });
+  /** Runs a change to the jobs and publishes the roster when it changed. */
+  const publishIfRosterChanged = Effect.fnUntraced(function* (change: () => void) {
+    const before = tasks().map((task) => task.taskId);
+    change();
+    const after = tasks().map((task) => task.taskId);
+    if (before.join() !== after.join()) yield* publishBackgroundJobs();
+  });
 
-  /** Tracks jobs a finished cell started in the background, and drops those it awaited or killed. */
+  /**
+   * Tracks jobs a finished cell started in the background. Awaiting or killing
+   * a handle ends its job; reading its result takes it off the roster.
+   */
   const trackBackgroundJobs = Effect.fnUntraced(function* (code: string) {
-    let changed = false;
-    for (const [taskId, job] of backgroundJobs) {
-      if (job.variable !== null && endsHandle(code, job.variable)) {
-        backgroundJobs.delete(taskId);
-        changed = true;
+    yield* publishIfRosterChanged(() => {
+      for (const [taskId, tracked] of backgroundJobs) {
+        const { variable } = tracked.job;
+        if (variable === null) continue;
+        if (endsHandle(code, variable)) backgroundJobs.delete(taskId);
+        else if (readsHandle(code, variable)) tracked.read = true;
       }
-    }
-    for (const job of detachedBashJobs(code)) {
-      backgroundJobs.set(`bash:${++backgroundJobCounter}`, job);
-      changed = true;
-    }
-    if (changed) yield* publishBackgroundJobs();
+      for (const job of detachedBashJobs(code)) {
+        backgroundJobs.set(`bash:${++backgroundJobCounter}`, { job, read: false });
+      }
+    });
   });
 
   /** The kernel reports a detached job's end with an `async_bash_completion` message. */
@@ -265,18 +287,20 @@ export function makePrimeAgentBackgroundJobs(
     if (reported === undefined || typeof message !== "object" || message === null) return;
     if (handledNotices.has(message)) return;
     handledNotices.add(message);
-    for (const [taskId, job] of backgroundJobs) {
-      if (reportedCommandMatches(job, reported)) {
-        finishedJobs.set(message, job);
-        backgroundJobs.delete(taskId);
-        yield* publishBackgroundJobs();
-        return;
-      }
-    }
+    // A notice only comes for a result nobody read while the job was done, so
+    // a job no cell has read is the likelier owner.
+    const candidates = Array.from(backgroundJobs).sort(
+      ([, left], [, right]) => Number(left.read) - Number(right.read),
+    );
+    const match = candidates.find(([, { job }]) => reportedCommandMatches(job, reported));
+    if (match === undefined) return;
+    const [taskId, { job }] = match;
+    finishedJobs.set(message, job);
+    yield* publishIfRosterChanged(() => backgroundJobs.delete(taskId));
   });
 
   return {
-    /** The jobs this process knows are running: what a persisted roster has to agree with. */
+    /** The jobs this process may still be running that no cell has read: what a persisted roster has to agree with. */
     tasks,
     trackBackgroundJobs,
     completeBackgroundJob,

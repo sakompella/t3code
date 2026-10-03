@@ -3580,25 +3580,147 @@ describe("PiAdapterV2 with the Prime Agent flavor", () => {
     }).pipe(Effect.scoped, Effect.provide(testLayer)),
   );
 
-  it.effect("keeps listing a background shell job when a later cell only reads from it", () =>
+  /**
+   * Cells and kernel notices from a real Prime Agent session (a Windows box
+   * set up over a tailnet). Every job but the unread one below was read by a
+   * later cell, so Prime Agent either withdrew its completion notice or sent
+   * it while the job still ran. Secrets are replaced by `TOKEN`.
+   */
+  const readJobsSession: ReadonlyArray<
+    { readonly cell: string } | { readonly finished: string; readonly exitCode: number }
+  > = [
+    {
+      cell: "rd_net_handle = bash('dscacheutil -q host -a name rs-ny.rustdesk.com; nc -vz -G 5 rs-ny.rustdesk.com 21116 2>&1')",
+    },
+    {
+      cell: "print(rd_net_handle.running)\nrd_net_output = rd_net_handle.output()\nprint(rd_net_output)",
+    },
+    { cell: "rd_tc_help_handle = bash(', tailcat --help')" },
+    { cell: "print(rd_tc_help_handle.output()[-5500:])" },
+    {
+      cell: 'rd_enable_cmd = "Get-Process"\nrd_enable_handle = bash(f", tailcat ssh {code} {shlex.quote(rd_enable_cmd)} < /dev/null")',
+    },
+    {
+      cell: 'print(rd_enable_handle.running, rd_enable_handle.output())\nrd_tunnel_handle = bash(f", tailcat ssh {code} -N -o ExitOnForwardFailure=yes -L 127.0.0.1:21118:127.0.0.1:21118 < /dev/null")',
+    },
+    {
+      cell: "print(rd_tunnel_handle.running); print(rd_tunnel_handle.output())\nrd_test_handle = bash('nc -vz -G 3 127.0.0.1 21118 2>&1')",
+    },
+    { finished: "nc -vz -G 3 127.0.0.1 21118 2>&1", exitCode: 1 },
+    {
+      cell: "rd_tunnel_handle = bash(f\"ssh -N -o BatchMode=yes -o ExitOnForwardFailure=yes -o ConnectTimeout=15 -o StrictHostKeyChecking=accept-new -o {shlex.quote('ProxyCommand=, tailcat '+code+' 22')} -L 127.0.0.1:21118:127.0.0.1:21118 {code} < /dev/null\")",
+    },
+    {
+      cell: "print(rd_tunnel_handle.running); print(rd_tunnel_handle.output())\nrd_test_handle = bash('nc -vz -G 3 127.0.0.1 21118 2>&1')",
+    },
+    { cell: "print(rd_test_handle.output()); print(rd_tunnel_handle.output()[-1200:])" },
+    {
+      cell: 'rd_tunnel_handle.kill()\nrd_tailcat_probe = "(Get-Command tailcat -ErrorAction Stop).Source; tailcat serve --help"\nrd_tailcat_probe_handle = bash(f", tailcat ssh {code} {shlex.quote(rd_tailcat_probe)} < /dev/null")',
+    },
+    { cell: "print(rd_tailcat_probe_handle.output()[:6500])" },
+    {
+      finished:
+        "ssh -N -o BatchMode=yes -o ExitOnForwardFailure=yes -o ConnectTimeout=15 -o StrictHostKeyChecking=accept-new -o 'ProxyCommand=, tailcat TOKEN 22' -L 127.0.0.1:21118:127.0.0.1:21118 TOKEN < /dev/null",
+      exitCode: -15,
+    },
+    {
+      cell: 'rd_tc_find = "Get-Process"\nrd_tc_find_handle = bash(f", tailcat ssh {code} {shlex.quote(rd_tc_find)} < /dev/null")',
+    },
+    { cell: "print(rd_tc_find_handle.output())" },
+    {
+      cell: 'rd_tc_start = "Get-Process"\nrd_tc_start_handle = bash(f", tailcat ssh {code} {shlex.quote(rd_tc_start)} < /dev/null")',
+    },
+    {
+      cell: 'print(rd_tc_start_handle.output())\nrd_tc_addr_cmd = "Get-Process"\nrd_tc_addr_handle = bash(f", tailcat ssh {code} {shlex.quote(rd_tc_addr_cmd)} < /dev/null")',
+    },
+    { cell: "rd_tc_addr_output=rd_tc_addr_handle.output(); print(rd_tc_addr_output)" },
+    {
+      cell: 'import json\nrd_forward_handle = bash(f", tailcat forward --bind=127.0.0.1 {rd_forward_code} 21118:21118")',
+    },
+    {
+      cell: "print(rd_forward_handle.running); print(rd_forward_handle.output())\nrd_forward_test = bash('nc -vz -G 3 127.0.0.1 21118 2>&1')",
+    },
+    { cell: "print(rd_forward_test.output()); print(rd_forward_handle.output())" },
+    {
+      cell: "ethan_test_handle = bash('tailscale status; tailscale ping --c 3 --timeout 5s ethan')",
+    },
+    {
+      cell: "print(ethan_test_handle.running)\nethan_test_output = ethan_test_handle.output()\nprint(ethan_test_output)",
+    },
+    {
+      cell: 'power_cmd = "Get-Process"\npower_handle = bash(f", tailcat ssh {code} {shlex.quote(power_cmd)} < /dev/null")',
+    },
+    {
+      cell: "print(power_handle.running); power_output=power_handle.output(); print(power_output)",
+    },
+    { finished: ", tailcat ssh TOKEN 'Get-Process' < /dev/null", exitCode: 255 },
+    {
+      cell: "power_output = power_handle.output(); print(power_output[-2500:])\npower_reach_handle = bash('tailscale ping --c 1 --timeout 5s 100.120.125.3')",
+    },
+    { finished: "tailscale ping --c 1 --timeout 5s 100.120.125.3", exitCode: 1 },
+    { cell: "print(power_reach_handle.output())" },
+  ];
+
+  it.effect("lists only the jobs no cell read after a long session of read handles", () =>
     Effect.gen(function* () {
       const fake = yield* makeFakePi;
       const { runtime, takeEvent, providerThread } = yield* openPrimeThreadWithWakes(fake);
       yield* startTurn(runtime, providerThread);
       yield* fake.takeRequest("prompt");
       yield* fake.emit({ type: "agent_start" });
-      yield* emitCell(fake, "cell_start", "job = bash('sleep 300'); print(job.pid)");
-      yield* takeEvent(
-        (event) =>
-          event.type === "provider_thread.updated" &&
-          (event.providerThread.pendingBackgroundTasks?.length ?? 0) === 1,
-      );
-      yield* emitCell(fake, "cell_peek", "print(job.tail(5))");
+      for (const [index, step] of readJobsSession.entries()) {
+        if ("cell" in step) {
+          yield* emitCell(fake, `cell_${index}`, step.cell);
+          continue;
+        }
+        yield* fake.emit({
+          type: "message_start",
+          message: {
+            role: "custom",
+            customType: "async_bash_completion",
+            details: { pid: 1000 + index, command: step.finished, exitCode: step.exitCode },
+          },
+        });
+      }
       yield* fake.emit({ type: "agent_end", messages: [] });
       yield* fake.takeRequest("get_state");
-      yield* drainUntilTerminal(takeEvent);
+      const seen = yield* drainUntilTerminal(takeEvent);
+      const rosters = seen.flatMap((event) =>
+        event.type === "provider_thread.updated"
+          ? [event.providerThread.pendingBackgroundTasks ?? []]
+          : [],
+      );
+      assert.deepEqual(rosters.at(-1), []);
+      assert.isTrue(rosters.flat().every((task) => (task.description ?? "").trim().length > 0));
+      // A job whose result was read may still run, so the session stays up for it.
       assert.isTrue(yield* runtime.hasPendingBackgroundWork!);
     }).pipe(Effect.scoped, Effect.provide(testLayer)),
+  );
+
+  it.effect(
+    "takes a background shell job off the roster once a later cell reads it, but keeps the session alive",
+    () =>
+      Effect.gen(function* () {
+        const fake = yield* makeFakePi;
+        const { runtime, takeEvent, providerThread } = yield* openPrimeThreadWithWakes(fake);
+        yield* startTurn(runtime, providerThread);
+        yield* fake.takeRequest("prompt");
+        yield* fake.emit({ type: "agent_start" });
+        yield* emitCell(fake, "cell_start", "job = bash('sleep 300'); print(job.pid)");
+        yield* takeEvent(
+          (event) =>
+            event.type === "provider_thread.updated" &&
+            (event.providerThread.pendingBackgroundTasks?.length ?? 0) === 1,
+        );
+        // Prime Agent drops the completion notice of a job that was done at the
+        // read, and nothing tells T3 whether this one was. The job may still run.
+        yield* emitCell(fake, "cell_peek", "print(job.tail(5))");
+        yield* fake.emit({ type: "agent_end", messages: [] });
+        yield* fake.takeRequest("get_state");
+        const seen = yield* drainUntilTerminal(takeEvent);
+        assert.deepEqual(rosterLengths(seen).slice(0, 1), [0]);
+        assert.isTrue(yield* runtime.hasPendingBackgroundWork!);
+      }).pipe(Effect.scoped, Effect.provide(testLayer)),
   );
 
   it.effect("does not list a job its own cell killed", () =>
