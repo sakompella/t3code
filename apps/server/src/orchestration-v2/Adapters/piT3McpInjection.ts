@@ -8,6 +8,8 @@ import {
   PI_T3_MCP_EXTENSION_SOURCE,
   T3_MCP_BEARER_ENV,
   T3_MCP_URL_ENV,
+  T3_PI_MCP_TOOLS_ENV,
+  T3_PI_MCP_TOOLS_KERNEL,
   T3_PI_RUNTIME_MODE_ENV,
 } from "./piT3McpExtensionSource.ts";
 import {
@@ -308,14 +310,15 @@ export function buildPiRpcLaunch(input: {
   ) {
     args.push("--extension", input.extensionPath);
   }
-  if (hasT3Mcp && input.skillPath !== undefined) {
-    args.push("--skill", input.skillPath);
-  }
+  // A skill means the agent reaches T3 through its own MCP client.
+  const skillPath = hasT3Mcp ? input.skillPath : undefined;
+  if (skillPath !== undefined) args.push("--skill", skillPath);
   const environment = { ...input.environment };
   // These values belong to the current T3 session. Never let a Pi child reuse
   // credentials inherited from the server or a parent provider process.
   delete environment[T3_MCP_URL_ENV];
   delete environment[T3_MCP_BEARER_ENV];
+  delete environment[T3_PI_MCP_TOOLS_ENV];
 
   return {
     args,
@@ -327,6 +330,7 @@ export function buildPiRpcLaunch(input: {
               input.runtimeMode === "auto" ? "approval-required" : input.runtimeMode,
           }
         : {}),
+      ...(skillPath !== undefined ? { [T3_PI_MCP_TOOLS_ENV]: T3_PI_MCP_TOOLS_KERNEL } : {}),
       ...(hasT3Mcp && input.mcpSession !== undefined
         ? {
             [T3_MCP_URL_ENV]: input.mcpSession.endpoint,

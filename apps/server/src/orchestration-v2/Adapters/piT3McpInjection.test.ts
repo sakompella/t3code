@@ -8,6 +8,7 @@ import {
   PI_T3_MCP_EXTENSION_FILENAME,
   T3_MCP_BEARER_ENV,
   T3_MCP_URL_ENV,
+  T3_PI_MCP_TOOLS_ENV,
   T3_PI_RUNTIME_MODE_ENV,
 } from "./piT3McpExtensionSource.ts";
 import {
@@ -176,7 +177,15 @@ describe("pi T3 MCP injection", () => {
     const skillPath = "/tmp/cache/pi-t3-skills/t3-code";
     const withSkill = buildPiRpcLaunch({ ...base, mcpSession, skillPath });
     assert.deepEqual(withSkill.args.slice(-2), ["--skill", skillPath]);
-    assert.notInclude(buildPiRpcLaunch({ ...base, mcpSession }).args, "--skill");
+    assert.equal(withSkill.env[T3_PI_MCP_TOOLS_ENV], "kernel");
+    const native = buildPiRpcLaunch({
+      ...base,
+      mcpSession,
+      environment: { [T3_PI_MCP_TOOLS_ENV]: "kernel" },
+    });
+    assert.notInclude(native.args, "--skill");
+    // A value inherited from the server must not switch off native tools.
+    assert.notProperty(native.env, T3_PI_MCP_TOOLS_ENV);
     // Without a T3 credential the skill would describe tools that cannot work.
     assert.notInclude(
       buildPiRpcLaunch({ ...base, mcpSession: undefined, skillPath }).args,

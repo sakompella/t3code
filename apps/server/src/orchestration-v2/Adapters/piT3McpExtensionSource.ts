@@ -15,6 +15,13 @@ export const PI_T3_MCP_EXTENSION_FILENAME = "pi-t3-mcp-extension.ts";
 export const T3_MCP_URL_ENV = "T3_MCP_URL";
 export const T3_MCP_BEARER_ENV = "T3_MCP_BEARER_TOKEN";
 export const T3_PI_RUNTIME_MODE_ENV = "T3_PI_RUNTIME_MODE";
+/**
+ * Set to `kernel` when the agent reaches T3 through its own MCP client and the
+ * `t3-code` skill. The extension then registers no T3 tools and adds no
+ * orchestration prompt; permissions, rollback, and the token cap stay.
+ */
+export const T3_PI_MCP_TOOLS_ENV = "T3_PI_MCP_TOOLS";
+export const T3_PI_MCP_TOOLS_KERNEL = "kernel";
 
 /**
  * Hidden command that rolls the conversation back in place with the extension
@@ -45,6 +52,8 @@ import { Type } from "typebox";
 const URL_ENV = ${JSON.stringify(T3_MCP_URL_ENV)};
 const TOKEN_ENV = ${JSON.stringify(T3_MCP_BEARER_ENV)};
 const RUNTIME_MODE_ENV = ${JSON.stringify(T3_PI_RUNTIME_MODE_ENV)};
+const MCP_TOOLS_ENV = ${JSON.stringify(T3_PI_MCP_TOOLS_ENV)};
+const MCP_TOOLS_KERNEL = ${JSON.stringify(T3_PI_MCP_TOOLS_KERNEL)};
 const ORCHESTRATION_INSTRUCTIONS = ${JSON.stringify(T3_CODE_ORCHESTRATION_INSTRUCTIONS.trim())};
 const PROTOCOL = "2025-06-18";
 const NAVIGATE_TREE_COMMAND = ${JSON.stringify(T3_NAVIGATE_TREE_COMMAND)};
@@ -294,6 +303,9 @@ export default async function t3McpExtension(pi: ExtensionAPI) {
       return { block: true, reason: \`\${event.toolName} was declined in T3 Code.\` };
     }
   });
+
+  // The agent's own MCP client serves T3's tools, guided by the t3-code skill.
+  if (env(MCP_TOOLS_ENV) === MCP_TOOLS_KERNEL) return;
 
   const endpoint = env(URL_ENV);
   const token = env(TOKEN_ENV);
