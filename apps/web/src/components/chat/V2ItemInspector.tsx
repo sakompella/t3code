@@ -167,7 +167,6 @@ export const V2ItemInspector = memo(function V2ItemInspector(props: V2ItemInspec
         <StructuredValue value={item.questions.map((question) => question.question).join("\n\n")} />
       ) : null}
       {item.type === "notification" ? <StructuredValue value={item.detail} /> : null}
-      {item.type === "system_notice" ? <StructuredValue value={item.message} /> : null}
       {item.type === "proposed_plan" ? <StructuredValue value={item.markdown} /> : null}
       {item.type === "todo_list" ? (
         <StructuredValue

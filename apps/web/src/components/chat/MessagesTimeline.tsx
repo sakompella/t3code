@@ -4883,6 +4883,10 @@ function workEntryIconName(workEntry: TimelineWorkEntry): WorkEntryIconName {
   if (workEntry.itemType === "user_input_request" || workEntry.itemType === "approval_request") {
     return "message-circle";
   }
+  // The info tone's check mark would claim a notice that is still running is done.
+  if (workEntry.itemType === "system_notice" && workEntry.toolLifecycleStatus === "inProgress") {
+    return "zap";
+  }
   if (workEntry.toolSurface) return workEntry.toolSurface;
   const toolPresentation = resolveWorkEntryToolPresentation(workEntry);
   if (toolPresentation) return toolPresentation.icon;
@@ -5097,10 +5101,12 @@ const SimpleWorkEntryRow = memo(function SimpleWorkEntryRow(props: {
             viewedImage ? viewedImagePath : null,
           )
       : null;
+  // A system notice's whole message is its label, so expanding would repeat it.
   const canExpandProjectedItem =
     plainOutput !== undefined
       ? Boolean(plainOutput || viewedImage || workEntry.questionAnswer)
-      : canExpand || workEntry.projectedItem !== undefined;
+      : workEntry.itemType !== "system_notice" &&
+        (canExpand || workEntry.projectedItem !== undefined);
   // Reserve destructive row styling for severe failures, not routine tool errors.
   const iconWrapperClass = cn(
     "flex size-4 items-center justify-center",

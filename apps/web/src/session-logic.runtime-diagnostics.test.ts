@@ -91,6 +91,49 @@ describe("runtime diagnostics in the v2 work log", () => {
     expect(entry.detail).toBeUndefined();
   });
 
+  it("shows routine system notices as quiet rows and an untoned one as a warning", () => {
+    const notice = (tone: "info" | "progress" | "warning" | undefined) =>
+      workEntry({
+        ...baseItem,
+        type: "system_notice",
+        message: "Refined its harness.",
+        // A completed progress notice is dropped, so keep this one running.
+        status: tone === "progress" ? "running" : "completed",
+        ...(tone === undefined ? {} : { tone }),
+      });
+
+    expect(notice("info").sourceActivityKind).toBeUndefined();
+    expect(notice("progress").sourceActivityKind).toBeUndefined();
+    expect(notice("warning").sourceActivityKind).toBe("runtime.warning");
+    expect(notice(undefined).sourceActivityKind).toBe("runtime.warning");
+  });
+
+  it("drops a finished progress notice but keeps it while it runs", () => {
+    const progress = (status: "running" | "completed") => ({
+      ...baseItem,
+      status,
+      type: "system_notice" as const,
+      message: "Finishing up…",
+      tone: "progress" as const,
+    });
+    const entriesFor = (item: OrchestrationV2TurnItem) =>
+      deriveTimelineEntriesFromVisibleTurnItems({
+        visibleTurnItems: [
+          {
+            position: 0,
+            visibility: "local",
+            sourceThreadId: item.threadId,
+            sourceItemId: item.id,
+            item,
+          },
+        ],
+        optimisticMessages: [],
+      });
+
+    expect(entriesFor(progress("running"))).toHaveLength(1);
+    expect(entriesFor(progress("completed"))).toHaveLength(0);
+  });
+
   it("keeps retry progress visible while retaining its diagnostic detail", () => {
     const entry = workEntry(
       errorItem({
