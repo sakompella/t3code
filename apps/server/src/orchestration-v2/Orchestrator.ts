@@ -8106,9 +8106,11 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         });
       }
       for (const providerThread of input.projection.providerThreads) {
-        // A live process owns its roster and reports clearing it.
+        // A live process owns its roster and heartbeats and reports clearing
+        // them. Heartbeats only run while their session does.
         if (
-          (providerThread.pendingBackgroundTasks?.length ?? 0) === 0 ||
+          ((providerThread.pendingBackgroundTasks?.length ?? 0) === 0 &&
+            (providerThread.heartbeats?.length ?? 0) === 0) ||
           (yield* hasLiveSession(providerThread.id))
         ) {
           continue;
@@ -8128,6 +8130,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
                 ? "idle"
                 : providerThread.status,
             pendingBackgroundTasks: [],
+            heartbeats: [],
             updatedAt: input.now,
           },
         });
