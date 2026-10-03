@@ -49,6 +49,7 @@ import {
   TYPE_TO_FOCUS_EDITABLE_SELECTOR,
   TYPE_TO_FOCUS_FLOATING_LAYER_SELECTOR,
 } from "./chat/composerFocusRedirect";
+import { heartbeatBannerItem } from "./chat/ComposerHeartbeat";
 import { getTerminalLabel } from "@t3tools/shared/terminalLabels";
 import * as Schema from "effect/Schema";
 import {
@@ -103,6 +104,10 @@ import {
 import { threadSupportsProviderHandoff } from "@t3tools/client-runtime/state/thread-workflows";
 import { resolvePendingHandoff } from "@t3tools/client-runtime/handoff";
 import { HandoffRow } from "./chat/V2LifecycleRow";
+import {
+  deriveThreadHeartbeats,
+  presentHeartbeats,
+} from "@t3tools/client-runtime/state/thread-heartbeats";
 import {
   codexFeedbackMessage,
   parseCodexFeedbackCommand,
@@ -5282,6 +5287,18 @@ export default function ChatView(props: ChatViewProps) {
       actions: stopAction,
     };
   })() as ComposerBannerStackItem | null;
+  // Configuration, not work: shown quietly, and never part of the background list.
+  const threadHeartbeats =
+    serverProjection === null ? [] : deriveThreadHeartbeats(serverProjection);
+  const heartbeatThreadId = activeThread?.id ?? null;
+  const heartbeatPresentation = presentHeartbeats(
+    threadHeartbeats,
+    new Date(`${nowMinute}:00.000Z`),
+  );
+  const heartbeatBanner =
+    heartbeatPresentation === null || heartbeatThreadId === null
+      ? null
+      : heartbeatBannerItem(heartbeatThreadId, heartbeatPresentation);
   // The relative times read the clock; nowMinute re-renders them on the minute.
   const snoozedUntil = activeThreadShell?.snoozedUntil ?? null;
   const settledAt = activeThreadShell?.settledAt ?? null;
@@ -5424,6 +5441,7 @@ export default function ChatView(props: ChatViewProps) {
       goalBannerItem,
       backgroundWorkBannerItem,
     ].filter((item) => item !== null);
+    const heartbeatItems = heartbeatBanner === null ? [] : [heartbeatBanner];
     const usageLimitsItems = usageLimitsBanner === null ? [] : [usageLimitsBanner];
     const projectCloneItems = projectCloneBannerItem === null ? [] : [projectCloneBannerItem];
     if (!localCheckoutBranchMismatch || !showBranchMismatchBanner || !activeBranchMismatchKey) {
@@ -5434,6 +5452,7 @@ export default function ChatView(props: ChatViewProps) {
         ...projectCloneItems,
         ...systemComposerBannerItems,
         ...backgroundWorkItems,
+        ...heartbeatItems,
       ];
     }
     return [
@@ -5482,6 +5501,7 @@ export default function ChatView(props: ChatViewProps) {
           setBranchMismatchDismissTick((tick) => tick + 1);
         },
       },
+      ...heartbeatItems,
     ];
   })() as ComposerBannerStackItem[];
 
