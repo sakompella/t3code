@@ -361,6 +361,29 @@ export function makeProviderEventRoutingState(input: {
   };
 }
 
+/**
+ * Every run on a session sees every `subagent.updated`, and only the run that
+ * owns the subagent keeps it. Logging each subscriber's verdict shows which
+ * run took an update, or that none did.
+ */
+const logSubagentRouting = (
+  subagent: OrchestrationV2Subagent,
+  route: ProviderEventRouteIdentity,
+  accepted: boolean,
+) =>
+  Effect.logDebug("orchestration-v2.subagent-update-routing").pipe(
+    Effect.annotateLogs({
+      accepted,
+      subscriberRunId: route.runId,
+      subscriberThreadId: route.threadId,
+      subagentId: subagent.id,
+      subagentRunId: subagent.runId,
+      subagentThreadId: subagent.threadId,
+      subagentProviderThreadId: subagent.providerThreadId,
+      status: subagent.status,
+    }),
+  );
+
 export function routeProviderEvent(
   event: ProviderAdapterV2Event,
   input: ProviderEventRouteIdentity,
@@ -1206,7 +1229,15 @@ export const layer: Layer.Layer<
           const filterAssistantEvent = makeAssistantStreamingFilter(responseStreamingMode);
           const providerEventFiber = yield* eventSubscription.events.pipe(
             Stream.filterEffect((event) =>
-              Ref.modify(eventRouting, (state) => routeProviderEvent(event, routeIdentity, state)),
+              Ref.modify(eventRouting, (state) =>
+                routeProviderEvent(event, routeIdentity, state),
+              ).pipe(
+                Effect.tap((accepted) =>
+                  event.type === "subagent.updated"
+                    ? logSubagentRouting(event.subagent, routeIdentity, accepted)
+                    : Effect.void,
+                ),
+              ),
             ),
             Stream.tap((event) =>
               Effect.gen(function* () {
