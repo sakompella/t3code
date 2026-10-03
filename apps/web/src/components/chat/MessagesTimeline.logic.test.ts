@@ -32,6 +32,7 @@ import {
   type MessagesTimelineRow,
   resolveTimelineToolPresentation,
   workEntryDisplayLabel,
+  workEntryBodyCode,
   workEntryLabelCode,
   workEntryHasInspectableContent,
   workEntryReadOutput,
@@ -172,10 +173,13 @@ describe("work entry labels", () => {
     );
   });
 
-  it("marks the code of command and Python labels for the code font", () => {
+  it("marks the code of command and Python labels with the language to highlight", () => {
     const command = { ...entry, itemType: "command_execution" as const, command: "ls -la src" };
     const commandLabel = workEntryDisplayLabel(command, undefined);
-    expect(workEntryLabelCode(command, commandLabel)).toBe(commandLabel);
+    expect(workEntryLabelCode(command, commandLabel)).toEqual({
+      code: commandLabel,
+      language: "shellscript",
+    });
     // A group heading over the same command is prose.
     expect(workEntryLabelCode(command, "Ran 3 commands")).toBeNull();
 
@@ -188,13 +192,59 @@ describe("work entry labels", () => {
         input: { code: "print(1)" },
       } as NonNullable<WorkLogEntry["structuredPayload"]>,
     };
-    expect(workEntryLabelCode(python, "print(1)")).toBe("print(1)");
+    expect(workEntryLabelCode(python, "print(1)")).toEqual({
+      code: "print(1)",
+      language: "python",
+    });
     // Prose headings may capitalize words; code must preserve the provider's spelling.
     expect(workEntryDisplayLabel({ ...python, toolTitle: "print(1)" }, undefined)).toBe("print(1)");
     // Rows stored before the prefix was dropped still show only the code.
-    expect(workEntryLabelCode(python, "Python: print(1)")).toBe("print(1)");
+    expect(workEntryLabelCode(python, "Python: print(1)")).toEqual({
+      code: "print(1)",
+      language: "python",
+    });
     expect(workEntryLabelCode(python, "Python")).toBeNull();
     expect(workEntryLabelCode(entry, "Tool call")).toBeNull();
+  });
+
+  it("selects the whole Python cell or the raw command as the expanded code body", () => {
+    const python = {
+      ...entry,
+      itemType: "dynamic_tool" as const,
+      structuredPayload: {
+        type: "dynamic_tool",
+        toolName: "python",
+        input: { code: "import os\nprint(os.getcwd())" },
+      } as NonNullable<WorkLogEntry["structuredPayload"]>,
+    };
+    expect(workEntryBodyCode(python, "import os")).toEqual({
+      code: "import os\nprint(os.getcwd())",
+      language: "python",
+    });
+    // A cell without source has no code body.
+    const emptyCell = {
+      ...python,
+      structuredPayload: {
+        ...python.structuredPayload,
+        input: {},
+      } as typeof python.structuredPayload,
+    };
+    expect(workEntryBodyCode(emptyCell, "Python")).toBeNull();
+
+    const command = {
+      ...entry,
+      itemType: "command_execution" as const,
+      command: "/bin/zsh -lc 'ls -la src'",
+      rawCommand: "/bin/zsh -lc 'ls -la src'",
+    };
+    const commandLabel = workEntryDisplayLabel(command, undefined);
+    expect(workEntryBodyCode(command, commandLabel)).toEqual({
+      code: "/bin/zsh -lc 'ls -la src'",
+      language: "shellscript",
+    });
+    // Prose labels (a command group heading, a plain tool) never get a code body.
+    expect(workEntryBodyCode(command, "Ran 3 commands")).toBeNull();
+    expect(workEntryBodyCode(entry, "Tool call")).toBeNull();
   });
 
   it("labels file reads with the path and never the file body", () => {

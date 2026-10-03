@@ -24,6 +24,8 @@ import { formatWorkspaceRelativePath } from "../../filePathDisplay";
 import { Button } from "../ui/button";
 import ChatMarkdown, { ChatMarkdownAssetImage } from "../ChatMarkdown";
 import { RenderErrorBoundary } from "../RenderErrorBoundary";
+import { HighlightedCode } from "./HighlightedCode";
+import type { WorkEntryCode } from "./MessagesTimeline.logic";
 import { resolveExternalWebLinkHref } from "./externalLinkContextMenu";
 import type { ExpandedImagePreview } from "./ExpandedImagePreview";
 import { ShellCommandBlock } from "./ShellCommandBlock";
@@ -33,6 +35,8 @@ interface V2ItemInspectorProps {
   readonly environmentId: EnvironmentId;
   readonly cwd?: string | undefined;
   readonly workspaceRoot?: string | undefined;
+  /** The row's code (shell command or Python cell), shown highlighted in place of the raw input. */
+  readonly code?: WorkEntryCode | undefined;
   readonly onOpenThread: (threadId: ThreadId) => void;
   readonly onOpenTurnDiff: (runId: RunId, filePath?: string) => void;
   readonly onRollbackCheckpoint?: (input: {
@@ -66,10 +70,13 @@ const monoClassName =
 function StructuredValue({
   value,
   highlightJson = false,
+  code,
 }: {
   readonly value: unknown;
   readonly highlightJson?: boolean;
+  readonly code?: WorkEntryCode | undefined;
 }) {
+  const { resolvedTheme } = useTheme();
   const text = typeof value === "string" ? value : JSON.stringify(value, null, 2);
   const isJson = useMemo(() => {
     if (!highlightJson || !text) return false;
@@ -83,7 +90,9 @@ function StructuredValue({
   if (!text) return null;
   return (
     <pre className={cn("max-h-80 overflow-auto text-muted-foreground", monoClassName)}>
-      {isJson ? (
+      {code ? (
+        <HighlightedCode code={code.code} language={code.language} theme={resolvedTheme} kind="body" />
+      ) : isJson ? (
         <RenderErrorBoundary fallback={text}>
           <Suspense fallback={text}>
             <JsonTokens text={text} />
@@ -193,14 +202,16 @@ function ToolCallBody(
   props: ToolOutputState & {
     readonly command?: string;
     readonly args?: unknown;
+    readonly code?: WorkEntryCode | undefined;
     readonly exitCode?: number | undefined;
   },
 ) {
   const call = toolCallLines({ command: props.command, args: props.args });
   return (
     <div className={cn("space-y-1.5", monoClassName)}>
-      {call.command ? <ShellCommandBlock command={call.command} /> : null}
-      {call.args ? (
+      {props.code ? <StructuredValue value={props.command ?? props.args} code={props.code} /> : null}
+      {!props.code && call.command ? <ShellCommandBlock command={call.command} /> : null}
+      {!props.code && call.args ? (
         <div className="text-foreground/85">
           {call.args.map(([key, value]) => (
             <div key={key}>
@@ -210,7 +221,7 @@ function ToolCallBody(
           ))}
         </div>
       ) : null}
-      {call.argsText ? <StructuredValue value={call.argsText} highlightJson /> : null}
+      {!props.code && call.argsText ? <StructuredValue value={call.argsText} highlightJson /> : null}
       <ToolOutput {...props} />
       {props.exitCode !== undefined && props.exitCode !== 0 ? (
         <div className="text-destructive">exit {props.exitCode}</div>
@@ -247,6 +258,7 @@ export const V2ItemInspector = memo(function V2ItemInspector(props: V2ItemInspec
       {item.type === "command_execution" ? (
         <ToolCallBody
           command={item.input}
+          code={props.code}
           exitCode={item.exitCode}
           {...outputState}
           onImageExpand={props.onImageExpand}
@@ -348,7 +360,7 @@ export const V2ItemInspector = memo(function V2ItemInspector(props: V2ItemInspec
       ) : null}
 
       {item.type === "dynamic_tool" ? (
-        <ToolCallBody args={item.input} {...outputState} onImageExpand={props.onImageExpand} />
+        <ToolCallBody args={item.input} code={props.code} {...outputState} onImageExpand={props.onImageExpand} />
       ) : null}
 
       {item.type === "approval_request" ? <StructuredValue value={item.prompt} /> : null}
