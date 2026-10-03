@@ -25,10 +25,18 @@ import {
 } from "./PiRpc.ts";
 import type { ActivePiTurn, PiChildTranscript, PiItemHooks } from "./PiAdapterV2State.ts";
 
+/**
+ * One child as T3 last saw it. A child's entry outlives its task: Prime Agent
+ * keeps a finished child's session, so the entry keeps the lineage (which turn
+ * owns the child and where its own children nest) after `terminal`.
+ */
 interface PiRlmChildState {
   readonly snapshot: unknown;
   readonly startedAt: DateTime.Utc;
+  /** The task is over and its outcome is on the card. */
   readonly terminal: boolean;
+  /** A finished child is working again on a follow-up message, outside its task card. */
+  readonly followUp: boolean;
   readonly turn: ActivePiTurn;
 }
 
@@ -43,6 +51,11 @@ type RlmChildDecision =
       readonly turn: ActivePiTurn;
       /** Which turn won: the child's own, its parent's, or the one now running. */
       readonly routedVia: "known-child" | "parent-child" | "current-turn";
+    }
+  | {
+      /** A finished child's retained session started or finished follow-up work. */
+      readonly outcome: "follow-up";
+      readonly turn: ActivePiTurn;
     }
   | {
       readonly outcome: "dropped";
@@ -68,6 +81,14 @@ function rlmChildStatus(
     default:
       return "running";
   }
+}
+
+/**
+ * Whether a roster entry says its session is working. Prime Agent keeps a
+ * finished child's status `done` and reports later work through `activity`.
+ */
+function rlmChildIsWorking(snapshot: unknown): boolean {
+  return recordString(recordField(snapshot, "activity"), "kind") !== undefined;
 }
 
 /** A short live status line: the child's own progress note, else what it is doing. */
@@ -127,8 +148,6 @@ export function makePrimeAgentChildThreads(input: {
     settleOpenTools,
   } = input.items;
   const rlmChildren = new Map<string, PiRlmChildState>();
-  /** Children whose terminal update was already emitted, to tell a repeat from a stranger. */
-  const settledRlmChildIds = new Set<string>();
   const rlmTranscripts = new Map<string, PiChildTranscript>();
   const observedTranscripts = new Map<string, PiChildTranscript>();
   const openChildTranscript = Effect.fnUntraced(function* (input: {
@@ -446,7 +465,7 @@ export function makePrimeAgentChildThreads(input: {
     decision: RlmChildDecision,
   ) => {
     const session = sessionThread();
-    const turn = decision.outcome === "emitted" ? decision.turn : null;
+    const turn = decision.outcome === "dropped" ? null : decision.turn;
     return Effect.logInfo("orchestration-v2.prime-agent-rlm-child-update").pipe(
       Effect.annotateLogs({
         driver,
@@ -467,6 +486,54 @@ export function makePrimeAgentChildThreads(input: {
       Effect.withSpan("orchestration-v2.prime-agent-rlm-child-update"),
     );
   };
+
+  /**
+   * Ends a finished child's follow-up observation. Its card and root node
+   * keep the outcome of the original task; only the transcript is closed.
+   */
+  const endChildFollowUp = Effect.fnUntraced(function* (
+    childId: string,
+    child: PiRlmChildState,
+    status: OrchestrationV2ExecutionNode["status"],
+    sessionIsAlive: boolean,
+  ) {
+    rlmChildren.set(childId, { ...child, followUp: false });
+    const transcript = rlmTranscripts.get(childId);
+    if (transcript !== undefined) yield* finishChildObservation(transcript, status, sessionIsAlive);
+  });
+
+  /**
+   * A terminal update for a child whose task already finished. Prime Agent
+   * keeps such a child's session, so this is either follow-up work (still
+   * `done`, with activity) or roster churn that must not rewrite the card.
+   */
+  const emitRetainedChildUpdate = Effect.fnUntraced(function* (
+    childId: string,
+    previous: PiRlmChildState,
+    snapshot: unknown,
+    status: OrchestrationV2ExecutionNode["status"],
+    currentTurn: ActivePiTurn | null,
+  ) {
+    const working = status === "completed" && rlmChildIsWorking(snapshot);
+    if (!working && !previous.followUp) {
+      yield* traceRlmChildUpdate(snapshot, currentTurn, undefined, {
+        outcome: "dropped",
+        reason: "terminal-already-settled",
+      });
+      return;
+    }
+    yield* traceRlmChildUpdate(snapshot, currentTurn, undefined, {
+      outcome: "follow-up",
+      turn: previous.turn,
+    });
+    if (!working) {
+      yield* endChildFollowUp(childId, { ...previous, snapshot }, status, true);
+      return;
+    }
+    rlmChildren.set(childId, { ...previous, snapshot, followUp: true });
+    const transcript = rlmTranscripts.get(childId);
+    if (transcript !== undefined) yield* syncChildObservation(transcript, snapshot);
+  });
 
   /** Mirrors one `rlm_child_update` roster snapshot onto T3's subagent surfaces. */
   const emitRlmChild = Effect.fnUntraced(function* (
@@ -502,12 +569,14 @@ export function makePrimeAgentChildThreads(input: {
     // A child that finished in an earlier turn already shows its outcome.
     // Later roster churn (the parent deleting it, a resynced roster) must
     // not rewrite that card from an unrelated turn.
+    if (previous?.terminal && terminal) {
+      yield* emitRetainedChildUpdate(childId, previous, snapshot, status, currentTurn);
+      return;
+    }
     if (previous === undefined && terminal) {
       yield* traceRlmChildUpdate(snapshot, currentTurn, statusOverride, {
         outcome: "dropped",
-        reason: settledRlmChildIds.has(childId)
-          ? "terminal-already-settled"
-          : "terminal-for-unseen-child",
+        reason: "terminal-for-unseen-child",
       });
       return;
     }
@@ -525,6 +594,7 @@ export function makePrimeAgentChildThreads(input: {
       snapshot,
       startedAt: previous?.startedAt ?? emittedAt,
       terminal,
+      followUp: false,
       turn,
     };
     rlmChildren.set(childId, state);
@@ -613,10 +683,6 @@ export function makePrimeAgentChildThreads(input: {
     if (transcript !== undefined && !terminal) {
       yield* syncChildObservation(transcript, snapshot);
     }
-    if (terminal) {
-      rlmChildren.delete(childId);
-      settledRlmChildIds.add(childId);
-    }
   });
 
   const handleEvent = Effect.fnUntraced(function* (event: PiRpcRecord, turn: ActivePiTurn | null) {
@@ -646,13 +712,20 @@ export function makePrimeAgentChildThreads(input: {
   });
   const interrupt = (turn?: ActivePiTurn) =>
     Effect.forEach(
-      Array.from(rlmChildren.values()).filter((child) => turn === undefined || child.turn === turn),
-      (child) => emitRlmChild(child.snapshot, null, "interrupted"),
+      Array.from(rlmChildren).filter(
+        ([, child]) =>
+          (!child.terminal || child.followUp) && (turn === undefined || child.turn === turn),
+      ),
+      ([childId, child]) =>
+        child.terminal
+          ? endChildFollowUp(childId, child, "interrupted", false)
+          : emitRlmChild(child.snapshot, null, "interrupted"),
       { discard: true },
     );
   return {
     handleEvent,
     interrupt,
-    hasLiveChildren: () => Array.from(rlmChildren.values()).some((child) => !child.terminal),
+    hasLiveChildren: () =>
+      Array.from(rlmChildren.values()).some((child) => !child.terminal || child.followUp),
   };
 }
