@@ -353,6 +353,78 @@ it("routes only exact same-thread background items inherited from settled runs",
   );
 });
 
+it("routes a settled run's subagent update to the live run that inherited its card", () => {
+  const threadId = ThreadId.make("thread:inherited-subagent-routing");
+  const priorRunId = RunId.make("run:inherited-subagent-routing:prior");
+  const identity: RunExecutionService.ProviderEventRouteIdentity = {
+    threadId,
+    runId: RunId.make("run:inherited-subagent-routing:current"),
+    attemptId: RunAttemptId.make("attempt:inherited-subagent-routing:current"),
+    providerThreadId: ProviderThreadId.make("provider-thread:inherited-subagent-routing:current"),
+  };
+  const subagentId = NodeId.make("node:inherited-subagent-routing");
+  const initial = RunExecutionService.makeProviderEventRoutingState({
+    identity,
+    inheritedBackgroundTurnItems: [
+      {
+        id: TurnItemId.make("turn-item:inherited-subagent-routing"),
+        runId: priorRunId,
+        subagentId,
+      },
+    ],
+    providerTurnId: null,
+  });
+  const subagentUpdate = (
+    status: OrchestrationV2Subagent["status"],
+    overrides: Partial<OrchestrationV2Subagent> = {},
+  ) =>
+    ({
+      type: "subagent.updated",
+      driver,
+      subagent: { id: subagentId, threadId, runId: priorRunId, status, ...overrides },
+    }) as ProviderAdapterV2Event;
+
+  const [runningAccepted, afterRunning] = RunExecutionService.routeProviderEvent(
+    subagentUpdate("running"),
+    identity,
+    initial,
+  );
+  assert.isTrue(runningAccepted);
+  assert.isFalse(
+    RunExecutionService.routeProviderEvent(
+      subagentUpdate("completed", { id: NodeId.make("node:other-subagent") }),
+      identity,
+      afterRunning,
+    )[0],
+    "only the exact inherited card is routed",
+  );
+  assert.isFalse(
+    RunExecutionService.routeProviderEvent(
+      subagentUpdate("completed", { runId: RunId.make("run:inherited-subagent-routing:other") }),
+      identity,
+      afterRunning,
+    )[0],
+  );
+  assert.isFalse(
+    RunExecutionService.routeProviderEvent(
+      subagentUpdate("completed", { threadId: ThreadId.make("thread:inherited-other") }),
+      identity,
+      afterRunning,
+    )[0],
+  );
+
+  const [terminalAccepted, afterTerminal] = RunExecutionService.routeProviderEvent(
+    subagentUpdate("completed"),
+    identity,
+    afterRunning,
+  );
+  assert.isTrue(terminalAccepted);
+  assert.isFalse(
+    RunExecutionService.routeProviderEvent(subagentUpdate("running"), identity, afterTerminal)[0],
+    "a nonterminal replay must not resurrect an inherited terminal",
+  );
+});
+
 it("selects only live background items from non-completed settled prior runs", () => {
   const threadId = ThreadId.make("thread:inherited-background-selection");
   const otherThreadId = ThreadId.make("thread:inherited-background-selection:other");
@@ -383,6 +455,7 @@ it("selects only live background items from non-completed settled prior runs", (
       ordinal,
       status,
     }) as OrchestrationV2Run;
+  const subagentIdOf = (id: TurnItemId) => NodeId.make(`node:${id}`);
   const makeItem = (
     id: TurnItemId,
     runId: RunId,
@@ -398,6 +471,7 @@ it("selects only live background items from non-completed settled prior runs", (
       providerThreadId,
       type,
       status,
+      subagentId: subagentIdOf(id),
     }) as OrchestrationV2TurnItem;
 
   const selected = RunExecutionService.selectInheritedBackgroundTurnItems({
@@ -462,9 +536,9 @@ it("selects only live background items from non-completed settled prior runs", (
   });
 
   assert.deepEqual(selected, [
-    { id: inheritedItemId, runId: interruptedRunId },
-    { id: failedItemId, runId: failedRunId },
-    { id: cancelledItemId, runId: cancelledRunId },
+    { id: inheritedItemId, runId: interruptedRunId, subagentId: subagentIdOf(inheritedItemId) },
+    { id: failedItemId, runId: failedRunId, subagentId: subagentIdOf(failedItemId) },
+    { id: cancelledItemId, runId: cancelledRunId, subagentId: subagentIdOf(cancelledItemId) },
   ]);
 });
 
