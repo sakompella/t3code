@@ -11,6 +11,7 @@ import {
 import { QuestionAnswerHistory } from "./QuestionAnswerHistory";
 import { ThreadCommandOutput, useCommandOutputStreaming } from "./thread-command-output";
 import { HighlightedCodeText } from "./HighlightedCodeText";
+import { workLogCodeResult } from "./work-log-code-result";
 import {
   workEntryBodyCode,
   workEntryLabelCode,
@@ -1083,6 +1084,7 @@ const ThreadWorkLogRow = memo(function ThreadWorkLogRow(
         ? formatItemFullDetail(row.projectedItem, fetchedItem)
         : row.getFullDetail()
       : null;
+  const codeResult = bodyCode ? workLogCodeResult(shownItem, failed) : null;
   const icon = reasoning ? "brain" : (toolPresentation?.icon ?? workRowSymbolName(row.icon));
 
   return (
@@ -1270,14 +1272,27 @@ const ThreadWorkLogRow = memo(function ThreadWorkLogRow(
             {reasoning ? (
               props.renderReasoning(reasoning.text)
             ) : bodyCode ? (
-              <HighlightedCodeText
-                selectable
-                code={bodyCode.code}
-                language={bodyCode.language}
-                theme={props.themeAppearance}
-                kind="body"
-                className="text-2xs leading-normal text-foreground-muted"
-              />
+              <>
+                <HighlightedCodeText
+                  selectable
+                  code={bodyCode.code}
+                  language={bodyCode.language}
+                  theme={props.themeAppearance}
+                  kind="body"
+                  className="text-2xs leading-normal text-foreground-muted"
+                />
+                {codeResult ? (
+                  <Text
+                    selectable
+                    className={cn(
+                      "mt-1.5 font-mono text-2xs leading-normal",
+                      failed ? "text-danger-foreground" : "text-foreground-muted",
+                    )}
+                  >
+                    {codeResult}
+                  </Text>
+                ) : null}
+              </>
             ) : call ? (
               [
                 call.command,
@@ -1327,7 +1342,7 @@ const ThreadWorkLogRow = memo(function ThreadWorkLogRow(
                 {fetchedOutput}
               </Text>
             ) : null}
-            {streamsOutput ? null : exitLine}
+            {streamsOutput || bodyCode ? null : exitLine}
           </ScrollView>
           {streamsOutput ? (
             <>
@@ -1337,7 +1352,7 @@ const ThreadWorkLogRow = memo(function ThreadWorkLogRow(
                 itemId={row.projectedItem.sourceItemId}
                 themeAppearance={props.themeAppearance}
               />
-              {exitLine}
+              {bodyCode ? null : exitLine}
             </>
           ) : null}
         </Animated.View>
