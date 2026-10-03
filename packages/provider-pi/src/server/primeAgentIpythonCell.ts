@@ -170,6 +170,15 @@ export function awaitsHandle(code: string, variable: string): boolean {
   return new RegExp(`\\bawait\\s+${variable}\\b|\\bgather\\s*\\([^)]*\\b${variable}\\b`).test(code);
 }
 
+/**
+ * Whether a cell reads a handle's result without awaiting it. Prime Agent
+ * withdraws the completion notice when the job was already done at that read,
+ * and keeps it when the job still ran; nothing tells the two apart.
+ */
+export function readsHandle(code: string, variable: string): boolean {
+  return new RegExp(`\\b${variable}\\s*\\.\\s*(?:output|tail|poll)\\s*\\(`).test(code);
+}
+
 /** Whether a cell calls `kill()` on a handle: the process group is gone within the kill's grace period. */
 export function killsHandle(code: string, variable: string): boolean {
   return new RegExp(`\\b${variable}\\s*\\.\\s*kill\\s*\\(`).test(code);
