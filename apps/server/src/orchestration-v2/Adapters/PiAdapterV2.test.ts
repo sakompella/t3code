@@ -3649,6 +3649,48 @@ describe("PiAdapterV2 with the Prime Agent flavor", () => {
     }).pipe(Effect.scoped, Effect.provide(testLayer)),
   );
 
+  it.effect("drops a persisted job roster the reopened process never started", () =>
+    Effect.gen(function* () {
+      const fake = yield* makeFakePi;
+      const { runtime, providerThread } = yield* openPrimeThread(fake);
+      const reopened = yield* runtime.ensureThread({
+        threadId: THREAD_ID,
+        modelSelection: modelSelection("default"),
+        runtimePolicy,
+        existingProviderThread: {
+          ...providerThread,
+          nativeThreadRef: null,
+          pendingBackgroundTasks: [{ taskId: "bash:1", kind: "command", description: "sleep 300" }],
+        },
+      });
+      assert.deepEqual(reopened.pendingBackgroundTasks, []);
+    }).pipe(Effect.scoped, Effect.provide(testLayer)),
+  );
+
+  it.effect("keeps the jobs a live process started when its thread is registered again", () =>
+    Effect.gen(function* () {
+      const fake = yield* makeFakePi;
+      const { runtime, takeEvent, providerThread } = yield* openPrimeThreadWithWakes(fake);
+      yield* startTurn(runtime, providerThread);
+      yield* fake.takeRequest("prompt");
+      yield* fake.emit({ type: "agent_start" });
+      yield* emitCell(fake, "cell_start", "job = bash('sleep 300'); print(job.pid)");
+      yield* fake.emit({ type: "agent_end", messages: [] });
+      yield* fake.takeRequest("get_state");
+      yield* drainUntilTerminal(takeEvent);
+      const reopened = yield* runtime.ensureThread({
+        threadId: THREAD_ID,
+        modelSelection: modelSelection("default"),
+        runtimePolicy,
+        existingProviderThread: { ...providerThread, nativeThreadRef: null },
+      });
+      assert.deepEqual(
+        reopened.pendingBackgroundTasks?.map((task) => task.description),
+        ["sleep 300"],
+      );
+    }).pipe(Effect.scoped, Effect.provide(testLayer)),
+  );
+
   it.effect("restarts Prime Agent when Stop interrupts a turn with a live subagent", () =>
     Effect.gen(function* () {
       const fake = yield* makeFakePi;

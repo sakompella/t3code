@@ -93,14 +93,14 @@ export function makePrimeAgentBackgroundJobs(
 ) {
   const backgroundJobs = new Map<string, DetachedBashJob>();
   let backgroundJobCounter = 0;
+  const tasks = () =>
+    Array.from(backgroundJobs, ([taskId, job]) => ({
+      taskId,
+      kind: "command" as const,
+      description: job.command,
+    }));
   const publishBackgroundJobs = Effect.fnUntraced(function* () {
-    yield* publish({
-      pendingBackgroundTasks: Array.from(backgroundJobs, ([taskId, job]) => ({
-        taskId,
-        kind: "command" as const,
-        description: job.command,
-      })),
-    });
+    yield* publish({ pendingBackgroundTasks: tasks() });
   });
 
   /** Tracks jobs a finished cell started in the background, and drops those it awaited or killed. */
@@ -134,6 +134,8 @@ export function makePrimeAgentBackgroundJobs(
   });
 
   return {
+    /** The jobs this process knows are running: what a persisted roster has to agree with. */
+    tasks,
     trackBackgroundJobs,
     completeBackgroundJob,
     hasPendingJobs: () => backgroundJobs.size > 0,
