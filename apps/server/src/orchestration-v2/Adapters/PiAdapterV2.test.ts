@@ -109,6 +109,10 @@ interface FakePi {
   readonly queueCommands: (data: unknown) => void;
   /** Make the next `get_commands` ack fail. */
   readonly failNextCommands: () => void;
+  /** Data returned by the next `list_heartbeats` acks, consumed in order; none left means no heartbeats. */
+  readonly queueHeartbeats: (data: unknown) => void;
+  /** Make the next `list_heartbeats` ack fail. */
+  readonly failNextHeartbeats: () => void;
   /** Close the fake process stdout stream. */
   readonly closeStdout: Effect.Effect<void>;
   readonly lastSpawn: () => {
@@ -151,6 +155,7 @@ const makeFakePi: Effect.Effect<FakePi> = Effect.gen(function* () {
   const statsQueue: Array<unknown> = [];
   const observedQueue: Array<ReadonlyArray<unknown>> = [];
   const commandsQueue: Array<{ readonly success: boolean; readonly data?: unknown }> = [];
+  const heartbeatsQueue: Array<{ readonly success: boolean; readonly data?: unknown }> = [];
   const allRequests: Array<PiRpcRecord> = [];
   let deferState = false;
   let deferredStateRequest: PiRpcRecord | undefined;
@@ -210,6 +215,8 @@ const makeFakePi: Effect.Effect<FakePi> = Effect.gen(function* () {
         return { ...base, data: statsQueue.shift() ?? {} };
       case "get_commands":
         return { ...base, ...(commandsQueue.shift() ?? { data: { commands: [] } }) };
+      case "list_heartbeats":
+        return { ...base, ...(heartbeatsQueue.shift() ?? { data: { heartbeats: [] } }) };
       case "fork":
         return { ...base, data: { text: "Hello pi", cancelled: false } };
       default:
@@ -323,6 +330,8 @@ const makeFakePi: Effect.Effect<FakePi> = Effect.gen(function* () {
     queueStats: (data) => statsQueue.push(data),
     queueCommands: (data) => commandsQueue.push({ success: true, data }),
     failNextCommands: () => commandsQueue.push({ success: false }),
+    queueHeartbeats: (data) => heartbeatsQueue.push({ success: true, data }),
+    failNextHeartbeats: () => heartbeatsQueue.push({ success: false }),
     closeStdout: Queue.end(stdout),
     lastSpawn: () => lastSpawn,
   } satisfies FakePi;
@@ -492,6 +501,21 @@ const expectModelFailure = (errorMessage: string) =>
   }).pipe(Effect.scoped, Effect.provide(testLayer));
 
 describe("PiAdapterV2", () => {
+  it.effect("does not ask Pi for heartbeats, which only Prime Agent has", () =>
+    Effect.gen(function* () {
+      const fake = yield* makeFakePi;
+      const { runtime } = yield* openRuntime(fake);
+      const providerThread = yield* runtime.ensureThread({
+        threadId: THREAD_ID,
+        modelSelection: modelSelection("default"),
+        runtimePolicy,
+      });
+
+      assert.isFalse(fake.allRequests().some((request) => request["type"] === "list_heartbeats"));
+      assert.isUndefined(providerThread.heartbeats);
+    }).pipe(Effect.scoped, Effect.provide(testLayer)),
+  );
+
   it.effect("stops provider-initiated work that has no T3 turn owner", () =>
     Effect.gen(function* () {
       const fake = yield* makeFakePi;
@@ -3582,6 +3606,190 @@ describe("PiAdapterV2 with the Prime Agent flavor", () => {
           (event.providerThread.pendingBackgroundTasks?.length ?? 0) === 0,
       );
       assert.equal(cleared.type, "provider_thread.updated");
+    }).pipe(Effect.scoped, Effect.provide(testLayer)),
+  );
+
+  /** The session id the fake reports from `get_state`; heartbeats are matched on it. */
+  const FAKE_SESSION_ID = "00000000-0000-4000-8000-000000000002";
+
+  const heartbeatJob = (job: Record<string, unknown>) => ({
+    job: {
+      source: "rlm_heartbeat",
+      status: "active",
+      sessionId: FAKE_SESSION_ID,
+      prompt: "Check the deploy.",
+      schedule: { kind: "interval", expression: "every 15m", intervalMs: 900_000 },
+      ...job,
+    },
+  });
+
+  const heartbeatIds = (event: ProviderAdapterV2Event) =>
+    event.type === "provider_thread.updated"
+      ? event.providerThread.heartbeats?.map((heartbeat) => heartbeat.id)
+      : undefined;
+
+  it.effect("publishes the heartbeats of the session it opens, not another session's", () =>
+    Effect.gen(function* () {
+      const fake = yield* makeFakePi;
+      fake.queueHeartbeats({
+        heartbeats: [
+          heartbeatJob({ id: "deploy", label: "deploy watch", nextRunAt: "2026-10-03T15:40:00Z" }),
+          heartbeatJob({ id: "elsewhere", sessionId: "another-session" }),
+          heartbeatJob({
+            id: "paused",
+            status: "paused",
+            prompt: "\nFirst line\nSecond line",
+            schedule: { kind: "interval", expression: "every 5m", intervalMs: 300_000 },
+          }),
+        ],
+      });
+      const { runtime, providerThread } = yield* openPrimeThread(fake);
+
+      assert.deepEqual(providerThread.heartbeats, [
+        {
+          id: "deploy",
+          description: "deploy watch",
+          schedule: "every 15m",
+          paused: false,
+          nextRunAt: "2026-10-03T15:40:00Z",
+        },
+        { id: "paused", description: "First line", schedule: "every 5m", paused: true },
+      ]);
+      // A heartbeat is configuration. It must not keep the thread working.
+      assert.isFalse(yield* runtime.hasPendingBackgroundWork!);
+      assert.deepEqual(providerThread.pendingBackgroundTasks, []);
+    }).pipe(Effect.scoped, Effect.provide(testLayer)),
+  );
+
+  it.effect("follows a heartbeat as turns settle: changed, then removed", () =>
+    Effect.gen(function* () {
+      const fake = yield* makeFakePi;
+      fake.queueHeartbeats({ heartbeats: [heartbeatJob({ id: "deploy" })] });
+      const { runtime, takeEvent, providerThread } = yield* openPrimeThread(fake);
+      assert.deepEqual(
+        providerThread.heartbeats?.map((heartbeat) => heartbeat.id),
+        ["deploy"],
+      );
+
+      // The agent adds a second heartbeat and the first one runs on a new schedule.
+      yield* startTurn(runtime, providerThread);
+      yield* fake.takeRequest("prompt");
+      yield* fake.emit({ type: "agent_start" });
+      fake.queueHeartbeats({
+        heartbeats: [
+          heartbeatJob({
+            id: "deploy",
+            schedule: { kind: "interval", expression: "every 2h", intervalMs: 7_200_000 },
+            nextRunAt: "2026-10-03T17:00:00Z",
+          }),
+          heartbeatJob({ id: "tests", label: "tests" }),
+        ],
+      });
+      yield* fake.emit({ type: "agent_end", messages: [] });
+      yield* fake.takeRequest("get_state");
+      const changed = yield* takeEvent((event) => heartbeatIds(event)?.length === 2);
+      assert.deepEqual(
+        changed.type === "provider_thread.updated"
+          ? changed.providerThread.heartbeats?.map(
+              (heartbeat) => `${heartbeat.id} ${heartbeat.schedule} ${heartbeat.nextRunAt}`,
+            )
+          : undefined,
+        ["deploy every 2h 2026-10-03T17:00:00Z", "tests every 15m undefined"],
+      );
+      yield* takeEvent((event) => event.type === "turn.terminal");
+
+      // The agent ends both heartbeats.
+      yield* startTurn(runtime, providerThread, "default", [], "Stop watching", undefined, 2);
+      yield* fake.takeRequest("prompt");
+      yield* fake.emit({ type: "agent_start" });
+      yield* fake.emit({ type: "agent_end", messages: [] });
+      yield* fake.takeRequest("get_state");
+      const removed = yield* takeEvent((event) => heartbeatIds(event)?.length === 0);
+      assert.equal(removed.type, "provider_thread.updated");
+    }).pipe(Effect.scoped, Effect.provide(testLayer)),
+  );
+
+  it.effect("keeps the heartbeats it showed when the agent cannot list them", () =>
+    Effect.gen(function* () {
+      const fake = yield* makeFakePi;
+      fake.queueHeartbeats({ heartbeats: [heartbeatJob({ id: "deploy" })] });
+      const { runtime, takeEvent, providerThread } = yield* openPrimeThread(fake);
+      yield* startTurn(runtime, providerThread);
+      yield* fake.takeRequest("prompt");
+      yield* fake.emit({ type: "agent_start" });
+      fake.failNextHeartbeats();
+      yield* fake.emit({ type: "agent_end", messages: [] });
+      yield* fake.takeRequest("get_state");
+      const seen = yield* drainUntilTerminal(takeEvent);
+
+      assert.isTrue(
+        seen.some(
+          (event) =>
+            event.type === "provider_thread.updated" && event.providerThread.status === "idle",
+        ),
+      );
+      for (const event of seen) {
+        if (event.type !== "provider_thread.updated") continue;
+        assert.deepEqual(
+          event.providerThread.heartbeats?.map((heartbeat) => heartbeat.id),
+          ["deploy"],
+        );
+      }
+    }).pipe(Effect.scoped, Effect.provide(testLayer)),
+  );
+
+  it.effect("shows a heartbeat that fires during a turn, with the prompt it ran", () =>
+    Effect.gen(function* () {
+      const fake = yield* makeFakePi;
+      const { runtime, takeEvent, providerThread } = yield* openPrimeThread(fake);
+      yield* startTurn(runtime, providerThread);
+      yield* fake.takeRequest("prompt");
+      yield* fake.emit({ type: "agent_start" });
+      yield* emitAssistantReply(fake, "Working on it.");
+      yield* takeCompletedReply(takeEvent);
+
+      yield* fake.emit({
+        type: "message_start",
+        message: {
+          role: "custom",
+          customType: "heartbeat_prompt",
+          content: "[heartbeat: every 5m run#3]\n\nCheck the deploy.",
+          details: { jobId: "deploy", schedule: "every 5m", runCount: 3 },
+        },
+      });
+      const notice = yield* takeEvent(
+        (event) => event.type === "turn_item.updated" && event.turnItem.type === "notification",
+      );
+
+      assert.isTrue(notice.type === "turn_item.updated");
+      if (notice.type !== "turn_item.updated" || notice.turnItem.type !== "notification") return;
+      assert.equal(notice.turnItem.summary, "Heartbeat");
+      assert.deepEqual(notice.turnItem.source, { kind: "background_task" });
+      assert.equal(notice.turnItem.detail, "Check the deploy.");
+    }).pipe(Effect.scoped, Effect.provide(testLayer)),
+  );
+
+  it.effect("shows a heartbeat that wakes an idle agent, with the prompt it ran", () =>
+    Effect.gen(function* () {
+      const fake = yield* makeFakePi;
+      const { offers } = yield* openPrimeThreadWithWakes(fake);
+
+      yield* fake.emit({ type: "agent_start" });
+      yield* fake.emit({
+        type: "message_start",
+        message: {
+          role: "custom",
+          customType: "heartbeat_prompt",
+          content: "[heartbeat: every 5m run#3]\n\nCheck the deploy.",
+          details: { jobId: "deploy", schedule: "every 5m", runCount: 3 },
+        },
+      });
+      yield* emitAssistantReply(fake, "The deploy is fine.");
+      const offer = yield* Queue.take(offers);
+
+      assert.equal(offer.notification?.summary, "Heartbeat");
+      assert.deepEqual(offer.notification?.source, { kind: "background_task" });
+      assert.equal(offer.notification?.detail, "Check the deploy.");
     }).pipe(Effect.scoped, Effect.provide(testLayer)),
   );
 

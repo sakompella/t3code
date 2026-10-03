@@ -117,6 +117,7 @@ import type {
   PiThreadState,
 } from "./PiAdapterV2State.ts";
 import { makePrimeAgentChildThreads } from "./primeAgentChildThreads.ts";
+import { primeAgentHeartbeats } from "./primeAgentHeartbeats.ts";
 import { makePrimeAgentStream, snapshotBlock } from "./primeAgentStream.ts";
 import { makePrimeAgentTools } from "./primeAgentTools.ts";
 import { makePrimeAgentSettle } from "./primeAgentSettle.ts";
@@ -508,6 +509,8 @@ export function makePiAdapterV2(
       let threadState: PiThreadState | null = null;
       let registrationAttempted = false;
       let lastNativeThreadId: string | null = null;
+      /** Prime Agent's id for the open session; it keys the session's heartbeats. */
+      let heartbeatSessionId: string | null = null;
       // User Stop intentionally tears down this RPC process after aborting.
       // Keep that intent beyond turn finalization so the later stdout close is
       // not mistaken for an unexpected transport failure.
@@ -613,6 +616,19 @@ export function makePiAdapterV2(
 
       const request = (record: PiRpcRecord, timeoutMs = PI_REQUEST_TIMEOUT_MS) =>
         connection.request(record, timeoutMs);
+
+      /**
+       * The session's heartbeats, or undefined when the flavor has none or
+       * the agent cannot say. A failed read keeps what clients already show.
+       */
+      const readHeartbeats = () => {
+        const sessionId = heartbeatSessionId;
+        if (!flavor.heartbeats || sessionId === null) return Effect.succeed(undefined);
+        return request({ type: "list_heartbeats" }, 2_000).pipe(
+          Effect.map((listing) => primeAgentHeartbeats(listing, sessionId)),
+          Effect.orElseSucceed(() => undefined),
+        );
+      };
 
       const nonNegativeInteger = (input: unknown, key: string): number | undefined => {
         const value = recordNumber(input, key);
@@ -1703,11 +1719,15 @@ export function makePiAdapterV2(
             ...(tokenUsage === undefined ? {} : { tokenUsage }),
           },
         });
+        // The agent may have set, changed, or ended a heartbeat during the turn,
+        // and a fired one has moved its next run. A Stop ends the session.
+        const heartbeats = turn.interrupted ? undefined : yield* readHeartbeats();
         yield* updateProviderThread(state, {
           status: "idle",
           ...(treeRefs?.leafId == null
             ? {}
             : { nativeConversationHeadRef: providerRef(treeRefs.leafId) }),
+          ...(heartbeats === undefined ? {} : { heartbeats }),
         });
         yield* updateProviderSession(
           failure !== null ? "error" : "ready",
@@ -2450,6 +2470,9 @@ export function makePiAdapterV2(
           return yield* protocolError(`${name} did not create a distinct session file`);
         }
         lastNativeThreadId = nativeId;
+        heartbeatSessionId = recordString(stateData, "sessionId") ?? null;
+        // A persisted list says what ran before this process; read it afresh.
+        const heartbeats = flavor.heartbeats ? ((yield* readHeartbeats()) ?? []) : undefined;
         const createdAt = yield* DateTime.now;
         const providerThread: OrchestrationV2ProviderThread =
           existing !== undefined
@@ -2463,6 +2486,7 @@ export function makePiAdapterV2(
                 ...(flavor.tools === "ipython"
                   ? { pendingBackgroundTasks: backgroundJobs.tasks() }
                   : {}),
+                ...(heartbeats === undefined ? {} : { heartbeats }),
                 status: "idle",
                 updatedAt: createdAt,
               }
@@ -2484,6 +2508,7 @@ export function makePiAdapterV2(
                 handoffIds: [],
                 forkedFrom: null,
                 pendingBackgroundTasks: [],
+                ...(heartbeats === undefined ? {} : { heartbeats }),
                 createdAt,
                 updatedAt: createdAt,
               };
