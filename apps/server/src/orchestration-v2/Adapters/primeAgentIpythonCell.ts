@@ -154,7 +154,7 @@ export function detachedBashJobs(code: string): ReadonlyArray<DetachedBashJob> {
       /r/i.test(match[2]!),
     );
     if (literal === null || literal.value.length === 0) continue;
-    if (variable !== null && awaitsHandle(code, variable)) continue;
+    if (variable !== null && endsHandle(code, variable)) continue;
     const isTemplate = isFString(match[2]!);
     jobs.push({
       variable,
@@ -168,6 +168,21 @@ export function detachedBashJobs(code: string): ReadonlyArray<DetachedBashJob> {
 /** Whether a cell awaits a handle, which consumes its result and its completion notice. */
 export function awaitsHandle(code: string, variable: string): boolean {
   return new RegExp(`\\bawait\\s+${variable}\\b`).test(code);
+}
+
+/** Whether a cell calls `kill()` on a handle: the process group is gone within the kill's grace period. */
+export function killsHandle(code: string, variable: string): boolean {
+  return new RegExp(`\\b${variable}\\s*\\.\\s*kill\\s*\\(`).test(code);
+}
+
+/**
+ * Whether a cell ends a handle's job. An await consumes the completion notice.
+ * A kill ends the process, but a later read of its result withdraws the
+ * notice too (`job.kill(); print(job.output())`), so the cell is the only
+ * end signal there is.
+ */
+export function endsHandle(code: string, variable: string): boolean {
+  return awaitsHandle(code, variable) || killsHandle(code, variable);
 }
 
 const PLACEHOLDER = /\{[^{}]*\}/;

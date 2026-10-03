@@ -3517,6 +3517,106 @@ describe("PiAdapterV2 with the Prime Agent flavor", () => {
     }).pipe(Effect.scoped, Effect.provide(testLayer)),
   );
 
+  /** Collects the events a turn publishes until it settles. */
+  const drainUntilTerminal = (
+    takeEvent: (
+      predicate: (event: ProviderAdapterV2Event) => boolean,
+    ) => Effect.Effect<ProviderAdapterV2Event>,
+  ) =>
+    Effect.gen(function* () {
+      const seen: Array<ProviderAdapterV2Event> = [];
+      yield* takeEvent((event) => {
+        seen.push(event);
+        return event.type === "turn.terminal";
+      });
+      return seen;
+    });
+
+  const emitCell = (fake: FakePi, toolCallId: string, code: string, text = "ok\n") =>
+    Effect.gen(function* () {
+      yield* fake.emit({
+        type: "tool_execution_start",
+        toolCallId,
+        toolName: "ipython",
+        args: { code },
+      });
+      yield* fake.emit({
+        type: "tool_execution_end",
+        toolCallId,
+        toolName: "ipython",
+        result: { content: [{ type: "text", text }], details: { status: "ok" } },
+        isError: false,
+      });
+    });
+
+  const rosterLengths = (events: ReadonlyArray<ProviderAdapterV2Event>) =>
+    events.flatMap((event) =>
+      event.type === "provider_thread.updated"
+        ? [event.providerThread.pendingBackgroundTasks?.length ?? 0]
+        : [],
+    );
+
+  it.effect("stops listing a background shell job once a later cell kills its handle", () =>
+    Effect.gen(function* () {
+      const fake = yield* makeFakePi;
+      const { runtime, takeEvent, providerThread } = yield* openPrimeThreadWithWakes(fake);
+      yield* startTurn(runtime, providerThread);
+      yield* fake.takeRequest("prompt");
+      yield* fake.emit({ type: "agent_start" });
+      yield* emitCell(fake, "cell_start", "job = bash('sleep 300'); print(job.pid)");
+      yield* takeEvent(
+        (event) =>
+          event.type === "provider_thread.updated" &&
+          (event.providerThread.pendingBackgroundTasks?.length ?? 0) === 1,
+      );
+      // Reading the result after the kill withdraws the kernel's completion
+      // notice, so the kill is the only end signal T3 gets.
+      yield* emitCell(fake, "cell_kill", "job.kill(); print(job.output())");
+      yield* fake.emit({ type: "agent_end", messages: [] });
+      yield* fake.takeRequest("get_state");
+      const seen = yield* drainUntilTerminal(takeEvent);
+      assert.deepEqual(rosterLengths(seen).slice(0, 1), [0]);
+      assert.isFalse(yield* runtime.hasPendingBackgroundWork!);
+    }).pipe(Effect.scoped, Effect.provide(testLayer)),
+  );
+
+  it.effect("keeps listing a background shell job when a later cell only reads from it", () =>
+    Effect.gen(function* () {
+      const fake = yield* makeFakePi;
+      const { runtime, takeEvent, providerThread } = yield* openPrimeThreadWithWakes(fake);
+      yield* startTurn(runtime, providerThread);
+      yield* fake.takeRequest("prompt");
+      yield* fake.emit({ type: "agent_start" });
+      yield* emitCell(fake, "cell_start", "job = bash('sleep 300'); print(job.pid)");
+      yield* takeEvent(
+        (event) =>
+          event.type === "provider_thread.updated" &&
+          (event.providerThread.pendingBackgroundTasks?.length ?? 0) === 1,
+      );
+      yield* emitCell(fake, "cell_peek", "print(job.tail(5))");
+      yield* fake.emit({ type: "agent_end", messages: [] });
+      yield* fake.takeRequest("get_state");
+      yield* drainUntilTerminal(takeEvent);
+      assert.isTrue(yield* runtime.hasPendingBackgroundWork!);
+    }).pipe(Effect.scoped, Effect.provide(testLayer)),
+  );
+
+  it.effect("does not list a job its own cell killed", () =>
+    Effect.gen(function* () {
+      const fake = yield* makeFakePi;
+      const { runtime, takeEvent, providerThread } = yield* openPrimeThreadWithWakes(fake);
+      yield* startTurn(runtime, providerThread);
+      yield* fake.takeRequest("prompt");
+      yield* fake.emit({ type: "agent_start" });
+      yield* emitCell(fake, "cell_both", "job = bash('sleep 300'); job.kill()");
+      yield* fake.emit({ type: "agent_end", messages: [] });
+      yield* fake.takeRequest("get_state");
+      const seen = yield* drainUntilTerminal(takeEvent);
+      assert.isTrue(rosterLengths(seen).every((length) => length === 0));
+      assert.isFalse(yield* runtime.hasPendingBackgroundWork!);
+    }).pipe(Effect.scoped, Effect.provide(testLayer)),
+  );
+
   it.effect("restarts Prime Agent when Stop interrupts a turn with a live subagent", () =>
     Effect.gen(function* () {
       const fake = yield* makeFakePi;

@@ -2,6 +2,7 @@ import { describe, expect, it } from "@effect/vitest";
 
 import {
   awaitsHandle,
+  endsHandle,
   classifyIpythonCell,
   detachedBashJobs,
   previewPythonCell,
@@ -156,6 +157,18 @@ describe("detachedBashJobs", () => {
     expect(detachedBashJobs("r = await bash('pnpm test'); print(r.output)")).toEqual([]);
     expect(detachedBashJobs("job = bash('sleep 1')\nprint(job.pid)\nres = await job")).toEqual([]);
     expect(detachedBashJobs("print('no shell here')")).toEqual([]);
+  });
+
+  it("ignores a handle the creating cell kills", () => {
+    expect(detachedBashJobs("job = bash('sleep 300')\njob.kill()")).toEqual([]);
+  });
+
+  it("recognizes a later cell killing a handle", () => {
+    expect(endsHandle("job.kill(); print(job.output())", "job")).toBe(true);
+    expect(endsHandle("job . kill ( 9 )", "job")).toBe(true);
+    expect(endsHandle("print(job.tail(5), job.poll())", "job")).toBe(false);
+    expect(endsHandle("other_job.kill()", "job")).toBe(false);
+    expect(endsHandle("jobs.kill()", "job")).toBe(false);
   });
 
   it("recognizes a later cell consuming a handle", () => {
