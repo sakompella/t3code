@@ -771,8 +771,10 @@ function toFeedActivity(
     summary,
     detail,
     // A system notice's whole message is its summary, so expanding would repeat it.
+    // A notification without a detail has nothing more to show either.
     canExpand:
       item.type !== "system_notice" &&
+      !(item.type === "notification" && !item.detail?.trim()) &&
       !(item.type === "error" && item.status === "failed") &&
       (readPaths?.length ?? 1) > 0,
     getFullDetail,

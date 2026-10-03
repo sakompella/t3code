@@ -2237,6 +2237,25 @@ it("renders automatic completion as a neutral activity while retaining its detai
   expect(buildThreadFeed([projected(userMessage(), 0)])[0]?.type).toBe("message");
 });
 
+it.each([
+  { detail: "make build\n\nExit code 0", canExpand: true },
+  { detail: undefined, canExpand: false },
+  { detail: "  ", canExpand: false },
+])("lets a notification with detail $detail expand: $canExpand", ({ detail, canExpand }) => {
+  const item = {
+    ...base("notification", "2026-06-20T00:00:01.000Z", 0),
+    type: "notification" as const,
+    source: { kind: "command" as const },
+    outcome: "completed" as const,
+    summary: "Background command finished",
+    ...(detail === undefined ? {} : { detail }),
+  };
+  const activity = buildThreadFeed([projected(item, 0)]).flatMap((entry) =>
+    entry.type === "activity-group" ? entry.activities : [],
+  )[0];
+  expect(activity?.canExpand).toBe(canExpand);
+});
+
 it("uses a compact reasoning preview and a short expanded heading", () => {
   const entry = {
     id: "thought",
