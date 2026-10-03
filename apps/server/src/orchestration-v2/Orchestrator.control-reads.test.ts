@@ -334,6 +334,137 @@ it.effect("implements a proposed plan that the command projection leaves out", (
   }).pipe(Effect.provide(testLayer)),
 );
 
+// A heartbeat only runs while its provider session does, so a Stop that leaves
+// the provider thread without a live session ends what the thread shows of it.
+it.effect(
+  "clears the heartbeats of a provider thread that has no live session when Stop settles",
+  () =>
+    Effect.gen(function* () {
+      const orchestrator = yield* Orchestrator.OrchestratorV2;
+      const projections = yield* ProjectionStore.ProjectionStoreV2;
+      const threadId = ThreadId.make("thread:settle-heartbeats");
+      const providerThreadId = ProviderThreadId.make("provider-thread:settle-heartbeats");
+      const runId = RunId.make("run:settle-heartbeats");
+      const attemptId = RunAttemptId.make("attempt:settle-heartbeats");
+      const nodeId = NodeId.make("node:settle-heartbeats");
+      const providerTurnId = ProviderTurnId.make("provider-turn:settle-heartbeats");
+      const now = yield* DateTime.now;
+      yield* orchestrator.dispatch({
+        type: "thread.create",
+        commandId: CommandId.make("create-settle-heartbeats"),
+        threadId,
+        projectId: ProjectId.make("project:settle-heartbeats"),
+        title: "Settle heartbeats",
+        modelSelection,
+        runtimeMode: "full-access",
+        interactionMode: "default",
+        branch: null,
+        worktreePath: null,
+        createdBy: "user",
+        creationSource: "web",
+      });
+      yield* projections.apply({
+        id: EventId.make("settle-heartbeats:provider-thread"),
+        type: "provider-thread.updated",
+        threadId,
+        occurredAt: now,
+        payload: {
+          id: providerThreadId,
+          driver: adapter.driver,
+          providerInstanceId: instanceId,
+          providerSessionId: null,
+          appThreadId: threadId,
+          ownerNodeId: null,
+          nativeThreadRef: null,
+          nativeConversationHeadRef: null,
+          status: "idle",
+          firstRunOrdinal: 1,
+          lastRunOrdinal: 1,
+          handoffIds: [],
+          forkedFrom: null,
+          heartbeats: [{ id: "deploy", schedule: "every 15m", paused: false }],
+          createdAt: now,
+          updatedAt: now,
+        },
+      });
+      yield* projections.apply({
+        id: EventId.make("settle-heartbeats:run"),
+        type: "run.created",
+        threadId,
+        occurredAt: now,
+        payload: {
+          id: runId,
+          threadId,
+          ordinal: 1,
+          providerInstanceId: instanceId,
+          modelSelection,
+          providerThreadId,
+          userMessageId: MessageId.make("message:settle-heartbeats"),
+          rootNodeId: nodeId,
+          activeAttemptId: attemptId,
+          status: "completed",
+          requestedAt: now,
+          startedAt: now,
+          completedAt: now,
+          checkpointId: null,
+          contextHandoffId: null,
+        },
+      });
+      yield* projections.apply({
+        id: EventId.make("settle-heartbeats:attempt"),
+        type: "run-attempt.created",
+        threadId,
+        occurredAt: now,
+        payload: {
+          id: attemptId,
+          runId,
+          attemptOrdinal: 1,
+          rootNodeId: nodeId,
+          providerInstanceId: instanceId,
+          providerThreadId,
+          providerTurnId,
+          reason: "initial",
+          status: "completed",
+          startedAt: now,
+          completedAt: now,
+        },
+      });
+      yield* projections.apply({
+        id: EventId.make("settle-heartbeats:turn"),
+        type: "provider-turn.updated",
+        threadId,
+        occurredAt: now,
+        payload: {
+          id: providerTurnId,
+          providerThreadId,
+          nodeId,
+          runAttemptId: attemptId,
+          nativeTurnRef: null,
+          ordinal: 1,
+          status: "completed",
+          startedAt: now,
+          completedAt: now,
+        },
+      });
+      const heartbeats = Effect.map(
+        projections.getThreadProjection(threadId),
+        (projection) =>
+          projection.providerThreads.find((thread) => thread.id === providerThreadId)?.heartbeats,
+      );
+      assert.lengthOf((yield* heartbeats) ?? [], 1);
+
+      yield* orchestrator.dispatch({
+        type: "thread.background-work.settle",
+        commandId: CommandId.make("stop-settle-heartbeats:background-work-settled"),
+        threadId,
+        providerThreadId,
+        providerTurnId,
+      });
+
+      assert.deepEqual(yield* heartbeats, []);
+    }).pipe(Effect.provide(testLayer)),
+);
+
 // Stop's settle follow-up runs after the provider interrupt returns, possibly
 // long after the Stop (retries) or again (an effect replayed after a crash).
 // A later run's background work is not that Stop's to end.

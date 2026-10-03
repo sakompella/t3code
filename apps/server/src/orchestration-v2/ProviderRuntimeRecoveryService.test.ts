@@ -1272,3 +1272,72 @@ it.effect(
     }).pipe(Effect.provide(layer));
   },
 );
+
+it.effect("clears the heartbeats a restart leaves on an idle provider thread", () => {
+  const threadId = ThreadId.make("thread_recovery_heartbeats");
+  const providerThreadId = ProviderThreadId.make("provider_thread_recovery_heartbeats");
+  const projection = {
+    thread: { id: threadId },
+    runtimeRequests: [],
+    providerSessions: [],
+    providerThreads: [
+      {
+        id: providerThreadId,
+        driver: ProviderDriverKind.make("primeAgent"),
+        providerInstanceId: ProviderInstanceId.make("primeAgent"),
+        status: "idle",
+        pendingBackgroundTasks: [],
+        heartbeats: [{ id: "deploy", schedule: "every 15m", paused: false }],
+      },
+    ],
+    providerTurns: [],
+    runs: [],
+    attempts: [],
+    nodes: [],
+    subagents: [],
+    messages: [],
+    turnItems: [],
+  } as unknown as OrchestrationV2ThreadProjection;
+  let committedInput: Parameters<EventSink.EventSinkV2["Service"]["commitCommand"]>[0] | null =
+    null;
+  const layer = ProviderRuntimeRecovery.layer.pipe(
+    Layer.provide(ServerSettings.layerTest()),
+    Layer.provide(
+      Layer.mergeAll(
+        Layer.mock(ProjectionStore.ProjectionStoreV2)({
+          getRecoveryThreadIds: () => Effect.succeed([threadId]),
+          getRuntimeRecoveryProjection: () => Effect.succeed(projection),
+        }),
+        Layer.mock(EventSink.EventSinkV2)({
+          commitCommand: (input) => {
+            committedInput = input;
+            return Effect.succeed({ committed: true, cancelledEffectCount: 0 } as never);
+          },
+        }),
+        IdAllocator.layer,
+        Layer.mock(EffectWorker.OrchestrationEffectWorkerV2)({
+          runRecoveryOnce: Effect.succeed(false),
+        }),
+        Layer.mock(EffectOutbox.EffectOutboxV2)({
+          listByCommandId: () => Effect.succeed([]),
+          reconcileAfterProcessLoss: Effect.succeed({ requeued: 0, cancelled: 0 }),
+        }),
+      ),
+    ),
+  );
+
+  return Effect.gen(function* () {
+    yield* (yield* ProviderRuntimeRecovery.ProviderRuntimeRecoveryService).reconcile("startup");
+
+    const updates = (committedInput?.events ?? []).filter(
+      (event) => event.type === "provider-thread.updated",
+    );
+    assert.equal(updates.length, 1);
+    const [update] = updates;
+    assert.isTrue(update?.type === "provider-thread.updated");
+    if (update?.type !== "provider-thread.updated") return;
+    assert.equal(update.payload.id, providerThreadId);
+    assert.equal(update.payload.status, "idle");
+    assert.deepEqual(update.payload.heartbeats, []);
+  }).pipe(Effect.provide(layer));
+});
