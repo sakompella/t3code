@@ -27,6 +27,8 @@ import { Button } from "../ui/button";
 import ChatMarkdown, { ChatMarkdownAssetImage } from "../ChatMarkdown";
 import { RenderErrorBoundary } from "../RenderErrorBoundary";
 import { CommandOutputPanel, useCommandOutputStreaming } from "./CommandOutputPanel";
+import { HighlightedCode } from "./HighlightedCode";
+import type { WorkEntryCode } from "./MessagesTimeline.logic";
 import { resolveExternalWebLinkHref } from "./externalLinkContextMenu";
 import type { ExpandedImagePreview } from "./ExpandedImagePreview";
 import { ShellCommandBlock } from "./ShellCommandBlock";
@@ -36,6 +38,8 @@ interface V2ItemInspectorProps {
   readonly environmentId: EnvironmentId;
   readonly cwd?: string | undefined;
   readonly workspaceRoot?: string | undefined;
+  /** The row's code (shell command or Python cell), shown highlighted in place of the raw input. */
+  readonly code?: WorkEntryCode | undefined;
   readonly onOpenThread: (threadId: ThreadId) => void;
   readonly onOpenTurnDiff: (runId: RunId, filePath?: string) => void;
   readonly onRollbackCheckpoint?: (input: {
@@ -85,17 +89,22 @@ function StructuredValue({
   value,
   highlightJson = false,
   language,
+  code,
 }: {
   readonly value: unknown;
   readonly highlightJson?: boolean;
   readonly language?: "typescript";
+  readonly code?: WorkEntryCode | undefined;
 }) {
+  const { resolvedTheme } = useTheme();
   const text = typeof value === "string" ? value : JSON.stringify(value, null, 2);
   const isJson = highlightJson && isJsonText(text);
   if (!text) return null;
   return (
     <pre className={cn("max-h-80 overflow-auto text-muted-foreground", monoClassName)}>
-      {language || isJson ? (
+      {code ? (
+        <HighlightedCode code={code.code} language={code.language} theme={resolvedTheme} kind="body" />
+      ) : language || isJson ? (
         <RenderErrorBoundary fallback={text}>
           <Suspense fallback={text}>
             <SyntaxTokens text={text} language={language ?? "json"} />
@@ -201,6 +210,7 @@ function ToolCallBody(
     readonly command?: string;
     readonly args?: unknown;
     readonly toolName?: string | null;
+    readonly code?: WorkEntryCode | undefined;
     readonly exitCode?: number | undefined;
     /** Replaces the fetched output, e.g. with a command's live output. */
     readonly outputSlot?: ReactNode;
@@ -209,8 +219,9 @@ function ToolCallBody(
   const call = toolCallLines({ command: props.command, args: props.args });
   return (
     <div className={cn("space-y-1.5", monoClassName)}>
-      {call.command ? <ShellCommandBlock command={call.command} /> : null}
-      {call.args ? (
+      {props.code ? <StructuredValue value={props.command ?? props.args} code={props.code} /> : null}
+      {!props.code && call.command ? <ShellCommandBlock command={call.command} /> : null}
+      {!props.code && call.args ? (
         <div className="text-foreground/85">
           {call.args.map(([key, value]) => (
             <div key={key}>
@@ -224,7 +235,7 @@ function ToolCallBody(
           ))}
         </div>
       ) : null}
-      {call.argsText ? <StructuredValue value={call.argsText} highlightJson /> : null}
+      {!props.code && call.argsText ? <StructuredValue value={call.argsText} highlightJson /> : null}
       {props.outputSlot ?? <ToolOutput {...props} />}
       {props.exitCode !== undefined && props.exitCode !== 0 ? (
         <div className="text-destructive">exit {props.exitCode}</div>
@@ -265,6 +276,7 @@ export const V2ItemInspector = memo(function V2ItemInspector(props: V2ItemInspec
       {item.type === "command_execution" ? (
         <ToolCallBody
           command={item.input}
+          code={props.code}
           exitCode={item.exitCode}
           {...outputState}
           onImageExpand={props.onImageExpand}
@@ -378,6 +390,7 @@ export const V2ItemInspector = memo(function V2ItemInspector(props: V2ItemInspec
         <ToolCallBody
           toolName={item.toolName}
           args={item.input}
+          code={props.code}
           {...outputState}
           onImageExpand={props.onImageExpand}
         />
