@@ -5073,6 +5073,29 @@ describe("replies inside a run that received steers or notifications", () => {
     expect(visibleIds(rows)).toEqual(["prompt", "reply-1", "agent-message", "reply-2"]);
   });
 
+  it("keeps both replies when a finished background command joins the run after the first", () => {
+    // Thread a8bf335f, run 32: a steer, the plan, then a `bash()` job finished
+    // and the agent wrote a second reply in the same run.
+    const rows = settled([
+      message("prompt", 0, "user", "turn_start"),
+      work("tool-1", 1),
+      message("reply-1", 2, "assistant"),
+      message("steer", 3, "user", "steer"),
+      message("plan", 4, "assistant"),
+      work("bash-finished", 5, true),
+      work("tool-2", 6),
+      message("verification", 7, "assistant"),
+    ]);
+    expect(visibleIds(rows)).toEqual([
+      "prompt",
+      "reply-1",
+      "steer",
+      "plan",
+      "bash-finished",
+      "verification",
+    ]);
+  });
+
   it("still folds everything but the last reply in a run without steers", () => {
     const rows = settled([
       message("prompt", 0, "user", "turn_start"),
