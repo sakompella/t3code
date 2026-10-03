@@ -99,6 +99,11 @@ export interface ActivePiTurn {
   } | null;
   /** Counts synthetic notices so each gets its own id within the turn. */
   noticeCount: number;
+  /**
+   * The wake message a continuation turn's own notification already reports,
+   * so the buffered wake events do not report it twice.
+   */
+  wakeTrigger?: unknown;
   failure: ReturnType<typeof makeProviderFailure> | null;
   /** Native retry can recover its work without accepting a rejected joining prompt. */
   rejectedPromptFailure: ReturnType<typeof makeProviderFailure> | null;
