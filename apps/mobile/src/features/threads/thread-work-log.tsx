@@ -10,6 +10,7 @@ import {
 } from "./work-log-layout";
 import { QuestionAnswerHistory } from "./QuestionAnswerHistory";
 import { HighlightedCodeText } from "./HighlightedCodeText";
+import { workLogCodeResult } from "./work-log-code-result";
 import {
   workEntryBodyCode,
   workEntryLabelCode,
@@ -917,6 +918,7 @@ const ThreadWorkLogRow = memo(function ThreadWorkLogRow(
   const failed = row.status === "failure";
   const toolIcon = row.workEntry.toolIcon ?? row.workEntry.toolSource?.icon;
   const fullDetail = expanded && !reasoning && !bodyCode ? row.getFullDetail() : null;
+  const codeResult = bodyCode ? workLogCodeResult(row.projectedItem.item, failed) : null;
   const icon = reasoning ? "brain" : (toolPresentation?.icon ?? workRowSymbolName(row.icon));
 
   return (
@@ -1076,14 +1078,27 @@ const ThreadWorkLogRow = memo(function ThreadWorkLogRow(
             {reasoning ? (
               props.renderReasoning(reasoning.text)
             ) : bodyCode ? (
-              <HighlightedCodeText
-                selectable
-                code={bodyCode.code}
-                language={bodyCode.language}
-                theme={props.themeAppearance}
-                kind="body"
-                className="text-2xs leading-normal text-foreground-muted"
-              />
+              <>
+                <HighlightedCodeText
+                  selectable
+                  code={bodyCode.code}
+                  language={bodyCode.language}
+                  theme={props.themeAppearance}
+                  kind="body"
+                  className="text-2xs leading-normal text-foreground-muted"
+                />
+                {codeResult ? (
+                  <Text
+                    selectable
+                    className={cn(
+                      "mt-1.5 font-mono text-2xs leading-normal",
+                      failed ? "text-danger-foreground" : "text-foreground-muted",
+                    )}
+                  >
+                    {codeResult}
+                  </Text>
+                ) : null}
+              </>
             ) : (
               <Text selectable className="font-mono text-2xs leading-normal text-foreground-muted">
                 {fullDetail}
