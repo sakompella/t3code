@@ -2597,6 +2597,11 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
                 providerSessionId: input.providerSessionId,
                 nativeThreadRef: providerRef(nativeId),
                 ...(needsNewSession ? { nativeConversationHeadRef: null, contextUsage: null } : {}),
+                // A persisted roster outlives the process that ran those jobs,
+                // and nothing would ever report them finished.
+                ...(flavor.tools === "ipython"
+                  ? { pendingBackgroundTasks: backgroundJobs.tasks() }
+                  : {}),
                 status: "idle",
                 updatedAt: createdAt,
               }
