@@ -69,6 +69,10 @@ export function resolveBackgroundWorkPillSegment(
   if (presentation === null) return null;
   return {
     label: `${presentation.items.length} background`,
-    accessibilityLabel: `${presentation.title}: ${presentation.items.map((item) => item.label).join(", ")}`,
+    // A single item's title already names it ("Running: npm run dev").
+    accessibilityLabel:
+      presentation.items.length === 1
+        ? presentation.title
+        : `${presentation.title}: ${presentation.items.map((item) => item.label).join(", ")}`,
   };
 }
