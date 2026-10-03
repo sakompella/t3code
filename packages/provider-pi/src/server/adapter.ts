@@ -2633,6 +2633,12 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
           baselineModel = null;
           baselineThinking = null;
           contextWindow = null;
+          if (flavor.selfWakes === "continuation") {
+            // Prime Agent disposes the replaced session without cancelling a
+            // pending auto-retry. The retry would still fire later and send
+            // the failed request again, on the old model.
+            yield* request({ type: "abort_retry" }, 2_000).pipe(Effect.ignore);
+          }
           const result = yield* lifecycleRequest(
             resumeId != null
               ? { type: "switch_session", sessionPath: resumeId }
