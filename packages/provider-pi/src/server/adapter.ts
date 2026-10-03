@@ -1548,6 +1548,7 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
       const { emitMidRunWakeNotice } = makePrimeAgentWakeNotices({
         enabled: flavor.selfWakes === "continuation",
         driver,
+        handleOf: backgroundJobs.handleOf,
         items: { emit, emitItemNode, baseItemFields },
       });
 
@@ -1903,7 +1904,7 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
             providerThreadId: state.providerThread.id,
             driver,
             detail: null,
-            ...(flavor.wakeNotices ? { notification: piWakeNotification(wake.events, name) } : {}),
+            ...(flavor.wakeNotices ? { notification: piWakeNotification(wake.events, name, backgroundJobs.handleOf) } : {}),
             delivery: "adapter_buffered",
             dispatchIfCurrent: (dispatch) =>
               sessionEventPermit.withPermits(1)(
