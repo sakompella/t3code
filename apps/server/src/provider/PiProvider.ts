@@ -76,8 +76,11 @@ const piPresentation = (flavor: PiFlavor): ServerProviderPresentation => ({
   requiresNewThreadForModelChange: false,
 });
 
-const VERSION_PROBE_TIMEOUT_MS = 4_000;
-const PI_RPC_DISCOVERY_TIMEOUT_MS = 15_000;
+// Both CLIs start a full agent runtime for these probes, and several agents
+// often run on the same machine. A tight limit reads a busy machine as a
+// broken install and drops the command list the composer offers.
+const VERSION_PROBE_TIMEOUT_MS = 15_000;
+const PI_RPC_DISCOVERY_TIMEOUT_MS = 30_000;
 /** Deferring to the user's own settings.json default model. */
 const piDefaultModel = (flavor: PiFlavor): ServerProviderModel => ({
   slug: "default",
