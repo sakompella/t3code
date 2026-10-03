@@ -3498,6 +3498,109 @@ describe("PiAdapterV2 with the Prime Agent flavor", () => {
     }).pipe(Effect.scoped, Effect.provide(testLayer)),
   );
 
+  it.effect(
+    "keeps a finished child's thread live for follow-up work and routes its nested children",
+    () =>
+      Effect.gen(function* () {
+        const fake = yield* makeFakePi;
+        const session = yield* openPrimeThread(fake);
+        fake.queueObserved([{ role: "user", content: "Reply to your parent", timestamp: 1000 }]);
+        yield* startTurn(session.runtime, session.providerThread);
+        yield* fake.takeRequest("prompt");
+        yield* fake.emit({ type: "agent_start" });
+        yield* fake.emit(rlmChild("running", { activeSessionId: "active-1" }));
+        const running = yield* session.takeEvent(
+          (event) => event.type === "subagent.updated" && event.subagent.childThreadId !== null,
+        );
+        const child = running.type === "subagent.updated" ? running.subagent : undefined;
+        assert.isDefined(child);
+        yield* fake.takeRequest("observe");
+        yield* fake.emit({ type: "agent_end", messages: [] });
+        yield* fake.takeRequest("get_state");
+        yield* session.takeEvent((event) => event.type === "turn.terminal");
+
+        // The task finishes, which closes the child's transcript...
+        yield* fake.emit(rlmChild("done", { activeSessionId: "active-1" }));
+        yield* fake.takeRequest("observe");
+        yield* fake.takeRequest("unobserve");
+        yield* session.takeEvent(
+          (event) => event.type === "subagent.updated" && event.subagent.status === "completed",
+        );
+        assert.isFalse(yield* session.runtime.hasPendingBackgroundWork!);
+
+        /** Every event up to the first one matching `done`, so none can slip by unchecked. */
+        const eventsUntil = (done: (event: ProviderAdapterV2Event) => boolean) =>
+          Effect.gen(function* () {
+            const seen: Array<ProviderAdapterV2Event> = [];
+            do seen.push(yield* session.takeEvent(() => true));
+            while (!done(seen[seen.length - 1]!));
+            return seen;
+          });
+        const nestedChild = (id: string, title: string, status: string) => ({
+          type: "rlm_child_update",
+          child: {
+            id,
+            parentId: "sub-1",
+            sessionName: title,
+            label: title,
+            status,
+            sessionDir: `/fake/.prime/agent/session-artifacts/s/${id}`,
+          },
+        });
+
+        // ...but Prime Agent keeps the session. The parent messages it, and the
+        // roster reports follow-up work with the task status still `done`.
+        fake.queueObserved([
+          { role: "user", content: "Reply to your parent", timestamp: 1000 },
+          assistantSnapshot(2001, "Follow-up reply."),
+        ]);
+        yield* fake.emit(
+          rlmChild("done", { activeSessionId: "active-1", activity: { kind: "writing" } }),
+        );
+        assert.equal((yield* fake.takeRequest("observe"))["activeSessionId"], "active-1");
+        const followUp = yield* eventsUntil(
+          (event) =>
+            event.type === "message.updated" &&
+            event.message.threadId === child?.childThreadId &&
+            event.message.text === "Follow-up reply.",
+        );
+        assert.isTrue(yield* session.runtime.hasPendingBackgroundWork!);
+
+        // The root turn is idle, yet a nested child of the finished child still routes.
+        yield* fake.emit(nestedChild("sub-2", "gamma", "running"));
+        const nesting = yield* eventsUntil(
+          (event) => event.type === "subagent.updated" && event.subagent.title === "gamma",
+        );
+        const nested = nesting[nesting.length - 1];
+        assert.isTrue(
+          nested?.type === "subagent.updated" &&
+            nested.subagent.parentNodeId === child?.id &&
+            nested.subagent.runId === child.runId,
+        );
+        yield* fake.emit(nestedChild("sub-2", "gamma", "done"));
+
+        // The follow-up ends and the transcript closes again.
+        yield* fake.emit(rlmChild("done", { activeSessionId: "active-1" }));
+        yield* fake.takeRequest("observe");
+        assert.equal((yield* fake.takeRequest("unobserve"))["activeSessionId"], "active-1");
+        assert.isFalse(yield* session.runtime.hasPendingBackgroundWork!);
+        yield* fake.emit(nestedChild("sub-3", "marker", "running"));
+        const ending = yield* eventsUntil(
+          (event) => event.type === "subagent.updated" && event.subagent.title === "marker",
+        );
+
+        // None of it rewrote the original task's card or its root node.
+        const rewrites = [...followUp, ...nesting, ...ending].filter(
+          (event) =>
+            (event.type === "subagent.updated" && event.subagent.id === child?.id) ||
+            (event.type === "node.updated" &&
+              event.node.kind === "root_turn" &&
+              event.node.threadId === child?.childThreadId),
+        );
+        assert.deepEqual(rewrites, []);
+      }).pipe(Effect.scoped, Effect.provide(testLayer)),
+  );
+
   it.effect("logs what became of every child update, with the reason for a drop", () =>
     Effect.gen(function* () {
       const traced = yield* Queue.unbounded<Record<string, unknown>>();
