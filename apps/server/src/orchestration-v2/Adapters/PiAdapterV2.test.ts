@@ -3617,6 +3617,38 @@ describe("PiAdapterV2 with the Prime Agent flavor", () => {
     }).pipe(Effect.scoped, Effect.provide(testLayer)),
   );
 
+  it.effect("settles a cell whose end event never came when the turn ends", () =>
+    Effect.gen(function* () {
+      const fake = yield* makeFakePi;
+      const { runtime, takeEvent, providerThread } = yield* openPrimeThread(fake);
+      yield* startTurn(runtime, providerThread);
+      yield* fake.takeRequest("prompt");
+      yield* fake.emit({ type: "agent_start" });
+      yield* fake.emit({
+        type: "tool_execution_start",
+        toolCallId: "cell_lost",
+        toolName: "ipython",
+        args: { code: "print(open('f').read())" },
+      });
+      yield* fake.emit({
+        type: "tool_execution_update",
+        toolCallId: "cell_lost",
+        toolName: "ipython",
+        args: { code: "print(open('f').read())" },
+        partialResult: { content: [{ type: "text", text: "mcp" }] },
+      });
+      yield* fake.emit({ type: "agent_end", messages: [] });
+      yield* fake.takeRequest("get_state");
+      const seen = yield* drainUntilTerminal(takeEvent);
+      const cellStatuses = seen.flatMap((event) =>
+        event.type === "turn_item.updated" && event.turnItem.nativeItemRef?.nativeId === "cell_lost"
+          ? [event.turnItem.status]
+          : [],
+      );
+      assert.deepEqual([cellStatuses[0], cellStatuses.at(-1)], ["running", "completed"]);
+    }).pipe(Effect.scoped, Effect.provide(testLayer)),
+  );
+
   it.effect("restarts Prime Agent when Stop interrupts a turn with a live subagent", () =>
     Effect.gen(function* () {
       const fake = yield* makeFakePi;
