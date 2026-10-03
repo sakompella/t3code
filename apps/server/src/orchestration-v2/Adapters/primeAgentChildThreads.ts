@@ -75,6 +75,7 @@ export function makePrimeAgentChildThreads(input: {
     | "emitToolItem"
     | "adoptSnapshot"
     | "completeOpenStreamItems"
+    | "settleOpenTools"
   >;
 }) {
   const { driver, instanceId, name, childThreads, idAllocator, request, contentText } = input;
@@ -86,6 +87,7 @@ export function makePrimeAgentChildThreads(input: {
     emitToolItem,
     adoptSnapshot,
     completeOpenStreamItems,
+    settleOpenTools,
   } = input.items;
   const rlmChildren = new Map<string, PiRlmChildState>();
   const rlmTranscripts = new Map<string, PiChildTranscript>();
@@ -257,27 +259,16 @@ export function makePrimeAgentChildThreads(input: {
         return;
       }
       case "tool_execution_start":
-      case "tool_execution_update": {
-        const toolCallId = recordString(event, "toolCallId");
-        if (toolCallId !== undefined) {
-          transcript.openTools.set(toolCallId, {
-            ...transcript.openTools.get(toolCallId),
-            ...event,
-          });
-        }
+      case "tool_execution_update":
         yield* emitToolItem(
           transcript,
           event,
           event["type"] === "tool_execution_start" ? "start" : "update",
         );
         return;
-      }
-      case "tool_execution_end": {
-        const toolCallId = recordString(event, "toolCallId");
-        if (toolCallId !== undefined) transcript.openTools.delete(toolCallId);
+      case "tool_execution_end":
         yield* emitToolItem(transcript, event, "end");
         return;
-      }
       default:
         return;
     }
@@ -328,15 +319,7 @@ export function makePrimeAgentChildThreads(input: {
     toolStatus: "completed" | "failed" | "interrupted",
   ) {
     yield* completeOpenStreamItems(transcript);
-    for (const [toolCallId, event] of Array.from(transcript.openTools)) {
-      transcript.openTools.delete(toolCallId);
-      yield* emitToolItem(
-        transcript,
-        { ...event, type: "tool_execution_end", result: event["partialResult"] },
-        "end",
-        toolStatus,
-      );
-    }
+    yield* settleOpenTools(transcript, toolStatus);
   });
 
   const stopObservingChild = Effect.fnUntraced(function* (
