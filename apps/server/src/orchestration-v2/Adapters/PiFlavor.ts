@@ -62,6 +62,18 @@ export interface PiFlavor {
    * main one. Pi has no child sessions to observe.
    */
   readonly childThreads: boolean;
+  /**
+   * Set when the agent has its own MCP client in its kernel. T3 then ships the
+   * `t3-code` skill instead of registering its tools natively, provided the
+   * user declared the server in the agent's settings file. `null` means T3's
+   * extension always registers the tools.
+   */
+  readonly kernelMcp: {
+    /** Environment variable that relocates the agent's config directory. */
+    readonly agentDirEnvVar: string;
+    /** Config directory under the user's home when that variable is unset. */
+    readonly defaultAgentDir: string;
+  } | null;
 }
 
 export const PI_FLAVOR: PiFlavor = {
@@ -82,6 +94,7 @@ export const PI_FLAVOR: PiFlavor = {
   rollback: "fork",
   lossyStream: false,
   childThreads: false,
+  kernelMcp: null,
 };
 
 export const PRIME_AGENT_FLAVOR: PiFlavor = {
@@ -101,4 +114,5 @@ export const PRIME_AGENT_FLAVOR: PiFlavor = {
   rollback: "tree",
   lossyStream: true,
   childThreads: true,
+  kernelMcp: { agentDirEnvVar: "PRIME_AGENT_CODING_AGENT_DIR", defaultAgentDir: ".prime/agent" },
 };
