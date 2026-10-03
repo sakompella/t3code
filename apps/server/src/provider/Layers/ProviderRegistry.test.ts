@@ -700,6 +700,86 @@ it.layer(Layer.mergeAll(TestNodeServices, ServerSettingsModule.layerTest(), Test
         );
       });
 
+      for (const driver of ["pi", "primeAgent"] as const) {
+        it(`keeps ${driver} commands and skills through a probe that discovered nothing`, () => {
+          const previousProvider = {
+            instanceId: ProviderInstanceId.make(driver),
+            driver: ProviderDriverKind.make(driver),
+            status: "ready",
+            enabled: true,
+            installed: true,
+            auth: { status: "authenticated", type: driver },
+            checkedAt: "2026-10-03T00:00:00.000Z",
+            version: "1.0.0",
+            models: [],
+            slashCommands: [{ name: "compact" }, { name: "ant-account" }],
+            skills: [
+              {
+                name: "architect",
+                path: "/Users/me/.agents/skills/architect/SKILL.md",
+                enabled: true,
+                scope: "user",
+              },
+            ],
+          } as const satisfies ServerProvider;
+          const emptyProbe = {
+            ...previousProvider,
+            checkedAt: "2026-10-03T00:01:00.000Z",
+            auth: { status: "unknown" },
+            slashCommands: [],
+            skills: [],
+          } satisfies ServerProvider;
+
+          const merged = mergeProviderSnapshot(previousProvider, emptyProbe);
+          assert.deepStrictEqual(merged.slashCommands, previousProvider.slashCommands);
+          assert.deepStrictEqual(merged.skills, previousProvider.skills);
+
+          const failedProbe = {
+            ...emptyProbe,
+            status: "error",
+            message: "Failed to execute the CLI health check.",
+          } satisfies ServerProvider;
+          assert.deepStrictEqual(
+            mergeProviderSnapshot(previousProvider, failedProbe).skills,
+            previousProvider.skills,
+          );
+        });
+
+        it(`replaces ${driver} commands once discovery completes and clears them for a missing CLI`, () => {
+          const previousProvider = {
+            instanceId: ProviderInstanceId.make(driver),
+            driver: ProviderDriverKind.make(driver),
+            status: "ready",
+            enabled: true,
+            installed: true,
+            auth: { status: "authenticated", type: driver },
+            checkedAt: "2026-10-03T00:00:00.000Z",
+            version: "1.0.0",
+            models: [],
+            slashCommands: [{ name: "compact" }, { name: "retired" }],
+            skills: [{ name: "retired", path: "/skills/retired/SKILL.md", enabled: true }],
+          } as const satisfies ServerProvider;
+          const discovered = {
+            ...previousProvider,
+            slashCommands: [{ name: "compact" }],
+            skills: [],
+          } satisfies ServerProvider;
+          const merged = mergeProviderSnapshot(previousProvider, discovered);
+          assert.deepStrictEqual(merged.slashCommands, [{ name: "compact" }]);
+          assert.deepStrictEqual(merged.skills, []);
+
+          const missing = {
+            ...previousProvider,
+            status: "error",
+            installed: false,
+            auth: { status: "unknown" },
+            slashCommands: [],
+            skills: [],
+          } satisfies ServerProvider;
+          assert.deepStrictEqual(mergeProviderSnapshot(previousProvider, missing).skills, []);
+        });
+      }
+
       it("drops custom models the refreshed snapshot no longer carries", () => {
         const previousProvider = {
           instanceId: ProviderInstanceId.make("claudeAgent"),

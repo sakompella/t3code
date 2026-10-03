@@ -154,6 +154,25 @@ const shouldRetainMissingOpenCodeMetadata = (provider: ServerProvider): boolean 
   provider.driver === ProviderDriverKind.make("opencode") &&
   shouldRetainMissingProviderModels(provider);
 
+const PI_FAMILY_DRIVERS: ReadonlySet<ProviderDriverKind> = new Set([
+  ProviderDriverKind.make("pi"),
+  ProviderDriverKind.make("primeAgent"),
+]);
+
+/**
+ * Pi and Prime Agent learn their commands and skills from a live RPC session.
+ * A completed discovery always settles the account state (authenticated or
+ * not), so a snapshot with an unknown account came from the boot placeholder,
+ * a slow probe, or a failed one. Those must not blank the lists the composer
+ * offers, nor the cache file the next boot reads. A missing binary still
+ * clears them.
+ */
+const shouldRetainMissingPiCommands = (provider: ServerProvider): boolean =>
+  PI_FAMILY_DRIVERS.has(provider.driver) &&
+  provider.enabled &&
+  provider.installed &&
+  provider.auth.status === "unknown";
+
 const mergeProviderModels = (
   provider: ServerProvider,
   previousModels: ReadonlyArray<ServerProvider["models"][number]>,
@@ -239,6 +258,15 @@ export const mergeProviderSnapshot = (
         ? { workspaceSnapshots: previousProvider.workspaceSnapshots }
         : {}),
     ...(shouldRetainMissingOpenCodeMetadata(nextProvider)
+      ? {
+          slashCommands:
+            nextProvider.slashCommands.length === 0
+              ? previousProvider.slashCommands
+              : nextProvider.slashCommands,
+          skills: nextProvider.skills.length === 0 ? previousProvider.skills : nextProvider.skills,
+        }
+      : {}),
+    ...(shouldRetainMissingPiCommands(nextProvider)
       ? {
           slashCommands:
             nextProvider.slashCommands.length === 0
