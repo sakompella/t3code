@@ -1,5 +1,6 @@
 import type {
   OrchestrationV2PendingBackgroundTask,
+  OrchestrationV2ProviderHeartbeat,
   OrchestrationV2ThreadProjection,
   ScopedThreadRef,
 } from "@t3tools/contracts";
@@ -16,6 +17,7 @@ import {
   backgroundWorkTasksEqual,
   deriveRunningTurnBackgroundWork,
 } from "./threadBackgroundWork.ts";
+import { deriveThreadHeartbeats, heartbeatsEqual } from "./threadHeartbeats.ts";
 import type { EnvironmentThread } from "./models.ts";
 import { EMPTY_ENVIRONMENT_THREAD_STATE, type EnvironmentThreadState } from "./threadState.ts";
 import {
@@ -146,6 +148,19 @@ export function createEnvironmentThreadDetailAtoms<E>(
     );
   });
 
+  const heartbeatsAtomFamily = Atom.family((key: string) => {
+    const none: ReadonlyArray<OrchestrationV2ProviderHeartbeat> = [];
+    let value = none;
+    return Atom.make((get) => {
+      const projection = Option.getOrNull(get(threadStateValueAtomFamily(key)).data);
+      const next = projection === null ? none : deriveThreadHeartbeats(projection);
+      // A heartbeat's next run changes with the thread's provider thread, and every
+      // other projection update would otherwise hand clients fresh objects.
+      if (!heartbeatsEqual(value, next)) value = next;
+      return value;
+    }).pipe(Atom.setIdleTTL(0), Atom.withLabel(`environment-thread-heartbeats:${key}`));
+  });
+
   const worktreePathAtomFamily = Atom.family((key: string) =>
     Atom.make(
       (get) =>
@@ -214,6 +229,7 @@ export function createEnvironmentThreadDetailAtoms<E>(
     turnSubagentsAtom: (ref: ScopedThreadRef) => turnSubagentsAtomFamily(threadKey(ref)),
     runningTurnBackgroundWorkAtom: (ref: ScopedThreadRef) =>
       runningTurnBackgroundWorkAtomFamily(threadKey(ref)),
+    heartbeatsAtom: (ref: ScopedThreadRef) => heartbeatsAtomFamily(threadKey(ref)),
     stateAtom: (ref: ScopedThreadRef) => threadStateValueAtomFamily(threadKey(ref)),
     threadAtom: (ref: ScopedThreadRef) => threadAtomFamily(threadKey(ref)),
     visibleTurnItemsAtom: (ref: ScopedThreadRef) => visibleTurnItemsAtomFamily(threadKey(ref)),
