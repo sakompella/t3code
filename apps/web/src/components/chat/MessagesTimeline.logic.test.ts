@@ -4940,3 +4940,100 @@ describe("failed turn transcript", () => {
     },
   );
 });
+
+describe("replies inside a run that received steers or notifications", () => {
+  const time = (second: number) => new Date(Date.UTC(2026, 0, 1, 0, 0, second)).toISOString();
+  const run = RunId.make("steered-run");
+  const work = (id: string, second: number, notification = false) => ({
+    kind: "work" as const,
+    id,
+    createdAt: time(second),
+    entry: {
+      id,
+      runId: run,
+      createdAt: time(second),
+      label: id,
+      tone: "info" as const,
+      ...(notification ? { itemType: "notification" as const } : {}),
+    },
+  });
+  const message = (
+    id: string,
+    second: number,
+    role: "user" | "assistant",
+    inputIntent?: "turn_start" | "steer",
+  ) => ({
+    kind: "message" as const,
+    id,
+    createdAt: time(second),
+    message: {
+      id: MessageId.make(id),
+      role,
+      text: id,
+      runId: run,
+      ...(inputIntent ? { inputIntent } : {}),
+      createdAt: time(second),
+      updatedAt: time(second),
+      streaming: false,
+    },
+  });
+  const settled = (timelineEntries: ReturnType<typeof message | typeof work>[]) =>
+    deriveMessagesTimelineRows({
+      timelineEntries,
+      latestRun: {
+        runId: run,
+        status: "completed",
+        startedAt: time(0),
+        completedAt: time(60),
+      },
+      isWorking: false,
+      turnDiffSummaries: [],
+      supportsConversationRollback: false,
+    });
+  const visibleIds = (rows: ReturnType<typeof settled>) =>
+    rows.flatMap((row) =>
+      row.kind === "message"
+        ? [row.message.id]
+        : row.kind === "work"
+          ? row.groupedEntries.map((e) => e.id)
+          : [],
+    );
+
+  it("keeps the reply before a steer and the final reply visible", () => {
+    const rows = settled([
+      message("prompt", 0, "user", "turn_start"),
+      work("tool-1", 1),
+      message("reply-1", 2, "assistant"),
+      message("steer", 3, "user", "steer"),
+      work("tool-2", 4),
+      message("commentary", 5, "assistant"),
+      work("tool-3", 6),
+      message("reply-2", 7, "assistant"),
+    ]);
+    expect(visibleIds(rows)).toEqual(["prompt", "reply-1", "steer", "reply-2"]);
+    expect(rows.filter((row) => row.kind === "turn-fold")).toHaveLength(1);
+  });
+
+  it("keeps the reply before a delivered notification visible", () => {
+    const rows = settled([
+      message("prompt", 0, "user", "turn_start"),
+      work("tool-1", 1),
+      message("reply-1", 2, "assistant"),
+      work("agent-message", 3, true),
+      work("tool-2", 4),
+      message("reply-2", 5, "assistant"),
+    ]);
+    expect(visibleIds(rows)).toEqual(["prompt", "reply-1", "agent-message", "reply-2"]);
+  });
+
+  it("still folds everything but the last reply in a run without steers", () => {
+    const rows = settled([
+      message("prompt", 0, "user", "turn_start"),
+      work("tool-1", 1),
+      message("commentary", 2, "assistant"),
+      work("tool-2", 3),
+      message("reply", 4, "assistant"),
+    ]);
+    expect(visibleIds(rows)).toEqual(["prompt", "reply"]);
+  });
+});

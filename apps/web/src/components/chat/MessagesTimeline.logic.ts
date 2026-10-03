@@ -675,26 +675,33 @@ export function resolveAssistantMessageCopyState({
   };
 }
 
+/**
+ * The assistant message that ends each response: the last one per run before
+ * every boundary. Steers and delivered notifications are boundaries, so a run
+ * that received them keeps the reply to each visible instead of only its last.
+ */
 function deriveTerminalAssistantMessageIds(timelineEntries: ReadonlyArray<TimelineEntry>) {
   const lastAssistantMessageIdByResponseKey = new Map<string, string>();
-  let nullTurnResponseIndex = 0;
+  let boundaryIndex = 0;
 
   for (const timelineEntry of timelineEntries) {
+    if (timelineEntry.kind === "work" && timelineEntry.entry.itemType === "notification") {
+      boundaryIndex += 1;
+      continue;
+    }
     if (timelineEntry.kind !== "message") {
       continue;
     }
     const { message } = timelineEntry;
     if (message.role === "user") {
-      nullTurnResponseIndex += 1;
+      boundaryIndex += 1;
       continue;
     }
     if (message.role !== "assistant") {
       continue;
     }
 
-    const responseKey = message.runId
-      ? `turn:${message.runId}`
-      : `unkeyed:${nullTurnResponseIndex}`;
+    const responseKey = `${message.runId ? `turn:${message.runId}` : "unkeyed"}:${boundaryIndex}`;
     lastAssistantMessageIdByResponseKey.set(responseKey, message.id);
   }
 
@@ -1005,7 +1012,7 @@ function deriveTurnFolds(input: {
       ? group.entries.findIndex((entry) => entry.id === group.terminalEntry?.id)
       : group.entries.length;
     for (const [index, entry] of group.entries.entries()) {
-      if (entry.id === group.terminalEntry?.id) {
+      if (entry.kind === "message" && input.terminalAssistantMessageIds.has(entry.message.id)) {
         continue;
       }
       const isCompaction =
