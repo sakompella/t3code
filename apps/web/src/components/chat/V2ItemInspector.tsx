@@ -11,6 +11,9 @@ import { useV2ItemSupport } from "../../state/v2ItemSupport";
 import { formatWorkspaceRelativePath } from "../../filePathDisplay";
 import { Button } from "../ui/button";
 import ChatMarkdown from "../ChatMarkdown";
+import { useTheme } from "../../hooks/useTheme";
+import { HighlightedCode } from "./HighlightedCode";
+import type { WorkEntryCode } from "./MessagesTimeline.logic";
 import { resolveExternalWebLinkHref } from "./externalLinkContextMenu";
 
 interface V2ItemInspectorProps {
@@ -18,6 +21,8 @@ interface V2ItemInspectorProps {
   readonly environmentId: EnvironmentId;
   readonly cwd?: string | undefined;
   readonly workspaceRoot?: string | undefined;
+  /** The row's code (shell command or Python cell), shown highlighted in place of the raw input. */
+  readonly code?: WorkEntryCode | undefined;
   readonly onOpenThread: (threadId: ThreadId) => void;
   readonly onOpenTurnDiff: (runId: RunId, filePath?: string) => void;
   readonly onRollbackCheckpoint?: (input: {
@@ -26,12 +31,28 @@ interface V2ItemInspectorProps {
   }) => void;
 }
 
-function StructuredValue({ value }: { readonly value: unknown }) {
+function StructuredValue({
+  value,
+  code,
+}: {
+  readonly value: unknown;
+  readonly code?: WorkEntryCode | undefined;
+}) {
+  const { resolvedTheme } = useTheme();
   const text = typeof value === "string" ? value : JSON.stringify(value, null, 2);
   if (!text) return null;
   return (
     <pre className="max-h-80 overflow-auto whitespace-pre-wrap break-words rounded-md border border-border/50 bg-background/60 p-2 font-mono text-2xs leading-relaxed text-muted-foreground select-text">
-      {text}
+      {code ? (
+        <HighlightedCode
+          code={code.code}
+          language={code.language}
+          theme={resolvedTheme}
+          kind="body"
+        />
+      ) : (
+        text
+      )}
     </pre>
   );
 }
@@ -61,7 +82,7 @@ export const V2ItemInspector = memo(function V2ItemInspector(props: V2ItemInspec
 
       {item.type === "command_execution" ? (
         <div className="space-y-2">
-          <StructuredValue value={item.input} />
+          <StructuredValue value={item.input} code={props.code} />
           {item.exitCode !== undefined ? (
             <p className={item.exitCode === 0 ? "text-success" : "text-destructive"}>
               Process exited with code {item.exitCode}
@@ -158,7 +179,7 @@ export const V2ItemInspector = memo(function V2ItemInspector(props: V2ItemInspec
           <p className="mb-1 text-3xs font-medium tracking-wide uppercase text-muted-foreground">
             Input
           </p>
-          <StructuredValue value={item.input} />
+          <StructuredValue value={item.input} code={props.code} />
         </div>
       ) : null}
 

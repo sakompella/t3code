@@ -61,6 +61,7 @@ import { claudeSkillInvocation } from "@t3tools/shared/toolActivity";
 import { observeVisibleAnimation } from "../../lib/visibleAnimation";
 import {
   createContext,
+  Fragment,
   memo,
   use,
   useCallback,
@@ -200,7 +201,9 @@ import {
   shouldPreserveAssistantLineBreaks,
   toolGroupAction,
   workEntryDisplayLabel,
+  workEntryBodyCode,
   workEntryLabelCode,
+  type WorkEntryCode,
   workEntryHasInspectableContent,
   workEntryReadOutput,
   workEntryIsVisibleInGroup,
@@ -258,6 +261,7 @@ import {
   formatDayAwareTimestamp,
   formatUpcomingTimestamp,
 } from "../../timestampFormat";
+import { HighlightedCode } from "./HighlightedCode";
 import { V2ItemInspector } from "./V2ItemInspector";
 import { useV2ItemSupport } from "../../state/v2ItemSupport";
 import { Collapsible, CollapsibleTrigger, CollapsiblePanel } from "../ui/collapsible";
@@ -3625,7 +3629,17 @@ function LiveWorkEntryTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "
             </ReactMarkdown>
           ) : labelCode !== null ? (
             <span className="font-mono text-(length:--font-size-code,var(--text-xs))">
-              {labelCode}
+              {/* The running shine paints the text, so colors wait until the tool settles. */}
+              {row.active && !failed ? (
+                labelCode.code
+              ) : (
+                <HighlightedCode
+                  code={labelCode.code}
+                  language={labelCode.language}
+                  theme={ctx.resolvedTheme}
+                  kind="label"
+                />
+              )}
             </span>
           ) : (
             label
@@ -4803,21 +4817,32 @@ function workEntryRawCommand(
   return rawCommand === workEntry.command.trim() ? null : rawCommand;
 }
 
+interface ToolCallBodyBlock {
+  readonly text: string;
+  /** Set when the block is code worth syntax highlighting. */
+  readonly language?: WorkEntryCode["language"];
+}
+
 function buildToolCallExpandedBody(
   workEntry: TimelineWorkEntry,
   workspaceRoot: string | undefined,
   visibleLabel: string,
   viewedImagePath: string | null,
-): string | null {
-  const blocks: string[] = [];
+  bodyCode: WorkEntryCode | null,
+): ReadonlyArray<ToolCallBodyBlock> | null {
+  const blocks: ToolCallBodyBlock[] = [];
   const seen = new Set<string>([visibleLabel.trim()]);
-  const addBlock = (value: string | null | undefined) => {
+  const addBlock = (value: string | null | undefined, language?: WorkEntryCode["language"]) => {
     const text = value?.trim();
     if (!text || seen.has(text)) return;
     seen.add(text);
-    blocks.push(text);
+    blocks.push(language ? { text, language } : { text });
   };
-  if (workEntry.itemType === "dynamic_tool" && workEntry.toolData !== undefined) {
+  if (bodyCode?.language === "python") {
+    // The cell itself, not its JSON envelope. Shown even when it equals the
+    // truncated label, so a one-line cell still has a full-width body.
+    blocks.push({ text: bodyCode.code.trim(), language: "python" });
+  } else if (workEntry.itemType === "dynamic_tool" && workEntry.toolData !== undefined) {
     const input =
       workEntry.structuredPayload?.type === "dynamic_tool"
         ? workEntry.structuredPayload.input
@@ -4833,7 +4858,7 @@ function buildToolCallExpandedBody(
   if (command === visibleLabel.trim()) {
     seen.add(command);
   } else {
-    addBlock(raw ?? command);
+    addBlock(raw ?? command, bodyCode?.language);
   }
   const detail = workEntry.detail?.trim();
   if (detail !== viewedImagePath?.trim()) {
@@ -4856,7 +4881,7 @@ function buildToolCallExpandedBody(
   if (changedFiles.length > 0) {
     addBlock([...new Set(changedFiles)].join("\n"));
   }
-  return blocks.length > 0 ? blocks.join("\n\n") : null;
+  return blocks.length > 0 ? blocks : null;
 }
 
 const toolCallExpandedBodyClassName =
@@ -5091,15 +5116,19 @@ const SimpleWorkEntryRow = memo(function SimpleWorkEntryRow(props: {
       workEntry.changedFiles?.length ||
       viewedImage,
     );
+  const bodyCode = questionHeading ? null : workEntryBodyCode(workEntry, previewText);
   const expandedBody =
     expanded && !isReasoning
       ? plainOutput !== undefined
         ? plainOutput
+          ? [{ text: plainOutput }]
+          : null
         : buildToolCallExpandedBody(
             workEntry,
             workspaceRoot,
             previewText,
             viewedImage ? viewedImagePath : null,
+            bodyCode,
           )
       : null;
   // A system notice's whole message is its label, so expanding would repeat it.
@@ -5195,7 +5224,17 @@ const SimpleWorkEntryRow = memo(function SimpleWorkEntryRow(props: {
                 </ReactMarkdown>
               ) : labelCode !== null ? (
                 <span className="font-mono text-(length:--font-size-code,var(--text-xs))">
-                  {labelCode}
+                  {/* The running shine paints the text, so colors wait until the tool settles. */}
+                  {props.active && !showFailedIndicator ? (
+                    labelCode.code
+                  ) : (
+                    <HighlightedCode
+                      code={labelCode.code}
+                      language={labelCode.language}
+                      theme={ctx.resolvedTheme}
+                      kind="label"
+                    />
+                  )}
                 </span>
               ) : (
                 previewText
@@ -5301,9 +5340,26 @@ const SimpleWorkEntryRow = memo(function SimpleWorkEntryRow(props: {
               onOpenThread={ctx.onOpenThread}
               onOpenTurnDiff={ctx.onOpenTurnDiff}
               onRollbackCheckpoint={ctx.onRollbackCheckpoint}
+              code={bodyCode ?? undefined}
             />
           ) : expandedBody ? (
-            <pre className={toolCallExpandedBodyClassName}>{expandedBody}</pre>
+            <pre className={toolCallExpandedBodyClassName}>
+              {expandedBody.map((block, index) => (
+                <Fragment key={block.text}>
+                  {index > 0 ? "\n\n" : null}
+                  {block.language ? (
+                    <HighlightedCode
+                      code={block.text}
+                      language={block.language}
+                      theme={ctx.resolvedTheme}
+                      kind="body"
+                    />
+                  ) : (
+                    block.text
+                  )}
+                </Fragment>
+              ))}
+            </pre>
           ) : null}
         </WorkLogDetails>
       ) : null}

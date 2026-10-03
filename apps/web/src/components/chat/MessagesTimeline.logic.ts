@@ -33,6 +33,7 @@ import {
   type TimelineEntry,
   type WorkLogEntry,
 } from "../../session-logic";
+import type { HighlightLanguage } from "../../lib/codeTokens";
 import { type ChatMessage, type ProposedPlan, type TurnDiffSummary } from "../../types";
 import {
   type MessageId,
@@ -172,19 +173,62 @@ export function workEntryDisplayLabel(entry: WorkLogEntry, workspaceRoot: string
 // Older Prime Agent rows were titled "Python: <preview>"; the code alone is enough.
 const LEGACY_PYTHON_LABEL_PREFIX = "Python: ";
 
+/** Code a tool row shows, with the language its syntax highlighting uses. */
+export interface WorkEntryCode {
+  readonly code: string;
+  readonly language: HighlightLanguage;
+}
+
 /**
  * The code a row label shows, a shell command or a Python cell preview, so the
- * row can render it in the code font. Returns null when the label is prose.
+ * row can render it in the code font and highlight it. Returns null when the
+ * label is prose.
  */
-export function workEntryLabelCode(entry: WorkLogEntry, label: string): string | null {
-  if (entry.command && label === commandDisplayText(entry.command)) return label;
+export function workEntryLabelCode(entry: WorkLogEntry, label: string): WorkEntryCode | null {
+  if (entry.command && label === commandDisplayText(entry.command)) {
+    return { code: label, language: "shellscript" };
+  }
   const item = entry.structuredPayload;
   if (item?.type !== "dynamic_tool" || item.toolName !== "python" || label === "Python") {
     return null;
   }
-  return label.startsWith(LEGACY_PYTHON_LABEL_PREFIX)
-    ? label.slice(LEGACY_PYTHON_LABEL_PREFIX.length)
-    : label;
+  return {
+    code: label.startsWith(LEGACY_PYTHON_LABEL_PREFIX)
+      ? label.slice(LEGACY_PYTHON_LABEL_PREFIX.length)
+      : label,
+    language: "python",
+  };
+}
+
+function readField(value: unknown, key: string): unknown {
+  return value !== null && typeof value === "object"
+    ? (value as Record<string, unknown>)[key]
+    : undefined;
+}
+
+function pythonCellSource(entry: WorkLogEntry): string | null {
+  const input =
+    entry.structuredPayload?.type === "dynamic_tool"
+      ? entry.structuredPayload.input
+      : readField(entry.toolData, "input");
+  const code = readField(input, "code");
+  return typeof code === "string" && code.trim().length > 0 ? code : null;
+}
+
+/**
+ * The full code behind a row whose label is code: the whole Python cell, or
+ * the command as the provider ran it. Null when the label is prose or the
+ * entry carries no code.
+ */
+export function workEntryBodyCode(entry: WorkLogEntry, label: string): WorkEntryCode | null {
+  const labelCode = workEntryLabelCode(entry, label);
+  if (labelCode === null) return null;
+  if (labelCode.language === "python") {
+    const code = pythonCellSource(entry);
+    return code === null ? null : { code, language: "python" };
+  }
+  const command = (entry.rawCommand ?? entry.command)?.trim();
+  return command ? { code: command, language: labelCode.language } : null;
 }
 
 /** Inspectable read-file output is the path when we have one, otherwise nothing. */
