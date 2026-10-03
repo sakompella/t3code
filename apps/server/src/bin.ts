@@ -9,6 +9,12 @@
  */
 import { isEntrypoint } from "./entrypoint.ts";
 
+// The desktop app starts this server with ELECTRON_RUN_AS_NODE so its Electron
+// binary runs as Node. Every provider, terminal, and script the server spawns
+// would inherit it, and any Electron app they launch would then start as bare
+// Node and exit. Children that need it ask for it (see `resolveNodeRuntime`).
+delete process.env.ELECTRON_RUN_AS_NODE;
+
 if (
   isEntrypoint({
     moduleUrl: import.meta.url,
