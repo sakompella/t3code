@@ -10,6 +10,11 @@ import {
   T3_MCP_URL_ENV,
   T3_PI_RUNTIME_MODE_ENV,
 } from "./piT3McpExtensionSource.ts";
+import {
+  PI_T3_CODE_SKILL_FILENAME,
+  PI_T3_CODE_SKILL_NAME,
+  PI_T3_CODE_SKILL_SOURCE,
+} from "./piT3SkillSource.ts";
 
 const RESERVED_PI_LAUNCH_ARGUMENTS = new Set([
   "--continue",
@@ -234,17 +239,32 @@ function piT3McpExtensionDestPath(cacheDir: string): string {
   return `${cacheDir.replace(/\\/g, "/")}/${PI_T3_MCP_EXTENSION_FILENAME}`;
 }
 
+const writeFileIfChanged = Effect.fnUntraced(function* (dest: string, content: string) {
+  const fs = yield* FileSystem.FileSystem;
+  const existing = yield* fs.readFileString(dest).pipe(Effect.orElseSucceed(() => ""));
+  if (existing !== content) yield* fs.writeFileString(dest, content);
+});
+
 export const materializePiT3McpExtension = Effect.fn("materializePiT3McpExtension")(function* (
   cacheDir: string,
 ) {
   const fs = yield* FileSystem.FileSystem;
   yield* fs.makeDirectory(cacheDir, { recursive: true });
   const dest = piT3McpExtensionDestPath(cacheDir);
-  const existing = yield* fs.readFileString(dest).pipe(Effect.orElseSucceed(() => ""));
-  if (existing !== PI_T3_MCP_EXTENSION_SOURCE) {
-    yield* fs.writeFileString(dest, PI_T3_MCP_EXTENSION_SOURCE);
-  }
+  yield* writeFileIfChanged(dest, PI_T3_MCP_EXTENSION_SOURCE);
   return dest;
+});
+
+/**
+ * Writes the `t3-code` skill and returns its directory, the value for
+ * `--skill`. Pi rejects a skill whose directory name differs from its `name`.
+ */
+export const materializePiT3Skill = Effect.fn("materializePiT3Skill")(function* (cacheDir: string) {
+  const fs = yield* FileSystem.FileSystem;
+  const skillDir = `${cacheDir.replace(/\\/g, "/")}/pi-t3-skills/${PI_T3_CODE_SKILL_NAME}`;
+  yield* fs.makeDirectory(skillDir, { recursive: true });
+  yield* writeFileIfChanged(`${skillDir}/${PI_T3_CODE_SKILL_FILENAME}`, PI_T3_CODE_SKILL_SOURCE);
+  return skillDir;
 });
 
 export function buildPiRpcLaunch(input: {
@@ -252,6 +272,8 @@ export function buildPiRpcLaunch(input: {
   readonly environment: NodeJS.ProcessEnv;
   readonly mcpSession: McpProviderSessionConfig | undefined;
   readonly extensionPath: string | undefined;
+  /** Directory of the `t3-code` skill, for agents that reach T3 through their own MCP client. */
+  readonly skillPath?: string;
   readonly ephemeral?: boolean;
   readonly disableExtensions?: boolean;
   readonly disableTools?: boolean;
@@ -285,6 +307,9 @@ export function buildPiRpcLaunch(input: {
     !hasExplicitExtension(args, input.extensionPath)
   ) {
     args.push("--extension", input.extensionPath);
+  }
+  if (hasT3Mcp && input.skillPath !== undefined) {
+    args.push("--skill", input.skillPath);
   }
   const environment = { ...input.environment };
   // These values belong to the current T3 session. Never let a Pi child reuse

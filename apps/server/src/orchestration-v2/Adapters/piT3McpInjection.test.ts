@@ -13,8 +13,10 @@ import {
 import {
   buildPiRpcLaunch,
   materializePiT3McpExtension,
+  materializePiT3Skill,
   resolvePiLaunchArgs,
 } from "./piT3McpInjection.ts";
+import { PI_T3_CODE_SKILL_NAME } from "./piT3SkillSource.ts";
 
 const threadId = ThreadId.make("thread-pi-t3-mcp");
 
@@ -162,6 +164,42 @@ describe("pi T3 MCP injection", () => {
       assert.include(mcpSource, '"mcp-protocol-version"');
       assert.include(mcpSource, '"tools/call"');
       assert.include(mcpSource, "mcp__t3-code__");
+    }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+  );
+
+  it("passes the t3-code skill only when a skill path is supplied", () => {
+    const base = {
+      launchArgs: [],
+      environment: {},
+      extensionPath: "/tmp/cache/pi-t3-mcp-extension.ts",
+    };
+    const skillPath = "/tmp/cache/pi-t3-skills/t3-code";
+    const withSkill = buildPiRpcLaunch({ ...base, mcpSession, skillPath });
+    assert.deepEqual(withSkill.args.slice(-2), ["--skill", skillPath]);
+    assert.notInclude(buildPiRpcLaunch({ ...base, mcpSession }).args, "--skill");
+    // Without a T3 credential the skill would describe tools that cannot work.
+    assert.notInclude(
+      buildPiRpcLaunch({ ...base, mcpSession: undefined, skillPath }).args,
+      "--skill",
+    );
+  });
+
+  it.effect("materializes a skill whose directory, name, and description Pi accepts", () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const cacheDir = yield* fs.makeTempDirectoryScoped({ prefix: "t3-pi-skill-" });
+      const skillDir = yield* materializePiT3Skill(cacheDir);
+      assert.isTrue(skillDir.endsWith(`/${PI_T3_CODE_SKILL_NAME}`));
+      const content = yield* fs.readFileString(`${skillDir}/SKILL.md`);
+      const frontmatter = /^---\n([\s\S]*?)\n---\n/.exec(content)?.[1] ?? "";
+      assert.equal(/^name: (.+)$/m.exec(frontmatter)?.[1], "t3-code");
+      const description = /^description: (.+)$/m.exec(frontmatter)?.[1] ?? "";
+      assert.isTrue(description.length > 0 && description.length <= 1024);
+      assert.include(content, 'await mcp.list_tools("t3-code")');
+      assert.include(content, 'await mcp.call_tool("t3-code"');
+      assert.notInclude(content, "acp-mcp-call");
+      // Rewriting an unchanged skill must be a no-op.
+      assert.equal(yield* materializePiT3Skill(cacheDir), skillDir);
     }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
   );
 });
