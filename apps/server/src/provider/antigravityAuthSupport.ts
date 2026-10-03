@@ -3,7 +3,7 @@ import * as NodeFSP from "node:fs/promises";
 
 import type { AntigravityAuthMethod, ProviderInstanceId } from "@t3tools/contracts";
 import { HostProcessPlatform } from "@t3tools/shared/hostProcess";
-import { resolveNodeExecutable, nodeRuntimeUnavailableMessage } from "@t3tools/shared/nodeRuntime";
+import { resolveNodeRuntime, nodeRuntimeUnavailableMessage } from "@t3tools/shared/nodeRuntime";
 import * as Crypto from "effect/Crypto";
 import * as Effect from "effect/Effect";
 import * as Encoding from "effect/Encoding";
@@ -88,6 +88,13 @@ export interface AntigravityProfile {
   /** Parent of the per-process temp directories PyInstaller unpacks into. */
   readonly tempDirectory: string;
   readonly browserCommand: string;
+  /**
+   * What makes the BROWSER helper's runtime act as Node (`ELECTRON_RUN_AS_NODE`
+   * for Electron, otherwise empty). On POSIX `browserCommand` applies it to the
+   * helper alone. Windows has no safe scoped launcher (a batch file would
+   * re-parse the URL), so there it stays in the agent environment.
+   */
+  readonly runtimeEnv: Readonly<Record<string, string>>;
 }
 
 /**
@@ -246,7 +253,7 @@ function antigravityEnvironment(
     AGY_ACP_FORCE_FILE_STORAGE: "1",
     BROWSER: profile.browserCommand,
     PYTHONUNBUFFERED: "1",
-    ELECTRON_RUN_AS_NODE: "1",
+    ...(profile.platform === "win32" ? profile.runtimeEnv : {}),
     ...(profile.platform === "win32"
       ? { TEMP: tempDirectory, TMP: tempDirectory }
       : { TMPDIR: tempDirectory }),
@@ -320,20 +327,32 @@ export const prepareAntigravityProfile = Effect.fn("prepareAntigravityProfile")(
   const platform = input.platform ?? (yield* HostProcessPlatform);
   const userHome =
     input.userHome ?? resolveAntigravityUserHome(platform, input.baseEnv ?? process.env);
-  const runtimeExecutablePath =
-    input.runtimeExecutablePath ??
-    (yield* resolveNodeExecutable("Antigravity sign-in", input.baseEnv).pipe(
-      Effect.mapError(
-        (cause) =>
-          new AcpErrors.AcpTransportError({
-            detail: nodeRuntimeUnavailableMessage("Antigravity sign-in"),
-            cause,
-          }),
-      ),
-    ));
+  const runtime =
+    input.runtimeExecutablePath === undefined
+      ? yield* resolveNodeRuntime("Antigravity sign-in", input.baseEnv).pipe(
+          Effect.mapError(
+            (cause) =>
+              new AcpErrors.AcpTransportError({
+                detail: nodeRuntimeUnavailableMessage("Antigravity sign-in"),
+                cause,
+              }),
+          ),
+        )
+      : { command: input.runtimeExecutablePath, env: {} };
+  const runtimeExecutablePath = runtime.command;
   const helperExecutable =
     platform === "win32" ? runtimeExecutablePath.replaceAll("\\", "/") : runtimeExecutablePath;
-  const browserArguments = [helperExecutable, "-e", browserHelperSource, "--", "%s"];
+  const runtimeAssignments = Object.entries(runtime.env).map(([name, value]) => `${name}=${value}`);
+  const browserArguments = [
+    ...(platform !== "win32" && runtimeAssignments.length > 0
+      ? ["/usr/bin/env", ...runtimeAssignments]
+      : []),
+    helperExecutable,
+    "-e",
+    browserHelperSource,
+    "--",
+    "%s",
+  ];
   const browserCommand = browserArguments.map(quoteBrowserArgument).join(" ");
   if (
     browserCommand.includes(platform === "win32" ? ";" : ":") ||
@@ -357,12 +376,13 @@ export const prepareAntigravityProfile = Effect.fn("prepareAntigravityProfile")(
     tokenPath: path.join(acpDirectory, "acp_token.json"),
     tempDirectory,
     browserCommand,
+    runtimeEnv: runtime.env,
   };
   const environment = antigravityEnvironment(profile, input.baseEnv ?? process.env, auth);
   yield* Effect.gen(function* () {
     const child = yield* spawner.spawn(
       ChildProcess.make(helperExecutable, ["-e", browserHelperSource, "--", browserPreflightUrl], {
-        env: environment,
+        env: { ...environment, ...runtime.env },
         extendEnv: false,
         shell: false,
       }),
