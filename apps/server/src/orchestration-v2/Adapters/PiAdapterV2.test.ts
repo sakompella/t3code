@@ -2929,41 +2929,39 @@ describe("PiAdapterV2 with the Prime Agent flavor", () => {
     { name: "stdout closure", end: (fake) => fake.closeStdout },
   ];
 
-  for (const { name, end } of endings) {
-    it.effect(`completes a shown Finishing up row once on ${name}`, () =>
-      Effect.gen(function* () {
-        const fake = yield* makeFakePi;
-        const session = yield* openPrimeThread(fake);
-        yield* startTurn(session.runtime, session.providerThread);
-        yield* fake.takeRequest("prompt");
-        const running = yield* showFinishingUp(fake, session.takeEvent);
-        assert.isTrue(running.type === "turn_item.updated");
-        if (running.type !== "turn_item.updated") return;
+  it.effect.each(endings)("completes a shown Finishing up row once on $name", ({ end }) =>
+    Effect.gen(function* () {
+      const fake = yield* makeFakePi;
+      const session = yield* openPrimeThread(fake);
+      yield* startTurn(session.runtime, session.providerThread);
+      yield* fake.takeRequest("prompt");
+      const running = yield* showFinishingUp(fake, session.takeEvent);
+      assert.isTrue(running.type === "turn_item.updated");
+      if (running.type !== "turn_item.updated") return;
 
-        yield* end(fake, session, running.turnItem.providerTurnId ?? "");
-        const seen: Array<ProviderAdapterV2Event> = [];
-        yield* session.takeEvent((event) => {
-          seen.push(event);
-          return event.type === "turn.terminal";
-        });
-        // Time passing after the end must not bring the row back.
-        yield* TestClock.adjust(Duration.millis(5_000));
+      yield* end(fake, session, running.turnItem.providerTurnId ?? "");
+      const seen: Array<ProviderAdapterV2Event> = [];
+      yield* session.takeEvent((event) => {
+        seen.push(event);
+        return event.type === "turn.terminal";
+      });
+      // Time passing after the end must not bring the row back.
+      yield* TestClock.adjust(Duration.millis(5_000));
 
-        const notices = seen.filter(isSystemNotice);
-        assert.lengthOf(notices, 1);
-        const [completed] = notices;
-        assert.isTrue(
-          completed?.type === "turn_item.updated" &&
-            completed.turnItem.type === "system_notice" &&
-            completed.turnItem.status === "completed" &&
-            completed.turnItem.message === "Finished up" &&
-            completed.turnItem.tone === "progress" &&
-            completed.turnItem.id === running.turnItem.id &&
-            completed.turnItem.ordinal === running.turnItem.ordinal,
-        );
-      }).pipe(Effect.scoped, Effect.provide(testLayer)),
-    );
-  }
+      const notices = seen.filter(isSystemNotice);
+      assert.lengthOf(notices, 1);
+      const [completed] = notices;
+      assert.isTrue(
+        completed?.type === "turn_item.updated" &&
+          completed.turnItem.type === "system_notice" &&
+          completed.turnItem.status === "completed" &&
+          completed.turnItem.message === "Finished up" &&
+          completed.turnItem.tone === "progress" &&
+          completed.turnItem.id === running.turnItem.id &&
+          completed.turnItem.ordinal === running.turnItem.ordinal,
+      );
+    }).pipe(Effect.scoped, Effect.provide(testLayer)),
+  );
 
   it.effect("reports a finished refinement and a failed one as notices", () =>
     Effect.gen(function* () {
