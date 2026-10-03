@@ -74,6 +74,14 @@ export interface PiFlavor {
     /** Config directory under the user's home when that variable is unset. */
     readonly defaultAgentDir: string;
   } | null;
+  /**
+   * Whether the RPC lists the session's heartbeats (`list_heartbeats`), the
+   * recurring prompts it runs while the client keeps it alive. The adapter
+   * publishes them on the provider thread. Its RPC does not forward
+   * `heartbeats_changed`, so they are read when the session opens and when a
+   * turn settles.
+   */
+  readonly heartbeats: boolean;
 }
 
 export const PI_FLAVOR: PiFlavor = {
@@ -95,6 +103,7 @@ export const PI_FLAVOR: PiFlavor = {
   lossyStream: false,
   childThreads: false,
   kernelMcp: null,
+  heartbeats: false,
 };
 
 export const PRIME_AGENT_FLAVOR: PiFlavor = {
@@ -115,4 +124,5 @@ export const PRIME_AGENT_FLAVOR: PiFlavor = {
   lossyStream: true,
   childThreads: true,
   kernelMcp: { agentDirEnvVar: "PRIME_AGENT_CODING_AGENT_DIR", defaultAgentDir: ".prime/agent" },
+  heartbeats: true,
 };
