@@ -153,7 +153,7 @@ export function detachedBashJobs(code: string): ReadonlyArray<DetachedBashJob> {
       match[3]!,
       /r/i.test(match[2]!),
     );
-    if (literal === null || literal.value.length === 0) continue;
+    if (literal === null || literal.value.trim().length === 0) continue;
     if (variable !== null && endsHandle(code, variable)) continue;
     const isTemplate = isFString(match[2]!);
     jobs.push({
@@ -165,9 +165,9 @@ export function detachedBashJobs(code: string): ReadonlyArray<DetachedBashJob> {
   return jobs;
 }
 
-/** Whether a cell awaits a handle, which consumes its result and its completion notice. */
+/** Whether a cell awaits a handle, alone or through `asyncio.gather(...)`: either consumes its result and its completion notice. */
 export function awaitsHandle(code: string, variable: string): boolean {
-  return new RegExp(`\\bawait\\s+${variable}\\b`).test(code);
+  return new RegExp(`\\bawait\\s+${variable}\\b|\\bgather\\s*\\([^)]*\\b${variable}\\b`).test(code);
 }
 
 /** Whether a cell calls `kill()` on a handle: the process group is gone within the kill's grace period. */

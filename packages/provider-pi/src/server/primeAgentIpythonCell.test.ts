@@ -175,6 +175,19 @@ describe("detachedBashJobs", () => {
     expect(awaitsHandle("out = await late_job\nprint(out)", "late_job")).toBe(true);
     expect(awaitsHandle("print(late_job.running)", "late_job")).toBe(false);
     expect(awaitsHandle("await late_jobs_list", "late_job")).toBe(false);
+    expect(awaitsHandle("rs = await asyncio.gather(a, late_job)", "late_job")).toBe(true);
+    expect(awaitsHandle("rs = await asyncio.gather(a, b)", "late_job")).toBe(false);
+  });
+
+  it("ignores handles the creating cell gathers", () => {
+    expect(
+      detachedBashJobs("a = bash('sleep 1')\nb = bash('sleep 2')\nawait asyncio.gather(a, b)"),
+    ).toEqual([]);
+  });
+
+  it("ignores a command with nothing in it", () => {
+    expect(detachedBashJobs("job = bash('  ')")).toEqual([]);
+    expect(detachedBashJobs("job = bash('')")).toEqual([]);
   });
 });
 
