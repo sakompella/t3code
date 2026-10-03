@@ -5568,16 +5568,17 @@ function WorkEntryLogRow(props: WorkEntryRowProps) {
     plainOutput !== undefined &&
     workEntry.projectedItem !== undefined &&
     turnItemNeedsDetailFetch(workEntry.projectedItem.item);
-  // A system notice already displays its whole message in the label.
   const canExpandProjectedItem =
-    workEntry.itemType !== "system_notice" &&
     workEntryHasInspectableContent(workEntry) && (plainOutput !== undefined
       ? Boolean(plainOutput || viewedImage || workEntry.questionAnswer || plainOutputFetches)
       : workEntry.projectedItem === undefined
         ? canExpand
         : isReasoning
           ? Boolean(workEntry.detail?.trim())
-          : Boolean(
+          : workEntry.projectedItem.item.type === "notification" ||
+              workEntry.projectedItem.item.type === "system_notice"
+            ? true
+            : Boolean(
               viewedImage ||
               workEntry.questionAnswer ||
               turnItemHasDetail(workEntry.projectedItem.item),
