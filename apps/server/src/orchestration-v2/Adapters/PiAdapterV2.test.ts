@@ -24,9 +24,11 @@ import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
+import * as Logger from "effect/Logger";
 import * as Option from "effect/Option";
 import * as PlatformError from "effect/PlatformError";
 import * as Queue from "effect/Queue";
+import * as References from "effect/References";
 import * as Schema from "effect/Schema";
 import * as Sink from "effect/Sink";
 import * as Stream from "effect/Stream";
@@ -3439,6 +3441,70 @@ describe("PiAdapterV2 with the Prime Agent flavor", () => {
           nested.subagent.parentNodeId === parent?.id &&
           nested.subagent.runId === parent.runId,
       );
+    }).pipe(Effect.scoped, Effect.provide(testLayer)),
+  );
+
+  it.effect("logs what became of every child update, with the reason for a drop", () =>
+    Effect.gen(function* () {
+      const traced = yield* Queue.unbounded<Record<string, unknown>>();
+      const captureChildUpdateLogs = Logger.layer(
+        [
+          Logger.make(({ fiber, message }) => {
+            if (
+              Array.isArray(message) &&
+              message[0] === "orchestration-v2.prime-agent-rlm-child-update"
+            ) {
+              Queue.offerUnsafe(traced, fiber.getRef(References.CurrentLogAnnotations));
+            }
+          }),
+        ],
+        { mergeWithExisting: false },
+      );
+      yield* Effect.gen(function* () {
+        const fake = yield* makeFakePi;
+        const session = yield* openPrimeThread(fake);
+        // The turn has settled and sub-1 is still running when the updates below arrive.
+        yield* settleWithRunningChild(fake, session);
+        const earlier = [yield* Queue.take(traced), yield* Queue.take(traced)];
+        assert.deepEqual(
+          earlier.map((line) => [line.status, line.outcome, line.routedVia]),
+          [
+            ["pending", "emitted", "current-turn"],
+            ["running", "emitted", "known-child"],
+          ],
+        );
+        const settledTurnRunId = earlier[0]?.runId;
+        const nextLine = Effect.gen(function* () {
+          const line = yield* Queue.take(traced);
+          return [line.childId, line.outcome, line.reason, line.runId];
+        });
+        // No turn is running, so a child nobody has seen has nowhere to go.
+        yield* fake.emit(rlmChild("running", { id: "sub-late" }));
+        assert.deepEqual(yield* nextLine, ["sub-late", "dropped", "no-turn", null]);
+        yield* fake.emit(rlmChild("done"));
+        assert.deepEqual(yield* nextLine, ["sub-1", "emitted", null, settledTurnRunId]);
+        // A later turn is running: now a repeat or a stranger is dropped for what it is.
+        yield* startTurn(
+          session.runtime,
+          session.providerThread,
+          "default",
+          [],
+          "Again",
+          undefined,
+          2,
+        );
+        yield* fake.takeRequest("prompt");
+        yield* fake.emit({ type: "agent_start" });
+        yield* fake.emit(rlmChild("done"));
+        assert.deepEqual(yield* nextLine, ["sub-1", "dropped", "terminal-already-settled", null]);
+        yield* fake.emit(rlmChild("done", { id: "sub-ghost" }));
+        assert.deepEqual(yield* nextLine, [
+          "sub-ghost",
+          "dropped",
+          "terminal-for-unseen-child",
+          null,
+        ]);
+      }).pipe(Effect.provide(captureChildUpdateLogs));
     }).pipe(Effect.scoped, Effect.provide(testLayer)),
   );
 

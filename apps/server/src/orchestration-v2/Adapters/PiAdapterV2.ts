@@ -1113,6 +1113,10 @@ export function makePiAdapterV2(
         instanceId: options.instanceId,
         name,
         childThreads: flavor.childThreads,
+        sessionThread: () => ({
+          threadId: threadState?.providerThread.appThreadId ?? input.threadId,
+          providerThreadId: threadState?.providerThread.id ?? null,
+        }),
         contentText,
         idAllocator,
         request,
