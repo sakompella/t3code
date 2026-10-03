@@ -1038,6 +1038,30 @@ export function failedFeedRunIds(
   return failed;
 }
 
+/**
+ * The assistant message that ends each response: the last one per run before
+ * every boundary. User messages (steers included) and delivered notifications
+ * are boundaries, so a run keeps the reply to each of them visible.
+ */
+export function deriveTerminalAssistantMessageIds(
+  feed: ReadonlyArray<ThreadFeedEntry>,
+): ReadonlySet<string> {
+  const lastIdByResponseKey = new Map<string, string>();
+  let boundaryIndex = 0;
+  for (const entry of feed) {
+    if (
+      (entry.type === "message" && entry.message.role === "user") ||
+      (entry.type === "activity-group" &&
+        entry.activities.some((activity) => activity.projectedItem.item.type === "notification"))
+    ) {
+      boundaryIndex += 1;
+    } else if (entry.type === "message" && entry.message.role === "assistant") {
+      lastIdByResponseKey.set(`${entry.message.runId ?? "unkeyed"}:${boundaryIndex}`, entry.id);
+    }
+  }
+  return new Set(lastIdByResponseKey.values());
+}
+
 function deriveThreadFeedRunFolds(
   feed: ReadonlyArray<ThreadFeedEntry>,
   latestRun: ThreadFeedLatestRun | null,
@@ -1045,6 +1069,7 @@ function deriveThreadFeedRunFolds(
   feedFailedRunIds: ReadonlySet<RunId>,
 ): ReadonlyMap<string, ThreadFeedRunFold> {
   const firstAssistantMessageIdByRun = new Map<RunId, string>();
+  const terminalAssistantMessageIds = deriveTerminalAssistantMessageIds(feed);
   const terminalAssistantMessageIdByRun = new Map<RunId, string>();
   const interruptedRunIds = new Set<RunId>();
   const failedRunIds = new Set(feedFailedRunIds);
@@ -1141,6 +1166,7 @@ function deriveThreadFeedRunFolds(
             entry.id !== terminalAssistantId &&
             entry.type !== "html-render" &&
             entry.type !== "mcp-app" &&
+            !terminalAssistantMessageIds.has(entry.id) &&
             !(
               entry.type === "activity-group" &&
               entry.activities.some(
