@@ -3561,6 +3561,7 @@ function LiveActivityRow({
   failed = false,
   active = false,
   shimmer = false,
+  codeLabel = false,
 }: {
   label: ReactNode;
   iconName?: WorkEntryIconName;
@@ -3568,6 +3569,8 @@ function LiveActivityRow({
   failed?: boolean;
   active?: boolean;
   shimmer?: boolean;
+  /** The label is highlighted code, so a running shine must not repaint its colors. */
+  codeLabel?: boolean;
 }) {
   const animated = active && !failed;
   const showShimmer = animated && shimmer;
@@ -3583,6 +3586,7 @@ function LiveActivityRow({
         failed={failed}
         announceFailure={failed}
         active={animated && !shimmer}
+        codeLabel={codeLabel}
       />
       {showShimmer ? (
         <ActivityShimmerOverlay>
@@ -3601,6 +3605,7 @@ function LiveActivityContent({
   announceFailure = false,
   active = false,
   highlighted = false,
+  codeLabel = false,
 }: {
   label: ReactNode;
   iconName: WorkEntryIconName | undefined;
@@ -3609,6 +3614,7 @@ function LiveActivityContent({
   announceFailure?: boolean;
   active?: boolean;
   highlighted?: boolean;
+  codeLabel?: boolean;
 }) {
   const showTrailingFailureMark =
     failed && iconName !== undefined && !toolIconAcceptsTint(iconName, toolIcon);
@@ -3695,17 +3701,12 @@ function LiveWorkEntryTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "
             </ReactMarkdown>
           ) : labelCode !== null ? (
             <span className="font-mono text-(length:--font-size-code,var(--text-xs))">
-              {/* The running shine paints the text, so colors wait until the tool settles. */}
-              {row.active && !failed ? (
-                labelCode.code
-              ) : (
-                <HighlightedCode
-                  code={labelCode.code}
-                  language={labelCode.language}
-                  theme={ctx.resolvedTheme}
-                  kind="label"
-                />
-              )}
+              <HighlightedCode
+                code={labelCode.code}
+                language={labelCode.language}
+                theme={ctx.resolvedTheme}
+                kind="label"
+              />
             </span>
           ) : (
             label
@@ -3715,6 +3716,7 @@ function LiveWorkEntryTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "
         toolIcon={row.entry.toolIcon ?? row.entry.toolSource?.icon}
         failed={failed}
         active={row.active}
+        codeLabel={labelCode !== null}
       />
     </button>
   );
@@ -5331,7 +5333,9 @@ function WorkEntryLogRow(props: WorkEntryRowProps) {
                 answerPreview ? "min-w-0" : "min-w-0 flex-1",
                 "truncate",
                 headingClass,
-                props.active && !showFailedIndicator && "live-tool-shine",
+                props.active &&
+                  !showFailedIndicator &&
+                  (labelCode !== null ? "live-code-shine" : "live-tool-shine"),
               )}
             >
               {isReasoning && !expanded ? (
@@ -5348,17 +5352,12 @@ function WorkEntryLogRow(props: WorkEntryRowProps) {
                 </ReactMarkdown>
               ) : labelCode !== null ? (
                 <span className="font-mono text-(length:--font-size-code,var(--text-xs))">
-                  {/* The running shine paints the text, so colors wait until the tool settles. */}
-                  {props.active && !showFailedIndicator ? (
-                    labelCode.code
-                  ) : (
-                    <HighlightedCode
-                      code={labelCode.code}
-                      language={labelCode.language}
-                      theme={ctx.resolvedTheme}
-                      kind="label"
-                    />
-                  )}
+                  <HighlightedCode
+                    code={labelCode.code}
+                    language={labelCode.language}
+                    theme={ctx.resolvedTheme}
+                    kind="label"
+                  />
                 </span>
               ) : (
                 previewText
