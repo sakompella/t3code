@@ -10,6 +10,7 @@ import {
   type OrchestrationV2RuntimeRequest,
   type OrchestrationV2ProviderThread,
   type OrchestrationV2Run,
+  type OrchestrationV2Subagent,
   type OrchestrationV2TurnItem,
   ProviderDriverKind,
   ProviderInstanceId,
@@ -587,6 +588,142 @@ layer("ProviderEventIngestorV2", (it) => {
       assert.equal(persisted?.runId, priorRunId);
       assert.equal(persisted?.threadId, threadEvent.threadId);
       assert.equal(persisted?.status, "completed");
+    }),
+  );
+
+  it.effect("closes an interrupted run's persisted subagent card from the live run", () =>
+    Effect.gen(function* () {
+      const now = yield* DateTime.now;
+      const eventSink = yield* EventSink.EventSinkV2;
+      const projectionStore = yield* ProjectionStore.ProjectionStoreV2;
+      const ingestor = yield* ProviderEventIngestor.ProviderEventIngestorV2;
+      const idAllocator = yield* IdAllocator.IdAllocatorV2;
+      const threadEvent = yield* threadCreatedEvent(now);
+      const threadId = threadEvent.threadId;
+      const priorRunId = RunId.make("run:provider-event-subagent:prior");
+      const currentRunId = RunId.make("run:provider-event-subagent:current");
+      const providerSessionId = yield* idAllocator.allocate.providerSession({
+        providerInstanceId: modelSelection.instanceId,
+        threadId,
+      });
+      const providerThreadId = idAllocator.derive.providerThread({
+        driver: CODEX_DRIVER,
+        nativeThreadId: "native-thread-subagent",
+      });
+      const subagentId = NodeId.make("node:provider-event-subagent");
+      const runningSubagent = {
+        id: subagentId,
+        threadId,
+        runId: priorRunId,
+        parentNodeId: NodeId.make("node:provider-event-subagent:root"),
+        origin: "provider_native",
+        createdBy: "agent",
+        driver: CODEX_DRIVER,
+        providerInstanceId: modelSelection.instanceId,
+        providerThreadId,
+        childThreadId: null,
+        nativeTaskRef: null,
+        prompt: "check the build",
+        title: "build check",
+        model: null,
+        status: "running",
+        result: null,
+        startedAt: now,
+        completedAt: null,
+        updatedAt: now,
+      } satisfies OrchestrationV2Subagent;
+      const runningItem = {
+        id: TurnItemId.make("turn-item:provider-event-subagent"),
+        threadId,
+        runId: priorRunId,
+        nodeId: subagentId,
+        providerThreadId,
+        providerTurnId: null,
+        nativeItemRef: null,
+        parentItemId: null,
+        ordinal: 101,
+        status: "running",
+        title: "build check",
+        startedAt: now,
+        completedAt: null,
+        updatedAt: now,
+        type: "subagent",
+        subagentId,
+        origin: "provider_native",
+        driver: CODEX_DRIVER,
+        providerInstanceId: modelSelection.instanceId,
+        childThreadId: null,
+        prompt: "check the build",
+        result: null,
+      } satisfies OrchestrationV2TurnItem;
+      const terminalSubagent = {
+        ...runningSubagent,
+        status: "completed" as const,
+        result: "build is green",
+        completedAt: now,
+        updatedAt: now,
+      };
+
+      yield* eventSink.write({ events: [threadEvent] });
+      for (const event of [
+        { type: "subagent.updated", driver: CODEX_DRIVER, subagent: runningSubagent },
+        { type: "turn_item.updated", driver: CODEX_DRIVER, turnItem: runningItem },
+      ] as const) {
+        yield* ingestor.ingestNormalized({
+          providerSessionId,
+          providerInstanceId: modelSelection.instanceId,
+          threadId,
+          runId: priorRunId,
+          event,
+        });
+      }
+
+      const identity: ProviderEventRouteIdentity = {
+        threadId,
+        runId: currentRunId,
+        attemptId: RunAttemptId.make("attempt:provider-event-subagent:current"),
+        providerThreadId,
+      };
+      const routeState = makeProviderEventRoutingState({
+        identity,
+        inheritedBackgroundTurnItems: selectInheritedBackgroundTurnItems({
+          threadId,
+          currentProviderThreadId: providerThreadId,
+          currentRunOrdinal: 2,
+          runs: [
+            {
+              id: priorRunId,
+              threadId,
+              ordinal: 1,
+              status: "interrupted",
+            } as OrchestrationV2Run,
+            { id: currentRunId, threadId, ordinal: 2, status: "running" } as OrchestrationV2Run,
+          ],
+          turnItems: [runningItem],
+        }),
+        providerTurnId: null,
+      });
+      const terminalEvent = {
+        type: "subagent.updated",
+        driver: CODEX_DRIVER,
+        subagent: terminalSubagent,
+      } as const;
+      // The origin run no longer listens, so only the live run can deliver it.
+      assert.isTrue(routeProviderEvent(terminalEvent, identity, routeState)[0]);
+
+      yield* ingestor.ingestNormalized({
+        providerSessionId,
+        providerInstanceId: modelSelection.instanceId,
+        threadId,
+        runId: currentRunId,
+        event: terminalEvent,
+      });
+      const projection = yield* projectionStore.getThreadProjection(threadId);
+      const persisted = projection.subagents.find((subagent) => subagent.id === subagentId);
+
+      assert.equal(persisted?.status, "completed");
+      assert.equal(persisted?.runId, priorRunId);
+      assert.equal(persisted?.result, "build is green");
     }),
   );
 
