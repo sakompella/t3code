@@ -1795,6 +1795,53 @@ describe("deriveMessagesTimelineRows", () => {
     },
   );
 
+  it("does not treat a system notice as a response boundary", () => {
+    const runId = RunId.make("noticed-run");
+    const startedAt = "2026-01-01T00:00:00Z";
+    const entries: TimelineEntry[] = [
+      {
+        id: "initial-prompt",
+        kind: "message",
+        createdAt: startedAt,
+        message: {
+          id: MessageId.make("initial-prompt"),
+          role: "user",
+          text: "go",
+          runId,
+          inputIntent: "turn_start",
+          createdAt: startedAt,
+          updatedAt: startedAt,
+          streaming: false,
+        },
+      },
+      {
+        id: "notice",
+        kind: "work",
+        createdAt: startedAt,
+        entry: {
+          id: "notice",
+          createdAt: startedAt,
+          runId,
+          label: "Refined its harness.",
+          tone: "info",
+          itemType: "system_notice",
+        },
+      },
+    ];
+    const rows = deriveMessagesTimelineRows({
+      timelineEntries: entries,
+      latestRun: { runId, status: "running", startedAt, completedAt: null },
+      isWorking: true,
+      activeTurnStartedAt: startedAt,
+      turnDiffSummaries: [],
+      supportsConversationRollback: false,
+    });
+    expect(rows.slice(0, 2).map((row) => row.id)).toEqual([
+      "initial-prompt",
+      "working-indicator-row",
+    ]);
+  });
+
   it("keeps the previous turn folded while a newly sent message awaits its turn", () => {
     // Right after send, isWorking is true but latestRun still points at the
     // previous, settled turn — it must stay folded through that window.
