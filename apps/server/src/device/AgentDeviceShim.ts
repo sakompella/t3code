@@ -50,7 +50,9 @@ child.on("exit", code => { process.exitCode = code ?? 1; });
     const assignments = Object.entries(nodeEnv).map(
       ([name, value]) => `set "${name}=${value}"\r\n`,
     );
-    const script = `@echo off\r\n${assignments.join("")}"${node}" "${launcherPath}" %*\r\n`;
+    const script = `@echo off\r\nsetlocal\r\n${assignments.join("")}"${node}" "${launcherPath}" %*\r\n`;
+    // setlocal scopes the assignments to this invocation; the child's exit code
+    // is still the script's exit code, because endlocal runs implicitly.
     yield* fs.writeFileString(path.join(shimDir, "agent-device.cmd"), script);
   } else {
     const command = [node, launcherPath].map(shellQuote).join(" ");

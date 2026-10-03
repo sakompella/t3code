@@ -65,4 +65,29 @@ describe("agent-device shim", () => {
       );
     }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
   );
+
+  it.effect("scopes the Windows launcher's environment to its own invocation", () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const directory = yield* fs.makeTempDirectoryScoped();
+      const shimDir = yield* ensureAgentDeviceShim({
+        entryPath: path.join(directory, "entry.mjs"),
+        stateDir: directory,
+      }).pipe(
+        Effect.provideService(HostProcessPlatform, "win32"),
+        Effect.provideService(HostProcessExecutablePath, "C:\\T3\\T3.exe"),
+        Effect.provideService(HostProcessIsExecutable, false),
+        Effect.provideService(HostProcessIsElectron, true),
+      );
+      const lines = (yield* fs.readFileString(path.join(shimDir, "agent-device.cmd"))).split(
+        "\r\n",
+      );
+      const setlocal = lines.indexOf("setlocal");
+      const assignment = lines.indexOf('set "ELECTRON_RUN_AS_NODE=1"');
+      expect(setlocal).toBeGreaterThan(-1);
+      expect(assignment).toBeGreaterThan(setlocal);
+      expect(lines.some((line) => line.includes("endlocal"))).toBe(false);
+    }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+  );
 });
