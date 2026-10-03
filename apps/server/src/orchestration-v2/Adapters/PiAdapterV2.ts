@@ -1469,6 +1469,7 @@ export function makePiAdapterV2(
       const { emitMidRunWakeNotice } = makePrimeAgentWakeNotices({
         enabled: flavor.selfWakes === "continuation",
         driver,
+        handleOf: backgroundJobs.handleOf,
         items: { emit, emitItemNode, baseItemFields },
       });
 
@@ -1774,7 +1775,7 @@ export function makePiAdapterV2(
           providerThreadId: state.providerThread.id,
           driver,
           detail: null,
-          notification: piWakeNotification(wake.events, name),
+          notification: piWakeNotification(wake.events, name, backgroundJobs.handleOf),
           // A user turn that adopted the wake first makes this request stale.
           dispatchIfCurrent: (dispatch) =>
             pendingWake?.generation === generation

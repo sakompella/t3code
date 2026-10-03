@@ -3804,8 +3804,69 @@ describe("PiAdapterV2 with the Prime Agent flavor", () => {
       assert.equal(first.turnItem.detail, "child-ok");
       assert.deepEqual(first.turnItem.source, { kind: "subagent" });
       assert.equal(second.turnItem.summary, "Background command finished");
+      assert.isUndefined(
+        second.turnItem.detail,
+        "a completion that names no command has no detail",
+      );
       assert.notEqual(first.turnItem.id, second.turnItem.id);
       assert.notEqual(first.turnItem.nodeId, second.turnItem.nodeId);
+    }).pipe(Effect.scoped, Effect.provide(testLayer)),
+  );
+
+  it.effect("names the command and handle of a background job that finishes during a run", () =>
+    Effect.gen(function* () {
+      const fake = yield* makeFakePi;
+      const { runtime, takeEvent, providerThread } = yield* openPrimeThread(fake);
+      yield* startTurn(runtime, providerThread);
+      yield* fake.takeRequest("prompt");
+      yield* fake.emit({ type: "agent_start" });
+      yield* emitCell(fake, "cell_bg", "build = bash('make build'); print(build.pid)");
+      yield* fake.emit({
+        type: "message_start",
+        message: {
+          role: "custom",
+          customType: "async_bash_completion",
+          content: "[bash-done pid:51 exit:2]",
+          details: { pid: 51, command: "make build", exitCode: 2 },
+        },
+      });
+      const notice = yield* takeEvent(
+        (event) => event.type === "turn_item.updated" && event.turnItem.type === "notification",
+      );
+
+      assert.isTrue(notice.type === "turn_item.updated" && notice.turnItem.type === "notification");
+      if (notice.type !== "turn_item.updated" || notice.turnItem.type !== "notification") return;
+      assert.equal(notice.turnItem.detail, "make build\n\nExit code 2\n\nHandle: build");
+    }).pipe(Effect.scoped, Effect.provide(testLayer)),
+  );
+
+  it.effect("names the command of a background job that wakes an idle agent", () =>
+    Effect.gen(function* () {
+      const fake = yield* makeFakePi;
+      const { runtime, takeEvent, providerThread, offers } = yield* openPrimeThreadWithWakes(fake);
+      yield* startTurn(runtime, providerThread);
+      yield* fake.takeRequest("prompt");
+      yield* fake.emit({ type: "agent_start" });
+      yield* emitCell(fake, "cell_bg", "lint = bash('make lint'); print(lint.pid)");
+      yield* fake.emit({ type: "agent_end", messages: [] });
+      yield* fake.takeRequest("get_state");
+      yield* takeEvent((event) => event.type === "turn.terminal");
+
+      yield* fake.emit({ type: "agent_start" });
+      yield* fake.emit({
+        type: "message_start",
+        message: {
+          role: "custom",
+          customType: "async_bash_completion",
+          content: "[bash-done pid:52 exit:0]",
+          details: { pid: 52, command: "make lint", exitCode: 0 },
+        },
+      });
+      yield* emitAssistantReply(fake, "Lint is clean.");
+      const offer = yield* Queue.take(offers);
+
+      assert.equal(offer.notification?.summary, "Background command finished");
+      assert.equal(offer.notification?.detail, "make lint\n\nExit code 0\n\nHandle: lint");
     }).pipe(Effect.scoped, Effect.provide(testLayer)),
   );
 
