@@ -14,6 +14,24 @@ the [Pi provider](./providers-pi.md) except where noted here.
 If `prime-agent` is not on the server's `PATH`, set its binary path to the executable. Launch
 arguments work as they do for Pi.
 
+## Let Prime Agent Use T3 Code Tools
+
+Prime Agent can start threads, delegate tasks, and schedule work through T3 Code's MCP server. By
+default T3 Code gives it about 70 native tools for this. To give it one `ipython` tool and a short
+`t3-code` skill instead, add this to `mcpServers` in `~/.prime/agent/settings.json` (or in
+`$PRIME_AGENT_CODING_AGENT_DIR/settings.json`) and start a new session:
+
+```json
+"t3-code": {
+  "type": "http",
+  "url": "http://127.0.0.1:3773/mcp",
+  "bearerTokenEnvVar": "T3_MCP_BEARER_TOKEN"
+}
+```
+
+Use your server's own port in `url`. Until the entry matches, T3 Code keeps the native tools and
+shows a notice with the exact entry to add. T3 Code never edits this file.
+
 ## How Work Appears
 
 Prime Agent runs every action as a cell in one persistent Python kernel. T3 Code shows a cell that
