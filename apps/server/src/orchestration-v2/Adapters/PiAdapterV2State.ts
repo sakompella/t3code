@@ -94,6 +94,11 @@ export interface ActivePiTurn {
   } | null;
   /** Counts synthetic notices so each gets its own id within the turn. */
   noticeCount: number;
+  /**
+   * The wake message a continuation turn's own notification already reports,
+   * so the buffered wake events do not report it twice.
+   */
+  wakeTrigger?: unknown;
   failure: ReturnType<typeof makeProviderFailure> | null;
   /** Session-tree refs read just before Stop terminates Pi, when no read is possible later. */
   stopTreeRefs?: PiTurnTreeRefs | null;
