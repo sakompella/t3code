@@ -4,6 +4,7 @@ import type {
   ThreadUserInputQuestion,
 } from "@t3tools/client-runtime/state/thread-requests";
 import {
+  noticeExpandedText,
   systemNoticeIsRoutine,
   turnItemIsFinishedProgressNotice,
   turnItemIsWorkspacePreparation,
@@ -791,8 +792,9 @@ function toFeedActivity(
     item.type === "dynamic_tool" && toolGroupAction(workEntry) === "read"
       ? collectToolFilePaths(item)
       : null;
+  const noticeText = noticeExpandedText(item);
   const getFullDetail = memoizeValue(() =>
-    readPaths ? readPaths.join("\n") || null : formatItemFullDetail(row, item),
+    noticeText ?? (readPaths ? readPaths.join("\n") || null : formatItemFullDetail(row, item)),
   );
   const getCopyText = memoizeValue(() =>
     [summary, detail, getFullDetail()]
@@ -809,15 +811,15 @@ function toFeedActivity(
     attemptId,
     summary,
     detail,
-    // A system notice's whole message is its summary, so expanding would repeat it.
-    // A notification without a detail has nothing more to show either.
+    // A notice or notification is its one-line summary, so it opens only when
+    // the row can cut that off or there is a detail to add.
     canExpand:
-      item.type !== "system_notice" &&
-      !(item.type === "notification" && !item.detail?.trim()) &&
+      (noticeText !== null || (item.type !== "system_notice" && item.type !== "notification")) &&
       !(item.type === "error" && item.status === "failed") &&
-      (readPaths
-        ? readPaths.length > 0 || turnItemNeedsDetailFetch(item)
-        : turnItemHasDetail(item) || workEntry.questionAnswer !== undefined),
+      (noticeText !== null ||
+        (readPaths
+          ? readPaths.length > 0 || turnItemNeedsDetailFetch(item)
+          : turnItemHasDetail(item) || workEntry.questionAnswer !== undefined)),
     // Read rows show their paths, then the fetched file contents.
     fetchesDetail: turnItemNeedsDetailFetch(item),
     getFullDetail,
