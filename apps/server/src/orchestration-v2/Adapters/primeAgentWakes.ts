@@ -36,17 +36,65 @@ export function isPiWakeEvent(event: PiRpcRecord): boolean {
   }
 }
 
+const NOTIFICATION_DETAIL_MAX_LENGTH = 2_000;
+const COMMAND_DETAIL_MAX_LENGTH = 500;
+
+function clip(text: string, maxLength: number): string {
+  return text.length <= maxLength ? text : `${text.slice(0, maxLength - 1).trimEnd()}…`;
+}
+
+/** Notification fields that carry `detail` only when there is something to show. */
+function withDetail(detail: string | undefined): { readonly detail?: string } {
+  const text = detail?.trim();
+  return text ? { detail: clip(text, NOTIFICATION_DETAIL_MAX_LENGTH) } : {};
+}
+
+/**
+ * The command a background job ran, how it ended, and the handle variable it
+ * was started with when the adapter tracked it. Nothing when the message does
+ * not say which command finished.
+ */
+function backgroundCommandDetail(
+  details: unknown,
+  handleVariable: string | null,
+): string | undefined {
+  const command = recordString(details, "command")?.trim();
+  if (!command) return undefined;
+  const exitCode = recordField(details, "exitCode");
+  return [
+    clip(command, COMMAND_DETAIL_MAX_LENGTH),
+    typeof exitCode === "number" ? `Exit code ${exitCode}` : undefined,
+    handleVariable === null ? undefined : `Handle: ${handleVariable}`,
+  ]
+    .filter((line) => line !== undefined)
+    .join("\n\n");
+}
+
+/** What a heartbeat ran: the message's text after its `[heartbeat: ...]` header line. */
+function heartbeatPrompt(message: unknown): string | undefined {
+  return recordString(message, "content")?.replace(/^\[[^\]\n]*\]\s*/, "");
+}
+
+/**
+ * Finds the handle variable of the tracked background job a completion
+ * message reports, or null when the job is unknown or kept no handle.
+ */
+export type BackgroundJobHandleOf = (message: unknown) => string | null;
+
 /**
  * What a custom message Prime Agent injected means to the user, or null for
  * messages with no known meaning. Bookkeeping notices such as
- * `ipython_state_restored` have none.
+ * `ipython_state_restored` have none. `detail` is set only where the message
+ * carries content beyond its summary, so a row without it has nothing to expand.
  */
-export function piCustomMessageNotification(message: unknown): OrchestrationV2Notification | null {
+export function piCustomMessageNotification(
+  message: unknown,
+  handleOf: BackgroundJobHandleOf = () => null,
+): OrchestrationV2Notification | null {
   const customType = recordString(message, "customType");
+  const details = recordField(message, "details");
   if (customType === "agent_message") {
-    const details = recordField(message, "details");
     const sender = recordString(recordField(details, "from"), "sessionName") ?? "an agent";
-    const text = recordString(details, "message");
     return {
       source:
         recordString(details, "fromRelationship") === "child"
@@ -54,7 +102,7 @@ export function piCustomMessageNotification(message: unknown): OrchestrationV2No
           : { kind: "background_task" },
       outcome: "updated",
       summary: `Message from ${sender}`,
-      ...(text === undefined ? {} : { detail: text.slice(0, 2_000) }),
+      ...withDetail(recordString(details, "message")),
     };
   }
   if (customType === "async_bash_completion") {
@@ -62,16 +110,34 @@ export function piCustomMessageNotification(message: unknown): OrchestrationV2No
       source: { kind: "command" },
       outcome: "completed",
       summary: "Background command finished",
+      ...withDetail(backgroundCommandDetail(details, handleOf(message))),
     };
   }
   if (customType === "heartbeat_prompt") {
-    return { source: { kind: "background_task" }, outcome: "updated", summary: "Heartbeat" };
+    return {
+      source: { kind: "background_task" },
+      outcome: "updated",
+      summary: "Heartbeat",
+      ...withDetail(heartbeatPrompt(message)),
+    };
   }
   if (customType === "rlm_child_failure") {
-    return { source: { kind: "subagent" }, outcome: "failed", summary: "Subagent failed" };
+    return {
+      source: { kind: "subagent" },
+      outcome: "failed",
+      summary: "Subagent failed",
+      ...withDetail(recordString(details, "error")),
+    };
   }
   if (customType === "rlm_child_terminal_notice") {
-    return { source: { kind: "subagent" }, outcome: "completed", summary: "Subagent finished" };
+    return {
+      source: { kind: "subagent" },
+      outcome: "completed",
+      summary: "Subagent finished",
+      ...withDetail(
+        recordString(details, "reason") ?? recordString(details, "lastAssistantTextPreview"),
+      ),
+    };
   }
   return null;
 }
@@ -80,7 +146,10 @@ export function piCustomMessageNotification(message: unknown): OrchestrationV2No
  * The first message an idle agent was woken with that has a known meaning,
  * ahead of its own reply.
  */
-export function piWakeTrigger(events: ReadonlyArray<PiRpcRecord>): {
+export function piWakeTrigger(
+  events: ReadonlyArray<PiRpcRecord>,
+  handleOf?: BackgroundJobHandleOf,
+): {
   readonly message: unknown;
   readonly notification: OrchestrationV2Notification;
 } | null {
@@ -88,7 +157,7 @@ export function piWakeTrigger(events: ReadonlyArray<PiRpcRecord>): {
     if (event["type"] !== "message_start") continue;
     const message = event["message"];
     if (recordString(message, "role") === "assistant") return null;
-    const notification = piCustomMessageNotification(message);
+    const notification = piCustomMessageNotification(message, handleOf);
     if (notification !== null) return { message, notification };
   }
   return null;
@@ -98,9 +167,10 @@ export function piWakeTrigger(events: ReadonlyArray<PiRpcRecord>): {
 export function piWakeNotification(
   events: ReadonlyArray<PiRpcRecord>,
   agentName: string,
+  handleOf?: BackgroundJobHandleOf,
 ): OrchestrationV2Notification {
   return (
-    piWakeTrigger(events)?.notification ?? {
+    piWakeTrigger(events, handleOf)?.notification ?? {
       source: { kind: "background_task" },
       outcome: "updated",
       summary: `${agentName} resumed work`,
@@ -118,14 +188,15 @@ export function piWakeNotification(
 export function makePrimeAgentWakeNotices(input: {
   readonly enabled: boolean;
   readonly driver: ProviderDriverKind;
+  readonly handleOf: BackgroundJobHandleOf;
   readonly items: Pick<PiItemHooks, "emit" | "emitItemNode" | "baseItemFields">;
 }) {
-  const { enabled, driver } = input;
+  const { enabled, driver, handleOf } = input;
   const { emit, emitItemNode, baseItemFields } = input.items;
 
   const emitMidRunWakeNotice = Effect.fnUntraced(function* (turn: ActivePiTurn, message: unknown) {
     if (!enabled || message === turn.wakeTrigger) return;
-    const notification = piCustomMessageNotification(message);
+    const notification = piCustomMessageNotification(message, handleOf);
     if (notification === null) return;
     const emittedAt = yield* DateTime.now;
     // Provider item ordinals restart in every thread and attempt, so the id
@@ -156,6 +227,8 @@ export function makePrimeAgentBackgroundJobs(
   ) => Effect.Effect<void>,
 ) {
   const backgroundJobs = new Map<string, DetachedBashJob>();
+  /** Completion messages by the job they reported, which has left the roster by the time a row is built. */
+  const finishedJobs = new WeakMap<object, DetachedBashJob>();
   let backgroundJobCounter = 0;
   const tasks = () =>
     Array.from(backgroundJobs, ([taskId, job]) => ({
@@ -190,6 +263,7 @@ export function makePrimeAgentBackgroundJobs(
     if (reported === undefined) return;
     for (const [taskId, job] of backgroundJobs) {
       if (reportedCommandMatches(job, reported)) {
+        if (typeof message === "object" && message !== null) finishedJobs.set(message, job);
         backgroundJobs.delete(taskId);
         yield* publishBackgroundJobs();
         return;
@@ -202,6 +276,11 @@ export function makePrimeAgentBackgroundJobs(
     tasks,
     trackBackgroundJobs,
     completeBackgroundJob,
+    /** The handle variable the job a completion message reported was started with. */
+    handleOf: ((message) =>
+      typeof message === "object" && message !== null
+        ? (finishedJobs.get(message)?.variable ?? null)
+        : null) satisfies BackgroundJobHandleOf,
     hasPendingJobs: () => backgroundJobs.size > 0,
     clear: () =>
       Effect.suspend(() => {
