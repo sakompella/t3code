@@ -170,6 +170,7 @@ import {
   resolveMarkdownLinkPresentation,
 } from "../../lib/markdownLinks";
 import {
+  deriveTerminalAssistantMessageIds,
   failedFeedRunIds,
   deriveThreadFeedPresentation,
   threadFeedRunIsUnsettled,
@@ -2195,15 +2196,10 @@ export const ThreadFeed = memo(function ThreadFeed(props: ThreadFeedProps) {
     () => failedFeedRunIds(props.feed, props.latestRun),
     [props.feed, props.latestRun],
   );
-  const terminalAssistantMessageIds = useMemo(() => {
-    const terminalIdsByTurn = new Map<RunId, string>();
-    for (const entry of props.feed) {
-      if (entry.type === "message" && entry.message.role === "assistant" && entry.message.runId) {
-        terminalIdsByTurn.set(entry.message.runId, entry.message.id);
-      }
-    }
-    return new Set(terminalIdsByTurn.values());
-  }, [props.feed]);
+  const terminalAssistantMessageIds = useMemo(
+    () => deriveTerminalAssistantMessageIds(props.feed),
+    [props.feed],
+  );
   useEffect(() => {
     const previous = previousLatestTurnRef.current;
     previousLatestTurnRef.current = props.latestRun;
