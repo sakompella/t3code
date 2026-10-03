@@ -53,12 +53,12 @@ const fakeT3McpFetch = async (_url: string, init: { readonly body: string }) => 
 };
 
 async function loadExtension(env: Record<string, string> = {}): Promise<{
-  readonly handlers: Map<string, RequestHook>;
+  readonly handlers: Map<string, unknown>;
   readonly commands: Map<string, RegisteredCommand>;
   readonly sentMessages: Array<SentMessage>;
   readonly registeredTools: Array<string>;
 }> {
-  const handlers = new Map<string, RequestHook>();
+  const handlers = new Map<string, unknown>();
   const commands = new Map<string, RegisteredCommand>();
   const sentMessages: Array<SentMessage> = [];
   const registeredTools: Array<string> = [];
@@ -75,7 +75,7 @@ async function loadExtension(env: Record<string, string> = {}): Promise<{
     AbortSignal,
     Type: { Unsafe: (schema: unknown) => schema, Object: () => ({}) },
     pi: {
-      on: (name: string, handler: RequestHook) => handlers.set(name, handler),
+      on: (name: string, handler: unknown) => handlers.set(name, handler),
       registerCommand: (name: string, command: RegisteredCommand) => commands.set(name, command),
       registerTool: (tool: { readonly name: string }) => registeredTools.push(tool.name),
       sendMessage: (message: SentMessage["message"], options: SentMessage["options"]) =>
@@ -89,7 +89,7 @@ async function loadRequestHook(): Promise<RequestHook> {
   const { handlers } = await loadExtension();
   const hook = handlers.get("before_provider_request");
   assert.isDefined(hook);
-  return hook!;
+  return hook as RequestHook;
 }
 
 describe("Pi upstream output-budget workaround", () => {
@@ -206,5 +206,97 @@ describe("T3 tools in the extension", () => {
     assert.isTrue(handlers.has("tool_call"));
     assert.isTrue(handlers.has("before_provider_request"));
     assert.isTrue(commands.has(T3_NAVIGATE_TREE_COMMAND));
+  });
+});
+
+describe("T3 extension handlers on a stale ctx", () => {
+  // What Pi and Prime Agent throw from a retired runner's ctx getters.
+  const staleMessage =
+    "This extension ctx is stale after session replacement or reload. Do not use a captured pi or command ctx after ctx.newSession(), ctx.fork(), ctx.switchSession(), or ctx.reload().";
+  const throwingCtx = (message: string) =>
+    new Proxy(
+      {},
+      {
+        get: () => {
+          throw new Error(message);
+        },
+      },
+    );
+  const staleCtx = throwingCtx(staleMessage);
+  const brokenCtx = throwingCtx("ctx exploded");
+  const uncappedPayload = { max_tokens: 231_969 };
+
+  const loadHandler = async <Event, Ctx, Result>(
+    name: string,
+    env: Record<string, string> = {},
+  ) => {
+    const { handlers } = await loadExtension(env);
+    const handler = handlers.get(name);
+    assert.isDefined(handler);
+    return handler as (event: Event, ctx: Ctx) => Result;
+  };
+
+  it("sends a provider request from a replaced session on, uncapped and without an error", async () => {
+    const hook = await loadHandler<{ payload: unknown }, unknown, unknown>(
+      "before_provider_request",
+    );
+    assert.isUndefined(hook({ payload: uncappedPayload }, staleCtx));
+  });
+
+  it("still reports other ctx failures from a provider request", async () => {
+    const hook = await loadHandler<{ payload: unknown }, unknown, unknown>(
+      "before_provider_request",
+    );
+    assert.throws(() => hook({ payload: uncappedPayload }, brokenCtx), "ctx exploded");
+  });
+
+  describe("tool approval", () => {
+    const approvalEnv = { T3_PI_RUNTIME_MODE: "approval-required" };
+    const bash = { toolName: "bash", input: { command: "rm -rf build" } };
+    const loadToolCall = () =>
+      loadHandler<typeof bash, unknown, Promise<{ block: boolean; reason: string } | undefined>>(
+        "tool_call",
+        approvalEnv,
+      );
+
+    it("blocks the tool when the approval prompt belongs to a replaced session", async () => {
+      const toolCall = await loadToolCall();
+      const result = await toolCall(bash, staleCtx);
+      assert.isTrue(result?.block);
+      assert.match(result?.reason ?? "", /bash was blocked.*session was replaced/);
+    });
+
+    it("lets an approved tool run and blocks a declined one", async () => {
+      const toolCall = await loadToolCall();
+      const answering = (approved: boolean) => ({ ui: { confirm: async () => approved } });
+      assert.isUndefined(await toolCall(bash, answering(true)));
+      assert.deepEqual(await toolCall(bash, answering(false)), {
+        block: true,
+        reason: "bash was declined in T3 Code.",
+      });
+    });
+
+    it("rejects, rather than approving, when the prompt fails for another reason", async () => {
+      const toolCall = await loadToolCall();
+      let failure: unknown;
+      await toolCall(bash, brokenCtx).catch((error: unknown) => (failure = error));
+      assert.match(String(failure), /ctx exploded/);
+    });
+  });
+
+  it("starts a replaced session without a warning, and warns a live one", async () => {
+    const sessionStart = await loadHandler<unknown, unknown, Promise<void>>("session_start");
+    await sessionStart({}, staleCtx);
+    const warnings: Array<string> = [];
+    await sessionStart({}, { ui: { notify: (message: string) => warnings.push(message) } });
+    assert.lengthOf(warnings, 1);
+    assert.match(warnings[0]!, /T3_MCP_URL/);
+  });
+
+  it("leaves a rollback on a replaced session unreported instead of throwing", async () => {
+    const { commands } = await loadExtension();
+    const handler = commands.get(T3_NAVIGATE_TREE_COMMAND)?.handler;
+    assert.isDefined(handler);
+    await handler!("t3-nav-9 u1", staleCtx as unknown as NavigateTreeContext);
   });
 });

@@ -91,6 +91,37 @@ function runtimeMode(): RuntimeMode {
     : "full-access";
 }
 
+/**
+ * Pi and Prime Agent retire an extension runner when its session is replaced
+ * or reloaded. Work still running on the old session, such as a pending
+ * auto-retry, hands handlers a ctx whose getters throw this error. Nothing is
+ * wrong with the new session, so handlers must not report it as a failure.
+ */
+const STALE_CTX_PATTERN = /extension ctx is stale/i;
+
+function isStaleCtxError(error: unknown): boolean {
+  // Read the message by shape: extension runtimes may load this file in a
+  // separate realm, where \`instanceof Error\` is false.
+  const message =
+    typeof error === "object" && error !== null && "message" in error
+      ? String(error.message)
+      : String(error);
+  return STALE_CTX_PATTERN.test(message);
+}
+
+/** Tells the user, unless the ctx is stale and has no user left to tell. */
+function notifyUnlessStale(
+  ctx: { readonly ui: { readonly notify: (message: string, type?: string) => void } },
+  message: string,
+  type: string,
+): void {
+  try {
+    ctx.ui.notify(message, type);
+  } catch (error) {
+    if (!isStaleCtxError(error)) throw error;
+  }
+}
+
 function toolInputSummary(input: unknown): string {
   // Prime Agent's ipython cells are easier to judge as code than as JSON.
   const code = (input as { readonly code?: unknown } | null)?.code;
@@ -244,7 +275,15 @@ export default async function t3McpExtension(pi: ExtensionAPI) {
   // reject even a short conversation. Remove this cap when Pi accounts for
   // the current request prefix reliably (api/simple-options + utils/estimate).
   pi.on("before_provider_request", (event, ctx) => {
-    if (ctx.model?.provider !== "openrouter") return;
+    let provider: string | undefined;
+    try {
+      provider = ctx.model?.provider;
+    } catch (error) {
+      // A request from a replaced session is not worth capping or reporting.
+      if (!isStaleCtxError(error)) throw error;
+      return;
+    }
+    if (provider !== "openrouter") return;
     const payload = event.payload;
     if (typeof payload !== "object" || payload === null || Array.isArray(payload)) return;
     const replacement = { ...payload } as Record<string, unknown>;
@@ -267,7 +306,11 @@ export default async function t3McpExtension(pi: ExtensionAPI) {
     handler: async (args, ctx) => {
       const [requestId = "", entryId = ""] = args.trim().split(/\\s+/);
       const report = (result: Record<string, unknown>) =>
-        ctx.ui.notify(\`\${NAVIGATE_TREE_RESULT_MARKER}\${JSON.stringify({ requestId, ...result })}\`, "info");
+        notifyUnlessStale(
+          ctx,
+          \`\${NAVIGATE_TREE_RESULT_MARKER}\${JSON.stringify({ requestId, ...result })}\`,
+          "info",
+        );
       try {
         const result = await ctx.navigateTree(entryId);
         if (!result.cancelled) {
@@ -295,10 +338,21 @@ export default async function t3McpExtension(pi: ExtensionAPI) {
     if (mode === "auto-accept-edits" && FILE_CHANGE_TOOLS.has(event.toolName)) {
       return;
     }
-    const approved = await ctx.ui.confirm(
-      \`Allow \${event.toolName}?\`,
-      toolInputSummary(event.input),
-    );
+    let approved: boolean;
+    try {
+      approved = await ctx.ui.confirm(
+        \`Allow \${event.toolName}?\`,
+        toolInputSummary(event.input),
+      );
+    } catch (error) {
+      if (!isStaleCtxError(error)) throw error;
+      // The approval prompt belonged to a replaced session, so nobody can
+      // answer it. Failing closed keeps the tool from running unapproved.
+      return {
+        block: true,
+        reason: \`\${event.toolName} was blocked: T3 Code cannot ask for approval because this agent session was replaced.\`,
+      };
+    }
     if (!approved) {
       return { block: true, reason: \`\${event.toolName} was declined in T3 Code.\` };
     }
@@ -311,7 +365,8 @@ export default async function t3McpExtension(pi: ExtensionAPI) {
   const token = env(TOKEN_ENV);
   if (endpoint === undefined || token === undefined) {
     pi.on("session_start", async (_event, ctx) => {
-      ctx.ui.notify(
+      notifyUnlessStale(
+        ctx,
         "t3-code MCP unavailable: T3_MCP_URL or T3_MCP_BEARER_TOKEN is missing.",
         "warning",
       );
@@ -375,7 +430,7 @@ export default async function t3McpExtension(pi: ExtensionAPI) {
       await ensureStarted();
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
-      ctx.ui.notify(\`t3-code MCP unavailable: \${message}\`, "warning");
+      notifyUnlessStale(ctx, \`t3-code MCP unavailable: \${message}\`, "warning");
     }
   });
 
