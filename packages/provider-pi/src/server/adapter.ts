@@ -1081,8 +1081,9 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
             completed,
             emittedAt,
           });
-          // A child's cells run in its own kernel.
-          if (completed && !isError && "turnInput" in turn) {
+          // A child's cells run in its own kernel. A synthesized end says nothing
+          // about what the cell did, and the kernel may be gone by now.
+          if (completed && !isError && settledAs === undefined && "turnInput" in turn) {
             yield* trackBackgroundJobs(recordString(args, "code") ?? "");
           }
           return;
