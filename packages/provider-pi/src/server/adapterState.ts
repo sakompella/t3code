@@ -58,6 +58,8 @@ export interface ActivePiTurn {
    * tool keeps one start timestamp and reports a real duration.
    */
   readonly toolStartedAt: Map<string, DateTime.Utc>;
+  /** Latest start/update event of each tool that has not ended, to settle it if its end never comes. */
+  readonly openTools: Map<string, PiRpcRecord>;
   interrupted: boolean;
   /** Cancellation of the latest native run; new work can recover before settlement. */
   nativeAborted: boolean;
@@ -229,4 +231,8 @@ export interface PiItemHooks {
     final: boolean,
   ) => Effect.Effect<void>;
   readonly completeOpenStreamItems: (turn: PiItemSink) => Effect.Effect<void>;
+  readonly settleOpenTools: (
+    turn: PiItemSink,
+    status: "completed" | "failed" | "interrupted",
+  ) => Effect.Effect<void>;
 }

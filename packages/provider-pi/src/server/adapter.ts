@@ -1024,6 +1024,11 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
         if (phase === "start") {
           turn.toolArgs.set(toolCallId, event["args"]);
         }
+        if (phase === "end") {
+          turn.openTools.delete(toolCallId);
+        } else {
+          turn.openTools.set(toolCallId, { ...turn.openTools.get(toolCallId), ...event });
+        }
         const args = event["args"] ?? turn.toolArgs.get(toolCallId);
         const emittedAt = yield* DateTime.now;
         const startedAt = turn.toolStartedAt.get(toolCallId) ?? emittedAt;
@@ -1136,6 +1141,25 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
         }
       });
 
+      /**
+       * Ends the tools whose end event never came, as `status`. Pi has already
+       * handed their results to the model, so leaving them running would show
+       * work that is long finished.
+       */
+      const settleOpenTools = Effect.fnUntraced(function* (
+        turn: PiItemSink,
+        status: "completed" | "failed" | "interrupted",
+      ) {
+        for (const event of Array.from(turn.openTools.values())) {
+          yield* emitToolItem(
+            turn,
+            { ...event, type: "tool_execution_end", result: event["partialResult"] },
+            "end",
+            status,
+          );
+        }
+      });
+
       const childThreads = makePrimeAgentChildThreads({
         driver,
         instanceId: options.instanceId,
@@ -1152,6 +1176,7 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
           emitToolItem,
           adoptSnapshot,
           completeOpenStreamItems,
+          settleOpenTools,
         },
       });
 
@@ -1685,6 +1710,10 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
         const interrupted = turn.interrupted || turn.nativeAborted;
         const completedAt = yield* DateTime.now;
         yield* completeOpenStreamItems(turn);
+        yield* settleOpenTools(
+          turn,
+          turn.interrupted ? "interrupted" : turn.failure === null ? "completed" : "failed",
+        );
         yield* closeFinishingUp(turn);
         if (turn.activeCompaction !== null) {
           const status = interrupted ? "cancelled" : turn.failure === null ? "completed" : "failed";
@@ -2844,6 +2873,7 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
               streamItems: new Map(),
               toolArgs: new Map(),
               toolStartedAt: new Map(),
+              openTools: new Map(),
               interrupted: false,
               nativeAborted: false,
               sawAgentActivity: false,
