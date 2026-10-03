@@ -2,6 +2,7 @@ import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import type { OrchestrationV2ProviderThread, ProviderDriverKind } from "@t3tools/contracts";
 import {
+  assignmentOffset,
   detachedBashJobs,
   endsHandle,
   readsHandle,
@@ -237,7 +238,15 @@ export function makePrimeAgentBackgroundJobs(
     patch: Pick<OrchestrationV2ProviderThread, "pendingBackgroundTasks">,
   ) => Effect.Effect<void>,
 ) {
-  const backgroundJobs = new Map<string, { job: DetachedBashJob; read: boolean }>();
+  /**
+   * `handle` is the variable that names the job right now. It starts as the
+   * job's own variable and drops to null once a cell assigns that name again:
+   * the job lives on, but no cell can reach it through the name.
+   */
+  const backgroundJobs = new Map<
+    string,
+    { job: DetachedBashJob; handle: string | null; read: boolean }
+  >();
   /** Completion messages by the job they reported, which has left the roster by the time a row is built. */
   const finishedJobs = new WeakMap<object, DetachedBashJob>();
   /** A wake's messages are handled when they arrive and again when a continuation run replays them. */
@@ -262,20 +271,41 @@ export function makePrimeAgentBackgroundJobs(
     if (before.join() !== after.join()) yield* publishBackgroundJobs();
   });
 
+  /** Lets go of the name a job has, so later cells using it mean another job. */
+  const detachHandle = (handle: string | null) => {
+    if (handle === null) return;
+    for (const tracked of backgroundJobs.values()) {
+      if (tracked.handle === handle) tracked.handle = null;
+    }
+  };
+
   /**
    * Tracks jobs a finished cell started in the background. Awaiting or killing
-   * a handle ends its job; reading its result takes it off the roster.
+   * a handle ends its job; reading its result takes it off the roster. A cell
+   * that assigns a handle's name again detaches the old job from it first:
+   * what the cell does with the name before that assignment is about the old
+   * job, and everything after is about the new value.
    */
   const trackBackgroundJobs = Effect.fnUntraced(function* (code: string) {
     yield* publishIfRosterChanged(() => {
       for (const [taskId, tracked] of backgroundJobs) {
-        const { variable } = tracked.job;
-        if (variable === null) continue;
-        if (endsHandle(code, variable)) backgroundJobs.delete(taskId);
-        else if (readsHandle(code, variable)) tracked.read = true;
+        const { handle } = tracked;
+        if (handle === null) continue;
+        const rebindAt = assignmentOffset(code, handle);
+        const aboutThisJob = code.slice(0, rebindAt);
+        if (endsHandle(aboutThisJob, handle)) backgroundJobs.delete(taskId);
+        else {
+          if (readsHandle(aboutThisJob, handle)) tracked.read = true;
+          if (rebindAt < code.length) tracked.handle = null;
+        }
       }
       for (const job of detachedBashJobs(code)) {
-        backgroundJobs.set(`bash:${++backgroundJobCounter}`, { job, read: false });
+        detachHandle(job.variable);
+        backgroundJobs.set(`bash:${++backgroundJobCounter}`, {
+          job,
+          handle: job.variable,
+          read: false,
+        });
       }
     });
   });
