@@ -38,6 +38,7 @@ import {
   isUsageLimitsCommand,
 } from "@t3tools/shared/usageLimits";
 import { feedbackBannerItem } from "./chat/ComposerFeedback";
+import { heartbeatBannerItem } from "./chat/ComposerHeartbeat";
 import { usageLimitsBannerItem } from "./chat/ComposerUsageLimits";
 import { getTerminalLabel } from "@t3tools/shared/terminalLabels";
 import * as Schema from "effect/Schema";
@@ -112,6 +113,10 @@ import {
 import { threadSupportsProviderHandoff } from "@t3tools/client-runtime/state/thread-workflows";
 import { resolvePendingHandoff } from "@t3tools/client-runtime/handoff";
 import { HandoffRow } from "./chat/V2LifecycleRow";
+import {
+  deriveThreadHeartbeats,
+  presentHeartbeats,
+} from "@t3tools/client-runtime/state/thread-heartbeats";
 import {
   codexFeedbackMessage,
   parseCodexFeedbackCommand,
@@ -7376,6 +7381,18 @@ export default function ChatView(props: ChatViewProps) {
     liveSubagentTree,
     onOpenRelatedThreadStable,
   ]);
+  // Configuration, not work: shown quietly, and never part of the background list.
+  const threadHeartbeats = useMemo(
+    () => (serverProjection === null ? [] : deriveThreadHeartbeats(serverProjection)),
+    [serverProjection],
+  );
+  const heartbeatThreadId = activeThread?.id ?? null;
+  const heartbeatBanner = useMemo<ComposerBannerStackItem | null>(() => {
+    const presentation = presentHeartbeats(threadHeartbeats, new Date());
+    return presentation === null || heartbeatThreadId === null
+      ? null
+      : heartbeatBannerItem(heartbeatThreadId, presentation);
+  }, [heartbeatThreadId, threadHeartbeats]);
   const threadStatusLine = useMemo(() => {
     void nowMinute;
     return activeThreadSnoozed ? (
@@ -7550,6 +7567,7 @@ export default function ChatView(props: ChatViewProps) {
       goalBannerItem,
       backgroundWorkBannerItem,
     ].filter((item) => item !== null);
+    const heartbeatItems = heartbeatBanner === null ? [] : [heartbeatBanner];
     const usageLimitsItems = usageLimitsBanner === null ? [] : [usageLimitsBanner];
     const projectCloneItems = projectCloneBannerItem === null ? [] : [projectCloneBannerItem];
     if (!localCheckoutBranchMismatch || !showBranchMismatchBanner || !activeBranchMismatchKey) {
@@ -7560,6 +7578,7 @@ export default function ChatView(props: ChatViewProps) {
         ...projectCloneItems,
         ...systemComposerBannerItems,
         ...backgroundWorkItems,
+        ...heartbeatItems,
       ];
     }
     return [
@@ -7608,6 +7627,7 @@ export default function ChatView(props: ChatViewProps) {
           setBranchMismatchDismissTick((tick) => tick + 1);
         },
       },
+      ...heartbeatItems,
     ];
   }, [
     activeBranchMismatchKey,
@@ -7617,6 +7637,7 @@ export default function ChatView(props: ChatViewProps) {
     feedbackBannerItems,
     limitRecoveryBanner,
     handleRestoreThreadBranchStable,
+    heartbeatBanner,
     isRestoringThreadBranch,
     backgroundWorkBannerItem,
     childInputBannerItem,
