@@ -79,6 +79,18 @@ export const HostProcessIsExecutable = Context.Reference<boolean>(
 );
 
 /**
+ * Whether the host runtime is Electron, including Electron started as plain
+ * Node with `ELECTRON_RUN_AS_NODE`. Such a binary only behaves as `node` when
+ * the child it runs is given that variable.
+ */
+export const HostProcessIsElectron = Context.Reference<boolean>(
+  "@t3tools/shared/hostProcess/HostProcessIsElectron",
+  {
+    defaultValue: () => process.versions.electron !== undefined,
+  },
+);
+
+/**
  * Every IP address this machine answers to: the interface addresses, plus
  * whatever the resolver returns for the machine's own hostname. The latter
  * matters because a hostname can map to an address no interface carries —

@@ -53,6 +53,8 @@ export interface AgentDeviceEndpoint {
 
 export interface DeviceHostReady {
   readonly nodePath: string;
+  /** Environment `nodePath` needs to run as Node (`ELECTRON_RUN_AS_NODE` for Electron); absent on remote hosts. */
+  readonly nodeEnv?: Readonly<Record<string, string>>;
   readonly hub: DeviceHubEndpoint;
   /**
    * Runs a host command (`xcrun`, `adb`, or a helper bundled with the hub)
@@ -62,7 +64,11 @@ export interface DeviceHostReady {
   readonly run: (
     command: string,
     args: ReadonlyArray<string>,
-    options?: { readonly timeoutMs?: number; readonly stdin?: string },
+    options?: {
+      readonly timeoutMs?: number;
+      readonly stdin?: string;
+      readonly env?: Readonly<Record<string, string>>;
+    },
   ) => Effect.Effect<{ readonly stdout: string; readonly stderr: string; readonly code: number }>;
   /** Absolute paths of helper binaries vendored with the hub, when present. */
   readonly helpers: {

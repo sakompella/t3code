@@ -2,6 +2,7 @@
 import * as Schema from "effect/Schema";
 import * as Effect from "effect/Effect";
 import * as Path from "effect/Path";
+import type { NodeRuntime } from "@t3tools/shared/nodeRuntime";
 import * as ProcessRunner from "../processRunner.ts";
 import { AGENT_DEVICE_VERSION, DEVICE_HUB_VERSION } from "./DeviceToolchain.ts";
 
@@ -111,14 +112,15 @@ class DeviceToolMaintenanceError extends Schema.TaggedError<DeviceToolMaintenanc
 }
 
 const runMaintenance = Effect.fn("DeviceToolchain.maintenance")(function* (
-  nodePath: string,
+  node: NodeRuntime,
   script: string,
   operation: "prune",
   tool: "hub" | "agent",
 ) {
   const runner = yield* ProcessRunner.ProcessRunner;
   const result = yield* runner.run({
-    command: nodePath,
+    command: node.command,
+    env: node.env,
     args: [
       "-e",
       deviceToolMaintenanceScript +
@@ -138,12 +140,12 @@ const runMaintenance = Effect.fn("DeviceToolchain.maintenance")(function* (
 
 export const pruneLocalDeviceTools = Effect.fn("DeviceToolchain.prune")(function* (
   baseDir: string,
-  nodePath: string,
+  node: NodeRuntime,
   tool: "hub" | "agent",
 ) {
   const path = yield* Path.Path;
   yield* runMaintenance(
-    nodePath,
+    node,
     `pruneTools(${JSON.stringify(path.join(baseDir, "tools"))}, ${JSON.stringify(tool === "hub" ? [["expo-device-hub", DEVICE_HUB_VERSION]] : [["agent-device", AGENT_DEVICE_VERSION]])}, false)`,
     "prune",
     tool,

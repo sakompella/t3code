@@ -110,7 +110,7 @@ it.effect("maintenance failures retain safe context and the original process res
       stderrInvalidUtf8: false,
     };
     for (const [operation, run] of [["prune", pruneLocalDeviceTools]] as const) {
-      const error = yield* run("/tools", process.execPath, "hub").pipe(
+      const error = yield* run("/tools", { command: process.execPath, env: {} }, "hub").pipe(
         Effect.provideService(ProcessRunner.ProcessRunner, { run: () => Effect.succeed(output) }),
         Effect.flip,
       );
@@ -157,3 +157,33 @@ it("serializes competing maintenance processes after reclaiming a stale lock", a
     await NodeFSP.rm(root, { recursive: true, force: true });
   }
 });
+
+it.effect("maintenance runs an Electron runtime as Node on that child only", () =>
+  Effect.gen(function* () {
+    const calls: Array<{ command: string; env: unknown }> = [];
+    yield* pruneLocalDeviceTools(
+      "/tools",
+      { command: "/Applications/T3.app/Electron", env: { ELECTRON_RUN_AS_NODE: "1" } },
+      "hub",
+    ).pipe(
+      Effect.provideService(ProcessRunner.ProcessRunner, {
+        run: (input) => {
+          calls.push({ command: input.command, env: input.env });
+          return Effect.succeed({
+            code: ChildProcessSpawner.ExitCode(0),
+            stdout: "",
+            stderr: "",
+            timedOut: false,
+            stdoutTruncated: false,
+            stderrTruncated: false,
+            stdoutInvalidUtf8: false,
+            stderrInvalidUtf8: false,
+          });
+        },
+      }),
+    );
+    expect(calls).toEqual([
+      { command: "/Applications/T3.app/Electron", env: { ELECTRON_RUN_AS_NODE: "1" } },
+    ]);
+  }).pipe(Effect.provide(NodePathLayer.layer)),
+);

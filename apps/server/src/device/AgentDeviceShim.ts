@@ -6,12 +6,14 @@
  * written for, regardless of what is or is not globally installed.
  */
 import { HostProcessPlatform } from "@t3tools/shared/hostProcess";
-import { resolveNodeExecutable } from "@t3tools/shared/nodeRuntime";
+import { resolveNodeRuntime } from "@t3tools/shared/nodeRuntime";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Path from "effect/Path";
 
 const SHIM_DIR = "device/bin";
+
+const shellQuote = (value: string) => "'" + value.replaceAll("'", "'\"'\"'") + "'";
 
 export const ensureAgentDeviceShim = Effect.fn("AgentDeviceShim.ensure")(function* (input: {
   readonly entryPath: string;
@@ -21,7 +23,7 @@ export const ensureAgentDeviceShim = Effect.fn("AgentDeviceShim.ensure")(functio
   const fs = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
   const platform = yield* HostProcessPlatform;
-  const node = yield* resolveNodeExecutable("Device automation");
+  const { command: node, env: nodeEnv } = yield* resolveNodeRuntime("Device automation");
   const shimDir = path.join(input.stateDir, SHIM_DIR);
   yield* fs.makeDirectory(shimDir, { recursive: true });
   const launcherPath = path.join(shimDir, "agent-device-launcher.mjs");
@@ -45,13 +47,19 @@ child.on("exit", code => { process.exitCode = code ?? 1; });
 `,
   );
   if (platform === "win32") {
-    const script = `@echo off\r\n"${node}" "${launcherPath}" %*\r\n`;
+    const assignments = Object.entries(nodeEnv).map(
+      ([name, value]) => `set "${name}=${value}"\r\n`,
+    );
+    const script = `@echo off\r\n${assignments.join("")}"${node}" "${launcherPath}" %*\r\n`;
     yield* fs.writeFileString(path.join(shimDir, "agent-device.cmd"), script);
   } else {
-    const command = [node, launcherPath]
-      .map((value) => "'" + value.replaceAll("'", "'\"'\"'") + "'")
-      .join(" ");
-    const script = `#!/bin/sh\nexec ${command} "$@"\n`;
+    const command = [node, launcherPath].map(shellQuote).join(" ");
+    // The agent's shell no longer inherits ELECTRON_RUN_AS_NODE, so the shim
+    // sets it for the one process that needs it.
+    const assignments = Object.entries(nodeEnv).map(
+      ([name, value]) => `${name}=${shellQuote(value)} `,
+    );
+    const script = `#!/bin/sh\n${assignments.join("")}exec ${command} "$@"\n`;
     const shimPath = path.join(shimDir, "agent-device");
     yield* fs.writeFileString(shimPath, script);
     yield* fs.chmod(shimPath, 0o755);
