@@ -102,4 +102,18 @@ describe("makePrimeAgentBackgroundJobs", () => {
         expect(jobs.handleOf(unknown)).toBeNull();
       }),
   );
+
+  it.effect("counts a completion notice once when a continuation run replays it", () =>
+    Effect.gen(function* () {
+      const jobs = makePrimeAgentBackgroundJobs(() => Effect.void);
+      yield* jobs.trackBackgroundJobs("first = bash('sleep 9')");
+      yield* jobs.trackBackgroundJobs("second = bash('sleep 9')");
+      const finished = completion({ pid: 7, command: "sleep 9", exitCode: 0 });
+      yield* jobs.completeBackgroundJob(finished);
+      yield* jobs.completeBackgroundJob(finished);
+
+      expect(jobs.tasks().map((task) => task.description)).toEqual(["sleep 9"]);
+      expect(jobs.handleOf(finished)).toBe("first");
+    }),
+  );
 });

@@ -229,6 +229,8 @@ export function makePrimeAgentBackgroundJobs(
   const backgroundJobs = new Map<string, DetachedBashJob>();
   /** Completion messages by the job they reported, which has left the roster by the time a row is built. */
   const finishedJobs = new WeakMap<object, DetachedBashJob>();
+  /** A wake's messages are handled when they arrive and again when a continuation run replays them. */
+  const handledNotices = new WeakSet<object>();
   let backgroundJobCounter = 0;
   const tasks = () =>
     Array.from(backgroundJobs, ([taskId, job]) => ({
@@ -260,10 +262,12 @@ export function makePrimeAgentBackgroundJobs(
   const completeBackgroundJob = Effect.fnUntraced(function* (message: unknown) {
     if (recordString(message, "customType") !== "async_bash_completion") return;
     const reported = recordString(recordField(message, "details"), "command");
-    if (reported === undefined) return;
+    if (reported === undefined || typeof message !== "object" || message === null) return;
+    if (handledNotices.has(message)) return;
+    handledNotices.add(message);
     for (const [taskId, job] of backgroundJobs) {
       if (reportedCommandMatches(job, reported)) {
-        if (typeof message === "object" && message !== null) finishedJobs.set(message, job);
+        finishedJobs.set(message, job);
         backgroundJobs.delete(taskId);
         yield* publishBackgroundJobs();
         return;
