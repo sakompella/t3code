@@ -61,6 +61,8 @@ export interface ProviderEventRoutingState {
   readonly ownedProviderThreadIds: ReadonlySet<ProviderThreadId>;
   readonly ownedProviderTurnIds: ReadonlySet<ProviderTurnId>;
   readonly inheritedBackgroundTurnItems: ReadonlyMap<TurnItemId, OrchestrationV2Run["id"]>;
+  // The subagent rows behind inherited subagent items, which report on their own events.
+  readonly inheritedBackgroundSubagents: ReadonlyMap<NodeId, OrchestrationV2Run["id"]>;
   readonly rootProviderTurnId: ProviderTurnId | null;
 }
 
@@ -74,6 +76,8 @@ export interface ProviderEventRouteIdentity {
 export interface InheritedBackgroundTurnItemRoute {
   readonly id: TurnItemId;
   readonly runId: OrchestrationV2Run["id"];
+  /** Set for a subagent item, so its `subagent.updated` events are inherited with it. */
+  readonly subagentId?: NodeId;
 }
 
 type ProviderTerminalEvent = Extract<
@@ -136,7 +140,13 @@ export function selectInheritedBackgroundTurnItems(input: {
     settledPriorRunIds.has(turnItem.runId) &&
     backgroundCapableTurnItemTypes.has(turnItem.type) &&
     !isSettledTurnItemStatus(turnItem.status)
-      ? [{ id: turnItem.id, runId: turnItem.runId }]
+      ? [
+          {
+            id: turnItem.id,
+            runId: turnItem.runId,
+            ...(turnItem.type === "subagent" ? { subagentId: turnItem.subagentId } : {}),
+          },
+        ]
       : [],
   );
 }
@@ -337,6 +347,11 @@ export function makeProviderEventRoutingState(input: {
     inheritedBackgroundTurnItems: new Map(
       (input.inheritedBackgroundTurnItems ?? []).map((item) => [item.id, item.runId]),
     ),
+    inheritedBackgroundSubagents: new Map(
+      (input.inheritedBackgroundTurnItems ?? []).flatMap((item) =>
+        item.subagentId === undefined ? [] : [[item.subagentId, item.runId] as const],
+      ),
+    ),
     rootProviderTurnId: input.providerTurnId,
   };
 }
@@ -413,6 +428,25 @@ export function routeProviderEvent(
     }
     case "subagent.updated": {
       const belongs = ownsRun(event.subagent.runId) || ownsChildThread(event.subagent.threadId);
+      if (!belongs) {
+        // A child outlives the run that launched it. Like its turn item, its
+        // updates reach the one live run that inherited it, so a terminal
+        // update still closes the card after the origin run stopped listening.
+        const inheritedRunId = state.inheritedBackgroundSubagents.get(event.subagent.id);
+        const isInheritedSubagent =
+          event.subagent.threadId === input.threadId &&
+          event.subagent.runId !== null &&
+          event.subagent.runId === inheritedRunId;
+        if (!isInheritedSubagent) {
+          return [false, state];
+        }
+        if (!isSettledSubagentStatus(event.subagent.status)) {
+          return [true, state];
+        }
+        const inheritedBackgroundSubagents = new Map(state.inheritedBackgroundSubagents);
+        inheritedBackgroundSubagents.delete(event.subagent.id);
+        return [true, { ...state, inheritedBackgroundSubagents }];
+      }
       const coordinator = event.subagent;
       // A provider-native subagent's child thread follows the live run it is
       // attributed to. A resume reattributes it to the resuming run, which
