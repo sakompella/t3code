@@ -59,7 +59,7 @@ describe("resolveBackgroundWorkPillSegment", () => {
       ]),
     ).toEqual({
       label: "1 background",
-      accessibilityLabel: "Running: npm run dev: npm run dev",
+      accessibilityLabel: "Running: npm run dev",
     });
     expect(resolveBackgroundWorkPillSegment([{ taskId: "b", kind: "subagent" }])).toBeNull();
     expect(resolveBackgroundWorkPillSegment([])).toBeNull();
