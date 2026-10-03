@@ -28,7 +28,7 @@ import ChatMarkdown, { ChatMarkdownAssetImage } from "../ChatMarkdown";
 import { RenderErrorBoundary } from "../RenderErrorBoundary";
 import { CommandOutputPanel, useCommandOutputStreaming } from "./CommandOutputPanel";
 import { HighlightedCode } from "./HighlightedCode";
-import type { WorkEntryCode } from "./MessagesTimeline.logic";
+import type { WorkEntryCode } from "@t3tools/client-runtime/work-log/entry-code";
 import { resolveExternalWebLinkHref } from "./externalLinkContextMenu";
 import type { ExpandedImagePreview } from "./ExpandedImagePreview";
 import { ShellCommandBlock } from "./ShellCommandBlock";

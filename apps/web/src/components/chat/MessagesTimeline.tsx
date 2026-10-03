@@ -222,9 +222,6 @@ import {
   threadReadTargetTitle,
   toolGroupAction,
   workEntryDisplayLabel,
-  workEntryBodyCode,
-  workEntryLabelCode,
-  type WorkEntryCode,
   workEntryHasInspectableContent,
   workEntryReadOutput,
   workEntryIsVisibleInGroup,
@@ -239,6 +236,11 @@ import { type ThreadFindMatch } from "./threadFind";
 import { useThreadFindNavigation } from "./useThreadFindNavigation";
 import { readThreadFindPosition } from "./threadFindPosition";
 import type { ThreadFindPositionReader } from "./threadFind";
+import {
+  workEntryBodyCode,
+  workEntryLabelCode,
+  type WorkEntryCode,
+} from "@t3tools/client-runtime/work-log/entry-code";
 import { TerminalContextInlineChip } from "./TerminalContextInlineChip";
 import { Popover, PopoverPopup, PopoverTrigger } from "../ui/popover";
 import { Spinner } from "../ui/spinner";
