@@ -2,12 +2,14 @@
 import { Fragment, memo, Suspense, use, type CSSProperties } from "react";
 
 import {
-  splitHighlightWindow,
+  splitCodeHighlightWindow,
+  type CodeHighlightWindowKind,
+} from "@t3tools/client-runtime/work-log/entry-code";
+import {
   tokenizeCode,
   type CodeLines,
   type CodeToken,
   type HighlightLanguage,
-  type HighlightWindowKind,
 } from "~/lib/codeTokens";
 import { getSyntaxHighlighterPromise } from "~/lib/syntaxHighlighting";
 
@@ -48,15 +50,15 @@ function HighlightedHead(props: {
 /**
  * Inline syntax-highlighted code. The same characters render while the
  * highlighter loads, so the swap never moves layout. Only the head is
- * tokenized (see `splitHighlightWindow`); the tail stays plain text.
+ * tokenized (see `splitCodeHighlightWindow`); the tail stays plain text.
  */
 export const HighlightedCode = memo(function HighlightedCode(props: {
   readonly code: string;
   readonly language: HighlightLanguage;
   readonly theme: "light" | "dark";
-  readonly kind: HighlightWindowKind;
+  readonly kind: CodeHighlightWindowKind;
 }) {
-  const { head, tail } = splitHighlightWindow(props.code, props.kind);
+  const { head, tail } = splitCodeHighlightWindow(props.code, props.kind);
   const plainHead = <>{head}</>;
   return (
     <>

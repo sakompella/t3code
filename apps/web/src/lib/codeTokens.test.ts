@@ -1,7 +1,7 @@
 import type { DiffsHighlighter } from "@pierre/diffs";
 import { describe, expect, it, vi } from "vite-plus/test";
 
-import { codeTokenCacheKey, splitHighlightWindow, tokenizeCode } from "./codeTokens";
+import { codeTokenCacheKey, tokenizeCode } from "./codeTokens";
 import { getSyntaxHighlighterPromise } from "./syntaxHighlighting";
 
 function fakeHighlighter(codeToTokens: DiffsHighlighter["codeToTokens"]) {
@@ -10,30 +10,6 @@ function fakeHighlighter(codeToTokens: DiffsHighlighter["codeToTokens"]) {
 
 const oneLine = (code: string) => ({
   tokens: [[{ content: code, offset: 0, color: "#fff", fontStyle: 0 }]],
-});
-
-describe("splitHighlightWindow", () => {
-  it("highlights only the first line of a label", () => {
-    expect(splitHighlightWindow("import os\nprint(1)", "label")).toEqual({
-      head: "import os",
-      tail: "\nprint(1)",
-    });
-  });
-
-  it("caps how much of a long label is tokenized and keeps every character", () => {
-    const code = "x".repeat(1_000);
-    const { head, tail } = splitHighlightWindow(code, "label");
-    expect(head.length).toBeLessThan(code.length);
-    expect(head + tail).toBe(code);
-  });
-
-  it("keeps multiple lines in a body and caps very large ones", () => {
-    expect(splitHighlightWindow("a\nb", "body")).toEqual({ head: "a\nb", tail: "" });
-    const huge = "y".repeat(100_000);
-    const { head, tail } = splitHighlightWindow(huge, "body");
-    expect(head.length).toBeLessThan(huge.length);
-    expect(head + tail).toBe(huge);
-  });
 });
 
 describe("tokenizeCode", () => {
