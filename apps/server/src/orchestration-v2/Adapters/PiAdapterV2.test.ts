@@ -4574,6 +4574,19 @@ describe("PiAdapterV2 with the Prime Agent flavor", () => {
   );
 });
 
+describe("PiAdapterV2 subagent capabilities", () => {
+  it.effect("exposes subagent thread ids only where children get their own thread", () =>
+    Effect.gen(function* () {
+      const fake = yield* makeFakePi;
+      for (const flavor of [PI_FLAVOR, PRIME_AGENT_FLAVOR]) {
+        const adapter = yield* makeAdapter(fake, "", undefined, flavor);
+        const capabilities = yield* adapter.getCapabilities();
+        assert.equal(capabilities.subagents.exposesSubagentThreadIds, flavor.childThreads);
+      }
+    }).pipe(Effect.scoped, Effect.provide(testLayer)),
+  );
+});
+
 describe("PiAdapterV2 reaching T3 through the kernel's MCP client", () => {
   const encodeJson = Schema.encodeSync(Schema.fromJsonString(Schema.Unknown));
   const ENDPOINT = "http://127.0.0.1:43123/mcp";

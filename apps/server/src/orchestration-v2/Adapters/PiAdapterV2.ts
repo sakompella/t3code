@@ -293,6 +293,11 @@ function piProviderCapabilities(flavor: PiFlavor): OrchestrationV2ProviderCapabi
   return {
     ...PiProviderCapabilitiesV2,
     approvals: { ...PiProviderCapabilitiesV2.approvals, supportsFileChangeApproval: false },
+    subagents: {
+      ...PiProviderCapabilitiesV2.subagents,
+      // Observed `rlm_child_update` children get their own T3 thread.
+      exposesSubagentThreadIds: flavor.childThreads,
+    },
   };
 }
 
