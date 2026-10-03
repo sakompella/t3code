@@ -794,6 +794,45 @@ describe("buildThreadFeed", () => {
     ).toBe(false);
   });
 
+  it("keeps the reply before a steer visible when work folds", () => {
+    const reply = (id: string, updatedAt: string) => ({
+      ...assistantMessage(updatedAt),
+      id: TurnItemId.make(`item-${id}`),
+      messageId: MessageId.make(`message-${id}`),
+      text: id,
+    });
+    const steer = {
+      ...userMessage("2026-06-20T00:00:03.000Z"),
+      id: TurnItemId.make("item-steer"),
+      messageId: MessageId.make("message-steer"),
+      inputIntent: "steer" as const,
+      text: "Change course",
+    };
+    const feed = buildThreadFeed([
+      projected(userMessage(), 0),
+      projected(reply("opening", "2026-06-20T00:00:01.500Z"), 1),
+      projected(command(), 2),
+      projected(reply("before-steer", "2026-06-20T00:00:02.500Z"), 3),
+      projected(steer, 4),
+      projected({ ...command("2026-06-20T00:00:04.000Z"), id: TurnItemId.make("cmd-2") }, 5),
+      projected(reply("commentary", "2026-06-20T00:00:04.500Z"), 6),
+      projected(reply("final", "2026-06-20T00:00:05.000Z"), 7),
+    ]);
+    const collapsed = deriveThreadFeedPresentation(
+      feed,
+      {
+        runId,
+        status: "completed" as const,
+        startedAt: "2026-06-20T00:00:01.000Z",
+        completedAt: "2026-06-20T00:00:05.000Z",
+      },
+      new Set(),
+    );
+    expect(
+      collapsed.flatMap((entry) => (entry.type === "message" ? [entry.message.text] : [])),
+    ).toEqual(["Run checks", "opening", "before-steer", "Change course", "final"]);
+  });
+
   it("keeps opening and final assistant messages around the first hidden work", () => {
     const opening = {
       ...assistantMessage("2026-06-20T00:00:01.500Z"),

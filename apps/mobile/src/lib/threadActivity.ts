@@ -972,6 +972,30 @@ export function failedFeedRunIds(
 }
 
 /**
+ * The assistant message that ends each response: the last one per run before
+ * every boundary. User messages (steers included) and delivered notifications
+ * are boundaries, so a run keeps the reply to each of them visible.
+ */
+export function deriveTerminalAssistantMessageIds(
+  feed: ReadonlyArray<ThreadFeedEntry>,
+): ReadonlySet<string> {
+  const lastIdByResponseKey = new Map<string, string>();
+  let boundaryIndex = 0;
+  for (const entry of feed) {
+    if (
+      (entry.type === "message" && entry.message.role === "user") ||
+      (entry.type === "activity-group" &&
+        entry.activities.some((activity) => activity.projectedItem.item.type === "notification"))
+    ) {
+      boundaryIndex += 1;
+    } else if (entry.type === "message" && entry.message.role === "assistant") {
+      lastIdByResponseKey.set(`${entry.message.runId ?? "unkeyed"}:${boundaryIndex}`, entry.id);
+    }
+  }
+  return new Set(lastIdByResponseKey.values());
+}
+
+/**
  * A prompt without a run (a provider-native subagent, or a turn imported from
  * V1) folds its response like a run. `runlessWorkActive` keeps the latest
  * runless response open; V2 work must not reopen imported turns.
@@ -982,6 +1006,7 @@ function deriveThreadFeedRunFolds(
   runlessWorkActive: boolean,
 ): ReadonlyMap<string, ThreadFeedRunFold> {
   const firstAssistantMessageIdByRun = new Map<RunId, string>();
+  const terminalAssistantMessageIds = deriveTerminalAssistantMessageIds(feed);
   const terminalAssistantMessageIdByRun = new Map<RunId, string>();
   const interruptedRunIds = new Set<RunId>();
   const failedRunIds = failedFeedRunIds(feed, latestRun);
@@ -1055,6 +1080,7 @@ function deriveThreadFeedRunFolds(
           (entry) =>
             entry.id !== firstAssistantId &&
             entry.id !== terminalAssistantId &&
+            !terminalAssistantMessageIds.has(entry.id) &&
             !(
               entry.type === "activity-group" &&
               entry.activities.some(
