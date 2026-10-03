@@ -139,6 +139,18 @@ const UNAWAITED_BASH_HELPER =
   /(?:^|[\n;])[ \t]*(?:([A-Za-z_][A-Za-z0-9_]*)\s*=\s*)?bash\s*\(\s*([rRfF]{0,2})("""|'''|"|')/g;
 
 /**
+ * Where a cell next assigns `variable` at or after `from`, which is when the
+ * name stops meaning the handle it had. The code's length when it never does.
+ * Statements before that offset still talk about the old handle.
+ */
+export function assignmentOffset(code: string, variable: string | null, from = 0): number {
+  if (variable === null) return code.length;
+  const assignment = new RegExp(`(?:^|[\\n;])[ \\t]*${variable}\\s*=(?!=)`, "g");
+  assignment.lastIndex = from;
+  return assignment.exec(code)?.index ?? code.length;
+}
+
+/**
  * Shell commands a cell started as background jobs. Prime Agent treats a
  * `bash(...)` handle as detached when the cell that created it never awaits
  * it; only those jobs report back later with an `async_bash_completion`.
@@ -154,7 +166,8 @@ export function detachedBashJobs(code: string): ReadonlyArray<DetachedBashJob> {
       /r/i.test(match[2]!),
     );
     if (literal === null || literal.value.trim().length === 0) continue;
-    if (variable !== null && endsHandle(code, variable)) continue;
+    const untilRebound = code.slice(literal.end, assignmentOffset(code, variable, literal.end));
+    if (variable !== null && endsHandle(untilRebound, variable)) continue;
     const isTemplate = isFString(match[2]!);
     jobs.push({
       variable,
