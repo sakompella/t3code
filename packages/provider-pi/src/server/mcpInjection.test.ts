@@ -18,7 +18,7 @@ import {
   materializePiT3Skill,
   resolvePiLaunchArgs,
 } from "./mcpInjection.ts";
-import { PI_T3_CODE_SKILL_NAME } from "./piT3SkillSource.ts";
+import { PI_T3_CODE_SKILL_NAME } from "./skillSource.ts";
 
 const threadId = ThreadId.make("thread-pi-t3-mcp");
 
