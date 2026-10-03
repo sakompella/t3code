@@ -3,7 +3,7 @@ import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import type * as Scope from "effect/Scope";
 import type * as Semaphore from "effect/Semaphore";
-import type { ProviderDriverKind } from "@t3tools/contracts";
+import type { OrchestrationV2SystemNoticeTone, ProviderDriverKind } from "@t3tools/contracts";
 import {
   piRecordField as recordField,
   piRecordString as recordString,
@@ -35,10 +35,15 @@ export function makePrimeAgentSettle(input: {
     return `${turn.providerTurn.id}:${kind}:${key ?? turn.noticeCount}`;
   };
 
+  /**
+   * Routine events are `info`, and the live finishing-up row is `progress`;
+   * only a failed refinement is a `warning`, so only it looks like one.
+   */
   const emitNotice = Effect.fnUntraced(function* (
     turn: ActivePiTurn,
     nativeItemId: string,
     message: string,
+    tone: OrchestrationV2SystemNoticeTone,
     status: "running" | "completed",
     startedAt: DateTime.Utc,
     emittedAt: DateTime.Utc,
@@ -55,6 +60,7 @@ export function makePrimeAgentSettle(input: {
         completedAt,
         type: "system_notice",
         message,
+        tone,
       },
     });
   });
@@ -87,6 +93,7 @@ export function makePrimeAgentSettle(input: {
               turn,
               finishingUp.nativeItemId,
               FINISHING_UP_LABEL,
+              "progress",
               "running",
               startedAt,
               shownAt,
@@ -108,6 +115,7 @@ export function makePrimeAgentSettle(input: {
       turn,
       finishingUp.nativeItemId,
       FINISHED_UP_LABEL,
+      "progress",
       "completed",
       finishingUp.startedAt,
       completedAt,
@@ -126,7 +134,7 @@ export function makePrimeAgentSettle(input: {
         summary === undefined || summary.length === 0
           ? "Refined its harness."
           : `Refined its harness: ${summary}`;
-      yield* emitNotice(turn, nativeItemId, message, "completed", emittedAt, emittedAt);
+      yield* emitNotice(turn, nativeItemId, message, "info", "completed", emittedAt, emittedAt);
       return;
     }
     const detail = recordString(event, "error")?.trim();
@@ -138,6 +146,7 @@ export function makePrimeAgentSettle(input: {
       turn,
       nextNoticeId(turn, "refine-failed"),
       message,
+      "warning",
       "completed",
       emittedAt,
       emittedAt,

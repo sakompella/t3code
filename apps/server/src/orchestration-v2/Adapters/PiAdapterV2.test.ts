@@ -2600,7 +2600,13 @@ describe("PiAdapterV2 with the Prime Agent flavor", () => {
   const systemNotices = (events: ReadonlyArray<ProviderAdapterV2Event>) =>
     events.flatMap((event) =>
       event.type === "turn_item.updated" && event.turnItem.type === "system_notice"
-        ? [{ message: event.turnItem.message, status: event.turnItem.status }]
+        ? [
+            {
+              message: event.turnItem.message,
+              tone: event.turnItem.tone,
+              status: event.turnItem.status,
+            },
+          ]
         : [],
     );
 
@@ -2627,7 +2633,8 @@ describe("PiAdapterV2 with the Prime Agent flavor", () => {
       assert.isTrue(
         running.type === "turn_item.updated" &&
           running.turnItem.type === "system_notice" &&
-          running.turnItem.message === "Finishing up…",
+          running.turnItem.message === "Finishing up…" &&
+          running.turnItem.tone === "progress",
       );
 
       yield* fake.emit({ type: "agent_end", messages: [] });
@@ -2637,7 +2644,7 @@ describe("PiAdapterV2 with the Prime Agent flavor", () => {
         return event.type === "turn.terminal";
       });
       assert.deepStrictEqual(systemNotices(seen), [
-        { message: "Finished up", status: "completed" },
+        { message: "Finished up", tone: "progress", status: "completed" },
       ]);
     }).pipe(Effect.scoped, Effect.provide(testLayer)),
   );
@@ -2892,6 +2899,7 @@ describe("PiAdapterV2 with the Prime Agent flavor", () => {
             completed.turnItem.type === "system_notice" &&
             completed.turnItem.status === "completed" &&
             completed.turnItem.message === "Finished up" &&
+            completed.turnItem.tone === "progress" &&
             completed.turnItem.id === running.turnItem.id &&
             completed.turnItem.ordinal === running.turnItem.ordinal,
         );
@@ -2918,8 +2926,16 @@ describe("PiAdapterV2 with the Prime Agent flavor", () => {
         return event.type === "turn.terminal";
       });
       assert.deepStrictEqual(systemNotices(seen), [
-        { message: "Refined its harness: Create a memory for the fork fix.", status: "completed" },
-        { message: "Harness refinement failed: planner timed out", status: "completed" },
+        {
+          message: "Refined its harness: Create a memory for the fork fix.",
+          tone: "info",
+          status: "completed",
+        },
+        {
+          message: "Harness refinement failed: planner timed out",
+          tone: "warning",
+          status: "completed",
+        },
       ]);
     }).pipe(Effect.scoped, Effect.provide(testLayer)),
   );
