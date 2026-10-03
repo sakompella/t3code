@@ -99,7 +99,12 @@ import { makePrimeAgentChildThreads } from "./primeAgentChildThreads.ts";
 import { makePrimeAgentStream, snapshotBlock } from "./primeAgentStream.ts";
 import { makePrimeAgentTools } from "./primeAgentTools.ts";
 import { makePrimeAgentSettle } from "./primeAgentSettle.ts";
-import { piWakeNotification, makePrimeAgentBackgroundJobs } from "./primeAgentWakes.ts";
+import {
+  piWakeNotification,
+  piWakeTrigger,
+  makePrimeAgentBackgroundJobs,
+  makePrimeAgentWakeNotices,
+} from "./primeAgentWakes.ts";
 
 export const PI_PROVIDER = PI_FLAVOR.driverKind;
 const PI_DEFAULT_INSTANCE_ID = defaultInstanceIdForDriver(PI_PROVIDER);
@@ -1540,6 +1545,12 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
         items: { emit, emitItemNode, baseItemFields },
       });
 
+      const { emitMidRunWakeNotice } = makePrimeAgentWakeNotices({
+        enabled: flavor.selfWakes === "continuation",
+        driver,
+        items: { emit, emitItemNode, baseItemFields },
+      });
+
       const listSessionEntries = (since: string | null, timeoutMs: number) =>
         request({ type: "get_entries", ...(since === null ? {} : { since }) }, timeoutMs).pipe(
           Effect.map((data) => {
@@ -2008,6 +2019,9 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
           }
           case "message_start": {
             yield* completeBackgroundJob(event["message"]);
+            if (turn !== null && recordString(event["message"], "role") !== "assistant") {
+              yield* emitMidRunWakeNotice(turn, event["message"]);
+            }
             if (turn !== null && recordString(event["message"], "role") === "assistant") {
               yield* closeFinishingUp(turn);
               turn.sawAgentActivity = true;
@@ -2953,6 +2967,7 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
               });
               yield* updateProviderSession("running", null);
               if (wake !== null) {
+                if (continuation) activeTurn.wakeTrigger = piWakeTrigger(wake.events)?.message;
                 for (const event of wake.events) {
                   if (!continuation && event["type"] === "agent_settled") {
                     activeTurn.nativeAborted = event["aborted"] === true;
