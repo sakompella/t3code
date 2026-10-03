@@ -28,6 +28,7 @@ import {
   workEntryRowLabel,
   isContextHandoffActivityGroup,
   buildThreadFeed,
+  deriveTerminalAssistantMessageIds,
   deriveThreadFeedPresentation,
   threadFeedActivityIsVisible,
   threadFeedRunIsUnsettled,
@@ -395,6 +396,48 @@ describe("buildThreadFeed", () => {
       workEntry: { tone: "info", itemType: "system_notice" },
     });
     expect(presented.some((entry) => entry.type === "run-fold")).toBe(false);
+  });
+
+  it("shows a routine notice as a quiet row that cannot expand to repeat itself", () => {
+    const activityFor = (
+      tone: "info" | "progress" | "warning" | undefined,
+      status: "running" | "completed" = "completed",
+    ) => {
+      const item = {
+        ...base("item-notice", "2026-06-20T00:00:02.000Z", 1),
+        status,
+        type: "system_notice" as const,
+        message: "Refined its harness: add a memory.",
+        ...(tone === undefined ? {} : { tone }),
+      };
+      return buildThreadFeed([projected(item, 0)]).flatMap((entry) =>
+        entry.type === "activity-group" ? entry.activities : [],
+      )[0];
+    };
+
+    expect(activityFor("info")).toMatchObject({ icon: "zap", canExpand: false, prominent: true });
+    expect(activityFor("progress", "running")).toMatchObject({ icon: "zap", canExpand: false });
+    expect(activityFor("warning")).toMatchObject({ icon: "warning", canExpand: false });
+    expect(activityFor(undefined)).toMatchObject({ icon: "warning", canExpand: false });
+  });
+
+  it("drops a finished progress notice from the feed but keeps it while it runs", () => {
+    const feedFor = (status: "running" | "completed") =>
+      buildThreadFeed([
+        projected(
+          {
+            ...base("item-finishing", "2026-06-20T00:00:02.000Z", 1),
+            status,
+            type: "system_notice" as const,
+            message: "Finishing up…",
+            tone: "progress" as const,
+          },
+          0,
+        ),
+      ]);
+
+    expect(feedFor("running")).toHaveLength(1);
+    expect(feedFor("completed")).toHaveLength(0);
   });
 
   it("presents a usage-limit stop as a warning while preserving its explanation", () => {
@@ -831,6 +874,31 @@ describe("buildThreadFeed", () => {
     expect(
       collapsed.flatMap((entry) => (entry.type === "message" ? [entry.message.text] : [])),
     ).toEqual(["Run checks", "opening", "before-steer", "Change course", "final"]);
+  });
+
+  it("does not treat a system notice as a response boundary", () => {
+    const reply = (id: string, updatedAt: string) => ({
+      ...assistantMessage(updatedAt),
+      id: TurnItemId.make(`item-${id}`),
+      messageId: MessageId.make(`message-${id}`),
+      text: id,
+    });
+    const feed = buildThreadFeed([
+      projected(userMessage(), 0),
+      projected(reply("before-notice", "2026-06-20T00:00:02.000Z"), 1),
+      projected(
+        {
+          ...base("item-notice", "2026-06-20T00:00:03.000Z", 2),
+          type: "system_notice" as const,
+          message: "Refined its harness.",
+          tone: "info" as const,
+        },
+        2,
+      ),
+      projected(reply("final", "2026-06-20T00:00:04.000Z"), 3),
+    ]);
+
+    expect([...deriveTerminalAssistantMessageIds(feed)]).toEqual(["message-final"]);
   });
 
   it("keeps opening and final assistant messages around the first hidden work", () => {

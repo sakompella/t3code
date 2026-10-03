@@ -3,7 +3,11 @@ import type {
   ThreadPendingUserInput,
   ThreadUserInputQuestion,
 } from "@t3tools/client-runtime/state/thread-requests";
-import { turnItemIsWorkspacePreparation } from "@t3tools/client-runtime/state/turn-item-presentation";
+import {
+  systemNoticeIsRoutine,
+  turnItemIsFinishedProgressNotice,
+  turnItemIsWorkspacePreparation,
+} from "@t3tools/client-runtime/state/turn-item-presentation";
 import { formatSubagentDisplayTitle } from "@t3tools/client-runtime/state/subagent-display";
 import { extractToolActivityPresentation } from "@t3tools/client-runtime/work-log/tool-presentation";
 import {
@@ -505,8 +509,9 @@ function itemIcon(item: OrchestrationV2TurnItem): ThreadFeedActivity["icon"] {
       return "hammer";
     case "run_interrupt_request":
     case "run_interrupt_result":
-    case "system_notice":
       return "warning";
+    case "system_notice":
+      return systemNoticeIsRoutine(item) ? "zap" : "warning";
     case "error":
       return item.failure.class === "usage_limit"
         ? item.status === "completed"
@@ -765,7 +770,11 @@ function toFeedActivity(
     attemptId,
     summary,
     detail,
-    canExpand: !(item.type === "error" && item.status === "failed") && (readPaths?.length ?? 1) > 0,
+    // A system notice's whole message is its summary, so expanding would repeat it.
+    canExpand:
+      item.type !== "system_notice" &&
+      !(item.type === "error" && item.status === "failed") &&
+      (readPaths?.length ?? 1) > 0,
     getFullDetail,
     getCopyText,
     icon: workEntry.toolSurface ?? itemIcon(item),
@@ -1695,6 +1704,7 @@ export function buildThreadFeed(
   for (const row of visibleTurnItems) {
     const item = row.item;
     if (turnItemIsWorkspacePreparation(item)) continue;
+    if (turnItemIsFinishedProgressNotice(item)) continue;
     if (item.type === "todo_list" || item.type === "checkpoint") continue;
     if (item.type === "user_message" && foldedAnswerMessageIds.has(item.messageId)) continue;
     // Match the web timeline: only the terminal interrupt result is useful to
