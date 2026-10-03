@@ -98,6 +98,7 @@ import type {
   PiThreadState,
 } from "./adapterState.ts";
 import { makePrimeAgentChildThreads } from "./primeAgentChildThreads.ts";
+import { primeAgentHeartbeats } from "./primeAgentHeartbeats.ts";
 import { makePrimeAgentStream, snapshotBlock } from "./primeAgentStream.ts";
 import { makePrimeAgentTools } from "./primeAgentTools.ts";
 import { makePrimeAgentSettle } from "./primeAgentSettle.ts";
@@ -574,6 +575,8 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
       let threadState: PiThreadState | null = null;
       let registrationAttempted = false;
       let lastNativeThreadId: string | null = null;
+      /** Prime Agent's id for the open session; it keys the session's heartbeats. */
+      let heartbeatSessionId: string | null = null;
       let stopRequested = false;
       let unsolicitedActivityDetected = false;
       let pendingWake: PiWake | null = null;
@@ -678,6 +681,19 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
 
       const request = (record: PiRpcRecord, timeoutMs = PI_REQUEST_TIMEOUT_MS) =>
         connection.request(record, timeoutMs);
+
+      /**
+       * The session's heartbeats, or undefined when the flavor has none or
+       * the agent cannot say. A failed read keeps what clients already show.
+       */
+      const readHeartbeats = () => {
+        const sessionId = heartbeatSessionId;
+        if (!flavor.heartbeats || sessionId === null) return Effect.succeed(undefined);
+        return request({ type: "list_heartbeats" }, 2_000).pipe(
+          Effect.map((listing) => primeAgentHeartbeats(listing, sessionId)),
+          Effect.orElseSucceed(() => undefined),
+        );
+      };
 
       const nonNegativeInteger = (input: unknown, key: string): number | undefined => {
         const value = recordNumber(input, key);
@@ -1820,6 +1836,9 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
             ...(tokenUsage === undefined ? {} : { tokenUsage }),
           },
         });
+        // The agent may have set, changed, or ended a heartbeat during the turn,
+        // and a fired one has moved its next run. A Stop ends the session.
+        const heartbeats = turn.interrupted ? undefined : yield* readHeartbeats();
         yield* updateProviderThread(
           state,
           {
@@ -1830,6 +1849,7 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
                   nativeConversationHeadRef:
                     treeRefs.leafId === null ? null : providerRef(treeRefs.leafId),
                 }),
+            ...(heartbeats === undefined ? {} : { heartbeats }),
           },
           treeRefs?.retainedNativeTurnIds,
         );
@@ -2657,6 +2677,9 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
           return yield* protocolError(`${name} did not create a distinct session file`);
         }
         lastNativeThreadId = nativeId;
+        heartbeatSessionId = recordString(stateData, "sessionId") ?? null;
+        // A persisted list says what ran before this process; read it afresh.
+        const heartbeats = flavor.heartbeats ? ((yield* readHeartbeats()) ?? []) : undefined;
         const createdAt = yield* DateTime.now;
         const providerThread: OrchestrationV2ProviderThread =
           existing !== undefined
@@ -2670,6 +2693,7 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
                 ...(flavor.tools === "ipython"
                   ? { pendingBackgroundTasks: backgroundJobs.tasks() }
                   : {}),
+                ...(heartbeats === undefined ? {} : { heartbeats }),
                 status: "idle",
                 updatedAt: createdAt,
               }
@@ -2691,6 +2715,7 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
                 handoffIds: [],
                 forkedFrom: null,
                 pendingBackgroundTasks: [],
+                ...(heartbeats === undefined ? {} : { heartbeats }),
                 createdAt,
                 updatedAt: createdAt,
               };
