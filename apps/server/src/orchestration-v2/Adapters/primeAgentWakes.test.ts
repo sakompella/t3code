@@ -116,4 +116,55 @@ describe("makePrimeAgentBackgroundJobs", () => {
       expect(jobs.handleOf(finished)).toBe("first");
     }),
   );
+
+  it.effect("takes a job off the roster when a cell reads it, but keeps tracking it", () =>
+    Effect.gen(function* () {
+      const rosters: Array<ReadonlyArray<string | undefined>> = [];
+      const jobs = makePrimeAgentBackgroundJobs((patch) =>
+        Effect.sync(() => {
+          rosters.push((patch.pendingBackgroundTasks ?? []).map((task) => task.description));
+        }),
+      );
+      yield* jobs.trackBackgroundJobs("a = bash('make a'); b = bash('make b')");
+      yield* jobs.trackBackgroundJobs("print(a.running, a.pid)");
+      yield* jobs.trackBackgroundJobs("print(a.output())");
+      // Nothing changed for a cell that touches no job.
+      yield* jobs.trackBackgroundJobs("print(1)");
+
+      expect(rosters).toEqual([["make a", "make b"], ["make b"]]);
+      expect(jobs.hasPendingJobs()).toBe(true);
+
+      // The notice a read job still sends names it, and ends it.
+      yield* jobs.completeBackgroundJob(completion({ pid: 7, command: "make a", exitCode: 0 }));
+      expect(rosters).toEqual([["make a", "make b"], ["make b"]]);
+      yield* jobs.completeBackgroundJob(completion({ pid: 8, command: "make b", exitCode: 0 }));
+      expect(rosters.at(-1)).toEqual([]);
+      expect(jobs.hasPendingJobs()).toBe(false);
+    }),
+  );
+
+  it.effect("gives a completion to the job no cell read before one a cell read", () =>
+    Effect.gen(function* () {
+      const jobs = makePrimeAgentBackgroundJobs(() => Effect.void);
+      yield* jobs.trackBackgroundJobs("old = bash('make')");
+      yield* jobs.trackBackgroundJobs("print(old.output())");
+      yield* jobs.trackBackgroundJobs("new = bash('make')");
+      const finished = completion({ pid: 7, command: "make", exitCode: 0 });
+      yield* jobs.completeBackgroundJob(finished);
+
+      expect(jobs.handleOf(finished)).toBe("new");
+      expect(jobs.hasPendingJobs()).toBe(true);
+    }),
+  );
+
+  it.effect("ends the jobs of awaited, gathered, and killed handles", () =>
+    Effect.gen(function* () {
+      const jobs = makePrimeAgentBackgroundJobs(() => Effect.void);
+      yield* jobs.trackBackgroundJobs("a = bash('make a')\nb = bash('make b')\nc = bash('make c')");
+      yield* jobs.trackBackgroundJobs("await asyncio.gather(a, b)");
+      yield* jobs.trackBackgroundJobs("c.kill()");
+
+      expect(jobs.hasPendingJobs()).toBe(false);
+    }),
+  );
 });
