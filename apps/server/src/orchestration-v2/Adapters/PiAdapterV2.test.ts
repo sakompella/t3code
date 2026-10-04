@@ -3203,6 +3203,33 @@ describe("PiAdapterV2 with the Prime Agent flavor", () => {
     }).pipe(Effect.scoped, Effect.provide(testLayer)),
   );
 
+  // Thread b0d440d5 run 68: on a 68-run session the get_messages reply was
+  // over the old 8 MiB record cap, so the read failed and the reply stayed cut.
+  it.effect("completes a cut-off reply on a session whose history is over 8 MiB", () =>
+    Effect.gen(function* () {
+      const fake = yield* makeFakePi;
+      const longHistory = {
+        role: "toolResult",
+        toolCallId: "earlier-call",
+        content: [{ type: "text", text: "x".repeat(9 * 1024 * 1024) }],
+        timestamp: 500,
+      };
+      fake.setTranscript([longHistory]);
+      const { runtime, takeEvent, providerThread } = yield* openPrimeThread(fake);
+      yield* startTurn(runtime, providerThread);
+      yield* fake.takeRequest("prompt");
+      yield* streamCutReply(fake);
+      fake.setTranscript([longHistory, ...recordedTurn]);
+
+      yield* takeQuietProbeAtItsTick(fake);
+
+      assert.deepEqual(yield* takeRepliesAndOutcome(takeEvent), {
+        texts: [fullReply],
+        status: "completed",
+      });
+    }).pipe(Effect.scoped, Effect.provide(testLayer)),
+  );
+
   /** Runs turn `runOrdinal`, whose stored reply is `reply` and whose events were all dropped. */
   const runTurnWithDroppedReply = (
     fake: FakePi,
