@@ -9,6 +9,7 @@ import {
   turnItemIsFinishedProgressNotice,
   turnItemIsWorkspacePreparation,
 } from "@t3tools/client-runtime/state/turn-item-presentation";
+import { runFoldSegmentKey, runFoldSegmentLabel } from "@t3tools/client-runtime/state/run-fold";
 import { formatSubagentDisplayTitle } from "@t3tools/client-runtime/state/subagent-display";
 import { extractToolActivityPresentation } from "@t3tools/client-runtime/work-log/tool-presentation";
 import {
@@ -62,7 +63,6 @@ import {
   formatReadToolLabel,
   formatSearchToolLabel,
 } from "@t3tools/shared/toolActivity";
-import { formatDuration } from "@t3tools/shared/orchestrationTiming";
 import { compactDynamicToolOutput } from "@t3tools/shared/toolOutput";
 import * as DateTime from "effect/DateTime";
 
@@ -196,6 +196,8 @@ type ThreadFeedEntryContent =
       readonly id: string;
       readonly createdAt: string;
       readonly runId: RunId;
+      /** Expand-state key of this fold's run segment. */
+      readonly foldKey: string;
       readonly label: string;
       readonly expanded: boolean;
     }
@@ -924,12 +926,6 @@ function groupAdjacentActivities(entries: ReadonlyArray<RawThreadFeedEntry>): Th
   return grouped;
 }
 
-function computeElapsedMs(startIso: string, endIso: string): number | null {
-  const start = Date.parse(startIso);
-  const end = Date.parse(endIso);
-  return Number.isFinite(start) && Number.isFinite(end) ? Math.max(0, end - start) : null;
-}
-
 function maxIsoTimestamp(left: string | null, right: string | null): string | null {
   if (left === null) return right;
   if (right === null) return left;
@@ -968,6 +964,7 @@ export function threadFeedActivityIsVisible(
 
 interface ThreadFeedRunFold {
   readonly runId: RunId;
+  readonly key: string;
   readonly createdAt: string;
   readonly hiddenEntryIds: ReadonlySet<string>;
   readonly label: string;
@@ -995,10 +992,18 @@ export function failedFeedRunIds(
   return failed;
 }
 
+/** User messages (steers included) and delivered notifications split a run into segments. */
+function feedEntryIsSegmentBoundary(entry: ThreadFeedEntry): boolean {
+  return (
+    (entry.type === "message" && entry.message.role === "user") ||
+    (entry.type === "activity-group" &&
+      entry.activities.some((activity) => activity.projectedItem.item.type === "notification"))
+  );
+}
+
 /**
- * The assistant message that ends each response: the last one per run before
- * every boundary. User messages (steers included) and delivered notifications
- * are boundaries, so a run keeps the reply to each of them visible.
+ * The assistant message that ends each response: the last one per run in
+ * every segment. A run keeps the reply to each steer and notification visible.
  */
 export function deriveTerminalAssistantMessageIds(
   feed: ReadonlyArray<ThreadFeedEntry>,
@@ -1006,11 +1011,7 @@ export function deriveTerminalAssistantMessageIds(
   const lastIdByResponseKey = new Map<string, string>();
   let boundaryIndex = 0;
   for (const entry of feed) {
-    if (
-      (entry.type === "message" && entry.message.role === "user") ||
-      (entry.type === "activity-group" &&
-        entry.activities.some((activity) => activity.projectedItem.item.type === "notification"))
-    ) {
+    if (feedEntryIsSegmentBoundary(entry)) {
       boundaryIndex += 1;
     } else if (entry.type === "message" && entry.message.role === "assistant") {
       lastIdByResponseKey.set(`${entry.message.runId ?? "unkeyed"}:${boundaryIndex}`, entry.id);
@@ -1022,7 +1023,9 @@ export function deriveTerminalAssistantMessageIds(
 /**
  * A prompt without a run (a provider-native subagent, or a turn imported from
  * V1) folds its response like a run. `runlessWorkActive` keeps the latest
- * runless response open; V2 work must not reopen imported turns.
+ * runless response open; V2 work must not reopen imported turns. Steers and
+ * notifications split a run into segments that fold separately, each where
+ * its work happened.
  */
 function deriveThreadFeedRunFolds(
   feed: ReadonlyArray<ThreadFeedEntry>,
@@ -1031,19 +1034,28 @@ function deriveThreadFeedRunFolds(
 ): ReadonlyMap<string, ThreadFeedRunFold> {
   const firstAssistantMessageIdByRun = new Map<RunId, string>();
   const terminalAssistantMessageIds = deriveTerminalAssistantMessageIds(feed);
-  const terminalAssistantMessageIdByRun = new Map<RunId, string>();
   const interruptedRunIds = new Set<RunId>();
   const failedRunIds = failedFeedRunIds(feed, latestRun);
+  interface RunSegment {
+    readonly key: string;
+    readonly entries: ThreadFeedEntry[];
+    /** The prompt, steer or notification that started the segment. */
+    readonly startBoundary: string | null;
+  }
   const groupsByRunId = new Map<
     RunId,
-    { entries: ThreadFeedEntry[]; startBoundary: string | null }
+    { segments: RunSegment[]; boundaryEntryId: string | null }
   >();
   // Fold state is keyed by run, so each runless prompt lends its response a
   // stable key of its own. Decide per prompt, not per thread: a V1 thread's
   // first V2 run must not unfold every imported turn above it.
   let runlessKey: RunId | null = null;
   let pendingUserBoundary: string | null = null;
+  let segmentBoundary: { entryId: string; createdAt: string } | null = null;
   for (const entry of feed) {
+    if (feedEntryIsSegmentBoundary(entry)) {
+      segmentBoundary = { entryId: entry.id, createdAt: entry.createdAt };
+    }
     if (entry.type === "message" && entry.message.role === "user") {
       pendingUserBoundary = entry.message.createdAt;
       runlessKey = entry.message.runId == null ? RunId.make(`runless:${entry.id}`) : null;
@@ -1058,16 +1070,29 @@ function deriveThreadFeedRunFolds(
     if (!runId) continue;
     let group = groupsByRunId.get(runId);
     if (!group) {
-      group = { entries: [], startBoundary: pendingUserBoundary };
+      group = {
+        segments: [
+          {
+            key: runFoldSegmentKey(runId, null),
+            entries: [],
+            startBoundary: pendingUserBoundary,
+          },
+        ],
+        boundaryEntryId: segmentBoundary?.entryId ?? null,
+      };
       pendingUserBoundary = null;
       groupsByRunId.set(runId, group);
+    } else if (segmentBoundary !== null && group.boundaryEntryId !== segmentBoundary.entryId) {
+      group.segments.push({
+        key: runFoldSegmentKey(runId, segmentBoundary.entryId),
+        entries: [],
+        startBoundary: segmentBoundary.createdAt,
+      });
+      group.boundaryEntryId = segmentBoundary.entryId;
     }
-    group.entries.push(entry);
-    if (entry.type === "message") {
-      if (!firstAssistantMessageIdByRun.has(runId)) {
-        firstAssistantMessageIdByRun.set(runId, entry.id);
-      }
-      terminalAssistantMessageIdByRun.set(runId, entry.id);
+    group.segments.at(-1)!.entries.push(entry);
+    if (entry.type === "message" && !firstAssistantMessageIdByRun.has(runId)) {
+      firstAssistantMessageIdByRun.set(runId, entry.id);
     }
     if (entry.type !== "activity-group") continue;
     for (const activity of entry.activities) {
@@ -1087,77 +1112,73 @@ function deriveThreadFeedRunFolds(
   const activeRunId = unsettledRunId(latestRun);
   const foldsByAnchorId = new Map<string, ThreadFeedRunFold>();
   for (const [runId, group] of groupsByRunId) {
+    const entries = group.segments.flatMap((segment) => segment.entries);
     if (
       runId === activeRunId ||
       (runlessWorkActive && runId === runlessKey) ||
       interruptedRunIds.has(runId) ||
       failedRunIds.has(runId) ||
-      group.entries.some((entry) => entry.type === "message" && entry.message.streaming)
+      entries.some((entry) => entry.type === "message" && entry.message.streaming)
     ) {
       continue;
     }
     const firstAssistantId = firstAssistantMessageIdByRun.get(runId);
-    const terminalAssistantId = terminalAssistantMessageIdByRun.get(runId);
-    const hiddenEntryIds = new Set(
-      group.entries
-        .filter(
-          (entry) =>
-            entry.id !== firstAssistantId &&
-            entry.id !== terminalAssistantId &&
-            !terminalAssistantMessageIds.has(entry.id) &&
-            !(
-              entry.type === "activity-group" &&
-              entry.activities.some(
-                (activity) =>
-                  activity.prominent ||
-                  activity.projectedItem.item.type === "notification" ||
-                  activity.projectedItem.item.type === "handoff",
-              )
-            ),
-        )
-        .map((entry) => entry.id),
-    );
-    const firstEntry = group.entries[0];
-    const firstHiddenEntry = group.entries.find((entry) => hiddenEntryIds.has(entry.id));
-    const lastEntry = group.entries.at(-1);
-    if (!firstHiddenEntry || !firstEntry || !lastEntry) continue;
-    const hidesNonCompactionWork = group.entries.some(
-      (entry) =>
-        hiddenEntryIds.has(entry.id) &&
-        !(entry.type === "activity-group" && isContextCompactionActivityGroup(entry)),
-    );
-    if (!hidesNonCompactionWork) continue;
-    const terminalEntry = terminalAssistantId
-      ? group.entries.find((entry) => entry.id === terminalAssistantId)
-      : null;
-    const latestRunMatches = latestRun?.runId === runId;
-    const lastEntryEnd =
-      lastEntry.type === "message" ? lastEntry.message.updatedAt : lastEntry.createdAt;
-    const elapsedMs =
-      latestRunMatches && latestRun.startedAt && latestRun.completedAt
-        ? computeElapsedMs(latestRun.startedAt, latestRun.completedAt)
-        : computeElapsedMs(
-            group.startBoundary ?? firstEntry.createdAt,
-            maxIsoTimestamp(
-              terminalEntry?.type === "message" ? terminalEntry.message.updatedAt : null,
-              lastEntryEnd,
-            ) ?? lastEntryEnd,
-          );
-    const duration = elapsedMs === null ? null : formatDuration(elapsedMs);
-    const interrupted =
-      latestRunMatches && (latestRun.status === "interrupted" || latestRun.status === "cancelled");
-    foldsByAnchorId.set(firstHiddenEntry.id, {
-      runId,
-      createdAt: firstHiddenEntry.createdAt,
-      hiddenEntryIds,
-      label: interrupted
-        ? duration
-          ? `You stopped after ${duration}`
-          : "You stopped this response"
-        : duration
-          ? `Worked for ${duration}`
-          : "Worked",
-    });
+    const runTiming = latestRun?.runId === runId ? latestRun : null;
+    for (const [segmentIndex, segment] of group.segments.entries()) {
+      const hiddenEntryIds = new Set(
+        segment.entries
+          .filter(
+            (entry) =>
+              entry.id !== firstAssistantId &&
+              !terminalAssistantMessageIds.has(entry.id) &&
+              !(
+                entry.type === "activity-group" &&
+                entry.activities.some(
+                  (activity) =>
+                    activity.prominent ||
+                    activity.projectedItem.item.type === "notification" ||
+                    activity.projectedItem.item.type === "handoff",
+                )
+              ),
+          )
+          .map((entry) => entry.id),
+      );
+      const firstEntry = segment.entries[0];
+      const firstHiddenEntry = segment.entries.find((entry) => hiddenEntryIds.has(entry.id));
+      const lastEntry = segment.entries.at(-1);
+      if (!firstHiddenEntry || !firstEntry || !lastEntry) continue;
+      const hidesNonCompactionWork = segment.entries.some(
+        (entry) =>
+          hiddenEntryIds.has(entry.id) &&
+          !(entry.type === "activity-group" && isContextCompactionActivityGroup(entry)),
+      );
+      if (!hidesNonCompactionWork) continue;
+      const terminalEntry = segment.entries.findLast((entry) =>
+        terminalAssistantMessageIds.has(entry.id),
+      );
+      const lastEntryEnd =
+        lastEntry.type === "message" ? lastEntry.message.updatedAt : lastEntry.createdAt;
+      foldsByAnchorId.set(firstHiddenEntry.id, {
+        runId,
+        key: segment.key,
+        createdAt: firstHiddenEntry.createdAt,
+        hiddenEntryIds,
+        label: runFoldSegmentLabel({
+          segment: {
+            start: segment.startBoundary ?? firstEntry.createdAt,
+            end:
+              maxIsoTimestamp(
+                terminalEntry?.type === "message" ? terminalEntry.message.updatedAt : null,
+                lastEntryEnd,
+              ) ?? lastEntryEnd,
+            isFirst: segmentIndex === 0,
+            isLast: segmentIndex === group.segments.length - 1,
+          },
+          run: runTiming,
+          stopped: runTiming?.status === "interrupted" || runTiming?.status === "cancelled",
+        }),
+      });
+    }
   }
   return foldsByAnchorId;
 }
@@ -1196,7 +1217,8 @@ function settleSupersededReasoning(
 export function deriveThreadFeedPresentation(
   feed: ReadonlyArray<ThreadFeedEntry>,
   latestRun: ThreadFeedLatestRun | null,
-  expandedRunIds: ReadonlySet<RunId>,
+  /** Expanded run fold segments, by `runFoldSegmentKey`. */
+  expandedFoldKeys: ReadonlySet<string>,
   expandedWorkGroupIds: ReadonlySet<string> = new Set(),
   activeWorkStartedAt: string | null = null,
   /** The live work is a provider-native subagent's runless root turn. */
@@ -1220,7 +1242,7 @@ export function deriveThreadFeedPresentation(
   );
   const collapsedEntryIds = new Set<string>();
   for (const fold of foldsByAnchorId.values()) {
-    if (!expandedRunIds.has(fold.runId)) {
+    if (!expandedFoldKeys.has(fold.key)) {
       for (const entryId of fold.hiddenEntryIds) collapsedEntryIds.add(entryId);
     }
   }
@@ -1237,20 +1259,21 @@ export function deriveThreadFeedPresentation(
       entry.runId === activeRunId;
     const fold = foldsByAnchorId.get(entry.id);
     if (fold) {
-      const expanded = expandedRunIds.has(fold.runId);
+      const expanded = expandedFoldKeys.has(fold.key);
       let row = runFoldRowsCache.get(entry);
       if (
         !row ||
-        row.runId !== fold.runId ||
+        row.foldKey !== fold.key ||
         row.createdAt !== fold.createdAt ||
         row.label !== fold.label ||
         row.expanded !== expanded
       ) {
         row = {
           type: "run-fold",
-          id: `run-fold:${fold.runId}`,
+          id: `run-fold:${fold.key}`,
           createdAt: fold.createdAt,
           runId: fold.runId,
+          foldKey: fold.key,
           label: fold.label,
           expanded,
         };

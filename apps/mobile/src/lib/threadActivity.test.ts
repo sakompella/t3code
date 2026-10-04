@@ -898,6 +898,130 @@ describe("buildThreadFeed", () => {
     ).toEqual(["Run checks", "opening", "before-steer", "Change course", "final"]);
   });
 
+  describe("a run that received steers", () => {
+    const at = (second: number) => new Date(Date.UTC(2026, 5, 20, 0, 0, second)).toISOString();
+    const reply = (id: string, second: number) => ({
+      ...assistantMessage(at(second)),
+      id: TurnItemId.make(`item-${id}`),
+      messageId: MessageId.make(`message-${id}`),
+      text: id,
+    });
+    const steer = (id: string, second: number) => ({
+      ...userMessage(at(second)),
+      id: TurnItemId.make(`item-${id}`),
+      messageId: MessageId.make(`message-${id}`),
+      inputIntent: "steer" as const,
+      text: id,
+    });
+    const tool = (id: string, second: number) => ({
+      ...command(at(second)),
+      id: TurnItemId.make(id),
+    });
+    const feed = buildThreadFeed(
+      [
+        userMessage(at(1)),
+        reply("opening", 1),
+        tool("cmd-1", 2),
+        reply("reply-1", 3),
+        steer("steer-1", 4),
+        tool("cmd-2", 5),
+        reply("commentary", 6),
+        tool("cmd-3", 7),
+        reply("reply-2", 8),
+        steer("steer-2", 10),
+        tool("cmd-4", 20),
+        reply("reply-3", 30),
+      ].map((item, position) => projected(item, position)),
+    );
+    const latestRun = {
+      runId,
+      status: "completed" as const,
+      startedAt: at(1),
+      completedAt: at(40),
+    };
+    /** Visible messages and work, with each fold row shown as `fold: <label>`. */
+    const sequence = (entries: ReadonlyArray<ThreadFeedEntry>) =>
+      entries.map((entry) =>
+        entry.type === "run-fold"
+          ? `fold: ${entry.label}`
+          : entry.type === "message"
+            ? entry.message.text
+            : "work",
+      );
+    const foldKeys = (entries: ReadonlyArray<ThreadFeedEntry>) =>
+      entries.flatMap((entry) => (entry.type === "run-fold" ? [entry.foldKey] : []));
+
+    it("folds each segment separately, where its work happened, timed on its own", () => {
+      expect(sequence(deriveThreadFeedPresentation(feed, latestRun, new Set()))).toEqual([
+        "Run checks",
+        "opening",
+        // From the run's start to the first reply.
+        "fold: Worked for 2.0s",
+        "reply-1",
+        "steer-1",
+        "fold: Worked for 4.0s",
+        "reply-2",
+        "steer-2",
+        // From the last steer to the run's end.
+        "fold: Worked for 30s",
+        "reply-3",
+      ]);
+    });
+
+    it("expands one segment without expanding the others", () => {
+      const [, middle] = foldKeys(deriveThreadFeedPresentation(feed, latestRun, new Set()));
+      const expanded = deriveThreadFeedPresentation(feed, latestRun, new Set([middle!]));
+      expect(sequence(expanded)).toEqual([
+        "Run checks",
+        "opening",
+        "fold: Worked for 2.0s",
+        "reply-1",
+        "steer-1",
+        "fold: Worked for 4.0s",
+        "work",
+        "commentary",
+        "work",
+        "reply-2",
+        "steer-2",
+        "fold: Worked for 30s",
+        "reply-3",
+      ]);
+      expect(
+        expanded.flatMap((entry) =>
+          entry.type === "run-fold" && entry.expanded ? [entry.foldKey] : [],
+        ),
+      ).toEqual([middle]);
+    });
+
+    it("gives every segment a distinct key and row id", () => {
+      const folds = deriveThreadFeedPresentation(feed, latestRun, new Set()).filter(
+        (entry) => entry.type === "run-fold",
+      );
+      expect(new Set(folds.map((entry) => entry.foldKey)).size).toBe(3);
+      expect(new Set(folds.map((entry) => entry.id)).size).toBe(3);
+    });
+
+    it("keeps a single run-keyed fold for a run without steers", () => {
+      const unsteered = buildThreadFeed(
+        [
+          userMessage(at(1)),
+          tool("cmd-1", 2),
+          reply("commentary", 3),
+          tool("cmd-2", 4),
+          reply("final", 5),
+        ].map((item, position) => projected(item, position)),
+      );
+      const collapsed = deriveThreadFeedPresentation(unsteered, latestRun, new Set());
+      expect(sequence(collapsed)).toEqual([
+        "Run checks",
+        "fold: Worked for 39s",
+        "commentary",
+        "final",
+      ]);
+      expect(foldKeys(collapsed)).toEqual([runId]);
+    });
+  });
+
   it("does not treat a system notice as a response boundary", () => {
     const reply = (id: string, updatedAt: string) => ({
       ...assistantMessage(updatedAt),
