@@ -533,6 +533,7 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
         args: scopedLaunch.args,
         cwd,
         env: launch.env,
+        terminationGrace: flavor.terminationGrace,
       }).pipe(
         Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner),
         Effect.mapError(
