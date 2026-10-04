@@ -174,14 +174,20 @@ export function makePrimeAgentReconciler<E>(input: {
     ledger.messageCount = messages.length;
   };
 
+  /** The session the ledger was seeded from. */
+  let seededSession: string | null = null;
+
   /**
-   * Everything stored so far is history T3 did not stream: either earlier
-   * turns or work from before this process attached. Without this read
-   * nothing can be told apart, so nothing is projected until one succeeds.
+   * Everything `sessionFile` stored so far is history T3 did not stream:
+   * either earlier turns or work from before this process attached. Without
+   * this read nothing can be told apart, so nothing is projected until one
+   * succeeds. A session already seeded keeps its ledger, so the messages it
+   * has not accounted for yet still reach T3.
    */
-  const baseline = Effect.gen(function* () {
-    if (!enabled) return;
+  const baseline = Effect.fnUntraced(function* (sessionFile: string) {
+    if (!enabled || (ledger !== null && seededSession === sessionFile)) return;
     ledger = null;
+    seededSession = sessionFile;
     const history = yield* request({ type: "get_messages" }, HISTORY_READ_TIMEOUT_MS).pipe(
       Effect.option,
     );

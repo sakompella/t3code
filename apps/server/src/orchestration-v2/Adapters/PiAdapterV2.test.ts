@@ -3203,6 +3203,30 @@ describe("PiAdapterV2 with the Prime Agent flavor", () => {
     }).pipe(Effect.scoped, Effect.provide(testLayer)),
   );
 
+  it.effect("keeps a lost reply when the thread loads again on the same session", () =>
+    Effect.gen(function* () {
+      const fake = yield* makeFakePi;
+      const { runtime, takeEvent, providerThread } = yield* openPrimeThread(fake);
+      const lostReply = storedReply(300, "A reply whose events were all dropped.");
+      fake.setTranscript([lostReply]);
+      // A new model selection loads the thread again, on the session it is already on.
+      const reloaded = yield* runtime.resumeThread({
+        providerThread,
+        modelSelection: modelSelection("other"),
+      });
+      yield* startTurn(runtime, reloaded);
+      yield* fake.takeRequest("prompt");
+      yield* fake.emit({ type: "agent_start" });
+      fake.setTranscript([lostReply, ...recordedTurn]);
+      yield* fake.emit({ type: "agent_end", messages: [] });
+
+      assert.deepEqual(yield* takeRepliesAndOutcome(takeEvent), {
+        texts: ["A reply whose events were all dropped.", fullReply],
+        status: "completed",
+      });
+    }).pipe(Effect.scoped, Effect.provide(testLayer)),
+  );
+
   // Thread b0d440d5 run 68: on a 68-run session the get_messages reply was
   // over the old 8 MiB record cap, so the read failed and the reply stayed cut.
   it.effect("completes a cut-off reply on a session whose history is over 8 MiB", () =>
