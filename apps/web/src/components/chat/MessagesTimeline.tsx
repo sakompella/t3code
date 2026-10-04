@@ -225,6 +225,7 @@ import {
   workEntryLabelCode,
   type WorkEntryCode,
 } from "@t3tools/client-runtime/work-log/entry-code";
+import { runFoldSegmentKeyIsForRun } from "@t3tools/client-runtime/state/run-fold";
 import { TerminalContextInlineChip } from "./TerminalContextInlineChip";
 import { Popover, PopoverPopup, PopoverTrigger } from "../ui/popover";
 import { Spinner } from "../ui/spinner";
@@ -333,7 +334,7 @@ interface TimelineRowSharedState {
     readonly checkpointId: string;
     readonly scopeId: string;
   }) => void;
-  onToggleTurnFold: (runId: RunId) => void;
+  onToggleTurnFold: (foldKey: string) => void;
   onToggleAttemptFold: (attemptId: RunAttemptId) => void;
   onFileOpen: (attachment: ChatFileAttachment) => void;
   onFileDownload: (attachment: ChatFileAttachment) => void;
@@ -575,8 +576,8 @@ export const MessagesTimeline = memo(function MessagesTimeline({
     () => readTimelinePosition(listIdentityKey),
     [listIdentityKey],
   );
-  const [expandedRunIds, setExpandedRunIds] = useState<ReadonlySet<RunId>>(
-    () => rememberedPosition?.disclosures?.runs ?? new Set(),
+  const [expandedFoldKeys, setExpandedFoldKeys] = useState<ReadonlySet<string>>(
+    () => rememberedPosition?.disclosures?.folds ?? new Set(),
   );
   const [expandedWorkGroupIds, setExpandedWorkGroupIds] = useState<ReadonlySet<string>>(
     () => rememberedPosition?.disclosures?.workGroups ?? new Set(),
@@ -594,7 +595,7 @@ export const MessagesTimeline = memo(function MessagesTimeline({
   // The list stays mounted across thread switches. Its first end pins on the
   // new thread must snap, not glide, even if that thread is mid-turn.
   const [settlingListIdentity, setSettlingListIdentity] = useState<string | null>(null);
-  let paintedExpandedRunIds = expandedRunIds;
+  let paintedExpandedFoldKeys = expandedFoldKeys;
   let paintedExpandedWorkGroupIds = expandedWorkGroupIds;
   let paintedExpandedAttemptIds = expandedAttemptIds;
   if (listIdentityRef.current !== listIdentityKey) {
@@ -602,18 +603,15 @@ export const MessagesTimeline = memo(function MessagesTimeline({
     setPositionedThreadKey(null);
     previousLatestRunRef.current = latestRun;
     setSettlingListIdentity(listIdentityKey);
-    paintedExpandedRunIds = rememberedPosition?.disclosures?.runs ?? new Set();
+    paintedExpandedFoldKeys = rememberedPosition?.disclosures?.folds ?? new Set();
     paintedExpandedWorkGroupIds = rememberedPosition?.disclosures?.workGroups ?? new Set();
     paintedExpandedAttemptIds = rememberedPosition?.disclosures?.attempts ?? new Set();
-    setExpandedRunIds(paintedExpandedRunIds);
+    setExpandedFoldKeys(paintedExpandedFoldKeys);
     setExpandedWorkGroupIds(paintedExpandedWorkGroupIds);
     setExpandedAttemptIds(paintedExpandedAttemptIds);
   }
   const citationThreadRef = useMemo(() => parseScopedThreadKey(routeThreadKey), [routeThreadKey]);
   const openPullRequest = useOpenPrLink(citationThreadRef ?? undefined);
-  const expandCitedRun = useCallback((runId: RunId) => {
-    setExpandedRunIds((current) => (current.has(runId) ? current : new Set([...current, runId])));
-  }, []);
   // Nested tool state shares the bounded thread-position cache.
   const workGroupViewState = useMemo<WorkGroupViewState>(
     () =>
@@ -687,14 +685,14 @@ export const MessagesTimeline = memo(function MessagesTimeline({
   }, []);
 
   const onToggleTurnFold = useCallback(
-    (runId: RunId) => {
-      suspendEndScrollMaintenanceForDisclosure(`turn-fold:${runId}`);
-      setExpandedRunIds((existing) => {
+    (foldKey: string) => {
+      suspendEndScrollMaintenanceForDisclosure(`turn-fold:${foldKey}`);
+      setExpandedFoldKeys((existing) => {
         const next = new Set(existing);
-        if (next.has(runId)) {
-          next.delete(runId);
+        if (next.has(foldKey)) {
+          next.delete(foldKey);
         } else {
-          next.add(runId);
+          next.add(foldKey);
         }
         return next;
       });
@@ -732,35 +730,6 @@ export const MessagesTimeline = memo(function MessagesTimeline({
     [suspendEndScrollMaintenanceForDisclosure],
   );
 
-  // An in-session interrupt leaves its turn expanded so the user keeps their
-  // place; the next turn (or a reload, since this is local state) folds it.
-
-  useEffect(() => {
-    const previous = previousLatestRunRef.current;
-    previousLatestRunRef.current = latestRun;
-    if (!latestRun || previous?.runId === undefined) {
-      return;
-    }
-    if (latestRun.runId === previous.runId) {
-      if (previous.status === "running" && latestRun.status === "interrupted") {
-        setExpandedRunIds((existing) => {
-          const next = new Set(existing);
-          next.add(latestRun.runId);
-          return next;
-        });
-      }
-      return;
-    }
-    setExpandedRunIds((existing) => {
-      if (!existing.has(previous.runId)) {
-        return existing;
-      }
-      const next = new Set(existing);
-      next.delete(previous.runId);
-      return next;
-    });
-  }, [latestRun]);
-
   const rowsProjectionRef = useRef<{
     readonly threadKey: string;
     readonly workspaceRoot: string | undefined;
@@ -773,7 +742,7 @@ export const MessagesTimeline = memo(function MessagesTimeline({
         timelineEntries,
         latestRun,
         runningRunId,
-        expandedRunIds,
+        expandedFoldKeys,
         expandedAttemptIds,
         expandedWorkGroupIds,
         isWorking,
@@ -796,7 +765,7 @@ export const MessagesTimeline = memo(function MessagesTimeline({
     timelineEntries,
     latestRun,
     runningRunId,
-    expandedRunIds,
+    expandedFoldKeys,
     expandedAttemptIds,
     expandedWorkGroupIds,
     isWorking,
@@ -807,6 +776,43 @@ export const MessagesTimeline = memo(function MessagesTimeline({
     worktreeSetup,
   ]);
   const rows = useStableRows(rawRows, listIdentityKey);
+  const runFoldKeys = useCallback(
+    (runId: RunId) =>
+      rows.flatMap((row) => (row.kind === "turn-fold" && row.runId === runId ? [row.foldKey] : [])),
+    [rows],
+  );
+  const expandCitedRun = useCallback(
+    (runId: RunId) => {
+      const collapsedKeys = runFoldKeys(runId).filter((key) => !expandedFoldKeys.has(key));
+      if (collapsedKeys.length > 0) {
+        setExpandedFoldKeys((current) => new Set([...current, ...collapsedKeys]));
+      }
+    },
+    [expandedFoldKeys, runFoldKeys],
+  );
+
+  // An in-session interrupt leaves its turn expanded so the user keeps their
+  // place; the next turn (or a reload, since this is local state) folds it.
+  useEffect(() => {
+    const previous = previousLatestRunRef.current;
+    previousLatestRunRef.current = latestRun;
+    if (!latestRun || previous?.runId === undefined) {
+      return;
+    }
+    if (latestRun.runId === previous.runId) {
+      if (previous.status === "running" && latestRun.status === "interrupted") {
+        const interruptedKeys = [latestRun.runId, ...runFoldKeys(latestRun.runId)];
+        setExpandedFoldKeys((existing) => new Set([...existing, ...interruptedKeys]));
+      }
+      return;
+    }
+    setExpandedFoldKeys((existing) => {
+      const next = new Set(
+        [...existing].filter((key) => !runFoldSegmentKeyIsForRun(key, previous.runId)),
+      );
+      return next.size === existing.size ? existing : next;
+    });
+  }, [latestRun, runFoldKeys]);
   // Run status/timestamps churn on every stream event; the shared row context
   // must not change with them or every timeline row re-renders per event.
   const runs = useStableHandoffRuns(runsProp);
@@ -1053,7 +1059,7 @@ export const MessagesTimeline = memo(function MessagesTimeline({
           scrollOffset: element.scrollTop,
           atEnd: isAtEnd,
           disclosures: {
-            runs: paintedExpandedRunIds,
+            folds: paintedExpandedFoldKeys,
             workGroups: paintedExpandedWorkGroupIds,
             attempts: paintedExpandedAttemptIds,
             workGroupState: workGroupViewState,
@@ -1104,7 +1110,7 @@ export const MessagesTimeline = memo(function MessagesTimeline({
     );
   }, [
     citationPositioning,
-    paintedExpandedRunIds,
+    paintedExpandedFoldKeys,
     paintedExpandedWorkGroupIds,
     paintedExpandedAttemptIds,
     workGroupViewState,
@@ -2467,7 +2473,7 @@ function TurnFoldTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "turn-
         type="button"
         aria-expanded={row.expanded}
         data-scroll-anchor-ignore
-        onClick={() => ctx.onToggleTurnFold(row.runId)}
+        onClick={() => ctx.onToggleTurnFold(row.foldKey)}
         className="flex cursor-pointer select-none items-center gap-1 rounded-md px-1 text-sm leading-relaxed text-muted-foreground tabular-nums transition-colors hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring/70"
       >
         <span>{row.label}</span>
