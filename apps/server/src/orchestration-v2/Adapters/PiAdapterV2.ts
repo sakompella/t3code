@@ -53,6 +53,7 @@ import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Queue from "effect/Queue";
+import * as Schedule from "effect/Schedule";
 import * as Schema from "effect/Schema";
 import * as Semaphore from "effect/Semaphore";
 import * as Stream from "effect/Stream";
@@ -80,6 +81,7 @@ import {
 import { makeProviderFailure, makeProviderRetryTurnItem } from "../ProviderFailure.ts";
 import { turnScopedSelectionTransition } from "../ProviderSelectionTransition.ts";
 import {
+  isPiSessionLeaseContention,
   makePiRpcConnection,
   parsePiModelSlug,
   piRecordField as recordField,
@@ -143,6 +145,15 @@ const STREAM_FLUSH_MS = 50;
 const PI_REQUEST_TIMEOUT_MS = 15_000;
 // Session lifecycle hooks reload extensions, MCP servers and language servers.
 const PI_SESSION_TIMEOUT_MS = 60_000;
+/**
+ * Prime Agent frees a session lease when the worker that held it exits. T3
+ * lets the previous RPC process finish closing the session, so the lease is
+ * normally free by the time a resume asks. This covers the few seconds the
+ * daemon may still need to stop the worker. A lease held longer, for example
+ * after the previous process was killed, falls back to a new session.
+ */
+const SESSION_LEASE_RETRY_INTERVAL = Duration.seconds(1);
+const SESSION_LEASE_MAX_RETRIES = 15;
 const PI_SKILL_DISCOVERY_TIMEOUT_MS = 4_000;
 const SETTLE_PROBE_MAX_ATTEMPTS = 3;
 const SETTLE_PROBE_RETRY_DELAY = Duration.millis(100);
@@ -660,11 +671,14 @@ export function makePiAdapterV2(
           // A local timeout does not cancel Pi's lifecycle hook. Retire the
           // process before fallback can race its eventual switch/new-session.
           Effect.tapError((error) =>
-            Effect.logWarning(`${name} session lifecycle request failed`, {
-              providerSessionId: input.providerSessionId,
-              operation: record["type"],
-              errorTag: error._tag,
-            }),
+            (isPiSessionLeaseContention(error) ? Effect.logInfo : Effect.logWarning)(
+              `${name} session lifecycle request failed`,
+              {
+                providerSessionId: input.providerSessionId,
+                operation: record["type"],
+                errorTag: error._tag,
+              },
+            ),
           ),
           Effect.catchTags({
             PiRpcTimeoutError: (error) =>
@@ -2579,11 +2593,15 @@ export function makePiAdapterV2(
             // the failed request again, on the old model.
             yield* request({ type: "abort_retry" }, 2_000).pipe(Effect.ignore);
           }
-          const result = yield* lifecycleRequest(
-            resumeId != null
-              ? { type: "switch_session", sessionPath: resumeId }
-              : { type: "new_session" },
-          );
+          const result = yield* resumeId != null
+            ? lifecycleRequest({ type: "switch_session", sessionPath: resumeId }).pipe(
+                Effect.retry({
+                  while: isPiSessionLeaseContention,
+                  schedule: Schedule.spaced(SESSION_LEASE_RETRY_INTERVAL),
+                  times: SESSION_LEASE_MAX_RETRIES,
+                }),
+              )
+            : lifecycleRequest({ type: "new_session" });
           if (recordField(result, "cancelled") === true) {
             return yield* protocolError("A Pi extension cancelled the session switch");
           }
