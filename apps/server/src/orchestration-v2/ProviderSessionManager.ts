@@ -1695,6 +1695,8 @@ export const layerWithOptions = (
         );
       };
 
+      // Sessions release concurrently: each waits on its own provider process
+      // to exit, and server shutdown has a short grace before a forced kill.
       const shutdown = Effect.gen(function* () {
         const activeSessions = [...(yield* Ref.get(sessions)).values()];
         yield* Effect.forEach(
@@ -1711,7 +1713,7 @@ export const layerWithOptions = (
                 }),
               ),
             ),
-          { discard: true },
+          { discard: true, concurrency: "unbounded" },
         );
       });
       yield* Effect.addFinalizer(() => shutdown);
