@@ -1,7 +1,22 @@
 /**
- * Framing follows Pi's spec: LF-delimited only, with a trailing `\r` stripped.
- * Lines are split manually (never with `readline`, which also splits on
- * U+2028/U+2029 and would corrupt frames).
+ * PiRpc — stdio JSONL transport for the Pi coding agent's RPC mode.
+ *
+ * Spawns `pi --mode rpc` and speaks Pi's line-delimited JSON protocol:
+ * requests go to stdin as `{"type": "...", "id": "..."}` records, responses
+ * come back as `{"type": "response", "id": ..., "success": ...}` and are
+ * correlated by `id`; every other stdout record is a session event and is
+ * surfaced on the `events` queue in arrival order.
+ *
+ * Framing follows Pi's spec: LF-delimited only, with a trailing `\r`
+ * stripped. Lines are split manually (never with `readline`, which also
+ * splits on U+2028/U+2029 and would corrupt frames). Records that fail to
+ * parse as JSON are dropped with a debug log rather than failing the
+ * transport, so a chatty extension cannot take the session down. Records
+ * longer than `maxRecordChars` fail the request they answer with
+ * `PiRpcRecordTooLargeError`; the reader resyncs at the next newline.
+ *
+ * Used by `PiAdapterV2` for sessions and by `PiTextGeneration` /
+ * `PiProvider` for ephemeral one-shot processes.
  */
 import * as Clock from "effect/Clock";
 import * as Deferred from "effect/Deferred";
@@ -63,6 +78,19 @@ export function isPiSessionLeaseContention(error: unknown): boolean {
   );
 }
 
+export class PiRpcRecordTooLargeError extends Schema.TaggedError<PiRpcRecordTooLargeError>()(
+  "PiRpcRecordTooLargeError",
+  {
+    operation: Schema.String,
+    chars: Schema.Int,
+    maxChars: Schema.Int,
+  },
+) {
+  override get message(): string {
+    return `Pi RPC ${this.operation} failed: a stdout record of ${this.chars} chars exceeds the ${this.maxChars} char limit.`;
+  }
+}
+
 export type PiRpcRecord = Record<string, unknown>;
 
 export function piRecordField(input: unknown, key: string): unknown {
@@ -112,14 +140,22 @@ export interface PiRpcSpawnOptions {
    * its SIGTERM handler needs longer, or the kill cuts that shutdown off.
    */
   readonly terminationGrace?: Duration.Input;
+  /** Longest stdout record accepted, in characters. */
+  readonly maxRecordChars?: number;
 }
 
 export interface PiRpcConnection {
   readonly send: (record: PiRpcRecord) => Effect.Effect<void, PiRpcError>;
+  /**
+   * Correlated request: assigns an `id`, waits for the matching response
+   * record, and returns its `data` (undefined when the command carries none).
+   * Fails on `success: false`, transport death, timeout, or a reply over the
+   * record size limit.
+   */
   readonly request: (
     record: PiRpcRecord,
     timeoutMs?: number,
-  ) => Effect.Effect<unknown, PiRpcError | PiRpcTimeoutError>;
+  ) => Effect.Effect<unknown, PiRpcError | PiRpcTimeoutError | PiRpcRecordTooLargeError>;
   readonly events: Queue.Queue<PiRpcRecord, PiRpcError>;
   readonly exited: Effect.Effect<number, PiRpcError>;
   readonly terminate: Effect.Effect<void>;
@@ -130,41 +166,73 @@ const DEFAULT_TERMINATION_GRACE = Duration.seconds(1);
 const TERMINATION_POLL = Schedule.spaced("20 millis");
 
 interface PendingPiRequest {
-  readonly deferred: Deferred.Deferred<unknown, PiRpcError>;
+  readonly operation: string;
+  readonly deferred: Deferred.Deferred<unknown, PiRpcError | PiRpcRecordTooLargeError>;
 }
 
-// MCP completion events carry images in both model content and the script
-// CallToolResult. Allow the shared image budget twice, plus bounded JSON/text
-// overhead, before dropping an extension's oversized record.
-const MAX_PI_RECORD_CHARS =
-  2 * MAX_TOOL_OUTPUT_IMAGES * MAX_TOOL_OUTPUT_IMAGE_BASE64_LENGTH + 8 * 1024 * 1024;
+/**
+ * Default record limit, in characters. The largest `get_messages` reply among
+ * this machine's Prime Agent sessions is about 13 million characters, so 64 Mi
+ * (67 million) leaves a 5x margin. It also bounds the cost of a bad record:
+ * `JSON.parse` of 64 Mi characters blocks the event loop for about 200 ms and
+ * the line exists as pieces, a joined string and a parsed value at once.
+ *
+ * MCP completion events carry images in both model content and the script
+ * CallToolResult, so the limit also allows the shared image budget twice, plus
+ * bounded JSON/text overhead, before an extension's record is refused.
+ */
+const DEFAULT_MAX_PI_RECORD_CHARS = Math.max(
+  64 * 1024 * 1024,
+  2 * MAX_TOOL_OUTPUT_IMAGES * MAX_TOOL_OUTPUT_IMAGE_BASE64_LENGTH + 8 * 1024 * 1024,
+);
 
-function makeJsonlFramer() {
-  let buffer = "";
-  let dropping = false;
-  return (chunk: string): ReadonlyArray<string> => {
-    const lines: string[] = [];
+export type PiFrame =
+  | { readonly _tag: "Line"; readonly text: string }
+  | { readonly _tag: "Oversized"; readonly chars: number };
+
+/**
+ * Splits decoded stdout text into LF-delimited frames. Pieces of a line are
+ * collected and joined once at its newline. Past `maxChars` a line stops being
+ * collected and surfaces as `Oversized`, carrying only its length.
+ */
+export function makeJsonlFramer(maxChars: number) {
+  let pieces: string[] = [];
+  let chars = 0;
+
+  const push = (piece: string) => {
+    chars += piece.length;
+    if (chars <= maxChars) {
+      pieces.push(piece);
+    } else {
+      pieces = [];
+    }
+  };
+
+  const finishLine = (): PiFrame | undefined => {
+    const text = pieces.join("");
+    const frame: PiFrame | undefined =
+      chars > maxChars
+        ? { _tag: "Oversized", chars }
+        : chars === 0
+          ? undefined
+          : { _tag: "Line", text: text.endsWith("\r") ? text.slice(0, -1) : text };
+    pieces = [];
+    chars = 0;
+    return frame;
+  };
+
+  return (chunk: string): ReadonlyArray<PiFrame> => {
+    const frames: PiFrame[] = [];
     let start = 0;
     while (start < chunk.length) {
       const newline = chunk.indexOf("\n", start);
-      const end = newline < 0 ? chunk.length : newline;
-      if (!dropping) {
-        if (buffer.length + end - start > MAX_PI_RECORD_CHARS) {
-          buffer = "";
-          dropping = true;
-        } else {
-          buffer += chunk.slice(start, end);
-        }
-      }
+      push(chunk.slice(start, newline < 0 ? chunk.length : newline));
       if (newline < 0) break;
-      if (!dropping && buffer.length > 0) {
-        lines.push(buffer.endsWith("\r") ? buffer.slice(0, -1) : buffer);
-      }
-      buffer = "";
-      dropping = false;
+      const frame = finishLine();
+      if (frame !== undefined) frames.push(frame);
       start = newline + 1;
     }
-    return lines;
+    return frames;
   };
 }
 
@@ -300,6 +368,7 @@ export const makePiRpcConnection = Effect.fnUntraced(function* (options: PiRpcSp
   // pi process with no finalizer to reap it.
   yield* Scope.addFinalizer(scope, terminateProcess.pipe(Effect.ignore, Effect.uninterruptible));
 
+  const maxRecordChars = options.maxRecordChars ?? DEFAULT_MAX_PI_RECORD_CHARS;
   const pendingRequests = new Map<string, PendingPiRequest>();
   const events = yield* Queue.unbounded<PiRpcRecord, PiRpcError>();
   const outgoing = yield* Queue.unbounded<Uint8Array, PiRpcError>();
@@ -358,30 +427,52 @@ export const makePiRpcConnection = Effect.fnUntraced(function* (options: PiRpcSp
     Effect.forkIn(scope),
   );
 
+  // An oversized record is never parsed, so we cannot tell which request it
+  // answers, or whether it is a response at all. Fail every pending request: a
+  // wrong guess would leave the right one hanging until its timeout. The
+  // callers' requests are rare and short, so a spurious failure is cheap.
+  const rejectOversized = (frame: Extract<PiFrame, { _tag: "Oversized" }>) =>
+    Effect.gen(function* () {
+      yield* Effect.logWarning("Dropping oversized pi stdout record.", {
+        chars: frame.chars,
+        maxChars: maxRecordChars,
+        failedRequests: pendingRequests.size,
+      });
+      for (const [id, pending] of pendingRequests) {
+        pendingRequests.delete(id);
+        yield* Deferred.fail(
+          pending.deferred,
+          new PiRpcRecordTooLargeError({
+            operation: pending.operation,
+            chars: frame.chars,
+            maxChars: maxRecordChars,
+          }),
+        );
+      }
+    });
+
+  const routeFrame = (frame: PiFrame) =>
+    Effect.gen(function* () {
+      if (frame._tag === "Oversized") return yield* rejectOversized(frame);
+      const record = parsePiRecord(frame.text);
+      if (record === undefined) {
+        yield* Effect.logDebug("Dropping non-JSON pi stdout line.", {
+          lineLength: frame.text.length,
+        });
+        return;
+      }
+      yield* routeRecord(record);
+    });
+
   yield* Effect.gen(function* () {
-    const frame = makeJsonlFramer();
+    const frameLines = makeJsonlFramer(maxRecordChars);
     yield* child.stdout.pipe(
       Stream.decodeText(),
       Stream.runForEach((chunk) =>
-        Effect.gen(function* () {
-          const lines = frame(chunk);
-          for (const line of lines) {
-            const record = parsePiRecord(line);
-            if (record === undefined) {
-              yield* Effect.logDebug("Dropping non-JSON pi stdout line.", {
-                lineLength: line.length,
-              });
-              continue;
-            }
-            yield* routeRecord(record);
-          }
-        }),
+        Effect.forEach(frameLines(chunk), routeFrame, { discard: true }),
       ),
     );
-    for (const line of frame("\n")) {
-      const trailing = parsePiRecord(line);
-      if (trailing !== undefined) yield* routeRecord(trailing);
-    }
+    yield* Effect.forEach(frameLines("\n"), routeFrame, { discard: true });
   }).pipe(
     Effect.matchCauseEffect({
       onFailure: (cause) => failTransport(new PiRpcError({ operation: "read", cause })),
@@ -456,24 +547,19 @@ export const makePiRpcConnection = Effect.fnUntraced(function* (options: PiRpcSp
   const request = (
     record: PiRpcRecord,
     timeoutMs = DEFAULT_REQUEST_TIMEOUT_MS,
-  ): Effect.Effect<unknown, PiRpcError | PiRpcTimeoutError> =>
+  ): Effect.Effect<unknown, PiRpcError | PiRpcTimeoutError | PiRpcRecordTooLargeError> =>
     Effect.gen(function* () {
       const id = `t3-${nextRequestId++}`;
-      const deferred = yield* Deferred.make<unknown, PiRpcError>();
-      pendingRequests.set(id, { deferred });
+      const operation = String(record["type"] ?? "request");
+      const deferred = yield* Deferred.make<unknown, PiRpcError | PiRpcRecordTooLargeError>();
+      pendingRequests.set(id, { operation, deferred });
       yield* send({ ...record, id }).pipe(
         Effect.tapError(() => Effect.sync(() => pendingRequests.delete(id))),
       );
       return yield* Effect.raceFirst(Deferred.await(deferred), Deferred.await(transportDown)).pipe(
         Effect.timeoutOrElse({
           duration: Duration.millis(timeoutMs),
-          orElse: () =>
-            Effect.fail(
-              new PiRpcTimeoutError({
-                operation: String(record["type"] ?? "request"),
-                timeoutMs,
-              }),
-            ),
+          orElse: () => Effect.fail(new PiRpcTimeoutError({ operation, timeoutMs })),
         }),
         Effect.onInterrupt(() => Effect.sync(() => pendingRequests.delete(id))),
         Effect.onError(() => Effect.sync(() => pendingRequests.delete(id))),
