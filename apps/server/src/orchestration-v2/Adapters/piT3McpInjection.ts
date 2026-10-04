@@ -281,6 +281,8 @@ export function buildPiRpcLaunch(input: {
    */
   readonly kernelMcp?: { readonly skillPath: string | undefined };
   readonly ephemeral?: boolean;
+  /** Session file the process starts on, instead of a new session. */
+  readonly resumeSessionFile?: string;
   readonly disableExtensions?: boolean;
   readonly disableTools?: boolean;
   readonly runtimeMode?: "approval-required" | "auto-accept-edits" | "auto" | "full-access";
@@ -301,6 +303,7 @@ export function buildPiRpcLaunch(input: {
     "--mode",
     "rpc",
     ...(input.ephemeral === true ? ["--no-session"] : []),
+    ...(input.resumeSessionFile === undefined ? [] : ["--resume", input.resumeSessionFile]),
     ...launchArgs,
     // Restrictions follow user launch args so a configured --tools or
     // --extension cannot silently re-enable unattended text-generation code.

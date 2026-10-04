@@ -96,6 +96,16 @@ export function isPiSessionLeaseRefusal(stderr: string): boolean {
   return stderr.includes("Session is already active");
 }
 
+/** A `--resume` launch the daemon refused because another worker still holds the session. */
+export class PiSessionLeaseHeldError extends Schema.TaggedError<PiSessionLeaseHeldError>()(
+  "PiSessionLeaseHeldError",
+  { sessionFile: Schema.String },
+) {
+  override get message(): string {
+    return `Pi session ${this.sessionFile} is still held by another worker.`;
+  }
+}
+
 export type PiRpcRecord = Record<string, unknown>;
 
 export function piRecordField(input: unknown, key: string): unknown {

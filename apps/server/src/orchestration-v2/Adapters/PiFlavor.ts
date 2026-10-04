@@ -91,6 +91,15 @@ export interface PiFlavor {
    * disconnect timer fires, and a resume in that window is refused.
    */
   readonly terminationGrace: Duration.Duration;
+  /**
+   * Whether a thread's existing session is opened by launching the process on
+   * it (`--resume <file>`) instead of asking the running process to
+   * `switch_session`. Prime Agent's daemon hands its message, observe and
+   * heartbeat controllers only to the session a process starts on, so a
+   * session swapped in later cannot message its subagents. Pi has no such
+   * controllers, and its `--resume` opens a picker, so it keeps the swap.
+   */
+  readonly resumesAtLaunch: boolean;
 }
 
 export const PI_FLAVOR: PiFlavor = {
@@ -114,6 +123,7 @@ export const PI_FLAVOR: PiFlavor = {
   kernelMcp: null,
   heartbeats: false,
   terminationGrace: Duration.seconds(1),
+  resumesAtLaunch: false,
 };
 
 export const PRIME_AGENT_FLAVOR: PiFlavor = {
@@ -136,4 +146,5 @@ export const PRIME_AGENT_FLAVOR: PiFlavor = {
   kernelMcp: { agentDirEnvVar: "PRIME_AGENT_CODING_AGENT_DIR", defaultAgentDir: ".prime/agent" },
   heartbeats: true,
   terminationGrace: Duration.seconds(15),
+  resumesAtLaunch: true,
 };

@@ -50,11 +50,13 @@ import * as Option from "effect/Option";
 import * as Deferred from "effect/Deferred";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
+import * as Exit from "effect/Exit";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Queue from "effect/Queue";
 import * as Schedule from "effect/Schedule";
 import * as Schema from "effect/Schema";
+import * as Scope from "effect/Scope";
 import * as Semaphore from "effect/Semaphore";
 import * as Stream from "effect/Stream";
 import { ChildProcessSpawner } from "effect/unstable/process";
@@ -82,7 +84,9 @@ import { makeProviderFailure, makeProviderRetryTurnItem } from "../ProviderFailu
 import { turnScopedSelectionTransition } from "../ProviderSelectionTransition.ts";
 import {
   isPiSessionLeaseContention,
+  isPiSessionLeaseRefusal,
   makePiRpcConnection,
+  PiSessionLeaseHeldError,
   parsePiModelSlug,
   piRecordField as recordField,
   piRecordNumber as recordNumber,
@@ -455,31 +459,90 @@ export function makePiAdapterV2(
       if (!resolvedLaunchArgs.ok) {
         return yield* protocolError(resolvedLaunchArgs.message);
       }
-      const launch = buildPiRpcLaunch({
-        launchArgs: resolvedLaunchArgs.args,
-        environment: options.environment,
-        mcpSession,
-        extensionPath,
-        ...(flavor.kernelMcp === null ? {} : { kernelMcp: { skillPath } }),
-        runtimeMode: input.runtimePolicy.runtimeMode,
-      });
-      const connection: PiRpcConnection = yield* makePiRpcConnection({
-        command: binary,
-        args: launch.args,
-        cwd,
-        env: launch.env,
-        terminationGrace: flavor.terminationGrace,
-      }).pipe(
-        Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, options.spawner),
-        Effect.mapError(
-          (cause) =>
-            new ProviderAdapter.ProviderAdapterOpenSessionError({
-              driver,
-              providerSessionId: input.providerSessionId,
-              cause,
-            }),
-        ),
-      );
+      const launchProcess = (processScope: Scope.Scope, resumeSessionFile?: string) => {
+        const launch = buildPiRpcLaunch({
+          launchArgs: resolvedLaunchArgs.args,
+          environment: options.environment,
+          mcpSession,
+          extensionPath,
+          ...(flavor.kernelMcp === null ? {} : { kernelMcp: { skillPath } }),
+          ...(resumeSessionFile === undefined ? {} : { resumeSessionFile }),
+          runtimeMode: input.runtimePolicy.runtimeMode,
+        });
+        return makePiRpcConnection({
+          command: binary,
+          args: launch.args,
+          cwd,
+          env: launch.env,
+          terminationGrace: flavor.terminationGrace,
+        }).pipe(
+          Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, options.spawner),
+          Scope.provide(processScope),
+          Effect.mapError(
+            (cause) =>
+              new ProviderAdapter.ProviderAdapterOpenSessionError({
+                driver,
+                providerSessionId: input.providerSessionId,
+                cause,
+              }),
+          ),
+        );
+      };
+      /**
+       * Starts the process on a thread's existing session and waits until it
+       * has opened it. While the previous worker is still stopping, the daemon
+       * refuses the session and the process exits; that refusal is retried on
+       * the same session.
+       */
+      const launchProcessOnSession = (sessionFile: string) =>
+        Effect.gen(function* () {
+          const processScope = yield* Scope.fork(scope);
+          const connection = yield* launchProcess(processScope, sessionFile);
+          yield* connection.request({ type: "get_state" }, PI_SESSION_TIMEOUT_MS).pipe(
+            Effect.catch((error) =>
+              Effect.gen(function* () {
+                const leaseHeld = isPiSessionLeaseRefusal(yield* connection.stderrAfterExit);
+                yield* Scope.close(processScope, Exit.void);
+                return yield* leaseHeld ? new PiSessionLeaseHeldError({ sessionFile }) : error;
+              }),
+            ),
+          );
+          return connection;
+        }).pipe(
+          Effect.tapError((error) =>
+            (error._tag === "PiSessionLeaseHeldError" ? Effect.logInfo : Effect.logWarning)(
+              `${name} could not start on the thread's session`,
+              { providerSessionId: input.providerSessionId, errorTag: error._tag },
+            ),
+          ),
+          Effect.retry({
+            while: (error) => error._tag === "PiSessionLeaseHeldError",
+            schedule: Schedule.spaced(SESSION_LEASE_RETRY_INTERVAL),
+            times: SESSION_LEASE_MAX_RETRIES,
+          }),
+        );
+      /** The session file the process is known to be on; null while a replacement is in flight. */
+      let liveSession: string | null = null;
+      /** A session the process could not start on; the thread falls back to a new one. */
+      let unresumableSession: string | null = null;
+      const resumeAtLaunch = flavor.resumesAtLaunch ? input.initialNativeThreadId : undefined;
+      const connection: PiRpcConnection =
+        resumeAtLaunch === undefined
+          ? yield* launchProcess(scope)
+          : yield* launchProcessOnSession(resumeAtLaunch).pipe(
+              Effect.tap(() =>
+                Effect.sync(() => {
+                  liveSession = resumeAtLaunch;
+                }),
+              ),
+              // The run executor answers a failed resume with a new native
+              // session, which this process already has once it starts without one.
+              Effect.catch(() =>
+                Effect.sync(() => {
+                  unresumableSession = resumeAtLaunch;
+                }).pipe(Effect.andThen(launchProcess(scope))),
+              ),
+            );
       /** Whether T3's extension command for in-place rollback is loaded; null until discovered. */
       let navigateTreeAvailable: boolean | null = null;
       const discoverSkillNames = connection
@@ -2573,13 +2636,21 @@ export function makePiAdapterV2(
         }
         const existing = threadInput.existingProviderThread;
         const resumeId = existing?.nativeThreadRef?.nativeId;
+        if (resumeId != null && resumeId === unresumableSession) {
+          return yield* protocolError(`${name} could not start on session ${resumeId}`);
+        }
         const needsNewSession = resumeId == null && registrationAttempted;
+        // Replacing the session of a running Prime Agent process would drop
+        // its message, observe and heartbeat controllers.
+        const alreadyOnSession =
+          flavor.resumesAtLaunch && resumeId != null && resumeId === liveSession;
         registrationAttempted = true;
-        if (resumeId != null || needsNewSession) {
+        if ((resumeId != null && !alreadyOnSession) || needsNewSession) {
           lastNativeThreadId = resumeId ?? lastNativeThreadId;
           // Even a failed lifecycle operation can change Pi's native session.
           // Never leave the old app binding or model defaults usable afterward.
           threadState = null;
+          liveSession = null;
           appliedModel = null;
           appliedThinking = null;
           appliedSessionName = null;
@@ -2640,6 +2711,7 @@ export function makePiAdapterV2(
           return yield* protocolError(`${name} did not create a distinct session file`);
         }
         lastNativeThreadId = nativeId;
+        liveSession = nativeId;
         heartbeatSessionId = recordString(stateData, "sessionId") ?? null;
         // A persisted list says what ran before this process; read it afresh.
         const heartbeats = flavor.heartbeats ? ((yield* readHeartbeats()) ?? []) : undefined;
@@ -3369,6 +3441,7 @@ export function makePiAdapterV2(
                 return piThreadSnapshot(state.providerThread);
               }
             }
+            liveSession = null;
             const forkData = yield* lifecycleRequest({ type: "fork", entryId: forkEntryId });
             if (recordField(forkData, "cancelled") === true) {
               return yield* protocolError("A Pi extension cancelled the session fork");
@@ -3388,6 +3461,7 @@ export function makePiAdapterV2(
               return yield* protocolError(`${name} fork did not return a persisted session file`);
             }
             lastNativeThreadId = forkSessionFile;
+            liveSession = forkSessionFile;
             appliedModel = null;
             appliedThinking = null;
             appliedSessionName = null;

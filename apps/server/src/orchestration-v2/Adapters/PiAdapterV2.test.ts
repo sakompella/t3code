@@ -18,7 +18,9 @@ import {
   type OrchestrationV2ProviderTurn,
 } from "@t3tools/contracts";
 import * as Cause from "effect/Cause";
+import * as Clock from "effect/Clock";
 import * as DateTime from "effect/DateTime";
+import * as Deferred from "effect/Deferred";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
@@ -637,6 +639,226 @@ describe("PiAdapterV2", () => {
       yield* fake.takeRequest("prompt");
     }).pipe(Effect.scoped, Effect.provide(testLayer)),
   );
+
+  describe("Prime Agent starts on the thread's own session", () => {
+    const LEASE_REFUSAL = `Error: Session is already active in 0123456789ab: ${FAKE_SESSION_FILE}\n`;
+
+    /** What Prime Agent does when it cannot open the session it was told to resume: print the reason and exit. */
+    const exitedProcess = (stderr: string) =>
+      ChildProcessSpawner.makeHandle({
+        pid: ChildProcessSpawner.ProcessId(FAKE_PID),
+        exitCode: Effect.succeed(ChildProcessSpawner.ExitCode(1)),
+        isRunning: Effect.succeed(false),
+        kill: () => Effect.void,
+        unref: Effect.succeed(Effect.void),
+        stdin: Sink.drain,
+        stdout: Stream.empty,
+        stderr: Stream.fromIterable([new TextEncoder().encode(stderr)]),
+        all: Stream.empty,
+        getInputFd: () => Sink.drain,
+        getOutputFd: () => Stream.empty,
+      });
+
+    const resumeFile = (args: ReadonlyArray<string>) => {
+      const flag = args.indexOf("--resume");
+      return flag === -1 ? undefined : args[flag + 1];
+    };
+
+    /** `fake`, except that each launch `refuses` (by its argv and 1-based count) exits at once with `stderr`. */
+    const refusingLaunches = (
+      fake: FakePi,
+      stderr: string,
+      refuses: (args: ReadonlyArray<string>, launchCount: number) => boolean,
+    ) => {
+      const spawnedArgs: Array<ReadonlyArray<string>> = [];
+      const spawner = ChildProcessSpawner.make((command) => {
+        const args = ChildProcess.isStandardCommand(command) ? command.args : [];
+        spawnedArgs.push(args);
+        return refuses(args, spawnedArgs.length)
+          ? Effect.succeed(exitedProcess(stderr))
+          : fake.spawner.spawn(command);
+      });
+      return { fake: { ...fake, spawner }, spawnedArgs };
+    };
+
+    /** The thread a previous process left behind, as the orchestrator stores it. */
+    const savedThread = Effect.gen(function* () {
+      const previous = yield* makeFakePi;
+      const { runtime } = yield* openRuntime(
+        previous,
+        "default",
+        THREAD_ID,
+        SESSION_ID,
+        undefined,
+        PRIME_AGENT_FLAVOR,
+      );
+      return yield* runtime.ensureThread({
+        threadId: THREAD_ID,
+        modelSelection: modelSelection("default"),
+        runtimePolicy,
+      });
+    });
+
+    const openOnSavedSession = (fake: FakePi, flavor: PiFlavor = PRIME_AGENT_FLAVOR) =>
+      Effect.gen(function* () {
+        const adapter = yield* makeAdapter(fake, "", undefined, flavor);
+        return yield* adapter.openSession({
+          threadId: THREAD_ID,
+          providerSessionId: SESSION_ID,
+          modelSelection: modelSelection("default"),
+          runtimePolicy,
+          initialNativeThreadId: FAKE_SESSION_FILE,
+        });
+      });
+
+    const replacementRequests = (fake: FakePi) =>
+      fake
+        .allRequests()
+        .filter(
+          (request) => request["type"] === "switch_session" || request["type"] === "new_session",
+        );
+
+    /** Lets a launch run through its retry waits until it finishes. */
+    const waitOutLaunch = <A, E, R>(launch: Effect.Effect<A, E, R>) =>
+      Effect.gen(function* () {
+        const finished = yield* Deferred.make<void>();
+        const fiber = yield* launch.pipe(
+          Effect.ensuring(Deferred.succeed(finished, undefined)),
+          Effect.forkChild,
+        );
+        for (let waited = 0; waited < 100 && !(yield* Deferred.isDone(finished)); waited++) {
+          yield* TestClock.adjust(Duration.seconds(1));
+          // Real time, so the launch's own process I/O can progress between ticks.
+          yield* Effect.sleep(Duration.millis(5)).pipe(
+            Effect.provideService(Clock.Clock, Clock.Clock.defaultValue()),
+          );
+        }
+        return yield* Fiber.join(fiber);
+      });
+
+    it.effect("resumes an existing thread without replacing the process's session", () =>
+      Effect.gen(function* () {
+        const providerThread = yield* savedThread;
+        const fake = yield* makeFakePi;
+        const runtime = yield* openOnSavedSession(fake);
+        assert.equal(resumeFile(fake.lastSpawn().args), FAKE_SESSION_FILE);
+
+        yield* runtime.resumeThread({ providerThread });
+        // A changed model selection loads the thread again.
+        const resumed = yield* runtime.resumeThread({
+          providerThread,
+          modelSelection: modelSelection("other"),
+        });
+
+        assert.equal(resumed.nativeThreadRef?.nativeId, FAKE_SESSION_FILE);
+        assert.deepEqual(replacementRequests(fake), []);
+      }).pipe(Effect.scoped, Effect.provide(testLayer)),
+    );
+
+    it.effect("starts a new thread on the session the process created", () =>
+      Effect.gen(function* () {
+        const fake = yield* makeFakePi;
+        const { runtime } = yield* openRuntime(
+          fake,
+          "default",
+          THREAD_ID,
+          SESSION_ID,
+          undefined,
+          PRIME_AGENT_FLAVOR,
+        );
+        yield* runtime.ensureThread({
+          threadId: THREAD_ID,
+          modelSelection: modelSelection("default"),
+          runtimePolicy,
+        });
+
+        assert.isUndefined(resumeFile(fake.lastSpawn().args));
+        assert.deepEqual(replacementRequests(fake), []);
+      }).pipe(Effect.scoped, Effect.provide(testLayer)),
+    );
+
+    it.effect("leaves Pi, which has no such controllers, to switch sessions", () =>
+      Effect.gen(function* () {
+        const providerThread = yield* savedThread;
+        const fake = yield* makeFakePi;
+        const runtime = yield* openOnSavedSession(fake, PI_FLAVOR);
+
+        yield* runtime.resumeThread({ providerThread });
+
+        assert.isUndefined(resumeFile(fake.lastSpawn().args));
+        assert.equal(replacementRequests(fake).length, 1);
+      }).pipe(Effect.scoped, Effect.provide(testLayer)),
+    );
+
+    it.effect("retries the same session until the previous owner releases it", () =>
+      Effect.gen(function* () {
+        const providerThread = yield* savedThread;
+        const fake = yield* makeFakePi;
+        const launches = refusingLaunches(
+          fake,
+          LEASE_REFUSAL,
+          (_, launchCount) => launchCount <= 3,
+        );
+
+        const runtime = yield* waitOutLaunch(openOnSavedSession(launches.fake));
+        const resumed = yield* runtime.resumeThread({ providerThread });
+
+        assert.deepEqual(launches.spawnedArgs.map(resumeFile), Array(4).fill(FAKE_SESSION_FILE));
+        assert.equal(resumed.nativeThreadRef?.nativeId, FAKE_SESSION_FILE);
+        assert.deepEqual(replacementRequests(fake), []);
+      }).pipe(Effect.scoped, Effect.provide(testLayer)),
+    );
+
+    it.effect("falls back to a new session when the lease is never released", () =>
+      Effect.gen(function* () {
+        const providerThread = yield* savedThread;
+        const fake = yield* makeFakePi;
+        const launches = refusingLaunches(
+          fake,
+          LEASE_REFUSAL,
+          (args) => resumeFile(args) !== undefined,
+        );
+
+        // One attempt plus the 15 retries, then a process on its own session.
+        const runtime = yield* waitOutLaunch(openOnSavedSession(launches.fake));
+        const failed = yield* runtime.resumeThread({ providerThread }).pipe(Effect.flip);
+        const replacement = yield* runtime.ensureThread({
+          threadId: THREAD_ID,
+          modelSelection: modelSelection("default"),
+          runtimePolicy,
+          existingProviderThread: { ...providerThread, nativeThreadRef: null },
+        });
+
+        assert.equal(
+          launches.spawnedArgs.filter((args) => resumeFile(args) !== undefined).length,
+          16,
+        );
+        assert.isUndefined(resumeFile(fake.lastSpawn().args));
+        assert.equal(failed._tag, "ProviderAdapterResumeThreadError");
+        assert.isDefined(replacement.nativeThreadRef);
+        assert.deepEqual(replacementRequests(fake), []);
+      }).pipe(Effect.scoped, Effect.provide(testLayer)),
+    );
+
+    it.effect("does not retry other launch failures", () =>
+      Effect.gen(function* () {
+        const providerThread = yield* savedThread;
+        const fake = yield* makeFakePi;
+        const launches = refusingLaunches(
+          fake,
+          "Error: Session file is corrupt\n",
+          (_, launchCount) => launchCount === 1,
+        );
+
+        const runtime = yield* waitOutLaunch(openOnSavedSession(launches.fake));
+        const failed = yield* runtime.resumeThread({ providerThread }).pipe(Effect.flip);
+
+        assert.deepEqual(launches.spawnedArgs.map(resumeFile), [FAKE_SESSION_FILE, undefined]);
+        assert.equal(failed._tag, "ProviderAdapterResumeThreadError");
+        assert.deepEqual(replacementRequests(fake), []);
+      }).pipe(Effect.scoped, Effect.provide(testLayer)),
+    );
+  });
 
   describe("resume while the previous owner still holds the session lease", () => {
     const LEASE_HELD =
@@ -2568,7 +2790,17 @@ describe("PiAdapterV2 with the Prime Agent flavor", () => {
       const requestTypes = () => fake.allRequests().map((request) => request.type);
       assert.notInclude(requestTypes(), "abort_retry");
 
-      yield* runtime.resumeThread({ providerThread });
+      // The thread now lives in another session file, so the process must swap.
+      yield* runtime.resumeThread({
+        providerThread: {
+          ...providerThread,
+          nativeThreadRef: {
+            driver: PRIME_AGENT_FLAVOR.driverKind,
+            nativeId: "/fake/other.jsonl",
+            strength: "strong",
+          },
+        },
+      });
 
       const types = requestTypes();
       assert.isAbove(types.indexOf("abort_retry"), -1);
