@@ -82,6 +82,12 @@ export interface ActivePiTurn {
    * stops moving may have lost its closing events (see `PiFlavor.lossyStream`).
    */
   sessionEventCount: number;
+  /** Stored messages this turn's own events showed; see `transcriptMessageKey`. */
+  readonly seenMessageKeys: Set<string>;
+  /** Prime Agent's stored conversation was reconciled into the turn, or given up on. */
+  transcriptReconciled: boolean;
+  /** History reads that did not match the idle state at settle. */
+  settleReads: number;
   sawCompaction: boolean;
   /** RPC compact is in flight; Pi abort does not cancel it. */
   manualCompactInFlight: boolean;
