@@ -121,7 +121,8 @@ function toolCallIdsOf(messages: ReadonlyArray<unknown>): Array<string> {
  *
  * It runs when a turn settles, when Stop ends one, and on a backed-off quiet
  * check while an idle session has background work, which is where wakes are
- * lost whole. What the history cannot show stays unknown.
+ * lost whole. What the history cannot show stays unknown: a child's outcome
+ * comes only from the notice Prime Agent stores for its parent.
  */
 export function makePrimeAgentReconciler<E>(input: {
   readonly enabled: boolean;
