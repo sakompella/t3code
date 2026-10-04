@@ -32,6 +32,7 @@ export function isPiWakeEvent(event: PiRpcRecord): boolean {
     case "extension_error":
     case "t3.settle_probe":
     case "t3.flush_extension_errors":
+    case "t3.reconcile_idle":
       return false;
     default:
       return true;

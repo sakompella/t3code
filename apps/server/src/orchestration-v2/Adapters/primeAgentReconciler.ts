@@ -12,8 +12,14 @@ import {
 } from "./PiRpc.ts";
 import type { ActivePiTurn } from "./PiAdapterV2State.ts";
 
-/** How often the reconciler looks for a turn that went silent. */
+/**
+ * How often the reconciler looks at a session that may have lost events: a
+ * turn that went silent, or an idle session with background work. An idle
+ * session that shows no change is looked at less and less often, down to
+ * once per `MAX_IDLE_INTERVALS` intervals.
+ */
 const CHECK_INTERVAL = Duration.seconds(15);
+const MAX_IDLE_INTERVALS = 8;
 /** A history read that never matches the idle state settles the turn without it after this many tries. */
 const MAX_SETTLE_READS = 3;
 const STATE_READ_TIMEOUT_MS = 2_000;
@@ -113,17 +119,23 @@ function toolCallIdsOf(messages: ReadonlyArray<unknown>): Array<string> {
  * idempotent: a message is projected into the turn that stored it, then
  * accounted for, and later reads or late live events for it change nothing.
  *
- * It runs when a turn settles and when Stop ends one, and its quiet check
- * settles a turn whose end was lost. What the history cannot show stays
- * unknown.
+ * It runs when a turn settles, when Stop ends one, and on a backed-off quiet
+ * check while an idle session has background work, which is where wakes are
+ * lost whole. What the history cannot show stays unknown.
  */
 export function makePrimeAgentReconciler<E>(input: {
   readonly enabled: boolean;
   readonly driver: ProviderDriverKind;
   readonly request: PiRpcConnection["request"];
   readonly activeTurn: () => ActivePiTurn | null;
+  /** Whether an idle session may still wake on its own. */
+  readonly expectsWakes: () => boolean;
+  /** Whether a wake whose start T3 saw is still waiting for its continuation offer. */
+  readonly hasUnofferedWake: () => boolean;
   /** Asks the pump to settle a turn that went silent, if the agent is idle. */
   readonly probeQuietTurn: (turn: ActivePiTurn) => Effect.Effect<void>;
+  /** Queues a record behind the events already read, for the pump to apply. */
+  readonly enqueue: (record: PiRpcRecord) => Effect.Effect<void>;
   readonly items: {
     /** Brings an assistant message's items to its stored text and closes them. */
     readonly upsertAssistantMessage: (
@@ -135,6 +147,8 @@ export function makePrimeAgentReconciler<E>(input: {
     /** Handles a stored message other than a reply as if its `message_start` had arrived. */
     readonly replayMessageStart: (message: unknown) => Effect.Effect<void, E>;
   };
+  /** Applies what stored messages that woke an idle agent say, and offers their wake. */
+  readonly recoverWake: (wakeMessages: ReadonlyArray<unknown>) => Effect.Effect<void, E>;
 }) {
   const { enabled, request, activeTurn, items } = input;
   /** Null until a read established which messages predate T3's view of the session. */
@@ -256,7 +270,8 @@ export function makePrimeAgentReconciler<E>(input: {
     if (read._tag === "unconfirmed") {
       turn.settleReads += 1;
       if (turn.settleReads < MAX_SETTLE_READS) return false;
-      // The turn is over either way; what it stored stays unaccounted for.
+      // The turn is over either way. A later read finds what it stored
+      // unaccounted for and shows it as a wake.
       turn.transcriptReconciled = true;
       yield* logOutcome(turn, "unconfirmed");
       return true;
@@ -294,24 +309,79 @@ export function makePrimeAgentReconciler<E>(input: {
   };
 
   /**
-   * A turn whose event count stopped moving may have lost its end, so the
-   * pump confirms it against get_state.
+   * Applies a confirmed history read while no turn runs. Messages no turn
+   * accounted for are a wake whose events were lost: what they say is
+   * applied now, and a continuation run is offered to show them. They stay
+   * unaccounted, so the run that adopts the wake projects them.
+   */
+  const applyIdleTranscript = Effect.fnUntraced(function* (messages: ReadonlyArray<unknown>) {
+    if (!enabled) return;
+    if (ledger === null) {
+      commit(messages);
+      return;
+    }
+    const lost = unaccounted(messages);
+    ledger.messageCount = messages.length;
+    if (lost.length === 0 && !input.hasUnofferedWake()) return;
+    yield* logOutcome(null, "recovered-wake");
+    yield* input.recoverWake(
+      lost.filter((message) => {
+        const role = recordString(message, "role");
+        return role !== "assistant" && role !== "toolResult";
+      }),
+    );
+  });
+
+  /** Reads an idle session's history when it may hold work T3 never saw. Returns whether anything moved. */
+  const checkIdleSession = Effect.gen(function* () {
+    const state = yield* request({ type: "get_state" }, STATE_READ_TIMEOUT_MS).pipe(Effect.option);
+    if (Option.isNone(state)) return false;
+    // A busy agent's events, or a later check, will show the work.
+    if (!piStateIsIdle(state.value)) return true;
+    const messageCount = recordNumber(state.value, "messageCount");
+    if (ledger !== null && messageCount === ledger.messageCount && !input.hasUnofferedWake()) {
+      return false;
+    }
+    const read = yield* readSettledTranscript(request, state.value);
+    if (read._tag === "read") {
+      yield* input.enqueue({ type: "t3.reconcile_idle", messages: read.messages });
+    }
+    return true;
+  });
+
+  /**
+   * The one cadence for lost events. A turn whose event count stopped
+   * moving may have lost its end, so the pump confirms it against get_state.
+   * An idle session with background work is checked for lost wakes, less
+   * often while nothing changes.
    */
   const watch = Effect.gen(function* () {
     let lastSeen: { readonly turn: ActivePiTurn; readonly eventCount: number } | null = null;
+    let idleIntervals = 1;
+    let skipped = 0;
     while (true) {
       yield* Effect.sleep(CHECK_INTERVAL);
       const turn = activeTurn();
       const previous = lastSeen;
       lastSeen = turn === null ? null : { turn, eventCount: turn.sessionEventCount };
-      if (
-        turn !== null &&
-        turn.sawAgentActivity &&
-        previous?.turn === turn &&
-        previous.eventCount === turn.sessionEventCount
-      ) {
-        yield* input.probeQuietTurn(turn);
+      if (turn !== null) {
+        idleIntervals = 1;
+        skipped = 0;
+        if (
+          turn.sawAgentActivity &&
+          previous?.turn === turn &&
+          previous.eventCount === turn.sessionEventCount
+        ) {
+          yield* input.probeQuietTurn(turn);
+        }
+        continue;
       }
+      if (!input.expectsWakes()) continue;
+      skipped += 1;
+      if (skipped < idleIntervals) continue;
+      skipped = 0;
+      const moved = yield* checkIdleSession;
+      idleIntervals = moved ? 1 : Math.min(idleIntervals * 2, MAX_IDLE_INTERVALS);
     }
   });
 
@@ -322,6 +392,7 @@ export function makePrimeAgentReconciler<E>(input: {
     reconcileSettlingTurn,
     reconcileEndingTurn,
     closeTurn,
+    applyIdleTranscript,
     watch: enabled ? watch : Effect.void,
   };
 }

@@ -140,6 +140,11 @@ export interface PendingPiWake {
   readonly events: Array<PiRpcRecord>;
   offered: boolean;
   readonly generation: number;
+  /**
+   * The wake's end was lost and the agent was found idle, so its run settles
+   * as soon as it starts instead of waiting for events that will not come.
+   */
+  recovered: boolean;
 }
 
 /** Where emitted items land: a turn on the parent thread, or a child's own thread. */

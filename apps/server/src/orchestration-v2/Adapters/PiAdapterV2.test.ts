@@ -5529,6 +5529,120 @@ describe("PiAdapterV2 with the Prime Agent flavor", () => {
     }).pipe(Effect.scoped, Effect.provide(testLayer)),
   );
 
+  /** Lets every fiber that a step woke run before the next step. */
+  const drainFibers = Effect.gen(function* () {
+    for (let turn = 0; turn < 20; turn += 1) yield* Effect.yieldNow;
+  });
+
+  /** Steps virtual time through quiet checks until `done`, or gives up after an hour. */
+  const tickUntil = (done: () => boolean) =>
+    Effect.gen(function* () {
+      for (let step = 0; step < 240 && !done(); step += 1) {
+        yield* TestClock.adjust(Duration.seconds(15));
+        yield* drainFibers;
+      }
+    });
+
+  const storedChildMessage = (timestamp: number) => ({
+    role: "custom",
+    customType: "agent_message",
+    content: "[agent-message from child:worker]\n\nchild-ok",
+    display: true,
+    details: {
+      message: "child-ok",
+      from: { sessionName: "worker", runtimeKind: "subagent" },
+      fromRelationship: "child",
+    },
+    timestamp,
+  });
+
+  /** Opens a session whose first turn left a child running, with that turn stored. */
+  const settleWithChildAndHistory = (fake: FakePi) =>
+    Effect.gen(function* () {
+      const session = yield* openPrimeThreadWithWakes(fake);
+      const history = [storedPrompt(900), storedReply(1000, "A worker is on it.")];
+      fake.setTranscript(history);
+      const child = yield* settleWithRunningChild(fake, session);
+      return { ...session, history, child };
+    });
+
+  /** Takes the one wake offer the quiet checks make for work T3 never saw. */
+  const takeRecoveredOffer = (offers: Queue.Queue<ProviderContinuationRequest>) =>
+    Effect.gen(function* () {
+      yield* tickUntil(() => Queue.sizeUnsafe(offers) > 0);
+      const offer = yield* Queue.poll(offers);
+      assert.isTrue(Option.isSome(offer), "a quiet check offers the lost wake");
+      return Option.getOrThrow(offer);
+    });
+
+  /** Dispatches a wake offer as a continuation run and returns how that run ended. */
+  const runContinuation = (
+    session: Effect.Success<ReturnType<typeof openPrimeThreadWithWakes>>,
+    offer: ProviderContinuationRequest,
+  ) =>
+    Effect.gen(function* () {
+      const dispatched = yield* offer.dispatchIfCurrent!(Effect.succeed("dispatched"));
+      assert.isTrue(Option.isSome(dispatched));
+      yield* startTurn(
+        session.runtime,
+        session.providerThread,
+        "default",
+        [],
+        "Background activity updated",
+        undefined,
+        2,
+        THREAD_ID,
+        "provider",
+      );
+      return yield* takeRepliesAndOutcome(session.takeEvent);
+    });
+
+  it.effect("recovers a wake whose every event was dropped as one continuation run", () =>
+    Effect.gen(function* () {
+      const fake = yield* makeFakePi;
+      const session = yield* settleWithChildAndHistory(fake);
+      fake.setTranscript([
+        ...session.history,
+        storedChildMessage(2000),
+        storedReply(2001, "The child said child-ok"),
+      ]);
+
+      const offer = yield* takeRecoveredOffer(session.offers);
+      assert.equal(offer.notification?.summary, "Message from worker");
+      assert.deepEqual(yield* runContinuation(session, offer), {
+        texts: ["The child said child-ok"],
+        status: "completed",
+      });
+
+      // Later checks read the same history and find nothing new to offer.
+      yield* tickUntil(() => false);
+      assert.equal(Queue.sizeUnsafe(session.offers), 0);
+      // The child only sent a message; nothing says it ended.
+      assert.isTrue(yield* session.runtime.hasPendingBackgroundWork!);
+    }).pipe(Effect.scoped, Effect.provide(testLayer)),
+  );
+
+  it.effect("offers a wake whose reply and end were dropped once the agent is idle", () =>
+    Effect.gen(function* () {
+      const fake = yield* makeFakePi;
+      const session = yield* settleWithChildAndHistory(fake);
+      yield* fake.emit({ type: "agent_start" });
+      yield* fake.emit({ type: "message_start", message: storedChildMessage(2000) });
+      fake.setTranscript([
+        ...session.history,
+        storedChildMessage(2000),
+        storedReply(2001, "The child said child-ok"),
+      ]);
+
+      const offer = yield* takeRecoveredOffer(session.offers);
+      assert.equal(offer.notification?.summary, "Message from worker");
+      assert.deepEqual(yield* runContinuation(session, offer), {
+        texts: ["The child said child-ok"],
+        status: "completed",
+      });
+    }).pipe(Effect.scoped, Effect.provide(testLayer)),
+  );
+
   /** Runs one turn whose end-of-turn branch lists `userEntries` as its user entries. */
   const runPrimeTurn = (
     session: Effect.Success<ReturnType<typeof openPrimeThread>>,

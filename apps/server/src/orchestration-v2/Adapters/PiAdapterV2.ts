@@ -124,7 +124,7 @@ import type {
   PiThreadState,
 } from "./PiAdapterV2State.ts";
 import { makePrimeAgentChildThreads } from "./primeAgentChildThreads.ts";
-import { makePrimeAgentReconciler } from "./primeAgentReconciler.ts";
+import { makePrimeAgentReconciler, transcriptMessageKey } from "./primeAgentReconciler.ts";
 import { primeAgentHeartbeats } from "./primeAgentHeartbeats.ts";
 import { makePrimeAgentStream, snapshotBlock } from "./primeAgentStream.ts";
 import { makePrimeAgentTools } from "./primeAgentTools.ts";
@@ -1983,12 +1983,47 @@ export function makePiAdapterV2(
         });
       });
 
+      /**
+       * Turns stored messages that woke an idle agent, whose events never
+       * came, into a wake for a continuation run to show.
+       */
+      const recoverWake = Effect.fnUntraced(function* (wakeMessages: ReadonlyArray<unknown>) {
+        const state = threadState;
+        if (state === null) return;
+        for (const message of wakeMessages) yield* completeBackgroundJob(message);
+        const wake: PendingPiWake = pendingWake ?? {
+          events: [],
+          offered: false,
+          generation: ++wakeGeneration,
+          recovered: true,
+        };
+        pendingWake = wake;
+        wake.recovered = true;
+        if (wake.offered) return;
+        const buffered = new Set(
+          wake.events.map((event) => transcriptMessageKey(event["message"])),
+        );
+        for (const message of wakeMessages) {
+          if (!buffered.has(transcriptMessageKey(message))) {
+            wake.events.push({ type: "message_start", message });
+          }
+        }
+        yield* offerWakeContinuation(wake, state);
+      });
+
       const reconciler = makePrimeAgentReconciler({
         enabled: flavor.lossyStream,
         driver,
         request,
         activeTurn: () => threadState?.activeTurn ?? null,
+        expectsWakes: () =>
+          hasPendingBackgroundWork() || (threadState?.providerThread.heartbeats?.length ?? 0) > 0,
+        hasUnofferedWake: () =>
+          pendingWake !== null &&
+          !pendingWake.offered &&
+          options.continuationRequests !== undefined,
         probeQuietTurn: (turn) => scheduleSettleProbe(turn, true, 1, 0, true).pipe(Effect.asVoid),
+        enqueue: (record) => Queue.offer(connection.events, record).pipe(Effect.asVoid),
         items: {
           upsertAssistantMessage: upsertRecordedMessage,
           startTool: (turn, toolCall) =>
@@ -2027,6 +2062,7 @@ export function makePiAdapterV2(
           ): Effect.Effect<void, IdAllocator.IdAllocatorV2AllocationError | PiRpcError> =>
             handleSessionEvent({ type: "message_start", message }),
         },
+        recoverWake,
       });
 
       const handleSessionEvent = Effect.fnUntraced(function* (event: PiRpcRecord) {
@@ -2051,7 +2087,12 @@ export function makePiAdapterV2(
         switch (event["type"]) {
           case "agent_start": {
             if (turn === null && flavor.selfWakes === "continuation" && state !== null) {
-              pendingWake = { events: [event], offered: false, generation: ++wakeGeneration };
+              pendingWake = {
+                events: [event],
+                offered: false,
+                generation: ++wakeGeneration,
+                recovered: false,
+              };
               return;
             }
             if (turn === null) {
@@ -2529,6 +2570,13 @@ export function makePiAdapterV2(
             if (flavor.settleSignal === "idle_probe") yield* probeAgainLater;
             return;
           }
+          case "t3.reconcile_idle": {
+            // A turn that started since the read owns what it found.
+            const messages = event["messages"];
+            if (turn !== null || state === null || !Array.isArray(messages)) return;
+            yield* reconciler.applyIdleTranscript(messages);
+            return;
+          }
           default:
             return;
         }
@@ -2599,8 +2647,8 @@ export function makePiAdapterV2(
         Effect.forkIn(scope),
       );
 
-      // The RPC can drop a turn's end without saying so. The reconciler checks
-      // quiet turns against Prime Agent's state.
+      // The RPC can drop any event without saying so: a turn's end, or a whole
+      // wake. The reconciler checks quiet sessions against Prime Agent's state.
       yield* reconciler.watch.pipe(Effect.forkIn(scope));
 
       // Discovery can invoke extension code and therefore raise a blocking
@@ -3090,6 +3138,10 @@ export function makePiAdapterV2(
                 if (isWakeContinuation)
                   activeTurn.wakeTrigger = piWakeTrigger(adoptedWake.events)?.message;
                 for (const wakeEvent of adoptedWake.events) yield* handleSessionEvent(wakeEvent);
+                // Its events are gone and the agent was idle: settle from state.
+                if (isWakeContinuation && adoptedWake.recovered) {
+                  yield* scheduleSettleProbe(activeTurn, true);
+                }
               } else if (isWakeContinuation) {
                 // The wake was already adopted by a user turn or ended with the
                 // process. Settle this run as soon as the agent is idle.
