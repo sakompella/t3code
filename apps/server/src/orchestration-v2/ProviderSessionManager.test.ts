@@ -293,6 +293,7 @@ function makeProviderAdapter(
     }) => Effect.Effect<void>;
     readonly hasPendingBackgroundWork?: Effect.Effect<boolean>;
     readonly hangSessionScopeClose?: boolean;
+    readonly onSessionScopeClose?: Effect.Effect<void>;
     readonly beforeUnload?: Effect.Effect<void>;
   } = {},
 ): ProviderAdapterV2Shape {
@@ -339,6 +340,10 @@ function makeProviderAdapter(
           // close before the closeCount finalizer, like a provider process
           // that never yields its message stream.
           yield* Effect.addFinalizer(() => Effect.never);
+        }
+        if (options.onSessionScopeClose !== undefined) {
+          const onSessionScopeClose = options.onSessionScopeClose;
+          yield* Effect.addFinalizer(() => onSessionScopeClose);
         }
 
         return {
@@ -409,6 +414,7 @@ function makeTestLayer(input: {
   readonly flakyReleaseWrites?: FlakyReleaseWrites;
   readonly hasPendingBackgroundWork?: Effect.Effect<boolean>;
   readonly hangSessionScopeClose?: boolean;
+  readonly onSessionScopeClose?: Effect.Effect<void>;
   readonly beforeUnload?: Effect.Effect<void>;
   readonly serverSettingsLayer?: ReturnType<typeof ServerSettings.layerTest>;
   readonly projectServiceLayer?: Layer.Layer<ProjectService.ProjectService>;
@@ -431,6 +437,9 @@ function makeTestLayer(input: {
       ...(input.hangSessionScopeClose === undefined
         ? {}
         : { hangSessionScopeClose: input.hangSessionScopeClose }),
+      ...(input.onSessionScopeClose === undefined
+        ? {}
+        : { onSessionScopeClose: input.onSessionScopeClose }),
       ...(input.beforeUnload === undefined ? {} : { beforeUnload: input.beforeUnload }),
     }),
   );
@@ -931,6 +940,53 @@ it.effect("ProviderSessionManagerV2 releases live sessions when its layer shuts 
     );
 
     assert.equal((yield* Ref.get(state)).closeCount, 1);
+  }),
+);
+
+it.effect("ProviderSessionManagerV2 releases sessions concurrently on server shutdown", () =>
+  Effect.gen(function* () {
+    const sessionCount = 3;
+    const state = yield* Ref.make(emptyState);
+    const closing = yield* Ref.make(0);
+    const allClosing = yield* Deferred.make<void>();
+    // Each provider process exit holds its scope close until every session is
+    // closing, so a release that waits for the previous one never finishes.
+    const waitForEverySessionToClose = Effect.gen(function* () {
+      const count = yield* Ref.updateAndGet(closing, (current) => current + 1);
+      if (count === sessionCount) yield* Deferred.succeed(allClosing, undefined);
+      yield* Deferred.await(allClosing);
+    });
+    const effect = Effect.gen(function* () {
+      const eventSink = yield* EventSink.EventSinkV2;
+      const idAllocator = yield* IdAllocator.IdAllocatorV2;
+      const manager = yield* ProviderSessionManager.ProviderSessionManagerV2;
+      const now = yield* DateTime.now;
+      for (let index = 0; index < sessionCount; index += 1) {
+        const threadId = ThreadId.make(`thread-provider-session-manager-concurrent-${index}`);
+        const providerSessionId = yield* idAllocator.allocate.providerSession({
+          providerInstanceId: modelSelection.instanceId,
+          threadId,
+        });
+        yield* eventSink.write({
+          events: [yield* makeThreadCreatedEvent({ idAllocator, threadId, now })],
+        });
+        yield* manager.open({ threadId, providerSessionId, modelSelection, runtimePolicy });
+      }
+
+      yield* manager.shutdown;
+
+      assert.equal((yield* Ref.get(state)).closeCount, sessionCount);
+    });
+
+    yield* effect.pipe(
+      Effect.provide(
+        makeTestLayer({
+          state,
+          idleTimeoutMs: 60_000,
+          onSessionScopeClose: waitForEverySessionToClose,
+        }),
+      ),
+    );
   }),
 );
 
