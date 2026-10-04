@@ -4524,13 +4524,16 @@ const makeNativeOperations = Effect.fn("PreviewManager.makeOperations")(function
   const performAutomationEvaluate = Effect.fn("PreviewManager.performAutomationEvaluate")(
     function* (tabId: string, input: PreviewAutomationEvaluateInput, send: SendCommand) {
       yield* send("Runtime.enable");
-      const value = yield* evaluateWithDebugger(
-        tabId,
-        send,
-        input.expression,
-        input.returnByValue ?? true,
-        input.awaitPromise ?? true,
-      );
+      // CDP omits `value` for an `undefined` result, which JSON cannot encode.
+      // Void expressions such as `button.click()` report null instead of failing.
+      const value =
+        (yield* evaluateWithDebugger(
+          tabId,
+          send,
+          input.expression,
+          input.returnByValue ?? true,
+          input.awaitPromise ?? true,
+        )) ?? null;
       const serialized = yield* encodeJson(
         { operation: "automationEvaluate.encodeResult", tabId },
         value,

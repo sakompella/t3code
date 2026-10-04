@@ -4613,6 +4613,30 @@ describe("PreviewManager", () => {
     ),
   );
 
+  effectIt.effect("returns null when the evaluated expression has no value", () =>
+    withManager((manager) =>
+      Effect.gen(function* () {
+        const wc = makeTestPreviewWebContents(vi.fn());
+        Object.assign(wc, { isDevToolsOpened: () => false });
+        Object.assign(wc.debugger, {
+          // CDP's shape for `undefined`: a type, and no `value`.
+          sendCommand: vi.fn(async (method: string) =>
+            method === "Runtime.evaluate" ? { result: { type: "undefined" } } : undefined,
+          ),
+        });
+        fromId.mockReturnValue(wc);
+        yield* manager.createTab("tab_1");
+        yield* manager.registerWebview("tab_1", 42);
+
+        const value = yield* manager.automationEvaluate("tab_1", {
+          expression: "document.body.click()",
+        });
+
+        expect(value).toBeNull();
+      }),
+    ),
+  );
+
   effectIt.effect("derives evaluation detail kind and length from the same non-empty source", () =>
     withManager((manager) =>
       Effect.gen(function* () {
