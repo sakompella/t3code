@@ -64,10 +64,10 @@ export interface PiFlavor {
    */
   readonly childThreads: boolean;
   /**
-   * Set when the agent has its own MCP client in its kernel. T3 then ships the
-   * `t3-code` skill instead of registering its tools natively, provided the
-   * user declared the server in the agent's settings file. `null` means T3's
-   * extension always registers the tools.
+   * Set when the agent has its own MCP client in its kernel. T3 then never
+   * registers its tools natively. It ships the `t3-code` skill once the user
+   * declared the server in the agent's settings file, and shows a setup notice
+   * until then. `null` means T3's extension registers the tools natively.
    */
   readonly kernelMcp: {
     /** Environment variable that relocates the agent's config directory. */
