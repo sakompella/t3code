@@ -93,6 +93,7 @@ import {
   piRecordString as recordString,
   piStateIsIdle,
   type PiRpcConnection,
+  type PiRpcError,
   type PiRpcRecord,
 } from "./PiRpc.ts";
 import {
@@ -123,6 +124,7 @@ import type {
   PiThreadState,
 } from "./PiAdapterV2State.ts";
 import { makePrimeAgentChildThreads } from "./primeAgentChildThreads.ts";
+import { makePrimeAgentReconciler } from "./primeAgentReconciler.ts";
 import { primeAgentHeartbeats } from "./primeAgentHeartbeats.ts";
 import { makePrimeAgentStream, snapshotBlock } from "./primeAgentStream.ts";
 import { makePrimeAgentTools } from "./primeAgentTools.ts";
@@ -164,12 +166,6 @@ const SETTLE_PROBE_RETRY_DELAY = Duration.millis(100);
 /** Idle-probe flavors re-read state while a retry, compaction, or queued action is still running. */
 const BUSY_PROBE_INITIAL_DELAY_MS = 100;
 const BUSY_PROBE_MAX_DELAY_MS = 1_000;
-/**
- * How often an idle-probe flavor checks for a turn that went silent. Its RPC
- * drops events without a trace when the daemon socket backs up, and `agent_end`
- * is among them, so a quiet turn is confirmed against `get_state`.
- */
-const QUIET_TURN_PROBE_INTERVAL = Duration.seconds(15);
 /** A busy re-probe chain logs its first poll and then one in this many. */
 const BUSY_PROBE_LOG_EVERY = 30;
 
@@ -1084,14 +1080,12 @@ export function makePiAdapterV2(
           { discard: true },
         );
 
-      const { adoptMessageIdentity, adoptSnapshot, adoptRecordedMessages } = makePrimeAgentStream({
+      const { adoptMessageIdentity, adoptSnapshot, upsertRecordedMessage } = makePrimeAgentStream({
         lossyStream: flavor.lossyStream,
         streamItemFor,
         completeStreamItem,
         scheduleStreamFlush,
-        findStreamItem: (turn, contentIndex) =>
-          turn.streamItems.get(streamItemId(turn, contentIndex)),
-        reemitStreamItem: (turn, item) => emitStreamItem(turn, item, !item.completed),
+        emitCompletedStreamItem: (turn, item) => emitStreamItem(turn, item, false),
       });
 
       const ipython = makePrimeAgentTools({
@@ -1240,47 +1234,6 @@ export function makePiAdapterV2(
             { ...event, type: "tool_execution_end", result: event["partialResult"] },
             "end",
             status,
-          );
-        }
-      });
-
-      /**
-       * A lossy stream (see `PiFlavor.lossyStream`) can drop the end of a reply
-       * and of its tool calls, and the turn then ends with items still open
-       * and text cut short. Prime Agent's own record of the conversation has
-       * the rest, so read it before the open items are completed. A failed or
-       * slow read leaves the items as the stream left them.
-       */
-      const reconcileOpenWork = Effect.fnUntraced(function* (turn: ActivePiTurn) {
-        const hasOpenStreamItem = Array.from(turn.streamItems.values()).some(
-          (item) => !item.completed,
-        );
-        if (!flavor.lossyStream || (!hasOpenStreamItem && turn.openTools.size === 0)) return;
-        const recorded = yield* request({ type: "get_messages" }, 2_000).pipe(
-          Effect.orElseSucceed(() => undefined),
-        );
-        const messages = recordField(recorded, "messages");
-        if (!Array.isArray(messages)) return;
-        yield* adoptRecordedMessages(turn, messages);
-        for (const [toolCallId, openEvent] of Array.from(turn.openTools)) {
-          const toolResult = messages.find(
-            (message) =>
-              recordString(message, "role") === "toolResult" &&
-              recordString(message, "toolCallId") === toolCallId,
-          );
-          if (toolResult === undefined) continue;
-          yield* emitToolItem(
-            turn,
-            {
-              ...openEvent,
-              type: "tool_execution_end",
-              isError: recordField(toolResult, "isError") === true,
-              result: {
-                content: recordField(toolResult, "content"),
-                details: recordField(toolResult, "details"),
-              },
-            },
-            "end",
           );
         }
       });
@@ -1800,14 +1753,16 @@ export function makePiAdapterV2(
       const finalizeTurn = Effect.fnUntraced(function* (state: PiThreadState, processAlive = true) {
         const turn = state.activeTurn;
         if (turn === null) return;
+        // Stored messages it projects still belong to this turn.
+        if (processAlive) yield* reconciler.reconcileEndingTurn(turn);
         state.activeTurn = null;
         const completedAt = yield* DateTime.now;
-        if (processAlive) yield* reconcileOpenWork(turn);
         yield* completeOpenStreamItems(turn);
         yield* settleOpenTools(
           turn,
           turn.interrupted ? "interrupted" : turn.failure === null ? "completed" : "failed",
         );
+        reconciler.closeTurn(turn);
         yield* closeFinishingUp(turn);
         if (turn.activeCompaction !== null) {
           const status = turn.interrupted
@@ -2028,9 +1983,58 @@ export function makePiAdapterV2(
         });
       });
 
+      const reconciler = makePrimeAgentReconciler({
+        enabled: flavor.lossyStream,
+        driver,
+        request,
+        activeTurn: () => threadState?.activeTurn ?? null,
+        probeQuietTurn: (turn) => scheduleSettleProbe(turn, true, 1, 0, true).pipe(Effect.asVoid),
+        items: {
+          upsertAssistantMessage: upsertRecordedMessage,
+          startTool: (turn, toolCall) =>
+            emitToolItem(
+              turn,
+              {
+                type: "tool_execution_start",
+                toolCallId: recordString(toolCall, "id"),
+                toolName: recordString(toolCall, "name"),
+                args: recordField(toolCall, "arguments"),
+              },
+              "start",
+            ),
+          endTool: (turn, toolResult) => {
+            const toolCallId = recordString(toolResult, "toolCallId") ?? "";
+            return emitToolItem(
+              turn,
+              {
+                ...(turn.openTools.get(toolCallId) ?? {
+                  toolCallId,
+                  toolName: recordString(toolResult, "toolName"),
+                }),
+                type: "tool_execution_end",
+                isError: recordField(toolResult, "isError") === true,
+                result: {
+                  content: recordField(toolResult, "content"),
+                  details: recordField(toolResult, "details"),
+                },
+              },
+              "end",
+            );
+          },
+          // Annotated: the pump's handler also calls the reconciler.
+          replayMessageStart: (
+            message,
+          ): Effect.Effect<void, IdAllocator.IdAllocatorV2AllocationError | PiRpcError> =>
+            handleSessionEvent({ type: "message_start", message }),
+        },
+      });
+
       const handleSessionEvent = Effect.fnUntraced(function* (event: PiRpcRecord) {
+        // An event about a message an earlier turn already showed.
+        if (reconciler.isLate(event)) return;
         const state = threadState;
         const turn = state?.activeTurn ?? null;
+        if (turn !== null) reconciler.noteSeen(turn, event);
         if (turn === null && pendingWake !== null && isPiWakeEvent(event)) {
           pendingWake.events.push(event);
           if (event["type"] === "message_start") yield* completeBackgroundJob(event["message"]);
@@ -2508,6 +2512,10 @@ export function makePiAdapterV2(
               return;
             }
             if (piStateIsIdle(data)) {
+              if (!(yield* reconciler.reconcileSettlingTurn(turn, data))) {
+                yield* probeAgainLater;
+                return;
+              }
               turn.settleWhenIdle = false;
               if (state !== null) yield* finalizeTurn(state);
               return;
@@ -2591,29 +2599,9 @@ export function makePiAdapterV2(
         Effect.forkIn(scope),
       );
 
-      // The RPC can lose `agent_end` along with the rest of a reply's closing
-      // events and never says so, so a turn that goes silent after real agent
-      // activity is checked against get_state. A turn that is still running
-      // answers busy and stays open.
-      if (flavor.settleSignal === "idle_probe") {
-        yield* Effect.gen(function* () {
-          let lastSeen: { readonly turn: ActivePiTurn; readonly eventCount: number } | null = null;
-          while (true) {
-            yield* Effect.sleep(QUIET_TURN_PROBE_INTERVAL);
-            const turn = threadState?.activeTurn ?? null;
-            const previous = lastSeen;
-            lastSeen = turn === null ? null : { turn, eventCount: turn.sessionEventCount };
-            if (
-              turn !== null &&
-              turn.sawAgentActivity &&
-              previous?.turn === turn &&
-              previous.eventCount === turn.sessionEventCount
-            ) {
-              yield* scheduleSettleProbe(turn, true, 1, 0, true);
-            }
-          }
-        }).pipe(Effect.forkIn(scope));
-      }
+      // The RPC can drop a turn's end without saying so. The reconciler checks
+      // quiet turns against Prime Agent's state.
+      yield* reconciler.watch.pipe(Effect.forkIn(scope));
 
       // Discovery can invoke extension code and therefore raise a blocking
       // UI request. Start it only after the event pump exists, and never hold
@@ -2758,6 +2746,8 @@ export function makePiAdapterV2(
         // Baseline the session tree so the first turn's user entry can be
         // located without a full scan.
         yield* baselineSessionTree();
+        // What is stored now predates this view of the session.
+        yield* reconciler.baseline;
         if (publish)
           yield* emit({
             type: "provider_thread.updated",
@@ -3040,6 +3030,9 @@ export function makePiAdapterV2(
               settleProbeGeneration: 0,
               settleWhenIdle: false,
               sessionEventCount: 0,
+              seenMessageKeys: new Set(),
+              transcriptReconciled: false,
+              settleReads: 0,
               sawCompaction: false,
               manualCompactInFlight: compactCommand !== null,
               activeCompaction: null,
@@ -3234,7 +3227,7 @@ export function makePiAdapterV2(
                 Effect.gen(function* () {
                   if (threadState?.activeTurn === turn && turn.stopTreeRefs === undefined) {
                     turn.stopTreeRefs = yield* captureTurnTreeRefs(2_000);
-                    yield* reconcileOpenWork(turn);
+                    yield* reconciler.reconcileEndingTurn(turn);
                   }
                   yield* connection.terminate;
                 }),

@@ -84,8 +84,13 @@ interface FakePi {
   readonly takeRequest: (type: string) => Effect.Effect<PiRpcRecord>;
   /** Data returned by the next `get_entries` acks, consumed in order. */
   readonly queueEntries: (data: unknown) => void;
-  /** Data returned by the next active-branch `get_messages` acks. */
+  /** Data returned by the next active-branch `get_messages` acks, ahead of the transcript. */
   readonly queueMessages: (data: unknown) => void;
+  /**
+   * Prime Agent's stored conversation from now on: what `get_messages` returns
+   * and what `get_state` counts, unless a queued reply overrides one read.
+   */
+  readonly setTranscript: (messages: ReadonlyArray<unknown>) => void;
   /** Data returned by the next `get_fork_messages` acks, consumed in order. */
   readonly queueForkMessages: (data: unknown) => void;
   /** Make the next `switch_session` ack report an extension veto. */
@@ -171,6 +176,7 @@ const makeFakePi: Effect.Effect<FakePi> = Effect.gen(function* () {
   let sessionFile = FAKE_SESSION_FILE;
   let sessionGeneration = 0;
   let models: ReadonlyArray<unknown> = [];
+  let transcript: ReadonlyArray<unknown> = [];
   let stdinBuffer = "";
 
   const emit = (record: PiRpcRecord) =>
@@ -194,7 +200,14 @@ const makeFakePi: Effect.Effect<FakePi> = Effect.gen(function* () {
         }
         // Queued data overrides fields of the recorded idle state, so a test
         // that only cares about the session file still gets a real shape.
-        return { ...base, data: { ...recordedIdleState(sessionFile), ...stateQueue.shift() } };
+        return {
+          ...base,
+          data: {
+            ...recordedIdleState(sessionFile),
+            messageCount: transcript.length,
+            ...stateQueue.shift(),
+          },
+        };
       case "get_available_models":
         return { ...base, data: { models } };
       case "new_session": {
@@ -215,7 +228,7 @@ const makeFakePi: Effect.Effect<FakePi> = Effect.gen(function* () {
       case "get_entries":
         return { ...base, data: entriesQueue.shift() ?? { entries: [], leafId: null } };
       case "get_messages":
-        return { ...base, data: messagesQueue.shift() ?? { messages: [] } };
+        return { ...base, data: messagesQueue.shift() ?? { messages: transcript } };
       case "get_fork_messages":
         return { ...base, data: forkMessagesQueue.shift() ?? { messages: [] } };
       case "observe":
@@ -301,6 +314,9 @@ const makeFakePi: Effect.Effect<FakePi> = Effect.gen(function* () {
     takeRequest,
     queueEntries: (data) => entriesQueue.push(data),
     queueMessages: (data) => messagesQueue.push(data),
+    setTranscript: (messages) => {
+      transcript = messages;
+    },
     queueForkMessages: (data) => forkMessagesQueue.push(data),
     deferNextState: () => {
       deferState = true;
@@ -3006,9 +3022,21 @@ describe("PiAdapterV2 with the Prime Agent flavor", () => {
       });
     });
 
-  const recordedReply = (text: string) => ({
-    messages: [{ ...assistantSnapshot(1000, text), stopReason: "stop" }],
+  /** The user prompt Prime Agent stores at the start of a turn. */
+  const storedPrompt = (timestamp: number, text = "Hello pi") => ({
+    role: "user",
+    content: [{ type: "text", text }],
+    timestamp,
   });
+
+  /** A finished assistant message as Prime Agent stores it. */
+  const storedReply = (timestamp: number, text: string) => ({
+    ...assistantSnapshot(timestamp, text),
+    stopReason: "stop",
+  });
+
+  /** The stored conversation after a turn whose reply is `fullReply`. */
+  const recordedTurn = [storedPrompt(900), storedReply(1000, fullReply)];
 
   it.effect("completes a reply cut off by dropped events with Prime Agent's recorded text", () =>
     Effect.gen(function* () {
@@ -3017,12 +3045,54 @@ describe("PiAdapterV2 with the Prime Agent flavor", () => {
       yield* startTurn(runtime, providerThread);
       yield* fake.takeRequest("prompt");
       yield* streamCutReply(fake);
-      fake.queueMessages(recordedReply(fullReply));
+      fake.setTranscript(recordedTurn);
 
       yield* takeQuietProbeAtItsTick(fake);
 
       assert.deepEqual(yield* takeRepliesAndOutcome(takeEvent), {
         texts: [fullReply],
+        status: "completed",
+      });
+    }).pipe(Effect.scoped, Effect.provide(testLayer)),
+  );
+
+  // Thread 83be3aac lost 7 whole replies in one hour: none of their events
+  // reached T3, so there was no item to lengthen.
+  it.effect("recovers a reply whose every event was dropped", () =>
+    Effect.gen(function* () {
+      const fake = yield* makeFakePi;
+      const { runtime, takeEvent, providerThread } = yield* openPrimeThread(fake);
+      yield* startTurn(runtime, providerThread);
+      yield* fake.takeRequest("prompt");
+      yield* fake.emit({ type: "agent_start" });
+      fake.setTranscript(recordedTurn);
+      yield* fake.emit({ type: "agent_end", messages: [] });
+
+      assert.deepEqual(yield* takeRepliesAndOutcome(takeEvent), {
+        texts: [fullReply],
+        status: "completed",
+      });
+    }).pipe(Effect.scoped, Effect.provide(testLayer)),
+  );
+
+  it.effect("lengthens a cut-off reply whose item was already completed", () =>
+    Effect.gen(function* () {
+      const fake = yield* makeFakePi;
+      const { runtime, takeEvent, providerThread } = yield* openPrimeThread(fake);
+      yield* startTurn(runtime, providerThread);
+      yield* fake.takeRequest("prompt");
+      yield* streamCutReply(fake);
+      yield* fake.emit({
+        type: "message_update",
+        message: assistantSnapshot(1000, cutReply),
+        assistantMessageEvent: { type: "text_end", contentIndex: 0, content: cutReply },
+      });
+      fake.setTranscript(recordedTurn);
+
+      yield* takeQuietProbeAtItsTick(fake);
+
+      assert.deepEqual(yield* takeRepliesAndOutcome(takeEvent), {
+        texts: [cutReply, fullReply],
         status: "completed",
       });
     }).pipe(Effect.scoped, Effect.provide(testLayer)),
@@ -3041,7 +3111,7 @@ describe("PiAdapterV2 with the Prime Agent flavor", () => {
       assert.isTrue(running.type === "provider_turn.updated");
       if (running.type !== "provider_turn.updated") return;
       yield* streamCutReply(fake);
-      fake.queueMessages(recordedReply(fullReply));
+      fake.setTranscript(recordedTurn);
 
       yield* runtime.interruptTurn({ providerThread, providerTurnId: running.providerTurn.id });
 
@@ -3065,7 +3135,7 @@ describe("PiAdapterV2 with the Prime Agent flavor", () => {
       assert.isTrue(running.type === "provider_turn.updated");
       if (running.type !== "provider_turn.updated") return;
       yield* streamCutReply(fake);
-      fake.queueMessages(recordedReply(fullReply));
+      fake.setTranscript(recordedTurn);
 
       yield* runtime.interruptTurn({
         providerThread,
@@ -3081,25 +3151,203 @@ describe("PiAdapterV2 with the Prime Agent flavor", () => {
     }).pipe(Effect.scoped, Effect.provide(testLayer)),
   );
 
-  it.effect("never shortens a reply or adds a message the stream never started", () =>
+  it.effect("adds only the messages this turn stored, not earlier history", () =>
+    Effect.gen(function* () {
+      const fake = yield* makeFakePi;
+      const earlier = [storedPrompt(400), storedReply(500, "An earlier turn's reply.")];
+      fake.setTranscript(earlier);
+      const { runtime, takeEvent, providerThread } = yield* openPrimeThread(fake);
+      yield* startTurn(runtime, providerThread);
+      yield* fake.takeRequest("prompt");
+      yield* streamCutReply(fake);
+      fake.setTranscript([...earlier, ...recordedTurn]);
+
+      yield* takeQuietProbeAtItsTick(fake);
+
+      assert.deepEqual(yield* takeCompletedReplies(takeEvent), [fullReply]);
+    }).pipe(Effect.scoped, Effect.provide(testLayer)),
+  );
+
+  /** Runs turn `runOrdinal`, whose stored reply is `reply` and whose events were all dropped. */
+  const runTurnWithDroppedReply = (
+    fake: FakePi,
+    session: Effect.Success<ReturnType<typeof openPrimeThread>>,
+    runOrdinal: number,
+    before: ReadonlyArray<unknown>,
+    reply: { readonly timestamp: number; readonly text: string },
+  ) =>
+    Effect.gen(function* () {
+      yield* startTurn(
+        session.runtime,
+        session.providerThread,
+        "default",
+        [],
+        `turn ${runOrdinal}`,
+        undefined,
+        runOrdinal,
+      );
+      yield* fake.takeRequest("prompt");
+      yield* fake.emit({ type: "agent_start" });
+      const transcript = [
+        ...before,
+        storedPrompt(reply.timestamp - 1, `turn ${runOrdinal}`),
+        storedReply(reply.timestamp, reply.text),
+      ];
+      fake.setTranscript(transcript);
+      yield* fake.emit({ type: "agent_end", messages: [] });
+      return { transcript, outcome: yield* takeRepliesAndOutcome(session.takeEvent) };
+    });
+
+  it.effect("shows each recovered reply once, in the turn that stored it", () =>
+    Effect.gen(function* () {
+      const fake = yield* makeFakePi;
+      const session = yield* openPrimeThread(fake);
+      const first = yield* runTurnWithDroppedReply(fake, session, 1, [], {
+        timestamp: 1000,
+        text: "First reply.",
+      });
+      const second = yield* runTurnWithDroppedReply(fake, session, 2, first.transcript, {
+        timestamp: 2000,
+        text: "Second reply.",
+      });
+
+      assert.deepEqual(first.outcome, { texts: ["First reply."], status: "completed" });
+      assert.deepEqual(second.outcome, { texts: ["Second reply."], status: "completed" });
+    }).pipe(Effect.scoped, Effect.provide(testLayer)),
+  );
+
+  it.effect("ignores a recovered reply's events that arrive after its turn settled", () =>
+    Effect.gen(function* () {
+      const fake = yield* makeFakePi;
+      const session = yield* openPrimeThread(fake);
+      const first = yield* runTurnWithDroppedReply(fake, session, 1, [], {
+        timestamp: 1000,
+        text: "First reply.",
+      });
+      assert.deepEqual(first.outcome.texts, ["First reply."]);
+
+      yield* startTurn(
+        session.runtime,
+        session.providerThread,
+        "default",
+        [],
+        "turn 2",
+        undefined,
+        2,
+      );
+      yield* fake.takeRequest("prompt");
+      // The first reply's delayed events finally come through.
+      yield* fake.emit({
+        type: "message_update",
+        message: assistantSnapshot(1000, "First reply."),
+        assistantMessageEvent: { type: "text_delta", contentIndex: 0, delta: "First reply." },
+      });
+      yield* fake.emit({ type: "message_end", message: storedReply(1000, "First reply.") });
+      yield* fake.emit({ type: "agent_start" });
+      yield* fake.emit({ type: "message_start", message: assistantSnapshot(2000, "") });
+      yield* fake.emit({ type: "message_end", message: storedReply(2000, "Second reply.") });
+      fake.setTranscript([
+        ...first.transcript,
+        storedPrompt(1999, "turn 2"),
+        storedReply(2000, "Second reply."),
+      ]);
+      yield* fake.emit({ type: "agent_end", messages: [] });
+
+      assert.deepEqual(yield* takeRepliesAndOutcome(session.takeEvent), {
+        texts: ["Second reply."],
+        status: "completed",
+      });
+    }).pipe(Effect.scoped, Effect.provide(testLayer)),
+  );
+
+  /** Steps virtual time in settle-probe steps until the turn ends, for probes that ask again. */
+  const awaitRepliesAndOutcome = (takeEvent: TakeEvent) =>
+    Effect.gen(function* () {
+      const outcome = yield* takeRepliesAndOutcome(takeEvent).pipe(Effect.forkScoped);
+      for (let step = 0; step < 50 && outcome.pollUnsafe() === undefined; step += 1) {
+        yield* TestClock.adjust(Duration.millis(100));
+        yield* Effect.yieldNow;
+      }
+      return yield* Fiber.join(outcome);
+    });
+
+  // get_state and get_messages are separate reads, so the history can be from
+  // another moment than the idle state that settles the turn.
+  it.effect("reads the history again when it does not match the idle state", () =>
     Effect.gen(function* () {
       const fake = yield* makeFakePi;
       const { runtime, takeEvent, providerThread } = yield* openPrimeThread(fake);
       yield* startTurn(runtime, providerThread);
       yield* fake.takeRequest("prompt");
-      yield* streamCutReply(fake);
-      fake.queueMessages({
-        messages: [
-          assistantSnapshot(500, "An earlier turn's reply."),
-          assistantSnapshot(1000, "The cause"),
-        ],
+      yield* fake.emit({ type: "agent_start" });
+      fake.setTranscript(recordedTurn);
+      fake.queueMessages({ messages: [storedPrompt(900)] });
+      yield* fake.emit({ type: "agent_end", messages: [] });
+
+      // The settle probe asks again shortly and this time reads it all.
+      assert.deepEqual(yield* awaitRepliesAndOutcome(takeEvent), {
+        texts: [fullReply],
+        status: "completed",
       });
-
-      yield* takeQuietProbeAtItsTick(fake);
-
-      assert.deepEqual(yield* takeCompletedReplies(takeEvent), [cutReply]);
     }).pipe(Effect.scoped, Effect.provide(testLayer)),
   );
+
+  it.effect("keeps the turn open when the agent goes busy while its history is read", () =>
+    Effect.gen(function* () {
+      const fake = yield* makeFakePi;
+      const { runtime, takeEvent, providerThread } = yield* openPrimeThread(fake);
+      yield* startTurn(runtime, providerThread);
+      yield* fake.takeRequest("prompt");
+      yield* fake.emit({ type: "agent_start" });
+      // The settle probe sees idle and the history matches it, but by the
+      // state read after it a steer started more work, whose events are lost.
+      fake.queueState({ messageCount: 2 });
+      fake.queueMessages({ messages: recordedTurn });
+      fake.queueState({ ...busyState, messageCount: 3 });
+      fake.setTranscript([
+        ...recordedTurn,
+        storedPrompt(1100, "And then?"),
+        storedReply(1200, "Then the follow-up."),
+      ]);
+      yield* fake.emit({ type: "agent_end", messages: [] });
+
+      assert.deepEqual(yield* awaitRepliesAndOutcome(takeEvent), {
+        texts: [fullReply, "Then the follow-up."],
+        status: "completed",
+      });
+    }).pipe(Effect.scoped, Effect.provide(testLayer)),
+  );
+
+  const storedLookup = (timestamp: number) => [
+    {
+      role: "assistant",
+      content: [{ type: "toolCall", id: "call-1", name: "lookup", arguments: { key: "a" } }],
+      stopReason: "toolUse",
+      timestamp,
+    },
+    {
+      role: "toolResult",
+      toolCallId: "call-1",
+      toolName: "lookup",
+      content: [{ type: "text", text: "found it" }],
+      isError: false,
+      timestamp: timestamp + 1,
+    },
+  ];
+
+  const takeCompletedLookup = (takeEvent: TakeEvent) =>
+    takeEvent(
+      (event) =>
+        event.type === "turn_item.updated" &&
+        event.turnItem.type === "dynamic_tool" &&
+        event.turnItem.status === "completed",
+    ).pipe(
+      Effect.map((event) =>
+        event.type === "turn_item.updated" && event.turnItem.type === "dynamic_tool"
+          ? { input: event.turnItem.input, output: event.turnItem.output }
+          : undefined,
+      ),
+    );
 
   it.effect("completes a tool whose end was dropped with its recorded result", () =>
     Effect.gen(function* () {
@@ -3114,31 +3362,31 @@ describe("PiAdapterV2 with the Prime Agent flavor", () => {
         toolName: "lookup",
         args: { key: "a" },
       });
-      fake.queueMessages({
-        messages: [
-          {
-            role: "toolResult",
-            toolCallId: "call-1",
-            toolName: "lookup",
-            content: [{ type: "text", text: "found it" }],
-            isError: false,
-          },
-        ],
-      });
+      fake.setTranscript([storedPrompt(900), ...storedLookup(1000)]);
 
       yield* takeQuietProbeAtItsTick(fake);
 
-      const tool = yield* takeEvent(
-        (event) =>
-          event.type === "turn_item.updated" &&
-          event.turnItem.type === "dynamic_tool" &&
-          event.turnItem.status === "completed",
-      );
-      assert.isTrue(
-        tool.type === "turn_item.updated" &&
-          tool.turnItem.type === "dynamic_tool" &&
-          tool.turnItem.output === "found it",
-      );
+      assert.deepEqual(yield* takeCompletedLookup(takeEvent), {
+        input: { key: "a" },
+        output: "found it",
+      });
+    }).pipe(Effect.scoped, Effect.provide(testLayer)),
+  );
+
+  it.effect("recovers a tool call whose every event was dropped", () =>
+    Effect.gen(function* () {
+      const fake = yield* makeFakePi;
+      const { runtime, takeEvent, providerThread } = yield* openPrimeThread(fake);
+      yield* startTurn(runtime, providerThread);
+      yield* fake.takeRequest("prompt");
+      yield* fake.emit({ type: "agent_start" });
+      fake.setTranscript([storedPrompt(900), ...storedLookup(1000)]);
+      yield* fake.emit({ type: "agent_end", messages: [] });
+
+      assert.deepEqual(yield* takeCompletedLookup(takeEvent), {
+        input: { key: "a" },
+        output: "found it",
+      });
     }).pipe(Effect.scoped, Effect.provide(testLayer)),
   );
 
