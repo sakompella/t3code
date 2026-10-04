@@ -103,6 +103,25 @@ describe("pi T3 MCP injection", () => {
     assert.equal(launch.env[T3_PI_RUNTIME_MODE_ENV], "approval-required");
   });
 
+  it("starts the process on a given session file ahead of the user's launch arguments", () => {
+    const base = {
+      launchArgs: ["--model", "haiku"],
+      environment: {},
+      mcpSession: undefined,
+      extensionPath: undefined,
+    };
+
+    assert.deepEqual(buildPiRpcLaunch({ ...base, resumeSessionFile: "/sessions/a.jsonl" }).args, [
+      "--mode",
+      "rpc",
+      "--resume",
+      "/sessions/a.jsonl",
+      "--model",
+      "haiku",
+    ]);
+    assert.notInclude(buildPiRpcLaunch(base).args, "--resume");
+  });
+
   it("forces tools and user extensions off for unattended text generation", () => {
     const launch = buildPiRpcLaunch({
       launchArgs: [
