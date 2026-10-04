@@ -215,7 +215,7 @@ import {
   resolveWorkGroupScrollIndex,
   shouldCollapseUserMessage,
   shouldFollowWorkGroupAppend,
-  timelineTurnFoldRunIdsByEntryId,
+  timelineTurnFoldKeysByEntryId,
   threadReadLabelPrefix,
   threadReadTargetId,
   threadReadTargetTitle,
@@ -240,6 +240,7 @@ import {
   workEntryLabelCode,
   type WorkEntryCode,
 } from "@t3tools/client-runtime/work-log/entry-code";
+import { runFoldSegmentKeyIsForRun } from "@t3tools/client-runtime/state/run-fold";
 import { TerminalContextInlineChip } from "./TerminalContextInlineChip";
 import { Popover, PopoverPopup, PopoverTrigger } from "../ui/popover";
 import { Spinner } from "../ui/spinner";
@@ -342,7 +343,7 @@ interface TimelineRowSharedState {
     readonly checkpointId: string;
     readonly scopeId: string;
   }) => void;
-  onToggleTurnFold: (runId: RunId) => void;
+  onToggleTurnFold: (foldKey: string) => void;
   onToggleAttemptFold: (attemptId: RunAttemptId) => void;
   onFileOpen: (attachment: ChatFileAttachment) => void;
   onFileDownload: (attachment: ChatFileAttachment) => void;
@@ -614,8 +615,8 @@ const ConversationTimeline = memo(function ConversationTimeline({
   // The remembered position is a snapshot taken when the list identity changes;
   // scrolling keeps rewriting the stored entry, which must not move the restore.
   const [listState, setListState] = useState(() => timelineListStateFor(listIdentityKey));
-  const [expandedRunIds, setExpandedRunIds] = useState<ReadonlySet<RunId>>(
-    () => listState.rememberedPosition?.disclosures?.runs ?? new Set(),
+  const [expandedFoldKeys, setExpandedFoldKeys] = useState<ReadonlySet<string>>(
+    () => listState.rememberedPosition?.disclosures?.folds ?? new Set(),
   );
   const [expandedWorkGroupIds, setExpandedWorkGroupIds] = useState<ReadonlySet<string>>(
     () => listState.rememberedPosition?.disclosures?.workGroups ?? new Set(),
@@ -629,7 +630,7 @@ const ConversationTimeline = memo(function ConversationTimeline({
   const restoringThreadPosition = positionedThreadKey !== listIdentityKey;
   const prefersReducedMotion = useMediaQuery("(prefers-reduced-motion: reduce)");
   const [settlingListIdentity, setSettlingListIdentity] = useState<string | null>(listIdentityKey);
-  let paintedExpandedRunIds = expandedRunIds;
+  let paintedExpandedFoldKeys = expandedFoldKeys;
   let paintedExpandedWorkGroupIds = expandedWorkGroupIds;
   let paintedExpandedAttemptIds = expandedAttemptIds;
   const identityChanged = listState.identity !== listIdentityKey;
@@ -640,18 +641,15 @@ const ConversationTimeline = memo(function ConversationTimeline({
     setListState({ identity: listIdentityKey, rememberedPosition, workGroupViewState });
     setPositionedThreadKey(null);
     setSettlingListIdentity(listIdentityKey);
-    paintedExpandedRunIds = rememberedPosition?.disclosures?.runs ?? new Set();
+    paintedExpandedFoldKeys = rememberedPosition?.disclosures?.folds ?? new Set();
     paintedExpandedWorkGroupIds = rememberedPosition?.disclosures?.workGroups ?? new Set();
     paintedExpandedAttemptIds = rememberedPosition?.disclosures?.attempts ?? new Set();
-    setExpandedRunIds(paintedExpandedRunIds);
+    setExpandedFoldKeys(paintedExpandedFoldKeys);
     setExpandedWorkGroupIds(paintedExpandedWorkGroupIds);
     setExpandedAttemptIds(paintedExpandedAttemptIds);
   }
   const citationThreadRef = parseScopedThreadKey(routeThreadKey);
   const openPullRequest = useOpenPrLink(citationThreadRef ?? undefined);
-  const expandCitedRun = (runId: RunId) => {
-    setExpandedRunIds((current) => (current.has(runId) ? current : new Set([...current, runId])));
-  };
   const [minimapStripMap] = useState(() => new Map<string, HTMLSpanElement>());
   const [disclosureToggleSettling, setDisclosureToggleSettling] = useState(false);
   const disclosureAnchorKeyRef = useRef<string | null>(null);
@@ -733,14 +731,14 @@ const ConversationTimeline = memo(function ConversationTimeline({
     return disclosureAnchorKey === null || row.id === disclosureAnchorKey;
   };
 
-  const onToggleTurnFold = (runId: RunId) => {
-    suspendEndScrollMaintenanceForDisclosure(`turn-fold:${runId}`);
-    setExpandedRunIds((existing) => {
+  const onToggleTurnFold = (foldKey: string) => {
+    suspendEndScrollMaintenanceForDisclosure(`turn-fold:${foldKey}`);
+    setExpandedFoldKeys((existing) => {
       const next = new Set(existing);
-      if (next.has(runId)) {
-        next.delete(runId);
+      if (next.has(foldKey)) {
+        next.delete(foldKey);
       } else {
-        next.add(runId);
+        next.add(foldKey);
       }
       return next;
     });
@@ -770,37 +768,10 @@ const ConversationTimeline = memo(function ConversationTimeline({
     });
   };
 
-  const previousLatestRunRef = useRef({ identity: listIdentityKey, run: latestRun });
-  useEffect(() => {
-    const { identity, run: previous } = previousLatestRunRef.current;
-    previousLatestRunRef.current = { identity: listIdentityKey, run: latestRun };
-    if (identity !== listIdentityKey || !latestRun || previous?.runId === undefined) {
-      return;
-    }
-    if (latestRun.runId === previous.runId) {
-      if (previous.status === "running" && latestRun.status === "interrupted") {
-        setExpandedRunIds((existing) => {
-          const next = new Set(existing);
-          next.add(latestRun.runId);
-          return next;
-        });
-      }
-      return;
-    }
-    setExpandedRunIds((existing) => {
-      if (!existing.has(previous.runId)) {
-        return existing;
-      }
-      const next = new Set(existing);
-      next.delete(previous.runId);
-      return next;
-    });
-  }, [latestRun, listIdentityKey]);
-
-  // Find the fold that hides the match: imported turns have no run id but still
-  // fold under a synthetic key, so the match's own run id cannot open them.
-  const findFoldRunIds = findActive
-    ? timelineTurnFoldRunIdsByEntryId({
+  // Find the fold segment that hides the match: imported turns have no run id
+  // but still fold under a synthetic key, so the match's own run id cannot open them.
+  const findFoldKeys = findActive
+    ? timelineTurnFoldKeysByEntryId({
         timelineEntries,
         latestRun,
         runningRunId,
@@ -808,22 +779,22 @@ const ConversationTimeline = memo(function ConversationTimeline({
         runlessWorkActive,
       })
     : null;
-  const activeFindRunId = activeFindMatch
-    ? findFoldRunIds?.get(activeFindMatch.entryId)
+  const activeFindFoldKey = activeFindMatch
+    ? findFoldKeys?.get(activeFindMatch.entryId)
     : undefined;
-  const [expandedFindRunId, setExpandedFindRunId] = useState<RunId | undefined>();
-  if (expandedFindRunId !== activeFindRunId) {
-    setExpandedFindRunId(activeFindRunId);
-    if (activeFindRunId) {
-      setExpandedRunIds((previous) =>
-        previous.has(activeFindRunId) ? previous : new Set(previous).add(activeFindRunId),
+  const [expandedFindFoldKey, setExpandedFindFoldKey] = useState<string | undefined>();
+  if (expandedFindFoldKey !== activeFindFoldKey) {
+    setExpandedFindFoldKey(activeFindFoldKey);
+    if (activeFindFoldKey) {
+      setExpandedFoldKeys((previous) =>
+        previous.has(activeFindFoldKey) ? previous : new Set(previous).add(activeFindFoldKey),
       );
     }
   }
-  const visibleExpandedRunIds =
-    !activeFindRunId || paintedExpandedRunIds.has(activeFindRunId)
-      ? paintedExpandedRunIds
-      : new Set(paintedExpandedRunIds).add(activeFindRunId);
+  const visibleExpandedFoldKeys =
+    !activeFindFoldKey || paintedExpandedFoldKeys.has(activeFindFoldKey)
+      ? paintedExpandedFoldKeys
+      : new Set(paintedExpandedFoldKeys).add(activeFindFoldKey);
 
   const activeFindAttemptId = activeFindMatch
     ? timelineEntries.find((entry) => entry.id === activeFindMatch.entryId)?.attempt?.id
@@ -846,7 +817,7 @@ const ConversationTimeline = memo(function ConversationTimeline({
     timelineEntries,
     latestRun,
     runningRunId,
-    expandedRunIds: visibleExpandedRunIds,
+    expandedFoldKeys: visibleExpandedFoldKeys,
     expandedAttemptIds: visibleExpandedAttemptIds,
     expandedWorkGroupIds,
     isWorking,
@@ -857,6 +828,38 @@ const ConversationTimeline = memo(function ConversationTimeline({
     worktreeSetup,
   });
   const rows = useStableRows(rawRows, listIdentityKey);
+  const runFoldKeys = (runId: RunId) =>
+    rows.flatMap((row) => (row.kind === "turn-fold" && row.runId === runId ? [row.foldKey] : []));
+  const expandCitedRun = (runId: RunId) => {
+    const collapsedKeys = runFoldKeys(runId).filter((key) => !expandedFoldKeys.has(key));
+    if (collapsedKeys.length > 0) {
+      setExpandedFoldKeys((current) => new Set([...current, ...collapsedKeys]));
+    }
+  };
+
+  // An in-session interrupt leaves its turn expanded so the user keeps their
+  // place; the next turn (or a reload, since this is local state) folds it.
+  const previousLatestRunRef = useRef({ identity: listIdentityKey, run: latestRun });
+  useEffect(() => {
+    const { identity, run: previous } = previousLatestRunRef.current;
+    previousLatestRunRef.current = { identity: listIdentityKey, run: latestRun };
+    if (identity !== listIdentityKey || !latestRun || previous?.runId === undefined) {
+      return;
+    }
+    if (latestRun.runId === previous.runId) {
+      if (previous.status === "running" && latestRun.status === "interrupted") {
+        const interruptedKeys = [latestRun.runId, ...runFoldKeys(latestRun.runId)];
+        setExpandedFoldKeys((existing) => new Set([...existing, ...interruptedKeys]));
+      }
+      return;
+    }
+    setExpandedFoldKeys((existing) => {
+      const next = new Set(
+        [...existing].filter((key) => !runFoldSegmentKeyIsForRun(key, previous.runId)),
+      );
+      return next.size === existing.size ? existing : next;
+    });
+  }, [latestRun, listIdentityKey, runFoldKeys]);
   // Run status/timestamps churn on every stream event; the shared row context
   // must not change with them or every timeline row re-renders per event.
   const runs = useStableHandoffRuns(runsProp);
@@ -1114,7 +1117,7 @@ const ConversationTimeline = memo(function ConversationTimeline({
             scrollOffset: element.scrollTop,
             atEnd: isAtEnd,
             disclosures: {
-              runs: paintedExpandedRunIds,
+              folds: paintedExpandedFoldKeys,
               workGroups: paintedExpandedWorkGroupIds,
               attempts: paintedExpandedAttemptIds,
               workGroupState: workGroupViewState,
@@ -1307,9 +1310,9 @@ const ConversationTimeline = memo(function ConversationTimeline({
   useLayoutEffect(() => {
     if (!findPositionReaderRef || !timelineViewportElement) return;
     const read: ThreadFindPositionReader = (query) => {
-      const foldRunIds =
-        findFoldRunIds ??
-        timelineTurnFoldRunIdsByEntryId({
+      const foldKeys =
+        findFoldKeys ??
+        timelineTurnFoldKeysByEntryId({
           timelineEntries,
           latestRun,
           runningRunId,
@@ -1330,16 +1333,16 @@ const ConversationTimeline = memo(function ConversationTimeline({
               continue;
             }
             const entry = timelineEntries.find((entry) => {
-              const runId =
+              const owner =
                 row.kind === "turn-fold"
-                  ? foldRunIds.get(entry.id)
+                  ? foldKeys.get(entry.id)
                   : entry.kind === "message"
                     ? entry.message.runId
                     : entry.kind === "proposed-plan"
                       ? entry.proposedPlan.runId
                       : null;
               return (
-                runId === row.runId &&
+                owner === (row.kind === "turn-fold" ? row.foldKey : row.runId) &&
                 (entry.kind !== "message" || entry.message.role === "assistant") &&
                 (row.kind !== "attempt-fold" || entry.attempt?.id === row.attemptId)
               );
@@ -1358,7 +1361,7 @@ const ConversationTimeline = memo(function ConversationTimeline({
     };
   }, [
     contentInsetEndAdjustment,
-    findFoldRunIds,
+    findFoldKeys,
     findPositionReaderRef,
     isWorking,
     latestRun,
@@ -2545,7 +2548,7 @@ function TurnFoldTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "turn-
         type="button"
         aria-expanded={row.expanded}
         data-scroll-anchor-ignore
-        onClick={() => ctx.onToggleTurnFold(row.runId)}
+        onClick={() => ctx.onToggleTurnFold(row.foldKey)}
         className="flex cursor-pointer select-none items-center gap-1 rounded-md px-1 text-sm leading-relaxed text-muted-foreground tabular-nums transition-colors hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring/70"
       >
         <span>{row.label}</span>

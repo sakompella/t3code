@@ -1281,7 +1281,7 @@ describe("HTML renders in the timeline", () => {
         startedAt: DateTime.formatIso(at(0)),
         completedAt: DateTime.formatIso(at(5)),
       },
-      ...(expanded ? { expandedRunIds: new Set([runId]) } : {}),
+      ...(expanded ? { expandedFoldKeys: new Set<string>([runId]) } : {}),
       isWorking: false,
       activeTurnStartedAt: null,
       turnDiffSummaries: [],
