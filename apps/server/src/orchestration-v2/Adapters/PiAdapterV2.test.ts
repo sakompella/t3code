@@ -5300,49 +5300,53 @@ describe("PiAdapterV2 reaching T3 through the kernel's MCP client", () => {
     ).pipe(Effect.scoped, Effect.provide(testLayer)),
   );
 
-  it.effect("keeps native tools and says once what to add when the server is not declared", () =>
-    withMcpSession(
-      Effect.gen(function* () {
-        const agentDir = yield* makeAgentDir();
-        const fake = yield* makeFakePi;
-        const { runtime, takeEvent } = yield* openPrime(fake, agentDir);
-        const { args, env } = fake.lastSpawn();
-        assert.notInclude(args, "--skill");
-        assert.notProperty(env, "T3_PI_MCP_TOOLS");
+  it.effect(
+    "registers no native tools and says once what to add when the server is not declared",
+    () =>
+      withMcpSession(
+        Effect.gen(function* () {
+          const agentDir = yield* makeAgentDir();
+          const fake = yield* makeFakePi;
+          const { runtime, takeEvent } = yield* openPrime(fake, agentDir);
+          const { args, env } = fake.lastSpawn();
+          assert.notInclude(args, "--skill");
+          assert.equal(env.T3_PI_MCP_TOOLS, "kernel");
+          // The permission hook lives in the extension, so Supervised stays enforced.
+          assert.include(args, "--extension");
 
-        const providerThread = yield* runtime.ensureThread({
-          threadId: THREAD_ID,
-          modelSelection: modelSelection("default"),
-          runtimePolicy,
-        });
-        const finishTurn = Effect.fnUntraced(function* (ordinal: number) {
-          yield* startTurn(runtime, providerThread, "default", [], "Hello", undefined, ordinal);
-          yield* fake.takeRequest("prompt");
-          yield* fake.emit({ type: "agent_start" });
-          yield* fake.emit({ type: "agent_end", messages: [] });
-          yield* fake.takeRequest("get_state");
-          const seen: Array<ProviderAdapterV2Event> = [];
-          yield* takeEvent((event) => {
-            seen.push(event);
-            return event.type === "turn.terminal";
+          const providerThread = yield* runtime.ensureThread({
+            threadId: THREAD_ID,
+            modelSelection: modelSelection("default"),
+            runtimePolicy,
           });
-          return t3SetupNotices(seen);
-        });
+          const finishTurn = Effect.fnUntraced(function* (ordinal: number) {
+            yield* startTurn(runtime, providerThread, "default", [], "Hello", undefined, ordinal);
+            yield* fake.takeRequest("prompt");
+            yield* fake.emit({ type: "agent_start" });
+            yield* fake.emit({ type: "agent_end", messages: [] });
+            yield* fake.takeRequest("get_state");
+            const seen: Array<ProviderAdapterV2Event> = [];
+            yield* takeEvent((event) => {
+              seen.push(event);
+              return event.type === "turn.terminal";
+            });
+            return t3SetupNotices(seen);
+          });
 
-        const [hint, ...extra] = yield* finishTurn(1);
-        assert.lengthOf(extra, 0);
-        assert.equal(hint?.type === "system_notice" ? hint.tone : undefined, "warning");
-        const message = hint?.type === "system_notice" ? hint.message : "";
-        assert.include(message, `${agentDir}/settings.json`);
-        assert.include(
-          message,
-          encodeJson({
-            "t3-code": { type: "http", url: ENDPOINT, bearerTokenEnvVar: "T3_MCP_BEARER_TOKEN" },
-          }),
-        );
-        assert.lengthOf(yield* finishTurn(2), 0);
-      }),
-    ).pipe(Effect.scoped, Effect.provide(testLayer)),
+          const [hint, ...extra] = yield* finishTurn(1);
+          assert.lengthOf(extra, 0);
+          assert.equal(hint?.type === "system_notice" ? hint.tone : undefined, "warning");
+          const message = hint?.type === "system_notice" ? hint.message : "";
+          assert.include(message, `${agentDir}/settings.json`);
+          assert.include(
+            message,
+            encodeJson({
+              "t3-code": { type: "http", url: ENDPOINT, bearerTokenEnvVar: "T3_MCP_BEARER_TOKEN" },
+            }),
+          );
+          assert.lengthOf(yield* finishTurn(2), 0);
+        }),
+      ).pipe(Effect.scoped, Effect.provide(testLayer)),
   );
 
   it.effect("treats a server declared for another port as undeclared", () =>
@@ -5353,7 +5357,9 @@ describe("PiAdapterV2 reaching T3 through the kernel's MCP client", () => {
         });
         const fake = yield* makeFakePi;
         yield* openPrime(fake, agentDir);
-        assert.notInclude(fake.lastSpawn().args, "--skill");
+        const { args, env } = fake.lastSpawn();
+        assert.notInclude(args, "--skill");
+        assert.equal(env.T3_PI_MCP_TOOLS, "kernel");
       }),
     ).pipe(Effect.scoped, Effect.provide(testLayer)),
   );

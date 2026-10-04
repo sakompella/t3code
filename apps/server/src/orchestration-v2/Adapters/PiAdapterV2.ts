@@ -379,8 +379,6 @@ export function makePiAdapterV2(
   const name = flavor.displayName;
   const binary = options.settings.binaryPath || flavor.defaultBinary;
   const capabilities = piProviderCapabilities(flavor);
-  /** The undeclared-MCP hint is shown once per adapter, not on every session open. */
-  let mcpSetupHintShown = false;
   const unsolicitedActivityError = `${name} started agent work outside an active T3 turn. The session was stopped to prevent invisible tool execution.`;
   const providerRef = (
     nativeId: string,
@@ -433,9 +431,9 @@ export function makePiAdapterV2(
       const extensionPath = yield* provideCacheFs(
         materializePiT3McpExtension(options.serverConfig.providerStatusCacheDir),
       );
-      // An agent with its own MCP client reaches T3 through the t3-code skill,
-      // but only once the user declared the server in its settings. Otherwise
-      // the extension keeps registering T3's tools and the user gets a hint.
+      // An agent with its own MCP client never gets T3's tools natively. It
+      // reaches T3 through the t3-code skill once the user declared the server
+      // in its settings. Until then the user gets a setup notice.
       const kernelMcpAccess =
         mcpSession === undefined || flavor.kernelMcp === null
           ? undefined
@@ -452,6 +450,7 @@ export function makePiAdapterV2(
         kernelMcpAccess !== undefined && !kernelMcpAccess.declared
           ? kernelMcpAccess.hint
           : undefined;
+      let mcpSetupHintShown = false;
       const resolvedLaunchArgs = resolvePiLaunchArgs(options.settings.launchArgs);
       if (!resolvedLaunchArgs.ok) {
         return yield* protocolError(resolvedLaunchArgs.message);
@@ -461,7 +460,7 @@ export function makePiAdapterV2(
         environment: options.environment,
         mcpSession,
         extensionPath,
-        ...(skillPath === undefined ? {} : { skillPath }),
+        ...(flavor.kernelMcp === null ? {} : { kernelMcp: { skillPath } }),
         runtimeMode: input.runtimePolicy.runtimeMode,
       });
       const connection: PiRpcConnection = yield* makePiRpcConnection({

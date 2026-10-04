@@ -1,8 +1,10 @@
 /**
  * Prime Agent's kernel reaches T3 through its own MCP client, which reads
- * generic MCP servers from the user's settings file with a fixed URL. T3 only
- * reads that file; the user adds the entry. Until they do, T3 keeps registering
- * its tools natively so the session still works.
+ * generic MCP servers from the user's settings file only: project settings,
+ * flags, the environment, and extensions cannot declare one. T3 only reads that
+ * file; the user adds the entry. Until they do, the session has no T3 tools and
+ * shows a setup notice. T3 never registers them natively, so the agent keeps
+ * exactly one tool, `ipython`.
  */
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
@@ -55,8 +57,8 @@ export function t3CodeMcpSetupHint(input: {
 }): string {
   const entry = JSON.stringify({ [T3_CODE_MCP_SERVER_NAME]: t3CodeMcpServerEntry(input.endpoint) });
   return [
-    `${input.displayName} can reach T3 Code through its own MCP client with one tool instead of about 70, but \`${T3_CODE_MCP_SERVER_NAME}\` is not declared in ${input.settingsPath}.`,
-    `This session keeps T3's tools as native tools. To switch, add this entry to "mcpServers" in that file and start a new session: ${entry}`,
+    `${input.displayName} reaches T3 Code through the \`${T3_CODE_MCP_SERVER_NAME}\` MCP server, which is not declared in ${input.settingsPath}. This session has no T3 Code tools.`,
+    `To enable them, add this entry to "mcpServers" in that file and start a new session: ${entry}`,
     "The URL holds this server's port; update it if the port changes.",
   ].join("\n\n");
 }

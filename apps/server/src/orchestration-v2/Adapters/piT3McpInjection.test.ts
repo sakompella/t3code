@@ -168,29 +168,56 @@ describe("pi T3 MCP injection", () => {
     }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
   );
 
-  it("passes the t3-code skill only when a skill path is supplied", () => {
+  it("never registers native T3 tools for an agent with its own MCP client", () => {
     const base = {
       launchArgs: [],
       environment: {},
       extensionPath: "/tmp/cache/pi-t3-mcp-extension.ts",
     };
     const skillPath = "/tmp/cache/pi-t3-skills/t3-code";
-    const withSkill = buildPiRpcLaunch({ ...base, mcpSession, skillPath });
-    assert.deepEqual(withSkill.args.slice(-2), ["--skill", skillPath]);
-    assert.equal(withSkill.env[T3_PI_MCP_TOOLS_ENV], "kernel");
-    const native = buildPiRpcLaunch({
+    const declared = buildPiRpcLaunch({ ...base, mcpSession, kernelMcp: { skillPath } });
+    assert.deepEqual(declared.args.slice(-2), ["--skill", skillPath]);
+    assert.equal(declared.env[T3_PI_MCP_TOOLS_ENV], "kernel");
+
+    // Undeclared: no skill, yet still no native tools and the permission hook stays.
+    const undeclared = buildPiRpcLaunch({
       ...base,
       mcpSession,
-      environment: { [T3_PI_MCP_TOOLS_ENV]: "kernel" },
+      kernelMcp: { skillPath: undefined },
     });
-    assert.notInclude(native.args, "--skill");
-    // A value inherited from the server must not switch off native tools.
-    assert.notProperty(native.env, T3_PI_MCP_TOOLS_ENV);
+    assert.notInclude(undeclared.args, "--skill");
+    assert.include(undeclared.args, "--extension");
+    assert.equal(undeclared.env[T3_PI_MCP_TOOLS_ENV], "kernel");
+
     // Without a T3 credential the skill would describe tools that cannot work.
-    assert.notInclude(
-      buildPiRpcLaunch({ ...base, mcpSession: undefined, skillPath }).args,
-      "--skill",
-    );
+    const noCredential = buildPiRpcLaunch({
+      ...base,
+      mcpSession: undefined,
+      kernelMcp: { skillPath },
+    });
+    assert.notInclude(noCredential.args, "--skill");
+    assert.equal(noCredential.env[T3_PI_MCP_TOOLS_ENV], "kernel");
+
+    // No extension means nothing registers tools, so there is nothing to switch off.
+    const noExtension = buildPiRpcLaunch({
+      ...base,
+      mcpSession,
+      kernelMcp: { skillPath },
+      disableExtensions: true,
+    });
+    assert.notProperty(noExtension.env, T3_PI_MCP_TOOLS_ENV);
+  });
+
+  it("keeps native tools for an agent without its own MCP client", () => {
+    const launch = buildPiRpcLaunch({
+      launchArgs: [],
+      // A value inherited from the server must not switch off native tools.
+      environment: { [T3_PI_MCP_TOOLS_ENV]: "kernel" },
+      mcpSession,
+      extensionPath: "/tmp/cache/pi-t3-mcp-extension.ts",
+    });
+    assert.notInclude(launch.args, "--skill");
+    assert.notProperty(launch.env, T3_PI_MCP_TOOLS_ENV);
   });
 
   it.effect("materializes a skill whose directory, name, and description Pi accepts", () =>

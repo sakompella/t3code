@@ -274,8 +274,12 @@ export function buildPiRpcLaunch(input: {
   readonly environment: NodeJS.ProcessEnv;
   readonly mcpSession: McpProviderSessionConfig | undefined;
   readonly extensionPath: string | undefined;
-  /** Directory of the `t3-code` skill, for agents that reach T3 through their own MCP client. */
-  readonly skillPath?: string;
+  /**
+   * Set for agents that reach T3 through their own MCP client. The extension
+   * then registers no T3 tools. `skillPath` is the `t3-code` skill directory,
+   * present only when the user declared the server.
+   */
+  readonly kernelMcp?: { readonly skillPath: string | undefined };
   readonly ephemeral?: boolean;
   readonly disableExtensions?: boolean;
   readonly disableTools?: boolean;
@@ -310,8 +314,9 @@ export function buildPiRpcLaunch(input: {
   ) {
     args.push("--extension", input.extensionPath);
   }
-  // A skill means the agent reaches T3 through its own MCP client.
-  const skillPath = hasT3Mcp ? input.skillPath : undefined;
+  const kernelMcp = hasT3Extension ? input.kernelMcp : undefined;
+  // The skill describes tools that only work with a T3 credential.
+  const skillPath = hasT3Mcp ? kernelMcp?.skillPath : undefined;
   if (skillPath !== undefined) args.push("--skill", skillPath);
   const environment = { ...input.environment };
   // These values belong to the current T3 session. Never let a Pi child reuse
@@ -330,7 +335,7 @@ export function buildPiRpcLaunch(input: {
               input.runtimeMode === "auto" ? "approval-required" : input.runtimeMode,
           }
         : {}),
-      ...(skillPath !== undefined ? { [T3_PI_MCP_TOOLS_ENV]: T3_PI_MCP_TOOLS_KERNEL } : {}),
+      ...(kernelMcp !== undefined ? { [T3_PI_MCP_TOOLS_ENV]: T3_PI_MCP_TOOLS_KERNEL } : {}),
       ...(hasT3Mcp && input.mcpSession !== undefined
         ? {
             [T3_MCP_URL_ENV]: input.mcpSession.endpoint,
