@@ -63,6 +63,16 @@ type TranscriptRead =
   /** No read, or a history from another moment than the idle state. */
   | { readonly _tag: "unconfirmed" };
 
+/** The stored conversation, or undefined when it could not be read. */
+const readHistory = (request: PiRpcConnection["request"], timeoutMs: number) =>
+  request({ type: "get_messages" }, timeoutMs).pipe(
+    Effect.map((data): ReadonlyArray<unknown> | undefined => {
+      const messages = recordField(data, "messages");
+      return Array.isArray(messages) ? messages : undefined;
+    }),
+    Effect.orElseSucceed(() => undefined),
+  );
+
 /**
  * Reads the stored conversation of an agent that `idleState` showed idle,
  * and confirms it with a second state read. Stock RPC has no atomic
@@ -74,14 +84,9 @@ const readSettledTranscript = Effect.fnUntraced(function* (
   request: PiRpcConnection["request"],
   idleState: unknown,
 ): Effect.fn.Return<TranscriptRead> {
-  const history = yield* request({ type: "get_messages" }, HISTORY_READ_TIMEOUT_MS).pipe(
-    Effect.option,
-  );
+  const messages = yield* readHistory(request, HISTORY_READ_TIMEOUT_MS);
   const after = yield* request({ type: "get_state" }, STATE_READ_TIMEOUT_MS).pipe(Effect.option);
-  const messages = Option.getOrUndefined(
-    Option.map(history, (data) => recordField(data, "messages")),
-  );
-  if (Option.isNone(after) || !Array.isArray(messages)) return { _tag: "unconfirmed" };
+  if (Option.isNone(after) || messages === undefined) return { _tag: "unconfirmed" };
   if (!piStateIsIdle(after.value)) return { _tag: "busy" };
   const counted = (state: unknown) => recordNumber(state, "messageCount") ?? messages.length;
   if (counted(idleState) !== messages.length || counted(after.value) !== messages.length) {
@@ -188,13 +193,8 @@ export function makePrimeAgentReconciler<E>(input: {
     if (!enabled || (ledger !== null && seededSession === sessionFile)) return;
     ledger = null;
     seededSession = sessionFile;
-    const history = yield* request({ type: "get_messages" }, HISTORY_READ_TIMEOUT_MS).pipe(
-      Effect.option,
-    );
-    const messages = Option.getOrUndefined(
-      Option.map(history, (data) => recordField(data, "messages")),
-    );
-    if (Array.isArray(messages)) commit(messages);
+    const messages = yield* readHistory(request, HISTORY_READ_TIMEOUT_MS);
+    if (messages !== undefined) commit(messages);
   });
 
   /** A live event about a message or tool an earlier turn already accounted for. */
@@ -297,13 +297,8 @@ export function makePrimeAgentReconciler<E>(input: {
   const reconcileEndingTurn = Effect.fnUntraced(function* (turn: ActivePiTurn) {
     if (!enabled || turn.transcriptReconciled || ledger === null) return;
     turn.transcriptReconciled = true;
-    const history = yield* request({ type: "get_messages" }, ENDING_HISTORY_READ_TIMEOUT_MS).pipe(
-      Effect.option,
-    );
-    const messages = Option.getOrUndefined(
-      Option.map(history, (data) => recordField(data, "messages")),
-    );
-    if (!Array.isArray(messages)) return yield* logOutcome(turn, "unreadable");
+    const messages = yield* readHistory(request, ENDING_HISTORY_READ_TIMEOUT_MS);
+    if (messages === undefined) return yield* logOutcome(turn, "unreadable");
     yield* project(turn, messages);
     commit(messages);
   });
