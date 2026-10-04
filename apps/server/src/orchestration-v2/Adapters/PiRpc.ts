@@ -86,6 +86,16 @@ export class PiRpcRecordTooLargeError extends Schema.TaggedError<PiRpcRecordTooL
   }
 }
 
+/**
+ * Prime Agent opens a session at launch (`--resume <file>`) only when no other
+ * worker holds its lease, and otherwise exits with this message on stderr. The
+ * holder releases the lease once it finishes shutting down, so the refusal is
+ * transient.
+ */
+export function isPiSessionLeaseRefusal(stderr: string): boolean {
+  return stderr.includes("Session is already active");
+}
+
 export type PiRpcRecord = Record<string, unknown>;
 
 export function piRecordField(input: unknown, key: string): unknown {
@@ -166,6 +176,12 @@ export interface PiRpcConnection {
   /** Resolves when the process has exited, with its exit code. */
   readonly exited: Effect.Effect<number, PiRpcError>;
   /**
+   * The end of what pi wrote to stderr, read once the process has closed it
+   * (empty if it has not within half a second). Only for classifying a failed
+   * launch: stderr can carry credentials or prompt text, so never log it.
+   */
+  readonly stderrAfterExit: Effect.Effect<string>;
+  /**
    * Kill the pi process group immediately (SIGTERM, grace, SIGKILL). Used by
    * Stop-with-restart when the process may be wedged and `abort` cannot be
    * trusted to land. The transport fails and the session manager respawns a
@@ -191,6 +207,8 @@ interface PendingPiRequest {
  * the line exists as pieces, a joined string and a parsed value at once.
  */
 const DEFAULT_MAX_PI_RECORD_CHARS = 64 * 1024 * 1024;
+const STDERR_TAIL_CHARS = 2_000;
+const STDERR_CLOSE_WAIT = Duration.millis(500);
 
 export type PiFrame =
   | { readonly _tag: "Line"; readonly text: string }
@@ -526,16 +544,20 @@ export const makePiRpcConnection = Effect.fnUntraced(function* (options: PiRpcSp
   );
 
   // Surface stderr as debug logs; pi reserves stdout for the protocol.
+  let stderrTail = "";
+  const stderrClosed = yield* Deferred.make<void>();
   yield* child.stderr.pipe(
     Stream.decodeText(),
-    Stream.runForEach((chunk) =>
-      chunk.trim().length === 0
+    Stream.runForEach((chunk) => {
+      stderrTail = (stderrTail + chunk).slice(-STDERR_TAIL_CHARS);
+      return chunk.trim().length === 0
         ? Effect.void
         : // Length only: pi's stderr is unbounded remote output and can carry
           // credentials or prompt text, so it never enters a log annotation.
-          Effect.logDebug("pi stderr", { stderrLength: chunk.length }),
-    ),
+          Effect.logDebug("pi stderr", { stderrLength: chunk.length });
+    }),
     Effect.ignore,
+    Effect.ensuring(Deferred.succeed(stderrClosed, undefined)),
     Effect.forkIn(scope),
   );
 
@@ -596,6 +618,12 @@ export const makePiRpcConnection = Effect.fnUntraced(function* (options: PiRpcSp
     request,
     events,
     exited: Deferred.await(exitDeferred),
+    stderrAfterExit: Deferred.await(stderrClosed).pipe(
+      Effect.timeoutOption(STDERR_CLOSE_WAIT),
+      // Same reason as the stdout-close wait above: adapter tests run under TestClock.
+      Effect.provideService(Clock.Clock, Clock.Clock.defaultValue()),
+      Effect.map(() => stderrTail),
+    ),
     terminate: failTransport(
       new PiRpcError({ operation: "terminate", detail: "pi process was stopped" }),
     ).pipe(Effect.andThen(terminateProcess), Effect.ignore, Effect.uninterruptible),
