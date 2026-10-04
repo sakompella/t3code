@@ -10,6 +10,7 @@ import * as Effect from "effect/Effect";
 import * as Option from "effect/Option";
 import * as Predicate from "effect/Predicate";
 import * as Queue from "effect/Queue";
+import * as Schedule from "effect/Schedule";
 import * as Scope from "effect/Scope";
 import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
@@ -104,6 +105,7 @@ export interface PiRpcConnection {
 
 const DEFAULT_REQUEST_TIMEOUT_MS = 30_000;
 const TERMINATION_GRACE = Duration.seconds(1);
+const TERMINATION_POLL = Schedule.spaced("20 millis");
 
 interface PendingPiRequest {
   readonly deferred: Deferred.Deferred<unknown, PiRpcError>;
@@ -179,6 +181,9 @@ function parsePiRecord(line: string): PiRpcRecord | undefined {
 }
 
 /**
+ * Kill the pi process group: SIGTERM, a grace that ends as soon as the group
+ * exits, then SIGKILL.
+ *
  * `hasExited` is consulted before each signal. Once the original child is
  * gone its pid/pgid can be recycled by the OS, so escalating blindly could
  * deliver SIGKILL to an unrelated process.
@@ -187,7 +192,10 @@ const terminatePiProcess = (kill: (signal: NodeJS.Signals) => boolean, hasExited
   Effect.gen(function* () {
     if (hasExited()) return;
     if (!kill("SIGTERM")) return;
-    yield* Effect.sleep(TERMINATION_GRACE);
+    yield* Effect.sync(hasExited).pipe(
+      Effect.repeat({ until: (exited) => exited, schedule: TERMINATION_POLL }),
+      Effect.timeoutOption(TERMINATION_GRACE),
+    );
     if (hasExited()) return;
     kill("SIGKILL");
   });
