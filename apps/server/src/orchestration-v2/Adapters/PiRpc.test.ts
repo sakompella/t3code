@@ -13,7 +13,12 @@ import * as Stream from "effect/Stream";
 import { ChildProcessSpawner } from "effect/unstable/process";
 import { HostProcessPlatform } from "@t3tools/shared/hostProcess";
 
-import { makeJsonlFramer, makePiRpcConnection, type PiFrame } from "./PiRpc.ts";
+import {
+  isPiSessionLeaseRefusal,
+  makeJsonlFramer,
+  makePiRpcConnection,
+  type PiFrame,
+} from "./PiRpc.ts";
 
 // Reports its pid, then idles until signalled, like an idle `pi --mode rpc`.
 const IDLE_PI_SCRIPT = `console.log(JSON.stringify({ type: "ready", pid: process.pid })); setInterval(() => {}, 1000);`;
@@ -249,5 +254,34 @@ describe("makeJsonlFramer", () => {
       for (let i = 0; i < input.length; i += size) frames.push(...frame(input.slice(i, i + size)));
       assert.deepEqual(text(frames), ['{"a":1}', "<oversized 11>", "<oversized 50>", "{}"]);
     }
+  });
+});
+
+describe("PiRpc launch failure", () => {
+  // Prime Agent refuses `--resume` for a session another worker holds by
+  // printing this and exiting 1, before it speaks the protocol.
+  const LEASE_REFUSAL_SCRIPT = `
+    console.error("Error: Session is already active in 0123456789ab: /sessions/a.jsonl");
+    process.exit(1);
+  `;
+
+  it.live("reports what pi wrote to stderr once a process that never answered has exited", () =>
+    Effect.gen(function* () {
+      const connection = yield* makePiRpcConnection({
+        command: process.execPath,
+        args: ["-e", LEASE_REFUSAL_SCRIPT],
+        cwd: undefined,
+        env: { PATH: process.env.PATH },
+      });
+
+      const reply = yield* Effect.exit(connection.request({ type: "get_state" }));
+
+      assert.isTrue(Exit.isFailure(reply));
+      assert.isTrue(isPiSessionLeaseRefusal(yield* connection.stderrAfterExit));
+    }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+  );
+
+  it("recognizes only the lease refusal", () => {
+    assert.isFalse(isPiSessionLeaseRefusal("Error: Session file not found: /sessions/a.jsonl"));
   });
 });
