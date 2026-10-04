@@ -61,7 +61,7 @@ vi.mock("./MessagesTimeline.logic", async (importOriginal) => {
       previous: Parameters<typeof logic.deriveMessagesTimelineRowsWithState>[1],
     ) {
       if (activityTestState.expandedRuns) {
-        input = { ...input, expandedRunIds: new Set([RunId.make("run-1")]) };
+        input = { ...input, expandedFoldKeys: new Set([RunId.make("run-1")]) };
       }
       const projection = logic.deriveMessagesTimelineRowsWithState(input, previous);
       if (!activityTestState.expanded) return projection;
