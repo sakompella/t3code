@@ -18,3 +18,11 @@
 ## Providers
 
 Keep upstream's providers even if unused. Removing them saves little and adds a large diff.
+
+## Fork features the owner wants kept
+
+Don't remove these to reduce divergence:
+
+- The Prime Agent heartbeat status line in the composer.
+- Refinement notices, the "Finishing up…" row shown while Prime Agent reviews its harness after the final reply, and expandable long notices.
+- Syntax highlighting for Python and shell tool rows (web and mobile), including the exit code shown under highlighted source.
