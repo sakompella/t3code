@@ -66,6 +66,46 @@ type RlmChildDecision =
         | "terminal-already-settled";
     };
 
+/** Where an update came from: the live roster, a Stop, or a notice stored in the parent's history. */
+type RlmChildUpdateSource = "rlm_child_update" | "interrupt" | "transcript_notice";
+
+/**
+ * The roster status a message Prime Agent stores in the parent says its
+ * child ended with. It sends one only when a child fails, is cancelled, or
+ * finishes without having replied; a child that replied ends silently.
+ */
+function noticedChildEnd(
+  message: unknown,
+): { readonly childId: string; readonly snapshot: Record<string, unknown> } | undefined {
+  const details = recordField(message, "details");
+  const childId = recordString(details, "childId");
+  if (childId === undefined || recordString(message, "role") !== "custom") return undefined;
+  switch (recordString(message, "customType")) {
+    case "rlm_child_failure":
+      return { childId, snapshot: { status: "error", error: recordString(details, "error") } };
+    case "rlm_child_terminal_notice":
+      switch (recordString(details, "kind")) {
+        case "completed_without_reply":
+          return {
+            childId,
+            snapshot: {
+              status: "done",
+              answerPreview: recordString(details, "lastAssistantTextPreview"),
+            },
+          };
+        case "cancelled":
+          return {
+            childId,
+            snapshot: { status: "cancelled", error: recordString(details, "reason") },
+          };
+        default:
+          return undefined;
+      }
+    default:
+      return undefined;
+  }
+}
+
 function rlmChildStatus(
   status: string | undefined,
 ): "pending" | "running" | "completed" | "failed" | "cancelled" {
@@ -461,7 +501,7 @@ export function makePrimeAgentChildThreads(input: {
   const traceRlmChildUpdate = (
     snapshot: unknown,
     currentTurn: ActivePiTurn | null,
-    statusOverride: "interrupted" | undefined,
+    source: RlmChildUpdateSource,
     decision: RlmChildDecision,
   ) => {
     const session = sessionThread();
@@ -469,11 +509,12 @@ export function makePrimeAgentChildThreads(input: {
     return Effect.logInfo("orchestration-v2.prime-agent-rlm-child-update").pipe(
       Effect.annotateLogs({
         driver,
-        source: statusOverride === undefined ? "rlm_child_update" : "interrupt",
+        source,
         childId: recordString(snapshot, "id") ?? null,
         parentChildId: recordString(snapshot, "parentId") ?? null,
         reportedStatus: recordString(snapshot, "status") ?? null,
-        status: statusOverride ?? rlmChildStatus(recordString(snapshot, "status")),
+        status:
+          source === "interrupt" ? "interrupted" : rlmChildStatus(recordString(snapshot, "status")),
         outcome: decision.outcome,
         reason: decision.outcome === "dropped" ? decision.reason : null,
         routedVia: decision.outcome === "emitted" ? decision.routedVia : null,
@@ -513,16 +554,17 @@ export function makePrimeAgentChildThreads(input: {
     snapshot: unknown,
     status: OrchestrationV2ExecutionNode["status"],
     currentTurn: ActivePiTurn | null,
+    source: RlmChildUpdateSource,
   ) {
     const working = status === "completed" && rlmChildIsWorking(snapshot);
     if (!working && !previous.followUp) {
-      yield* traceRlmChildUpdate(snapshot, currentTurn, undefined, {
+      yield* traceRlmChildUpdate(snapshot, currentTurn, source, {
         outcome: "dropped",
         reason: "terminal-already-settled",
       });
       return;
     }
-    yield* traceRlmChildUpdate(snapshot, currentTurn, undefined, {
+    yield* traceRlmChildUpdate(snapshot, currentTurn, source, {
       outcome: "follow-up",
       turn: previous.turn,
     });
@@ -539,11 +581,12 @@ export function makePrimeAgentChildThreads(input: {
   const emitRlmChild = Effect.fnUntraced(function* (
     snapshot: unknown,
     currentTurn: ActivePiTurn | null,
-    statusOverride?: "interrupted",
+    source: RlmChildUpdateSource = "rlm_child_update",
   ) {
+    const statusOverride = source === "interrupt" ? "interrupted" : undefined;
     const childId = recordString(snapshot, "id");
     if (childId === undefined) {
-      yield* traceRlmChildUpdate(snapshot, currentTurn, statusOverride, {
+      yield* traceRlmChildUpdate(snapshot, currentTurn, source, {
         outcome: "dropped",
         reason: "missing-child-id",
       });
@@ -558,7 +601,7 @@ export function makePrimeAgentChildThreads(input: {
     // A child outlives the run that spawned it; its card stays on that run.
     const turn = previous?.turn ?? parentChild?.turn ?? currentTurn;
     if (turn === null) {
-      yield* traceRlmChildUpdate(snapshot, currentTurn, statusOverride, {
+      yield* traceRlmChildUpdate(snapshot, currentTurn, source, {
         outcome: "dropped",
         reason: "no-turn",
       });
@@ -570,17 +613,17 @@ export function makePrimeAgentChildThreads(input: {
     // Later roster churn (the parent deleting it, a resynced roster) must
     // not rewrite that card from an unrelated turn.
     if (previous?.terminal && terminal) {
-      yield* emitRetainedChildUpdate(childId, previous, snapshot, status, currentTurn);
+      yield* emitRetainedChildUpdate(childId, previous, snapshot, status, currentTurn, source);
       return;
     }
     if (previous === undefined && terminal) {
-      yield* traceRlmChildUpdate(snapshot, currentTurn, statusOverride, {
+      yield* traceRlmChildUpdate(snapshot, currentTurn, source, {
         outcome: "dropped",
         reason: "terminal-for-unseen-child",
       });
       return;
     }
-    yield* traceRlmChildUpdate(snapshot, currentTurn, statusOverride, {
+    yield* traceRlmChildUpdate(snapshot, currentTurn, source, {
       outcome: "emitted",
       turn,
       routedVia:
@@ -710,6 +753,27 @@ export function makePrimeAgentChildThreads(input: {
       }
     }
   });
+
+  /**
+   * Settles a child from the notice Prime Agent stored for its parent, for
+   * when the roster update that said so was dropped. A child already settled
+   * keeps its card.
+   */
+  const settleFromNotice = Effect.fnUntraced(function* (message: unknown) {
+    const noticed = noticedChildEnd(message);
+    const child = noticed === undefined ? undefined : rlmChildren.get(noticed.childId);
+    if (noticed === undefined || child === undefined || child.terminal) return;
+    yield* emitRlmChild(
+      {
+        ...(Predicate.isObject(child.snapshot) ? child.snapshot : {}),
+        activity: undefined,
+        ...noticed.snapshot,
+      },
+      null,
+      "transcript_notice",
+    );
+  });
+
   const interrupt = (turn?: ActivePiTurn) =>
     Effect.forEach(
       Array.from(rlmChildren).filter(
@@ -719,11 +783,12 @@ export function makePrimeAgentChildThreads(input: {
       ([childId, child]) =>
         child.terminal
           ? endChildFollowUp(childId, child, "interrupted", false)
-          : emitRlmChild(child.snapshot, null, "interrupted"),
+          : emitRlmChild(child.snapshot, null, "interrupt"),
       { discard: true },
     );
   return {
     handleEvent,
+    settleFromNotice,
     interrupt,
     hasLiveChildren: () =>
       Array.from(rlmChildren.values()).some((child) => !child.terminal || child.followUp),

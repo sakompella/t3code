@@ -2122,6 +2122,12 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
           .pipe(Effect.tapError(() => stopPendingWake(wake)));
       });
 
+      /** What a message Prime Agent injected says about background work: a job or a child ended. */
+      const applyInjectedMessage = Effect.fnUntraced(function* (message: unknown) {
+        yield* completeBackgroundJob(message);
+        yield* childThreads.settleFromNotice(message);
+      });
+
       /**
        * Turns stored messages that woke an idle agent, whose events never
        * came, into a wake for a continuation run to show.
@@ -2129,7 +2135,7 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
       const recoverWake = Effect.fnUntraced(function* (wakeMessages: ReadonlyArray<unknown>) {
         const state = threadState;
         if (state === null) return;
-        for (const message of wakeMessages) yield* completeBackgroundJob(message);
+        for (const message of wakeMessages) yield* applyInjectedMessage(message);
         const appThreadId = state.providerThread.appThreadId;
         if (appThreadId == null || continuationRequests === undefined) return;
         if (pendingWake === null) {
@@ -2223,7 +2229,7 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
           wake.events.push(event);
           if (event["type"] === "agent_start") yield* updateProviderSession("running", null);
           if (event["type"] === "agent_settled") yield* updateProviderSession("ready", null);
-          if (event["type"] === "message_start") yield* completeBackgroundJob(event["message"]);
+          if (event["type"] === "message_start") yield* applyInjectedMessage(event["message"]);
           // Wait for the agent's own reply, so every message it was woken
           // with (kernel restore notices come first) is in the buffer.
           const agentReplied =
@@ -2302,7 +2308,7 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
             return;
           }
           case "message_start": {
-            yield* completeBackgroundJob(event["message"]);
+            yield* applyInjectedMessage(event["message"]);
             if (turn !== null && recordString(event["message"], "role") !== "assistant") {
               yield* emitMidRunWakeNotice(turn, event["message"]);
             }
