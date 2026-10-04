@@ -23,7 +23,7 @@ const processGroupIsGone = (pid: number) => {
 
 describe.skipIf(HostProcessPlatform.defaultValue() === "win32")("PiRpc termination", () => {
   // Server shutdown closes every session, and the desktop app force-kills the
-  // server two seconds after asking it to stop.
+  // server soon after asking it to stop.
   it.live("returns as soon as the pi process group exits on SIGTERM", () =>
     Effect.gen(function* () {
       const scope = yield* Scope.make();
