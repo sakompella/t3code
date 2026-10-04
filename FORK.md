@@ -69,7 +69,8 @@ Changes against upstream `main`, grouped by feature. Each item says what changed
 
 These aren't Prime Agent-specific.
 
-- **Replies to steers and notifications stay visible** inside a folded run on web and mobile. Before, only the run's last reply showed.
+- **Replies to steers and notifications stay visible** inside a folded run on web and mobile, and each segment between them folds separately. Before, only the run's last reply showed.
+  - Why: a single fold for the whole run hid later work above earlier steers, so the collapsed view broke time order. Each segment now has its own "Worked for" row in place, timed and expanded on its own. A run without steers or notifications still has one fold. Segment keys and labels are shared in `packages/client-runtime/src/state/runFold.ts`.
 - **A steer sent to a turn that just ended is no longer lost.** If the turn failed, the steer runs as the next run. If it was stopped, the steer goes back to the held queue.
 - **`ELECTRON_RUN_AS_NODE` is passed only to children that run Electron as Node.**
   - Why: it leaked into every spawned process. Agents and tools that launch Electron apps then started bare Node instead.
