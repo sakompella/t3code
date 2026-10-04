@@ -43,6 +43,8 @@ export class PiRpcError extends Schema.TaggedError<PiRpcError>()("PiRpcError", {
   }
 }
 
+const isPiRpcError = Schema.is(PiRpcError);
+
 export class PiRpcTimeoutError extends Schema.TaggedError<PiRpcTimeoutError>()(
   "PiRpcTimeoutError",
   {
@@ -53,6 +55,20 @@ export class PiRpcTimeoutError extends Schema.TaggedError<PiRpcTimeoutError>()(
   override get message(): string {
     return `Pi RPC ${this.operation} failed: timed out after ${this.timeoutMs}ms.`;
   }
+}
+
+/**
+ * Prime Agent refuses `switch_session` while another worker still holds the
+ * session lease, and reports only the message text. The holder releases the
+ * lease once it finishes shutting down, so the refusal is transient.
+ */
+export function isPiSessionLeaseContention(error: unknown): boolean {
+  return (
+    isPiRpcError(error) &&
+    error.operation === "switch_session" &&
+    typeof error.cause === "string" &&
+    error.cause.startsWith("Session is already active")
+  );
 }
 
 export type PiRpcRecord = Record<string, unknown>;
