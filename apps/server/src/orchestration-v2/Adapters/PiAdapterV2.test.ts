@@ -5643,6 +5643,70 @@ describe("PiAdapterV2 with the Prime Agent flavor", () => {
     }).pipe(Effect.scoped, Effect.provide(testLayer)),
   );
 
+  /** What Prime Agent stores in the parent when a child ends without a reply of its own. */
+  const childNotices = [
+    {
+      name: "a finished child",
+      notice: {
+        role: "custom",
+        customType: "rlm_child_terminal_notice",
+        content: "[child-exited: no-reply child:worker]",
+        display: true,
+        details: {
+          kind: "completed_without_reply",
+          childId: "sub-1",
+          sessionName: "worker",
+          lastAssistantTextPreview: "child-ok sent.",
+        },
+        timestamp: 2000,
+      },
+      status: "completed",
+      result: "child-ok sent.",
+    },
+    {
+      name: "a failed child",
+      notice: {
+        role: "custom",
+        customType: "rlm_child_failure",
+        content: "[child-failed child:worker]\n\nkernel died",
+        display: true,
+        details: { childId: "sub-1", sessionName: "worker", error: "kernel died" },
+        timestamp: 2000,
+      },
+      status: "failed",
+      result: "kernel died",
+    },
+  ] as const;
+
+  it.effect.each(childNotices)(
+    "settles $name from the notice its parent stored when the update was dropped",
+    ({ notice, status, result }) =>
+      Effect.gen(function* () {
+        const fake = yield* makeFakePi;
+        const session = yield* settleWithChildAndHistory(fake);
+        const settled = yield* session
+          .takeEvent(
+            (event) => event.type === "subagent.updated" && event.subagent.status !== "running",
+          )
+          .pipe(Effect.forkScoped);
+        fake.setTranscript([...session.history, notice, storedReply(2001, "Noted.")]);
+
+        yield* tickUntil(() => settled.pollUnsafe() !== undefined);
+
+        const update = yield* Fiber.join(settled);
+        assert.isTrue(update.type === "subagent.updated");
+        if (update.type !== "subagent.updated") return;
+        assert.deepEqual(
+          {
+            id: update.subagent.id,
+            status: update.subagent.status,
+            result: update.subagent.result,
+          },
+          { id: session.child?.id, status, result },
+        );
+      }).pipe(Effect.scoped, Effect.provide(testLayer)),
+  );
+
   /** Runs one turn whose end-of-turn branch lists `userEntries` as its user entries. */
   const runPrimeTurn = (
     session: Effect.Success<ReturnType<typeof openPrimeThread>>,

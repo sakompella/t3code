@@ -1983,6 +1983,12 @@ export function makePiAdapterV2(
         });
       });
 
+      /** What a message Prime Agent injected says about background work: a job or a child ended. */
+      const applyInjectedMessage = Effect.fnUntraced(function* (message: unknown) {
+        yield* completeBackgroundJob(message);
+        yield* childThreads.settleFromNotice(message);
+      });
+
       /**
        * Turns stored messages that woke an idle agent, whose events never
        * came, into a wake for a continuation run to show.
@@ -1990,7 +1996,7 @@ export function makePiAdapterV2(
       const recoverWake = Effect.fnUntraced(function* (wakeMessages: ReadonlyArray<unknown>) {
         const state = threadState;
         if (state === null) return;
-        for (const message of wakeMessages) yield* completeBackgroundJob(message);
+        for (const message of wakeMessages) yield* applyInjectedMessage(message);
         const wake: PendingPiWake = pendingWake ?? {
           events: [],
           offered: false,
@@ -2073,7 +2079,7 @@ export function makePiAdapterV2(
         if (turn !== null) reconciler.noteSeen(turn, event);
         if (turn === null && pendingWake !== null && isPiWakeEvent(event)) {
           pendingWake.events.push(event);
-          if (event["type"] === "message_start") yield* completeBackgroundJob(event["message"]);
+          if (event["type"] === "message_start") yield* applyInjectedMessage(event["message"]);
           // Wait for the agent's own reply, so every message it was woken
           // with (kernel restore notices come first) is in the buffer.
           const agentReplied =
@@ -2135,7 +2141,7 @@ export function makePiAdapterV2(
             return;
           }
           case "message_start": {
-            yield* completeBackgroundJob(event["message"]);
+            yield* applyInjectedMessage(event["message"]);
             if (turn !== null && recordString(event["message"], "role") !== "assistant") {
               yield* emitMidRunWakeNotice(turn, event["message"]);
             }
