@@ -405,6 +405,7 @@ const openRuntime = Effect.fnUntraced(function* (
   flavor: PiFlavor = PI_FLAVOR,
   continuationRequests?: Parameters<typeof makePiAdapterV2>[0]["continuationRequests"],
   environment: NodeJS.ProcessEnv = {},
+  initialNativeThreadId?: string,
 ) {
   const adapter = yield* makeAdapter(fake, "", forkFake, flavor, continuationRequests, environment);
   const runtime = yield* adapter.openSession({
@@ -412,6 +413,7 @@ const openRuntime = Effect.fnUntraced(function* (
     providerSessionId,
     modelSelection: modelSelection(model),
     runtimePolicy,
+    ...(initialNativeThreadId === undefined ? {} : { initialNativeThreadId }),
   });
   const emitted = yield* Queue.unbounded<ProviderAdapterV2Event>();
   yield* runtime.events.pipe(
@@ -3165,6 +3167,39 @@ describe("PiAdapterV2 with the Prime Agent flavor", () => {
       yield* takeQuietProbeAtItsTick(fake);
 
       assert.deepEqual(yield* takeCompletedReplies(takeEvent), [fullReply]);
+    }).pipe(Effect.scoped, Effect.provide(testLayer)),
+  );
+
+  it.effect("adds only this turn's messages on a thread that launched on its saved session", () =>
+    Effect.gen(function* () {
+      const { providerThread } = yield* openPrimeThread(yield* makeFakePi);
+      const fake = yield* makeFakePi;
+      const earlier = [storedPrompt(400), storedReply(500, "An earlier turn's reply.")];
+      fake.setTranscript(earlier);
+      const { runtime, takeEvent } = yield* openRuntime(
+        fake,
+        "default",
+        THREAD_ID,
+        SESSION_ID,
+        undefined,
+        PRIME_AGENT_FLAVOR,
+        undefined,
+        {},
+        FAKE_SESSION_FILE,
+      );
+      const resumed = yield* runtime.resumeThread({ providerThread });
+      yield* startTurn(runtime, resumed);
+      yield* fake.takeRequest("prompt");
+      yield* streamCutReply(fake);
+      fake.setTranscript([...earlier, ...recordedTurn]);
+
+      yield* takeQuietProbeAtItsTick(fake);
+
+      assert.deepEqual(yield* takeCompletedReplies(takeEvent), [fullReply]);
+      assert.isFalse(
+        fake.allRequests().some((request) => request["type"] === "switch_session"),
+        "the thread stayed on the session the process launched on",
+      );
     }).pipe(Effect.scoped, Effect.provide(testLayer)),
   );
 
