@@ -92,6 +92,8 @@ interface FakePi {
   /** Data returned by the next `get_fork_messages` acks, consumed in order. */
   readonly queueForkMessages: (data: unknown) => void;
   readonly vetoNextSwitch: () => void;
+  /** Refuse the next `count` `switch_session` requests with `message`, as Prime Agent does while another worker holds the lease. */
+  readonly rejectNextSwitches: (count: number, message: string) => void;
   readonly queueState: (data: Record<string, unknown>) => void;
   readonly setStreaming: (streaming: boolean) => void;
   readonly deferNextState: () => void;
@@ -154,6 +156,7 @@ const makeFakePi: Effect.Effect<FakePi> = Effect.gen(function* () {
   let deferredStateRequest: PiRpcRecord | undefined;
   let failState = false;
   let vetoSwitch = false;
+  let rejectedSwitches = { remaining: 0, message: "" };
   let vetoNewSession = false;
   let deferredLifecycle: string | undefined;
   let sessionFile = FAKE_SESSION_FILE;
@@ -213,6 +216,10 @@ const makeFakePi: Effect.Effect<FakePi> = Effect.gen(function* () {
         return { ...base, data: { cancelled } };
       }
       case "switch_session": {
+        if (rejectedSwitches.remaining > 0) {
+          rejectedSwitches.remaining -= 1;
+          return { ...base, success: false, error: rejectedSwitches.message };
+        }
         const cancelled = vetoSwitch;
         vetoSwitch = false;
         return { ...base, data: { cancelled } };
@@ -341,6 +348,9 @@ const makeFakePi: Effect.Effect<FakePi> = Effect.gen(function* () {
     allRequests: () => allRequests,
     vetoNextSwitch: () => {
       vetoSwitch = true;
+    },
+    rejectNextSwitches: (count, message) => {
+      rejectedSwitches = { remaining: count, message };
     },
     queueState: (data) => stateQueue.push(data),
     setStreaming: (streaming) => {
@@ -1490,6 +1500,103 @@ describe("PiAdapterV2", () => {
       yield* fake.takeRequest("prompt");
     }).pipe(Effect.scoped, Effect.provide(layerTest)),
   );
+
+  describe("resume while the previous owner still holds the session lease", () => {
+    const LEASE_HELD =
+      "Session is already active in worker-1: /fake/.pi/agent/sessions/0001_abc.jsonl";
+    const switchRequests = (fake: FakePi) =>
+      fake.allRequests().filter((request) => request["type"] === "switch_session");
+
+    /** Lets a resume run through its retry waits until it finishes or `releases` waits have passed. */
+    const waitOutRetries = <A, E>(fake: FakePi, resumed: Fiber.Fiber<A, E>, releases: number) =>
+      Effect.gen(function* () {
+        for (let waited = 0; waited < releases; waited++) {
+          const next = yield* Effect.raceFirst(
+            fake.takeRequest("switch_session"),
+            Fiber.await(resumed).pipe(Effect.as(undefined)),
+          );
+          if (next === undefined) return;
+          yield* TestClock.adjust(Duration.seconds(1));
+        }
+      });
+
+    it.effect("resumes the same native session once the lease is released", () =>
+      Effect.gen(function* () {
+        const fake = yield* makeFakePi;
+        const { runtime } = yield* openRuntime(fake);
+        const providerThread = yield* runtime.ensureThread({
+          threadId: THREAD_ID,
+          modelSelection: modelSelection("default"),
+          runtimePolicy,
+        });
+        fake.rejectNextSwitches(3, LEASE_HELD);
+        const resumed = yield* runtime.resumeThread({ providerThread }).pipe(Effect.forkChild);
+        yield* waitOutRetries(fake, resumed, 3);
+        const resumedThread = yield* Fiber.join(resumed);
+        assert.equal(resumedThread.nativeThreadRef?.nativeId, FAKE_SESSION_FILE);
+        assert.equal(switchRequests(fake).length, 4);
+        assert.isFalse(fake.allRequests().some((request) => request["type"] === "new_session"));
+      }).pipe(Effect.scoped, Effect.provide(testLayer)),
+    );
+
+    it.effect("gives up after the retry window with an ordinary resume failure", () =>
+      Effect.gen(function* () {
+        const fake = yield* makeFakePi;
+        const { runtime } = yield* openRuntime(fake);
+        const providerThread = yield* runtime.ensureThread({
+          threadId: THREAD_ID,
+          modelSelection: modelSelection("default"),
+          runtimePolicy,
+        });
+        fake.rejectNextSwitches(Number.POSITIVE_INFINITY, LEASE_HELD);
+        const resumed = yield* runtime
+          .resumeThread({ providerThread })
+          .pipe(Effect.flip, Effect.forkChild);
+        yield* waitOutRetries(fake, resumed, 100);
+        const error = yield* Fiber.join(resumed);
+        assert.equal(error._tag, "ProviderAdapterResumeThreadError");
+        assert.equal(switchRequests(fake).length, 16);
+        assert.isFalse(fake.allRequests().some((request) => request["type"] === "new_session"));
+      }).pipe(Effect.scoped, Effect.provide(testLayer)),
+    );
+
+    it.effect("stops waiting when the resume is cancelled", () =>
+      Effect.gen(function* () {
+        const fake = yield* makeFakePi;
+        const { runtime } = yield* openRuntime(fake);
+        const providerThread = yield* runtime.ensureThread({
+          threadId: THREAD_ID,
+          modelSelection: modelSelection("default"),
+          runtimePolicy,
+        });
+        fake.rejectNextSwitches(Number.POSITIVE_INFINITY, LEASE_HELD);
+        const resumed = yield* runtime.resumeThread({ providerThread }).pipe(Effect.forkChild);
+        yield* fake.takeRequest("switch_session");
+        yield* Fiber.interrupt(resumed);
+        yield* TestClock.adjust(Duration.seconds(60));
+        assert.equal(switchRequests(fake).length, 1);
+      }).pipe(Effect.scoped, Effect.provide(testLayer)),
+    );
+
+    it.effect("does not retry other resume failures", () =>
+      Effect.gen(function* () {
+        const fake = yield* makeFakePi;
+        const { runtime } = yield* openRuntime(fake);
+        const providerThread = yield* runtime.ensureThread({
+          threadId: THREAD_ID,
+          modelSelection: modelSelection("default"),
+          runtimePolicy,
+        });
+        fake.rejectNextSwitches(1, "Session file not found: /fake/missing.jsonl");
+        const resumed = yield* runtime
+          .resumeThread({ providerThread })
+          .pipe(Effect.flip, Effect.forkChild);
+        const error = yield* Fiber.join(resumed);
+        assert.equal(error._tag, "ProviderAdapterResumeThreadError");
+        assert.equal(switchRequests(fake).length, 1);
+      }).pipe(Effect.scoped, Effect.provide(testLayer)),
+    );
+  });
 
   it.effect("creates a distinct native session after a failed resume", () =>
     Effect.gen(function* () {
