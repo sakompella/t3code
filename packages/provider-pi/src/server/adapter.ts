@@ -447,8 +447,6 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
   const name = flavor.displayName;
   const binary = options.settings.binaryPath || flavor.defaultBinary;
   const capabilities = piProviderCapabilities(flavor);
-  /** The undeclared-MCP hint is shown once per adapter, not on every session open. */
-  let mcpSetupHintShown = false;
   const unsolicitedActivityError = `${name} started agent work outside an active T3 turn. The session was stopped to prevent invisible tool execution.`;
   const providerRef = (
     nativeId: string,
@@ -501,9 +499,9 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
       const extensionPath = yield* provideCacheFs(
         materializePiT3McpExtension(host.paths.providerStatusCacheDir),
       );
-      // An agent with its own MCP client reaches T3 through the t3-code skill,
-      // but only once the user declared the server in its settings. Otherwise
-      // the extension keeps registering T3's tools and the user gets a hint.
+      // An agent with its own MCP client never gets T3's tools natively. It
+      // reaches T3 through the t3-code skill once the user declared the server
+      // in its settings. Until then the user gets a setup notice.
       const kernelMcpAccess =
         mcpSession === undefined || flavor.kernelMcp === null
           ? undefined
@@ -520,6 +518,7 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
         kernelMcpAccess !== undefined && !kernelMcpAccess.declared
           ? kernelMcpAccess.hint
           : undefined;
+      let mcpSetupHintShown = false;
       const resolvedLaunchArgs = resolvePiLaunchArgs(options.settings.launchArgs);
       if (!resolvedLaunchArgs.ok) {
         return yield* protocolError(resolvedLaunchArgs.message);
@@ -529,7 +528,7 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
         environment: options.environment,
         mcpSession,
         extensionPath,
-        ...(skillPath === undefined ? {} : { skillPath }),
+        ...(flavor.kernelMcp === null ? {} : { kernelMcp: { skillPath } }),
         runtimeMode: input.runtimePolicy.runtimeMode,
       });
       const scopedLaunch = yield* agentScope.wrap({
