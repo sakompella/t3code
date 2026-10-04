@@ -9,6 +9,7 @@
  * the same adapter, probe, and text generation with one flavor each.
  */
 import { ProviderDriverKind } from "@t3tools/contracts";
+import * as Duration from "effect/Duration";
 
 export interface PiFlavor {
   readonly driverKind: ProviderDriverKind;
@@ -82,6 +83,14 @@ export interface PiFlavor {
    * turn settles.
    */
   readonly heartbeats: boolean;
+  /**
+   * How long T3 waits for the process to exit after SIGTERM before SIGKILL.
+   * Prime Agent's SIGTERM handler tells its daemon to stop the session's
+   * worker (`complete_owned_session`), which frees the session lease. A kill
+   * that lands first leaves the lease held until the daemon's 30 s
+   * disconnect timer fires, and a resume in that window is refused.
+   */
+  readonly terminationGrace: Duration.Duration;
 }
 
 export const PI_FLAVOR: PiFlavor = {
@@ -104,6 +113,7 @@ export const PI_FLAVOR: PiFlavor = {
   childThreads: false,
   kernelMcp: null,
   heartbeats: false,
+  terminationGrace: Duration.seconds(1),
 };
 
 export const PRIME_AGENT_FLAVOR: PiFlavor = {
@@ -125,4 +135,5 @@ export const PRIME_AGENT_FLAVOR: PiFlavor = {
   childThreads: true,
   kernelMcp: { agentDirEnvVar: "PRIME_AGENT_CODING_AGENT_DIR", defaultAgentDir: ".prime/agent" },
   heartbeats: true,
+  terminationGrace: Duration.seconds(15),
 };

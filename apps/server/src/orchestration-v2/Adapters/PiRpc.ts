@@ -103,6 +103,12 @@ export interface PiRpcSpawnOptions {
   readonly args: ReadonlyArray<string>;
   readonly cwd: string | undefined;
   readonly env: NodeJS.ProcessEnv;
+  /**
+   * How long SIGTERM may take before SIGKILL, ending as soon as the process
+   * group exits. Defaults to one second. An agent that closes its session in
+   * its SIGTERM handler needs longer, or the kill cuts that shutdown off.
+   */
+  readonly terminationGrace?: Duration.Input;
 }
 
 export interface PiRpcConnection {
@@ -135,7 +141,7 @@ export interface PiRpcConnection {
 }
 
 const DEFAULT_REQUEST_TIMEOUT_MS = 30_000;
-const TERMINATION_GRACE = Duration.seconds(1);
+const DEFAULT_TERMINATION_GRACE = Duration.seconds(1);
 const TERMINATION_POLL = Schedule.spaced("20 millis");
 
 interface PendingPiRequest {
@@ -222,13 +228,17 @@ function parsePiRecord(line: string): PiRpcRecord | undefined {
  * gone its pid/pgid can be recycled by the OS, so escalating blindly could
  * deliver SIGKILL to an unrelated process.
  */
-const terminatePiProcess = (kill: (signal: NodeJS.Signals) => boolean, hasExited: () => boolean) =>
+const terminatePiProcess = (
+  kill: (signal: NodeJS.Signals) => boolean,
+  hasExited: () => boolean,
+  grace: Duration.Input,
+) =>
   Effect.gen(function* () {
     if (hasExited()) return;
     if (!kill("SIGTERM")) return;
     yield* Effect.sync(hasExited).pipe(
       Effect.repeat({ until: (exited) => exited, schedule: TERMINATION_POLL }),
-      Effect.timeoutOption(TERMINATION_GRACE),
+      Effect.timeoutOption(grace),
     );
     if (hasExited()) return;
     kill("SIGKILL");
@@ -296,7 +306,13 @@ export const makePiRpcConnection = Effect.fnUntraced(function* (options: PiRpcSp
   }).pipe(Effect.scoped, Effect.ignore);
 
   const terminateProcess =
-    platform === "win32" ? terminateWindowsTree : terminatePiProcess(killProcessGroup, hasExited);
+    platform === "win32"
+      ? terminateWindowsTree
+      : terminatePiProcess(
+          killProcessGroup,
+          hasExited,
+          options.terminationGrace ?? DEFAULT_TERMINATION_GRACE,
+        );
 
   // Registered before any further setup: an interrupt or failure between the
   // spawn and the rest of this constructor would otherwise leak a detached

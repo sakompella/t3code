@@ -459,6 +459,7 @@ export function makePiAdapterV2(
         args: launch.args,
         cwd,
         env: launch.env,
+        terminationGrace: flavor.terminationGrace,
       }).pipe(
         Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, options.spawner),
         Effect.mapError(
