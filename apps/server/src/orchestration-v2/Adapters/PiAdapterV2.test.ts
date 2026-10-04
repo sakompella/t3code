@@ -2535,6 +2535,34 @@ describe("PiAdapterV2 with the Prime Agent flavor", () => {
     }).pipe(Effect.scoped, Effect.provide(testLayer)),
   );
 
+  // Prime Agent answers get_state through its daemon. Under heavy load a reply
+  // can miss the probe timeout while the agent keeps working. Three misses in a
+  // row used to end the process, which then showed as an unexpected exit.
+  it.effect("keeps a busy turn and its process when get_state goes unanswered", () =>
+    Effect.gen(function* () {
+      const fake = yield* makeFakePi;
+      const { runtime, takeEvent, providerThread } = yield* openPrimeThread(fake);
+      yield* startTurn(runtime, providerThread);
+      yield* fake.takeRequest("prompt");
+      yield* fake.emit({ type: "agent_start" });
+
+      fake.queueState(busyState);
+      yield* fake.emit({ type: "agent_end", messages: [] });
+      yield* fake.takeRequest("get_state");
+      yield* Effect.gen(function* () {
+        for (let miss = 0; miss < 4; miss += 1) {
+          fake.failNextState();
+          yield* takeReprobe(fake);
+        }
+        // The re-probe after the misses answers with the fake's idle state.
+        yield* takeReprobe(fake);
+      }).pipe(Effect.forkScoped);
+
+      const terminal = yield* takeEvent((event) => event.type === "turn.terminal");
+      assert.isTrue(terminal.type === "turn.terminal" && terminal.status === "completed");
+    }).pipe(Effect.scoped, Effect.provide(testLayer)),
+  );
+
   it.effect("keeps a retrying turn open across agent_end and settles on the recovered run", () =>
     Effect.gen(function* () {
       const fake = yield* makeFakePi;

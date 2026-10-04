@@ -1877,6 +1877,7 @@ export function makePiAdapterV2(
                 settleAfterAgentActivity,
                 settleProbeGeneration,
                 attempt,
+                busyPolls,
                 quiet,
                 probeFailed: true,
               }),
@@ -1887,13 +1888,18 @@ export function makePiAdapterV2(
       };
 
       /**
-       * Records why a settle probe found the agent busy. It gets a span of its
-       * own because only logs inside a span reach the trace file.
+       * Records why a settle probe found the agent busy, or that it got no
+       * answer. It gets a span of its own because only logs inside a span
+       * reach the trace file.
        */
       const logBusySettleProbe = (
         turn: ActivePiTurn,
         data: unknown,
-        probe: { readonly quiet: boolean; readonly busyPolls: number },
+        probe: {
+          readonly quiet: boolean;
+          readonly busyPolls: number;
+          readonly probeFailed: boolean;
+        },
       ) => {
         const sessionActions = recordField(data, "sessionActions");
         const active = recordField(sessionActions, "active");
@@ -1903,6 +1909,7 @@ export function makePiAdapterV2(
           providerTurnId: turn.providerTurn.id,
           quiet: probe.quiet,
           busyPolls: probe.busyPolls,
+          probeFailed: probe.probeFailed,
           sessionEventCount: turn.sessionEventCount,
           settleWhenIdle: turn.settleWhenIdle,
           isStreaming: recordField(data, "isStreaming"),
@@ -2381,12 +2388,35 @@ export function makePiAdapterV2(
             ) {
               return;
             }
+            const busyPolls = Math.max(0, Math.trunc(recordNumber(event, "busyPolls") ?? 0));
+            // Pi follows busy work with events that re-probe. Without
+            // agent_settled, the end of a retry wait or a queued action has no
+            // event of its own, so keep reading state until it goes idle.
+            // New work bumps the generation, which retires this chain.
+            const probeAgainLater = Effect.sleep(
+              Duration.millis(
+                Math.min(BUSY_PROBE_INITIAL_DELAY_MS * 2 ** busyPolls, BUSY_PROBE_MAX_DELAY_MS),
+              ),
+            ).pipe(
+              Effect.andThen(scheduleSettleProbe(turn, settleAfterAgentActivity, 1, busyPolls + 1)),
+              Effect.forkIn(scope),
+            );
             if (probeFailed) {
               // The next quiet check asks again. A turn that is merely slow to
               // answer get_state must not cost the session its process.
               if (quiet) return;
               if (!settleAfterAgentActivity) {
                 if (state !== null) yield* finalizeTurn(state);
+                return;
+              }
+              // Prime Agent answers get_state through its daemon, which can
+              // take seconds under load while the agent keeps working. A dead
+              // process closes stdout, so an unanswered probe only means busy.
+              if (flavor.settleSignal === "idle_probe") {
+                if (busyPolls % BUSY_PROBE_LOG_EVERY === 0) {
+                  yield* logBusySettleProbe(turn, undefined, { quiet, busyPolls, probeFailed });
+                }
+                yield* probeAgainLater;
                 return;
               }
               if (attempt < SETTLE_PROBE_MAX_ATTEMPTS) {
@@ -2405,29 +2435,13 @@ export function makePiAdapterV2(
               if (state !== null) yield* finalizeTurn(state);
               return;
             }
-            const busyPolls = Math.max(0, Math.trunc(recordNumber(event, "busyPolls") ?? 0));
             if (quiet || busyPolls % BUSY_PROBE_LOG_EVERY === 0) {
-              yield* logBusySettleProbe(turn, data, { quiet, busyPolls });
+              yield* logBusySettleProbe(turn, data, { quiet, busyPolls, probeFailed });
             }
             // A quiet check is its own timer: it asks again after the next
             // silent interval, so a long tool call is not polled every second.
             if (quiet) return;
-            // Pi follows busy work with events that re-probe. Without
-            // agent_settled, the end of a retry wait or a queued action has no
-            // event of its own, so keep reading state until it goes idle.
-            // New work bumps the generation, which retires this chain.
-            if (flavor.settleSignal === "idle_probe") {
-              const delayMs = Math.min(
-                BUSY_PROBE_INITIAL_DELAY_MS * 2 ** busyPolls,
-                BUSY_PROBE_MAX_DELAY_MS,
-              );
-              yield* Effect.sleep(Duration.millis(delayMs)).pipe(
-                Effect.andThen(
-                  scheduleSettleProbe(turn, settleAfterAgentActivity, 1, busyPolls + 1),
-                ),
-                Effect.forkIn(scope),
-              );
-            }
+            if (flavor.settleSignal === "idle_probe") yield* probeAgainLater;
             return;
           }
           default:
