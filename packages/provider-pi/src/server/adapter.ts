@@ -3002,7 +3002,7 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
         // located without a full scan.
         yield* baselineSessionTree();
         // What is stored now predates this view of the session.
-        yield* reconciler.baseline;
+        yield* reconciler.baseline(nativeId);
         if (publish)
           yield* emit({
             type: "provider_thread.updated",
