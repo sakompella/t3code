@@ -1,3 +1,4 @@
+import * as Clock from "effect/Clock";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as Option from "effect/Option";
@@ -102,6 +103,11 @@ interface TranscriptLedger {
   readonly toolCalls: Set<string>;
   /** How many messages the last confirmed read held, to tell when the history changed. */
   messageCount: number;
+  /**
+   * Messages stored before this time are history T3 did not stream. Set
+   * when the first read failed, so no key list says what came before.
+   */
+  readonly storedBefore: number;
 }
 
 function toolCallIdsOf(messages: ReadonlyArray<unknown>): Array<string> {
@@ -157,20 +163,23 @@ export function makePrimeAgentReconciler<E>(input: {
   readonly recoverWake: (wakeMessages: ReadonlyArray<unknown>) => Effect.Effect<void, E>;
 }) {
   const { enabled, request, activeTurn, items } = input;
-  /** Null until a read established which messages predate T3's view of the session. */
+  /** Null until `baseline` established which messages predate T3's view of the session. */
   let ledger: TranscriptLedger | null = null;
 
   const unaccounted = (messages: ReadonlyArray<unknown>) =>
     messages.filter((message) => {
       const key = transcriptMessageKey(message);
-      return key !== undefined && ledger !== null && !ledger.keys.has(key);
+      return (
+        key !== undefined &&
+        ledger !== null &&
+        !ledger.keys.has(key) &&
+        (recordNumber(message, "timestamp") ?? 0) >= ledger.storedBefore
+      );
     });
 
   /** Marks a whole confirmed history as accounted for. */
   const commit = (messages: ReadonlyArray<unknown>) => {
-    if (ledger === null) {
-      ledger = { keys: new Set(), toolCalls: new Set(), messageCount: 0 };
-    }
+    if (ledger === null) return;
     for (const message of messages) {
       const key = transcriptMessageKey(message);
       if (key !== undefined) ledger.keys.add(key);
@@ -184,16 +193,23 @@ export function makePrimeAgentReconciler<E>(input: {
 
   /**
    * Everything `sessionFile` stored so far is history T3 did not stream:
-   * either earlier turns or work from before this process attached. Without
-   * this read nothing can be told apart, so nothing is projected until one
-   * succeeds. A session already seeded keeps its ledger, so the messages it
-   * has not accounted for yet still reach T3.
+   * either earlier turns or work from before this process attached. When
+   * the read fails, what was stored before it is told apart by its
+   * timestamp. A session already seeded keeps its ledger, so the messages
+   * it has not accounted for yet still reach T3.
    */
   const baseline = Effect.fnUntraced(function* (sessionFile: string) {
     if (!enabled || (ledger !== null && seededSession === sessionFile)) return;
     ledger = null;
     seededSession = sessionFile;
+    const readAt = yield* Clock.currentTimeMillis;
     const messages = yield* readHistory(request, HISTORY_READ_TIMEOUT_MS);
+    ledger = {
+      keys: new Set(),
+      toolCalls: new Set(),
+      messageCount: 0,
+      storedBefore: messages === undefined ? readAt : 0,
+    };
     if (messages !== undefined) commit(messages);
   });
 
@@ -317,11 +333,7 @@ export function makePrimeAgentReconciler<E>(input: {
    * unaccounted, so the run that adopts the wake projects them.
    */
   const applyIdleTranscript = Effect.fnUntraced(function* (messages: ReadonlyArray<unknown>) {
-    if (!enabled) return;
-    if (ledger === null) {
-      commit(messages);
-      return;
-    }
+    if (!enabled || ledger === null) return;
     const lost = unaccounted(messages);
     ledger.messageCount = messages.length;
     if (lost.length === 0 && !input.hasUnofferedWake()) return;

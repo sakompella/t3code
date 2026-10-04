@@ -3187,6 +3187,27 @@ describe("PiAdapterV2 with the Prime Agent flavor", () => {
     }).pipe(Effect.scoped, Effect.provide(testLayer)),
   );
 
+  it.effect("adds only this turn's messages when the first history read failed", () =>
+    Effect.gen(function* () {
+      const fake = yield* makeFakePi;
+      const earlier = [storedPrompt(400), storedReply(500, "An earlier turn's reply.")];
+      fake.setTranscript(earlier);
+      fake.queueMessages({});
+      yield* TestClock.setTime(600);
+      const { runtime, takeEvent, providerThread } = yield* openPrimeThread(fake);
+      yield* startTurn(runtime, providerThread);
+      yield* fake.takeRequest("prompt");
+      yield* fake.emit({ type: "agent_start" });
+      fake.setTranscript([...earlier, ...recordedTurn]);
+      yield* fake.emit({ type: "agent_end", messages: [] });
+
+      assert.deepEqual(yield* takeRepliesAndOutcome(takeEvent), {
+        texts: [fullReply],
+        status: "completed",
+      });
+    }).pipe(Effect.scoped, Effect.provide(testLayer)),
+  );
+
   it.effect("adds only this turn's messages on a thread that launched on its saved session", () =>
     Effect.gen(function* () {
       const { providerThread } = yield* openPrimeThread(yield* makeFakePi);
