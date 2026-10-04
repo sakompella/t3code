@@ -2575,8 +2575,8 @@ describe("PiAdapterV2 with the Prime Agent flavor", () => {
     predicate: (event: ProviderAdapterV2Event) => boolean,
   ) => Effect.Effect<ProviderAdapterV2Event>;
 
-  /** Completed assistant texts of a turn, in order, until the turn ends. */
-  const takeCompletedReplies = (takeEvent: TakeEvent) =>
+  /** Completed assistant texts of a turn, in order, and how the turn ended. */
+  const takeRepliesAndOutcome = (takeEvent: TakeEvent) =>
     Effect.gen(function* () {
       const texts: Array<string> = [];
       for (;;) {
@@ -2587,12 +2587,16 @@ describe("PiAdapterV2 with the Prime Agent flavor", () => {
               candidate.turnItem.type === "assistant_message" &&
               candidate.turnItem.status === "completed"),
         );
-        if (event.type === "turn.terminal") return texts;
+        if (event.type === "turn.terminal") return { texts, status: event.status };
         if (event.type === "turn_item.updated" && "text" in event.turnItem) {
           texts.push(event.turnItem.text);
         }
       }
     });
+
+  /** Completed assistant texts of a turn, in order, until the turn ends. */
+  const takeCompletedReplies = (takeEvent: TakeEvent) =>
+    takeRepliesAndOutcome(takeEvent).pipe(Effect.map((outcome) => outcome.texts));
 
   const assistantSnapshot = (timestamp: number, text: string) => ({
     role: "assistant",
@@ -2609,6 +2613,16 @@ describe("PiAdapterV2 with the Prime Agent flavor", () => {
         yield* Effect.yieldNow;
       }
       return yield* Fiber.join(probe);
+    });
+
+  /**
+   * Like `takeQuietProbe`, but the clock stops at the watchdog tick that sends
+   * the probe, so the 2 s reads that follow cannot time out under it.
+   */
+  const takeQuietProbeAtItsTick = (fake: FakePi) =>
+    Effect.gen(function* () {
+      yield* TestClock.adjust(Duration.seconds(30));
+      return yield* fake.takeRequest("get_state");
     });
 
   // Prime Agent's daemon socket drops events when it backs up, and its RPC
@@ -2653,6 +2667,158 @@ describe("PiAdapterV2 with the Prime Agent flavor", () => {
       yield* takeQuietProbe(fake);
       const terminal = yield* Fiber.join(terminalFiber);
       assert.isTrue(terminal.type === "turn.terminal" && terminal.status === "completed");
+    }).pipe(Effect.scoped, Effect.provide(testLayer)),
+  );
+
+  const fullReply =
+    "The cause is a race. **Show the cause.** When the process exits, the socket closes first, " +
+    "so the last events are lost. Fix: read the final message from the record.";
+  const cutReply = fullReply.slice(0, fullReply.indexOf("the socket"));
+
+  /** A reply cut off at `cutReply`: its later updates, message_end, and agent_end were dropped. */
+  const streamCutReply = (fake: FakePi) =>
+    Effect.gen(function* () {
+      yield* fake.emit({ type: "agent_start" });
+      yield* fake.emit({
+        type: "message_update",
+        message: assistantSnapshot(1000, cutReply),
+        assistantMessageEvent: { type: "text_delta", contentIndex: 0, delta: cutReply },
+      });
+    });
+
+  const recordedReply = (text: string) => ({
+    messages: [{ ...assistantSnapshot(1000, text), stopReason: "stop" }],
+  });
+
+  it.effect("completes a reply cut off by dropped events with Prime Agent's recorded text", () =>
+    Effect.gen(function* () {
+      const fake = yield* makeFakePi;
+      const { runtime, takeEvent, providerThread } = yield* openPrimeThread(fake);
+      yield* startTurn(runtime, providerThread);
+      yield* fake.takeRequest("prompt");
+      yield* streamCutReply(fake);
+      fake.queueMessages(recordedReply(fullReply));
+
+      yield* takeQuietProbeAtItsTick(fake);
+
+      assert.deepEqual(yield* takeRepliesAndOutcome(takeEvent), {
+        texts: [fullReply],
+        status: "completed",
+      });
+    }).pipe(Effect.scoped, Effect.provide(testLayer)),
+  );
+
+  it.effect("completes a cut-off reply when Stop aborts the run", () =>
+    Effect.gen(function* () {
+      const fake = yield* makeFakePi;
+      const { runtime, takeEvent, providerThread } = yield* openPrimeThread(fake);
+      yield* startTurn(runtime, providerThread);
+      yield* fake.takeRequest("prompt");
+      const running = yield* takeEvent(
+        (event) =>
+          event.type === "provider_turn.updated" && event.providerTurn.status === "running",
+      );
+      assert.isTrue(running.type === "provider_turn.updated");
+      if (running.type !== "provider_turn.updated") return;
+      yield* streamCutReply(fake);
+      fake.queueMessages(recordedReply(fullReply));
+
+      yield* runtime.interruptTurn({ providerThread, providerTurnId: running.providerTurn.id });
+
+      assert.deepEqual(yield* takeRepliesAndOutcome(takeEvent), {
+        texts: [fullReply],
+        status: "interrupted",
+      });
+    }).pipe(Effect.scoped, Effect.provide(testLayer)),
+  );
+
+  it.effect("completes a cut-off reply when Stop restarts Prime Agent", () =>
+    Effect.gen(function* () {
+      const fake = yield* makeFakePi;
+      const { runtime, takeEvent, providerThread } = yield* openPrimeThread(fake);
+      yield* startTurn(runtime, providerThread);
+      yield* fake.takeRequest("prompt");
+      const running = yield* takeEvent(
+        (event) =>
+          event.type === "provider_turn.updated" && event.providerTurn.status === "running",
+      );
+      assert.isTrue(running.type === "provider_turn.updated");
+      if (running.type !== "provider_turn.updated") return;
+      yield* streamCutReply(fake);
+      fake.queueMessages(recordedReply(fullReply));
+
+      yield* runtime.interruptTurn({
+        providerThread,
+        providerTurnId: running.providerTurn.id,
+        requestRuntimeRestart: true,
+      });
+      yield* fake.closeStdout;
+
+      assert.deepEqual(yield* takeRepliesAndOutcome(takeEvent), {
+        texts: [fullReply],
+        status: "interrupted",
+      });
+    }).pipe(Effect.scoped, Effect.provide(testLayer)),
+  );
+
+  it.effect("never shortens a reply or adds a message the stream never started", () =>
+    Effect.gen(function* () {
+      const fake = yield* makeFakePi;
+      const { runtime, takeEvent, providerThread } = yield* openPrimeThread(fake);
+      yield* startTurn(runtime, providerThread);
+      yield* fake.takeRequest("prompt");
+      yield* streamCutReply(fake);
+      fake.queueMessages({
+        messages: [
+          assistantSnapshot(500, "An earlier turn's reply."),
+          assistantSnapshot(1000, "The cause"),
+        ],
+      });
+
+      yield* takeQuietProbeAtItsTick(fake);
+
+      assert.deepEqual(yield* takeCompletedReplies(takeEvent), [cutReply]);
+    }).pipe(Effect.scoped, Effect.provide(testLayer)),
+  );
+
+  it.effect("completes a tool whose end was dropped with its recorded result", () =>
+    Effect.gen(function* () {
+      const fake = yield* makeFakePi;
+      const { runtime, takeEvent, providerThread } = yield* openPrimeThread(fake);
+      yield* startTurn(runtime, providerThread);
+      yield* fake.takeRequest("prompt");
+      yield* fake.emit({ type: "agent_start" });
+      yield* fake.emit({
+        type: "tool_execution_start",
+        toolCallId: "call-1",
+        toolName: "lookup",
+        args: { key: "a" },
+      });
+      fake.queueMessages({
+        messages: [
+          {
+            role: "toolResult",
+            toolCallId: "call-1",
+            toolName: "lookup",
+            content: [{ type: "text", text: "found it" }],
+            isError: false,
+          },
+        ],
+      });
+
+      yield* takeQuietProbeAtItsTick(fake);
+
+      const tool = yield* takeEvent(
+        (event) =>
+          event.type === "turn_item.updated" &&
+          event.turnItem.type === "dynamic_tool" &&
+          event.turnItem.status === "completed",
+      );
+      assert.isTrue(
+        tool.type === "turn_item.updated" &&
+          tool.turnItem.type === "dynamic_tool" &&
+          tool.turnItem.output === "found it",
+      );
     }).pipe(Effect.scoped, Effect.provide(testLayer)),
   );
 

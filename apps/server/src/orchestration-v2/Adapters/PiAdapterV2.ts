@@ -966,12 +966,15 @@ export function makePiAdapterV2(
           );
         });
 
+      const streamItemId = (turn: PiItemSink, contentIndex: number) =>
+        `${itemScope(turn).idPrefix}:m${turn.messageOrdinal}:c${contentIndex}`;
+
       const streamItemFor = Effect.fnUntraced(function* (
         turn: PiItemSink,
         kind: PiStreamItemState["kind"],
         contentIndex: number,
       ) {
-        const nativeItemId = `${itemScope(turn).idPrefix}:m${turn.messageOrdinal}:c${contentIndex}`;
+        const nativeItemId = streamItemId(turn, contentIndex);
         const existing = turn.streamItems.get(nativeItemId);
         if (existing !== undefined) return existing;
         const startedAt = yield* DateTime.now;
@@ -1004,11 +1007,14 @@ export function makePiAdapterV2(
           { discard: true },
         );
 
-      const { adoptMessageIdentity, adoptSnapshot } = makePrimeAgentStream({
+      const { adoptMessageIdentity, adoptSnapshot, adoptRecordedMessages } = makePrimeAgentStream({
         lossyStream: flavor.lossyStream,
         streamItemFor,
         completeStreamItem,
         scheduleStreamFlush,
+        findStreamItem: (turn, contentIndex) =>
+          turn.streamItems.get(streamItemId(turn, contentIndex)),
+        reemitStreamItem: (turn, item) => emitStreamItem(turn, item, !item.completed),
       });
 
       const ipython = makePrimeAgentTools({
@@ -1157,6 +1163,47 @@ export function makePiAdapterV2(
             { ...event, type: "tool_execution_end", result: event["partialResult"] },
             "end",
             status,
+          );
+        }
+      });
+
+      /**
+       * A lossy stream (see `PiFlavor.lossyStream`) can drop the end of a reply
+       * and of its tool calls, and the turn then ends with items still open
+       * and text cut short. Prime Agent's own record of the conversation has
+       * the rest, so read it before the open items are completed. A failed or
+       * slow read leaves the items as the stream left them.
+       */
+      const reconcileOpenWork = Effect.fnUntraced(function* (turn: ActivePiTurn) {
+        const hasOpenStreamItem = Array.from(turn.streamItems.values()).some(
+          (item) => !item.completed,
+        );
+        if (!flavor.lossyStream || (!hasOpenStreamItem && turn.openTools.size === 0)) return;
+        const recorded = yield* request({ type: "get_messages" }, 2_000).pipe(
+          Effect.orElseSucceed(() => undefined),
+        );
+        const messages = recordField(recorded, "messages");
+        if (!Array.isArray(messages)) return;
+        yield* adoptRecordedMessages(turn, messages);
+        for (const [toolCallId, openEvent] of Array.from(turn.openTools)) {
+          const toolResult = messages.find(
+            (message) =>
+              recordString(message, "role") === "toolResult" &&
+              recordString(message, "toolCallId") === toolCallId,
+          );
+          if (toolResult === undefined) continue;
+          yield* emitToolItem(
+            turn,
+            {
+              ...openEvent,
+              type: "tool_execution_end",
+              isError: recordField(toolResult, "isError") === true,
+              result: {
+                content: recordField(toolResult, "content"),
+                details: recordField(toolResult, "details"),
+              },
+            },
+            "end",
           );
         }
       });
@@ -1673,11 +1720,12 @@ export function makePiAdapterV2(
         });
       });
 
-      const finalizeTurn = Effect.fnUntraced(function* (state: PiThreadState, readUsage = true) {
+      const finalizeTurn = Effect.fnUntraced(function* (state: PiThreadState, processAlive = true) {
         const turn = state.activeTurn;
         if (turn === null) return;
         state.activeTurn = null;
         const completedAt = yield* DateTime.now;
+        if (processAlive) yield* reconcileOpenWork(turn);
         yield* completeOpenStreamItems(turn);
         yield* settleOpenTools(
           turn,
@@ -1711,7 +1759,7 @@ export function makePiAdapterV2(
         const treeRefs =
           turn.stopTreeRefs !== undefined ? turn.stopTreeRefs : yield* captureTurnTreeRefs();
         const turnStartEntryId = turn.startEntryId ?? treeRefs?.turnStartEntryId ?? null;
-        const tokenUsage = readUsage
+        const tokenUsage = processAlive
           ? yield* readTokenUsage(turn.latestCompactionAfterTokens, completedAt)
           : undefined;
         const failure = turn.interrupted ? null : turn.failure;
@@ -3082,6 +3130,7 @@ export function makePiAdapterV2(
                 Effect.gen(function* () {
                   if (threadState?.activeTurn === turn && turn.stopTreeRefs === undefined) {
                     turn.stopTreeRefs = yield* captureTurnTreeRefs(2_000);
+                    yield* reconcileOpenWork(turn);
                   }
                   yield* connection.terminate;
                 }),
