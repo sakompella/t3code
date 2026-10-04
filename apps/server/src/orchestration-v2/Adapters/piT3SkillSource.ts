@@ -22,7 +22,7 @@ description: T3 Code orchestration from the kernel, through the \`t3-code\` MCP 
 
 ## Choosing
 
-- **Subagents:** \`rlm.spawn\`. \`delegate_task\` is for another provider or model, or for a T3-owned task the user asked for.
+- **Subagents:** \`rlm.spawn\`, with any model \`rlm.find_models\` lists, GPT models included. Choose \`delegate_task\` to another provider only for a capability that provider has and this one lacks (Codex computer use, for example), or when the user names it. A model's family is not such a reason.
 - **Threads:** \`t3_thread_launch\` or \`create_threads\` only for a new top-level thread the user asked for. Set its workspace in \`workspaceStrategy\`: the launch binds the thread to it, and an omitted strategy means the project root.
 - **Retries:** reuse the same \`clientRequestId\`. \`t3_thread_launch\` takes none, so check \`t3_thread_list\` before you launch again.
 `;
