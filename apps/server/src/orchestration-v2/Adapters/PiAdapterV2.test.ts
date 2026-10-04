@@ -3395,6 +3395,33 @@ describe("PiAdapterV2 with the Prime Agent flavor", () => {
       return yield* Fiber.join(outcome);
     });
 
+  it.effect("keeps a cut-off reply for a later read when its turn settled without one", () =>
+    Effect.gen(function* () {
+      const fake = yield* makeFakePi;
+      const session = yield* openPrimeThread(fake);
+      yield* startTurn(session.runtime, session.providerThread);
+      yield* fake.takeRequest("prompt");
+      yield* streamCutReply(fake);
+      fake.setTranscript(recordedTurn);
+      for (let read = 0; read < 3; read += 1) fake.queueMessages({});
+
+      yield* takeQuietProbeAtItsTick(fake);
+      assert.deepEqual(yield* awaitRepliesAndOutcome(session.takeEvent), {
+        texts: [cutReply],
+        status: "completed",
+      });
+
+      const next = yield* runTurnWithDroppedReply(fake, session, 2, recordedTurn, {
+        timestamp: 2000,
+        text: "Second reply.",
+      });
+      assert.deepEqual(next.outcome, {
+        texts: [fullReply, "Second reply."],
+        status: "completed",
+      });
+    }).pipe(Effect.scoped, Effect.provide(testLayer)),
+  );
+
   // get_state and get_messages are separate reads, so the history can be from
   // another moment than the idle state that settles the turn.
   it.effect("reads the history again when it does not match the idle state", () =>

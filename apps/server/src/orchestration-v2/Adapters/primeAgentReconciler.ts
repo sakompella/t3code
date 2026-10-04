@@ -230,10 +230,32 @@ export function makePrimeAgentReconciler<E>(input: {
     return false;
   };
 
-  /** Remembers which stored messages the turn's own events already showed. */
+  /** Remembers which stored messages the turn's own events already showed, and which in full. */
   const noteSeen = (turn: ActivePiTurn, event: PiRpcRecord) => {
-    const key = transcriptMessageKey(eventMessage(event));
-    if (key !== undefined) turn.seenMessageKeys.add(key);
+    const message = eventMessage(event);
+    const key = transcriptMessageKey(message);
+    if (key === undefined) return;
+    turn.seenMessageKeys.add(key);
+    if (showsInFull(turn, event["type"], message)) turn.shownMessageKeys.add(key);
+  };
+
+  /** Whether an event about `message` leaves T3 showing all of it. */
+  const showsInFull = (turn: ActivePiTurn, type: unknown, message: unknown) => {
+    switch (recordString(message, "role")) {
+      case "assistant":
+        return type === "message_end";
+      case "toolResult": {
+        // A tool's outcome comes from its end event, which precedes its result message.
+        const toolCallId = recordString(message, "toolCallId");
+        return (
+          toolCallId !== undefined &&
+          turn.toolStartedAt.has(toolCallId) &&
+          !turn.openTools.has(toolCallId)
+        );
+      }
+      default:
+        return true;
+    }
   };
 
   /** Projects the stored messages T3 has not accounted for into `turn`. */
@@ -287,21 +309,21 @@ export function makePrimeAgentReconciler<E>(input: {
     turn: ActivePiTurn,
     idleState: unknown,
   ) {
-    if (!enabled || turn.transcriptReconciled) return true;
+    if (!enabled || turn.transcript !== "streaming") return true;
     const read = yield* readSettledTranscript(request, idleState);
     if (read._tag === "busy") return false;
     if (read._tag === "unconfirmed") {
       turn.settleReads += 1;
       if (turn.settleReads < MAX_SETTLE_READS) return false;
-      // The turn is over either way. A later read finds what it stored
-      // unaccounted for and shows it as a wake.
-      turn.transcriptReconciled = true;
+      // The turn is over either way. What it did not show in full stays
+      // unaccounted, for a later read to project.
+      turn.transcript = "unreconciled";
       yield* logOutcome(turn, "unconfirmed");
       return true;
     }
     yield* project(turn, read.messages);
     commit(read.messages);
-    turn.transcriptReconciled = true;
+    turn.transcript = "reconciled";
     return true;
   });
 
@@ -311,18 +333,27 @@ export function makePrimeAgentReconciler<E>(input: {
    * leaves the turn as the stream left it.
    */
   const reconcileEndingTurn = Effect.fnUntraced(function* (turn: ActivePiTurn) {
-    if (!enabled || turn.transcriptReconciled || ledger === null) return;
-    turn.transcriptReconciled = true;
+    if (!enabled || turn.transcript !== "streaming" || ledger === null) return;
+    turn.transcript = "unreconciled";
     const messages = yield* readHistory(request, ENDING_HISTORY_READ_TIMEOUT_MS);
     if (messages === undefined) return yield* logOutcome(turn, "unreadable");
     yield* project(turn, messages);
     commit(messages);
+    turn.transcript = "reconciled";
   });
 
-  /** Accounts for what the turn showed live, whether or not a read confirmed it. */
+  /**
+   * Accounts for what the turn showed live. After a read, that is every
+   * message it saw, even one stored only after the read. Without a read, a
+   * message it showed only in part stays unaccounted, so a later read still
+   * projects what was stored. Late events of its tools are dropped either
+   * way: a read brings their stored outcome.
+   */
   const closeTurn = (turn: ActivePiTurn) => {
     if (!enabled || ledger === null) return;
-    for (const key of turn.seenMessageKeys) ledger.keys.add(key);
+    const accounted =
+      turn.transcript === "reconciled" ? turn.seenMessageKeys : turn.shownMessageKeys;
+    for (const key of accounted) ledger.keys.add(key);
     for (const toolCallId of turn.toolStartedAt.keys()) ledger.toolCalls.add(toolCallId);
   };
 

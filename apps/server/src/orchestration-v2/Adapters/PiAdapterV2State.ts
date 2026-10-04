@@ -82,10 +82,12 @@ export interface ActivePiTurn {
    * stops moving may have lost its closing events (see `PiFlavor.lossyStream`).
    */
   sessionEventCount: number;
-  /** Stored messages this turn's own events showed; see `transcriptMessageKey`. */
+  /** Stored messages this turn's own events showed, even in part; see `transcriptMessageKey`. */
   readonly seenMessageKeys: Set<string>;
-  /** Prime Agent's stored conversation was reconciled into the turn, or given up on. */
-  transcriptReconciled: boolean;
+  /** The seen messages T3 shows in full: a reply's final text, a tool result's outcome. */
+  readonly shownMessageKeys: Set<string>;
+  /** Whether a history read was reconciled into the turn, or the turn ended without one. */
+  transcript: "streaming" | "reconciled" | "unreconciled";
   /** History reads that did not match the idle state at settle. */
   settleReads: number;
   sawCompaction: boolean;
