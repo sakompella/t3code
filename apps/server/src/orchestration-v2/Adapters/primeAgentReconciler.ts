@@ -369,11 +369,8 @@ export function makePrimeAgentReconciler<E>(input: {
       if (turn !== null) {
         idleIntervals = 1;
         skipped = 0;
-        if (
-          turn.sawAgentActivity &&
-          previous?.turn === turn &&
-          previous.eventCount === turn.sessionEventCount
-        ) {
+        // Even a turn that showed no agent event: all of them can be lost.
+        if (previous?.turn === turn && previous.eventCount === turn.sessionEventCount) {
           yield* input.probeQuietTurn(turn);
         }
         continue;

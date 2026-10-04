@@ -3077,6 +3077,23 @@ describe("PiAdapterV2 with the Prime Agent flavor", () => {
     }).pipe(Effect.scoped, Effect.provide(testLayer)),
   );
 
+  it.effect("settles a turn that went quiet without showing one agent event", () =>
+    Effect.gen(function* () {
+      const fake = yield* makeFakePi;
+      const { runtime, takeEvent, providerThread } = yield* openPrimeThread(fake);
+      yield* startTurn(runtime, providerThread);
+      yield* fake.takeRequest("prompt");
+      fake.setTranscript(recordedTurn);
+
+      yield* takeQuietProbeAtItsTick(fake);
+
+      assert.deepEqual(yield* takeRepliesAndOutcome(takeEvent), {
+        texts: [fullReply],
+        status: "completed",
+      });
+    }).pipe(Effect.scoped, Effect.provide(testLayer)),
+  );
+
   it.effect("lengthens a cut-off reply whose item was already completed", () =>
     Effect.gen(function* () {
       const fake = yield* makeFakePi;
