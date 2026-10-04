@@ -52,9 +52,11 @@ export interface PiFlavor {
   /**
    * Whether the RPC can drop stream events. Prime Agent's RPC rides its
    * daemon socket and resyncs instead of queueing when that socket backs up,
-   * so deltas, `text_end`, and `message_start` can go missing. Every update
+   * so any event can go missing, up to a whole reply or wake. Every update
    * and the final message still carry the whole message so far, and the
-   * adapter treats that snapshot as the truth. Pi's stream is lossless.
+   * adapter treats that snapshot as the truth; what never arrived is rebuilt
+   * from the stored conversation (see `primeAgentReconciler.ts`). Pi's
+   * stream is lossless.
    */
   readonly lossyStream: boolean;
   /**
