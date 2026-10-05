@@ -82,8 +82,9 @@ export function totalTokens(totals: UsageTokenTotals): number {
  * an order of magnitude.
  */
 export function mightCarryUsage(line: string, provider: UsageProviderKind): boolean {
-  if (provider === "claude" || provider === "pi" || provider === "primeAgent")
-    return line.includes('"usage"');
+  if (provider === "claude") return line.includes('"usage"');
+  if (provider === "pi" || provider === "primeAgent")
+    return line.includes('"usage"') || line.includes('"child_usage_attributed"');
   if (provider === "grok") return line.includes('"turn_completed"');
   return line.includes('"token_count"');
 }
@@ -99,19 +100,130 @@ function grokCostTicksToUsd(ticks: unknown): number | null {
   return ticks / GROK_COST_USD_TICKS_PER_DOLLAR;
 }
 
-/* Pi and Prime Agent share the same assistant-message JSONL format. */
-export function parsePiLine(
-  line: string,
-  provider: "pi" | "primeAgent",
-  sessionId: string,
-): UsageRecord | null {
-  try {
-    return parsePiRecord(JSON.parse(line), provider, sessionId);
-  } catch {
-    return null;
-  }
+/* Pi and Prime Agent share the same session JSONL format. */
+
+/** Usage fields shared by Pi assistant messages and summary entries. */
+function parsePiUsage(
+  usage: unknown,
+): { readonly totals: UsageTokenTotals; readonly costUsd: number } | null {
+  if (typeof usage !== "object" || usage === null) return null;
+  const totals = {
+    uncachedInputTokens: int("input" in usage ? usage.input : undefined),
+    cachedInputTokens: int("cacheRead" in usage ? usage.cacheRead : undefined),
+    cacheCreationTokens: int("cacheWrite" in usage ? usage.cacheWrite : undefined),
+    outputTokens: int("output" in usage ? usage.output : undefined),
+    reasoningTokens: 0,
+  };
+  const cost = "cost" in usage ? usage.cost : undefined;
+  const total =
+    typeof cost === "object" && cost !== null && "total" in cost ? cost.total : undefined;
+  return {
+    totals,
+    costUsd: typeof total === "number" && Number.isFinite(total) && total > 0 ? total : 0,
+  };
 }
 
+/**
+ * Per-parse state for one Pi transcript.
+ *
+ * Prime Agent folds a subagent's usage into the parent response in memory. Appended
+ * lines stay raw, but a fork (`--fork`), branch or file rewrite writes the folded
+ * value under the same response ID. The attribution entries copied with it give
+ * back the parent's own usage. A resumed parse starts without earlier records,
+ * which is safe: appended attributions only follow raw, already-written lines.
+ */
+export interface PiScanState {
+  readonly recordsByEntryId: Map<string, { readonly out: UsageRecord[]; readonly index: number }>;
+}
+
+export function initialPiScanState(): PiScanState {
+  return { recordsByEntryId: new Map() };
+}
+
+/** The log does not say which model wrote a compaction or branch summary. */
+export const PI_SUMMARY_MODEL = "summary (model not recorded)";
+
+/** Applies one parsed Pi entry: adds usage records or restores a folded parent response. */
+export function applyPiEntry(
+  parsed: unknown,
+  provider: "pi" | "primeAgent",
+  sessionId: string,
+  state: PiScanState,
+  out: UsageRecord[],
+): void {
+  if (typeof parsed !== "object" || parsed === null || !("type" in parsed)) return;
+  const entryId = "id" in parsed && typeof parsed.id === "string" ? parsed.id : "";
+  if (parsed.type === "child_usage_attributed") {
+    const targetId =
+      "targetId" in parsed && typeof parsed.targetId === "string" ? parsed.targetId : "";
+    const target = state.recordsByEntryId.get(targetId);
+    if (target === undefined) return;
+    // Only the first attribution separates the response from its children.
+    state.recordsByEntryId.delete(targetId);
+    const aggregate = parsePiUsage("aggregateUsage" in parsed ? parsed.aggregateUsage : null);
+    const child = parsePiUsage("childUsage" in parsed ? parsed.childUsage : null);
+    const record = target.out[target.index];
+    if (aggregate === null || child === null || record === undefined) return;
+    const own: UsageTokenTotals = {
+      uncachedInputTokens: Math.max(
+        0,
+        aggregate.totals.uncachedInputTokens - child.totals.uncachedInputTokens,
+      ),
+      cachedInputTokens: Math.max(
+        0,
+        aggregate.totals.cachedInputTokens - child.totals.cachedInputTokens,
+      ),
+      cacheCreationTokens: Math.max(
+        0,
+        aggregate.totals.cacheCreationTokens - child.totals.cacheCreationTokens,
+      ),
+      outputTokens: Math.max(0, aggregate.totals.outputTokens - child.totals.outputTokens),
+      reasoningTokens: 0,
+    };
+    // A raw line already holds these totals; keep its exact recorded cost.
+    if (totalTokens(own) === 0 || totalsEqual(own, record.totals)) return;
+    const ownCost = aggregate.costUsd - child.costUsd;
+    target.out[target.index] = {
+      ...record,
+      totals: own,
+      reportedCostUsd: ownCost > 0 ? ownCost : null,
+    };
+    return;
+  }
+  if (parsed.type === "compaction" || parsed.type === "branch_summary") {
+    const usage = parsePiUsage("usage" in parsed ? parsed.usage : null);
+    const timestampMs = parseTimestampMs("timestamp" in parsed ? parsed.timestamp : undefined);
+    if (usage === null || timestampMs === null || totalTokens(usage.totals) === 0) return;
+    out.push({
+      provider,
+      timestampMs,
+      model: PI_SUMMARY_MODEL,
+      sessionId,
+      totals: usage.totals,
+      reportedCostUsd: usage.costUsd > 0 ? usage.costUsd : null,
+      speed: "standard",
+      // Copies keep the entry ID and timestamp.
+      dedupeKey: entryId ? `pi-summary:${entryId}:${timestampMs}` : null,
+    });
+    return;
+  }
+  const record = parsePiRecord(parsed, provider, sessionId);
+  if (record === null) return;
+  out.push(record);
+  if (entryId) state.recordsByEntryId.set(entryId, { out, index: out.length - 1 });
+}
+
+function totalsEqual(a: UsageTokenTotals, b: UsageTokenTotals): boolean {
+  return (
+    a.uncachedInputTokens === b.uncachedInputTokens &&
+    a.cachedInputTokens === b.cachedInputTokens &&
+    a.cacheCreationTokens === b.cacheCreationTokens &&
+    a.outputTokens === b.outputTokens &&
+    a.reasoningTokens === b.reasoningTokens
+  );
+}
+
+/** Parses one Pi assistant message. Summaries and attributions need {@link applyPiEntry}. */
 export function parsePiRecord(
   parsed: unknown,
   provider: "pi" | "primeAgent",
@@ -134,22 +246,12 @@ export function parsePiRecord(
   )
     return null;
   if (!("usage" in message) || !("model" in message) || !("timestamp" in message)) return null;
-  const { usage, model, timestamp } = message;
-  if (typeof usage !== "object" || usage === null || typeof model !== "string" || !model.trim())
-    return null;
+  const { model, timestamp } = message;
+  const usage = parsePiUsage(message.usage);
+  if (usage === null || typeof model !== "string" || !model.trim()) return null;
   const timestampMs = typeof timestamp === "number" ? timestamp : parseTimestampMs(timestamp);
   if (timestampMs === null || !Number.isFinite(timestampMs)) return null;
-  const totals = {
-    uncachedInputTokens: int("input" in usage ? usage.input : undefined),
-    cachedInputTokens: int("cacheRead" in usage ? usage.cacheRead : undefined),
-    cacheCreationTokens: int("cacheWrite" in usage ? usage.cacheWrite : undefined),
-    outputTokens: int("output" in usage ? usage.output : undefined),
-    reasoningTokens: 0,
-  };
-  if (totalTokens(totals) === 0) return null;
-  const cost = "cost" in usage ? usage.cost : undefined;
-  const reported =
-    typeof cost === "object" && cost !== null && "total" in cost ? cost.total : undefined;
+  if (totalTokens(usage.totals) === 0) return null;
   const responseId =
     "responseId" in message && typeof message.responseId === "string" ? message.responseId : "";
   const entryId = "id" in parsed && typeof parsed.id === "string" ? parsed.id : "";
@@ -158,17 +260,17 @@ export function parsePiRecord(
     timestampMs,
     model,
     sessionId,
-    totals,
+    totals: usage.totals,
     // Zero is also Pi's placeholder for models without configured prices.
-    reportedCostUsd:
-      typeof reported === "number" && Number.isFinite(reported) && reported > 0 ? reported : null,
+    reportedCostUsd: usage.costUsd > 0 ? usage.costUsd : null,
     speed: "standard",
-    // A response ID survives copied/forked sessions. Without one, scope Pi's
-    // short entry IDs to the session instead of dropping unrelated responses.
+    // A response ID survives copied/forked sessions. Without one (aborted
+    // requests), Pi's short entry ID plus the response time also survive a copy
+    // and do not collide across sessions.
     dedupeKey: responseId
       ? `pi-response:${responseId}`
       : entryId
-        ? `pi-entry:${sessionId}:${entryId}`
+        ? `pi-entry:${entryId}:${timestampMs}`
         : null,
   };
 }
