@@ -248,6 +248,29 @@ describe("queued messages keep a settled thread active", () => {
   });
 });
 
+describe("a settled thread whose wake needs the user leaves the settled shelf", () => {
+  it("lists a settled thread blocked on approval in the active block", () => {
+    const layout = buildThreadListV2Items({
+      threads: [
+        makeThread({ id: ThreadId.make("settled"), title: "Settled", settledOverride: "settled" }),
+        makeThread({
+          id: ThreadId.make("settled-approval"),
+          title: "Settled, asks approval",
+          settledOverride: "settled",
+          hasPendingApprovals: true,
+        }),
+      ],
+      environmentId: null,
+      searchQuery: "",
+      now: NOW,
+    });
+    expect(layout.items.map((item) => [item.thread.id, item.variant] as const)).toEqual([
+      ["settled-approval", "card"],
+      ["settled", "slim"],
+    ]);
+  });
+});
+
 describe("resolveThreadListV2SwipeActions", () => {
   it("offers settle and snooze for an active snoozable thread", () => {
     expect(

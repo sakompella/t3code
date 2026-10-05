@@ -2689,6 +2689,143 @@ it.layer(TestLayer)("OrchestrationV2LayerLive lifecycle", (it) => {
     }),
   );
 
+  it.effect("an agent wake keeps a parked thread parked; a user message brings it back", () =>
+    Effect.gen(function* () {
+      const orchestrator = yield* Orchestrator.OrchestratorV2;
+      const eventSink = yield* EventSink.EventSinkV2;
+      const threadId = ThreadId.make("runtime-layer-wake-keeps-parked");
+      const now = yield* DateTime.now;
+
+      yield* orchestrator.dispatch({
+        type: "thread.create",
+        createdBy: "user",
+        creationSource: "web",
+        commandId: CommandId.make("wake-parked-create"),
+        threadId,
+        projectId: ProjectId.make("wake-parked-project"),
+        title: "Wake keeps parked",
+        modelSelection,
+        runtimeMode: "full-access",
+        interactionMode: "default",
+        branch: null,
+        worktreePath: "/tmp/runtime-layer-wake-parked",
+      });
+      const finishRuns = (commandId: string) =>
+        Effect.gen(function* () {
+          const projection = yield* orchestrator.getThreadProjection(threadId);
+          const finishedAt = yield* DateTime.now;
+          yield* eventSink.commitCommand({
+            commandId: CommandId.make(commandId),
+            threadId,
+            commandType: "provider-runtime.reconcile",
+            acceptedAt: finishedAt,
+            events: projection.runs
+              .filter((run) => run.status !== "completed")
+              .map((run) => ({
+                id: EventId.make(`${commandId}:${run.id}`),
+                type: "run.updated" as const,
+                threadId,
+                runId: run.id,
+                occurredAt: finishedAt,
+                payload: { ...run, status: "completed" as const, completedAt: finishedAt },
+              })),
+            effects: [],
+          });
+        });
+      const sendUserMessage = (id: string) =>
+        orchestrator.dispatch({
+          type: "message.dispatch",
+          createdBy: "user",
+          creationSource: "web",
+          commandId: CommandId.make(id),
+          threadId,
+          messageId: MessageId.make(id),
+          text: id,
+          attachments: [],
+          modelSelection,
+          dispatchMode: { type: "start_immediately" },
+        });
+      // The shape ProviderContinuationService dispatches for a provider self-wake.
+      const wake = (id: string) =>
+        orchestrator.dispatch({
+          type: "message.dispatch",
+          createdBy: "agent",
+          creationSource: "provider",
+          notification: {
+            source: { kind: "command" },
+            outcome: "completed",
+            summary: "Background command finished",
+          },
+          commandId: CommandId.make(id),
+          threadId,
+          messageId: MessageId.make(id),
+          text: id,
+          attachments: [],
+          dispatchMode: { type: "queue_after_active" },
+        });
+
+      yield* sendUserMessage("wake-parked-first");
+      yield* finishRuns("wake-parked-first-done");
+      yield* orchestrator.dispatch({
+        type: "thread.settle",
+        commandId: CommandId.make("wake-parked-settle"),
+        threadId,
+      });
+      const settledAt = (yield* orchestrator.getThreadProjection(threadId)).thread.settledAt;
+      assert.isNotNull(settledAt);
+
+      yield* wake("wake-parked-settled-wake");
+      const afterSettledWake = yield* orchestrator.getThreadProjection(threadId);
+      assert.equal(afterSettledWake.thread.settledOverride, "settled");
+      assert.deepEqual(afterSettledWake.thread.settledAt, settledAt);
+      // The wake still runs: nothing the agent did is dropped.
+      assert.isTrue(
+        afterSettledWake.runs.some(
+          (run) => run.userMessageId === MessageId.make("wake-parked-settled-wake"),
+        ),
+      );
+      yield* finishRuns("wake-parked-settled-wake-done");
+
+      // A user message is the user re-engaging: it un-settles as before.
+      yield* sendUserMessage("wake-parked-user-returns");
+      const afterUser = yield* orchestrator.getThreadProjection(threadId);
+      assert.isNull(afterUser.thread.settledOverride);
+      assert.isNull(afterUser.thread.settledAt);
+      yield* finishRuns("wake-parked-user-returns-done");
+
+      const snoozedUntil = DateTime.add(now, { hours: 6 });
+      yield* orchestrator.dispatch({
+        type: "thread.snooze",
+        commandId: CommandId.make("wake-parked-snooze"),
+        threadId,
+        snoozedUntil: DateTime.formatIso(snoozedUntil),
+      });
+      yield* wake("wake-parked-snoozed-wake");
+      const afterSnoozedWake = yield* orchestrator.getThreadProjection(threadId);
+      assert.deepEqual(afterSnoozedWake.thread.snoozedUntil, snoozedUntil);
+      yield* finishRuns("wake-parked-snoozed-wake-done");
+
+      // An explicit un-settle ("keep active") is also the user's choice.
+      yield* orchestrator.dispatch({
+        type: "thread.unsettle",
+        commandId: CommandId.make("wake-parked-keep-active"),
+        threadId,
+        reason: "user",
+      });
+      yield* wake("wake-parked-active-wake");
+      assert.equal(
+        (yield* orchestrator.getThreadProjection(threadId)).thread.settledOverride,
+        "active",
+      );
+      yield* finishRuns("wake-parked-active-wake-done");
+
+      yield* sendUserMessage("wake-parked-user-unsnoozes");
+      const afterUserUnsnooze = yield* orchestrator.getThreadProjection(threadId);
+      assert.isNull(afterUserUnsnooze.thread.snoozedUntil);
+      assert.isNull(afterUserUnsnooze.thread.settledOverride);
+    }),
+  );
+
   it.effect("settles past held automatic runs but not held user messages", () =>
     Effect.gen(function* () {
       const orchestrator = yield* Orchestrator.OrchestratorV2;
