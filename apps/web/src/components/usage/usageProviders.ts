@@ -41,6 +41,12 @@ export const PROVIDER_PRESENTATION = {
     color: "#8c7bd1",
     driverKind: ProviderDriverKind.make("antigravity"),
   },
+  pi: { label: "Pi", color: "#c59b44", driverKind: ProviderDriverKind.make("pi") },
+  primeAgent: {
+    label: "Prime Agent",
+    color: "#55a68b",
+    driverKind: ProviderDriverKind.make("primeAgent"),
+  },
 } satisfies Record<UsageProviderKind, UsageProviderPresentation>;
 
 /** Stable provider reading order across charts, summaries, tables, and hover rows. */

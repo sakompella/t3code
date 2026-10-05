@@ -56,6 +56,11 @@ Changes against upstream `main`, grouped by feature. Each item says what changed
 - **Compatibility policy.** The model manifest marks Prime Agent 0.9.6 and later as supported and recommends 0.9.8 or later.
 - **Diagnostics.** Each subagent update is logged with the run that took or dropped it, and a failed launch reports the end of stderr.
 
+### Usage accounting
+
+- **Usage Cost/Tokens includes Pi and Prime Agent session logs**, including Prime Agent child sessions, disabled accounts and custom agent homes. It uses the existing incremental transcript cache and drops duplicate response IDs per server. Saved model costs win; zero or missing costs fall back to model pricing. Web and mobile show separate Pi and Prime Agent series.
+  - Why: the hub quota connection supplies limits, not durable request history. Local logs cover agent work without an always-on hub collector. Other hub clients are not included, and copied history on separate machines may still count twice.
+
 ### Prime Agent UI (keep)
 
 - **Heartbeat line.** Threads publish the heartbeats their session runs, and web and mobile show them in a quiet line above the composer.
