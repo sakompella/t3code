@@ -1104,8 +1104,8 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: {
   sweepAction: SidebarSweepAction | null;
   // Compact wake countdown ("2h") for rows in the snoozed shelf.
   snoozeWakeLabelText: string | null;
-  // When a snooze ended (timer or early wake); drives the Woke pill until
-  // the user visits the thread.
+  // When a snooze timer ran out; drives the Woke pill until the user visits
+  // the thread.
   wokeAt: string | null;
   isActive: boolean;
   openPullRequestsInRightPanel: boolean;
@@ -1233,10 +1233,10 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: {
   // A woken thread reappears at its original position (the sort is
   // deliberately static), so the pill has to carry the weight. Snoozing is
   // an explicit act, so the pill clears only when the user re-engages:
-  // reading a completion-triggered wake, clicking the pill, sending a
-  // message, settling, archiving, or a change request state that settles the
-  // thread. Timer wakes survive a mere visit. An unparseable visit timestamp
-  // counts as never-visited, so corrupt local data cannot eat the wake signal.
+  // visiting after the timer ran out, clicking the pill, sending a message,
+  // settling, archiving, or a change request state that settles the thread.
+  // An unparseable visit timestamp counts as never-visited, so corrupt local
+  // data cannot eat the wake signal.
   const lastVisitedDate = lastVisitedAt === undefined ? null : parseTimestampDate(lastVisitedAt);
   const wokeAtDate = props.wokeAt === null ? null : parseTimestampDate(props.wokeAt);
   const isWoke =
