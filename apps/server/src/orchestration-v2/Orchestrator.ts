@@ -407,7 +407,7 @@ function wakeWorkStartedAt(
 /**
  * A message the agent's own background work sent to wake it: a provider
  * self-wake, a monitor notification, or a delegated task's result. It is not
- * the user re-engaging, so it never undoes the user's settle or snooze.
+ * the user re-engaging, so it never undoes the user's settle.
  */
 function isAutomaticWake(message: {
   readonly notification?: unknown;
@@ -4606,9 +4606,9 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         (run) => run.id === command.restartContinuationOfRunId,
       )?.delegatedTaskId;
 
-      // Clients still surface a parked thread whose wake needs the user.
-      const userReengaged = !isAutomaticWake(command);
-      if (userReengaged && projection.thread.settledOverride !== null) {
+      // Only a user message un-settles. Snooze is untouched by every message,
+      // the user's included: only its timer or an explicit unsnooze ends it.
+      if (!isAutomaticWake(command) && projection.thread.settledOverride !== null) {
         const now = yield* DateTime.now;
         const thread: OrchestrationV2AppThread = {
           ...projection.thread,
@@ -4625,26 +4625,6 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           command,
         )({
           type: "thread.unsettled",
-          threadId: command.threadId,
-          providerInstanceId: thread.providerInstanceId,
-          occurredAt: now,
-          payload: thread,
-        });
-        projection = yield* getProjectionWithPendingEvents(command.threadId, events);
-      }
-      if (userReengaged && projection.thread.snoozedUntil != null) {
-        const now = yield* DateTime.now;
-        const thread: OrchestrationV2AppThread = {
-          ...projection.thread,
-          snoozedUntil: null,
-          snoozedAt: null,
-          updatedAt: now,
-        };
-        yield* emit(
-          events,
-          command,
-        )({
-          type: "thread.unsnoozed",
           threadId: command.threadId,
           providerInstanceId: thread.providerInstanceId,
           occurredAt: now,
