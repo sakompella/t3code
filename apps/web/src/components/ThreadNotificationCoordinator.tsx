@@ -3,7 +3,6 @@ import {
   presentThreadShell,
 } from "@t3tools/client-runtime/state/models";
 import { pendingSubagentRequestsByThread } from "@t3tools/client-runtime/state/threads";
-import { runCompletedTask } from "@t3tools/client-runtime/state/thread-heartbeats";
 import { useAtomValue } from "@effect/atom-react";
 import { useNavigate, useParams } from "@tanstack/react-router";
 import type { EnvironmentId, OrchestrationV2ThreadShell, ThreadId } from "@t3tools/contracts";
@@ -26,7 +25,10 @@ import {
   setNotificationBadge,
   unlockNotificationAudio,
 } from "../threadNotifications";
-import { resolveSidebarThreadStatus } from "./Sidebar.logic";
+import {
+  observeThreadForNotification,
+  type ThreadNotificationMemory,
+} from "./ThreadNotificationCoordinator.logic";
 import { toastManager } from "./ui/toast";
 
 export function ThreadNotificationCoordinator() {
@@ -93,11 +95,9 @@ export function ThreadNotificationCoordinator() {
   ));
 }
 
-interface NotificationState {
+interface NotificationState extends ThreadNotificationMemory {
   readonly raw: OrchestrationV2ThreadShell;
   readonly subagentRequest: PendingSubagentRequest | null;
-  readonly attention: string | null;
-  readonly completion: number | null;
 }
 
 function EnvironmentNotifications({
@@ -136,26 +136,12 @@ function EnvironmentNotifications({
         continue;
       }
       const thread = presentThreadShell(environmentId, rawThread, subagentRequest);
-      let status = resolveSidebarThreadStatus(thread);
-      if (status === "ready" && thread.latestRun?.status === "failed") status = "failed";
-      const attention =
-        status === "input" || status === "approval" || status === "failed" || status === "limited"
-          ? `${thread.latestRun?.runId ?? ""}:${status}`
-          : null;
-      const completedAt = Date.parse(thread.latestRun?.completedAt ?? "");
-      const completion =
-        status === "ready" && runCompletedTask(thread.latestRun) && Number.isFinite(completedAt)
-          ? completedAt
-          : (prior?.completion ?? null);
-      next.set(thread.id, { raw: rawThread, subagentRequest, attention, completion });
-      if (!prior || thread.archivedAt !== null) continue;
-      const kind =
-        attention && attention !== prior.attention
-          ? "input"
-          : completion !== null && (prior.completion === null || completion > prior.completion)
-            ? "completion"
-            : null;
-      if (!kind) continue;
+      const { status, memory, kind } = observeThreadForNotification(
+        thread,
+        previous.current.get(thread.id),
+      );
+      next.set(thread.id, { ...memory, raw: rawThread, subagentRequest });
+      if (!kind || thread.archivedAt !== null) continue;
       const title =
         kind === "completion"
           ? "Thread completed"
