@@ -6,6 +6,7 @@ import type {
   MessageId,
   OrchestrationProjectShell,
   OrchestrationV2RunStatus,
+  OrchestrationV2RunTrigger,
   OrchestrationV2ProviderFailureClass,
   OrchestrationV2ThreadProjection,
   OrchestrationV2ThreadShell,
@@ -42,6 +43,8 @@ export interface ThreadRunSummary {
   readonly startedAt: string | null;
   readonly completedAt: string | null;
   readonly assistantMessageId: MessageId | null;
+  /** What started the run when nobody asked for it; absent or null when someone did. */
+  readonly trigger?: OrchestrationV2RunTrigger | null;
   readonly sourcePlanRef?: {
     readonly threadId: ThreadId;
     readonly planId: PlanId;
@@ -217,6 +220,7 @@ export function presentThreadShell(
                 : null
               : nullableIso(thread.latestRunCompletedAt),
           assistantMessageId: null,
+          trigger: thread.latestRunTrigger ?? null,
         } satisfies ThreadRunSummary);
   return {
     environmentId,

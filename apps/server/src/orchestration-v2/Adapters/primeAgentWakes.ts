@@ -117,8 +117,9 @@ export function piCustomMessageNotification(
     };
   }
   if (customType === "heartbeat_prompt") {
+    const heartbeatId = recordString(details, "jobId")?.trim();
     return {
-      source: { kind: "background_task" },
+      source: heartbeatId ? { kind: "heartbeat", heartbeatId } : { kind: "heartbeat" },
       outcome: "updated",
       summary: "Heartbeat",
       ...withDetail(heartbeatPrompt(message)),

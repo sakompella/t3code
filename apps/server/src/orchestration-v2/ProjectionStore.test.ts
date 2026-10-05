@@ -1635,6 +1635,141 @@ it.layer(TestLayer)("ProjectionStoreV2", (it) => {
     }),
   );
 
+  it.effect("reads a heartbeat's run as a routine check, not a message someone sent", () =>
+    Effect.gen(function* () {
+      const projectionStore = yield* ProjectionStore.ProjectionStoreV2;
+      const startedAt = yield* DateTime.now;
+      const threadId = ThreadId.make("thread:projection-heartbeat");
+      yield* projectionStore.apply({
+        id: EventId.make("event:projection-heartbeat:created"),
+        type: "thread.created",
+        threadId,
+        occurredAt: startedAt,
+        payload: {
+          createdBy: "user",
+          creationSource: "web",
+          id: threadId,
+          projectId: ProjectId.make("project:projection-heartbeat"),
+          title: "Heartbeat runs",
+          providerInstanceId,
+          modelSelection,
+          runtimeMode: "full-access",
+          interactionMode: "default",
+          branch: null,
+          worktreePath: null,
+          activeProviderThreadId: null,
+          lineage: { parentThreadId: null, relationshipToParent: null, rootThreadId: threadId },
+          forkedFrom: null,
+          createdAt: startedAt,
+          updatedAt: startedAt,
+          archivedAt: null,
+          settledOverride: null,
+          settledAt: null,
+          lastVisitedAt: null,
+          deletedAt: null,
+        },
+      });
+      const addRun = Effect.fnUntraced(function* (ordinal: number, sender: "user" | "heartbeat") {
+        const at = DateTime.add(startedAt, { minutes: ordinal });
+        const runId = RunId.make(`run:projection-heartbeat:${ordinal}`);
+        const nodeId = NodeId.make(`node:projection-heartbeat:${ordinal}`);
+        const messageId = MessageId.make(`message:projection-heartbeat:${ordinal}`);
+        yield* projectionStore.apply({
+          id: EventId.make(`event:projection-heartbeat:message:${ordinal}`),
+          type: "message.updated",
+          threadId,
+          runId,
+          nodeId,
+          driver,
+          occurredAt: at,
+          payload: {
+            ...(sender === "user"
+              ? { createdBy: "user" as const, creationSource: "web" as const }
+              : {
+                  createdBy: "agent" as const,
+                  creationSource: "provider" as const,
+                  notification: {
+                    source: { kind: "heartbeat" as const, heartbeatId: "deploy" },
+                    outcome: "updated" as const,
+                    summary: "Heartbeat",
+                  },
+                }),
+            id: messageId,
+            threadId,
+            runId,
+            nodeId,
+            role: "user",
+            text: sender === "user" ? "Deploy it" : "Continue",
+            attachments: [],
+            streaming: false,
+            createdAt: at,
+            updatedAt: at,
+          },
+        });
+        yield* projectionStore.apply({
+          id: EventId.make(`event:projection-heartbeat:run:${ordinal}`),
+          type: "run.created",
+          threadId,
+          runId,
+          nodeId,
+          driver,
+          providerInstanceId,
+          occurredAt: at,
+          payload: {
+            id: runId,
+            threadId,
+            ordinal,
+            providerInstanceId,
+            modelSelection,
+            providerThreadId: null,
+            userMessageId: messageId,
+            rootNodeId: nodeId,
+            activeAttemptId: null,
+            status: "completed",
+            requestedAt: at,
+            startedAt: at,
+            completedAt: at,
+            checkpointId: null,
+            contextHandoffId: null,
+          },
+        });
+        return { runId, at };
+      });
+      const shells = Effect.fnUntraced(function* () {
+        const memory = ProjectionStore.threadShellFromProjection(
+          yield* projectionStore.getThreadProjection(threadId),
+        );
+        const sql = (yield* projectionStore.getShellSnapshot()).threads.find(
+          (thread) => thread.id === threadId,
+        )!;
+        const settlement = (yield* projectionStore.getSettlementCandidates(threadId))[0]!;
+        return { memory, sql, settlement };
+      });
+
+      const deploy = yield* addRun(1, "user");
+      const heartbeat = yield* addRun(2, "heartbeat");
+      const afterHeartbeat = yield* shells();
+      for (const shell of [afterHeartbeat.memory, afterHeartbeat.sql]) {
+        assert.equal(shell.latestRunId, heartbeat.runId);
+        assert.equal(shell.latestRunTrigger, "heartbeat");
+      }
+      // The heartbeat's prompt does not reorder the thread as if someone wrote.
+      for (const shell of Object.values(afterHeartbeat)) {
+        assert.deepEqual(shell.latestUserMessageAt, deploy.at);
+      }
+
+      const followUp = yield* addRun(3, "user");
+      const afterFollowUp = yield* shells();
+      for (const shell of [afterFollowUp.memory, afterFollowUp.sql]) {
+        assert.equal(shell.latestRunId, followUp.runId);
+        assert.isNull(shell.latestRunTrigger);
+      }
+      for (const shell of Object.values(afterFollowUp)) {
+        assert.deepEqual(shell.latestUserMessageAt, followUp.at);
+      }
+    }),
+  );
+
   it.effect("preserves delegated completion ownership across stale run and task updates", () =>
     Effect.gen(function* () {
       const projectionStore = yield* ProjectionStore.ProjectionStoreV2;

@@ -3,6 +3,7 @@ import { useRoute, type RouteProp } from "@react-navigation/native";
 import { useMemo, useRef, useState } from "react";
 import {
   EnvironmentId,
+  orchestrationV2MessageRunTrigger,
   ThreadId,
   type OrchestrationV2ThreadProjection,
   type OrchestrationV2ThreadShell,
@@ -51,7 +52,7 @@ function latestUserMessageAt(
 ): OrchestrationV2ThreadShell["latestUserMessageAt"] {
   for (let index = projection.messages.length - 1; index >= 0; index -= 1) {
     const message = projection.messages[index];
-    if (message?.role === "user") {
+    if (message?.role === "user" && orchestrationV2MessageRunTrigger(message) === null) {
       return message.createdAt;
     }
   }
@@ -92,6 +93,7 @@ function threadDetailToShell(
     createdBy: thread.createdBy,
     creationSource: thread.creationSource,
     latestRunId: latestRun?.runId ?? null,
+    latestRunTrigger: latestRun?.trigger ?? null,
     activeRunId: runtime?.activeRunId ?? null,
     status: runtime?.status ?? "idle",
     pendingRuntimeRequest:

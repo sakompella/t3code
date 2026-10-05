@@ -4836,7 +4836,7 @@ describe("PiAdapterV2 with the Prime Agent flavor", () => {
       assert.isTrue(notice.type === "turn_item.updated");
       if (notice.type !== "turn_item.updated" || notice.turnItem.type !== "notification") return;
       assert.equal(notice.turnItem.summary, "Heartbeat");
-      assert.deepEqual(notice.turnItem.source, { kind: "background_task" });
+      assert.deepEqual(notice.turnItem.source, { kind: "heartbeat", heartbeatId: "deploy" });
       assert.equal(notice.turnItem.detail, "Check the deploy.");
     }).pipe(Effect.scoped, Effect.provide(testLayer)),
   );
@@ -4860,7 +4860,7 @@ describe("PiAdapterV2 with the Prime Agent flavor", () => {
       const offer = yield* Queue.take(offers);
 
       assert.equal(offer.notification?.summary, "Heartbeat");
-      assert.deepEqual(offer.notification?.source, { kind: "background_task" });
+      assert.deepEqual(offer.notification?.source, { kind: "heartbeat", heartbeatId: "deploy" });
       assert.equal(offer.notification?.detail, "Check the deploy.");
     }).pipe(Effect.scoped, Effect.provide(testLayer)),
   );
@@ -5770,6 +5770,29 @@ describe("PiAdapterV2 with the Prime Agent flavor", () => {
       assert.equal(Queue.sizeUnsafe(session.offers), 0);
       // The child only sent a message; nothing says it ended.
       assert.isTrue(yield* session.runtime.hasPendingBackgroundWork!);
+    }).pipe(Effect.scoped, Effect.provide(testLayer)),
+  );
+
+  it.effect("still names the heartbeat behind a wake whose every event was dropped", () =>
+    Effect.gen(function* () {
+      const fake = yield* makeFakePi;
+      const session = yield* settleWithChildAndHistory(fake);
+      fake.setTranscript([
+        ...session.history,
+        {
+          role: "custom",
+          customType: "heartbeat_prompt",
+          content: "[heartbeat: every 5m run#3]\n\nCheck the deploy.",
+          display: true,
+          details: { jobId: "deploy", schedule: "every 5m", runCount: 3 },
+          timestamp: 2000,
+        },
+        storedReply(2001, "The deploy is fine."),
+      ]);
+
+      const offer = yield* takeRecoveredOffer(session.offers);
+      // Clients read the run as a routine check only through this source.
+      assert.deepEqual(offer.notification?.source, { kind: "heartbeat", heartbeatId: "deploy" });
     }).pipe(Effect.scoped, Effect.provide(testLayer)),
   );
 

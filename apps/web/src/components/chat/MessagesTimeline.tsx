@@ -4909,6 +4909,7 @@ function workEntryIconName(workEntry: TimelineWorkEntry): WorkEntryIconName {
         return "terminal";
       case "monitor":
         return "eye";
+      case "heartbeat":
       case "background_task":
         return "zap";
       default:

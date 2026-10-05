@@ -1189,6 +1189,8 @@ describe("background work kinds from older or newer servers", () => {
     const cases = [
       [{ kind: "subagent", childThreadId: "child" }, { kind: "background_task" }],
       [{ kind: "subagent" }, { kind: "background_task" }],
+      [{ kind: "heartbeat", heartbeatId: "deploy" }, { kind: "background_task" }],
+      [{ kind: "heartbeat" }, { kind: "background_task" }],
       [{ kind: "command" }, { kind: "background_command" }],
       [{ kind: "monitor" }, { kind: "monitor" }],
       [{ kind: "background_task" }, { kind: "background_task" }],

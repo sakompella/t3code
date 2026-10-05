@@ -133,6 +133,34 @@ describe("startup agent activity", () => {
     });
     assert.deepStrictEqual(ids, [THREAD_ID, newCompleted, newFailed]);
   });
+
+  it("catches up on a heartbeat run's failure, not on the check finishing", () => {
+    const heartbeatRun = RunId.make("heartbeat-run");
+    const finishedAt = DateTime.makeUnsafe("2026-09-04T12:00:01.000Z");
+    const heartbeat = {
+      latestRunId: heartbeatRun,
+      latestRunTrigger: "heartbeat" as const,
+      latestRunCompletedAt: finishedAt,
+    };
+    const failed = ThreadId.make("heartbeat-failed");
+    const ids = AgentAwarenessRelay.resolveAgentAwarenessRelayActiveThreadIds({
+      environmentId: EnvironmentId.make("relay-env"),
+      startedAt: DateTime.toEpochMillis(DateTime.makeUnsafe(NOW)),
+      projects: [{ id: PROJECT_ID, title: "Project" }],
+      threads: [
+        shell({ ...heartbeat, id: ThreadId.make("heartbeat-completed"), status: "completed" }),
+        shell({
+          ...heartbeat,
+          id: ThreadId.make("heartbeat-running"),
+          activityRunStatus: "running",
+          activeRunId: heartbeatRun,
+          latestRunCompletedAt: null,
+        }),
+        shell({ ...heartbeat, id: failed, status: "failed" }),
+      ],
+    });
+    assert.deepStrictEqual(ids, [failed]);
+  });
 });
 
 const makeTestRelay = Effect.fnUntraced(function* (
@@ -680,6 +708,42 @@ describe("AgentAwarenessRelay", () => {
       yield* TestClock.adjust("5 seconds");
       yield* relay.drain;
       assert.equal(publications.length, 0);
+    }),
+  );
+
+  it.effect("sends no completion for a heartbeat check, but still sends its failure", () =>
+    Effect.gen(function* () {
+      const { relay, currentShell, publications } = yield* makeTestRelay();
+      const userRun = RunId.make("user-run");
+      const heartbeatRun = RunId.make("heartbeat-run");
+      yield* Ref.set(
+        currentShell,
+        shell({ latestRunId: userRun, activeRunId: userRun, activityRunStatus: "running" }),
+      );
+      yield* relay.publishThread(THREAD_ID);
+      assert.equal(publications[0]?.state?.phase, "running");
+
+      const heartbeat = { latestRunId: heartbeatRun, latestRunTrigger: "heartbeat" as const };
+      const finishedAt = DateTime.add(yield* DateTime.now, { seconds: 1 });
+      for (const check of [
+        shell({ ...heartbeat, activeRunId: heartbeatRun, activityRunStatus: "running" }),
+        shell({ ...heartbeat, status: "completed", latestRunCompletedAt: finishedAt }),
+      ]) {
+        yield* Ref.set(currentShell, check);
+        yield* relay.publishThread(THREAD_ID);
+        yield* TestClock.adjust("5 seconds");
+        yield* relay.drain;
+      }
+      // The user's run is over, so its Live Activity is withdrawn, not kept spinning.
+      assert.equal(publications[1]?.state, null);
+      assert.isFalse(publications.some((publication) => publication.state?.phase === "completed"));
+
+      yield* Ref.set(
+        currentShell,
+        shell({ ...heartbeat, status: "failed", latestRunCompletedAt: finishedAt }),
+      );
+      yield* relay.publishThread(THREAD_ID);
+      assert.equal(publications.at(-1)?.state?.phase, "failed");
     }),
   );
 

@@ -12,7 +12,9 @@ import {
   type OrchestrationV2PendingBackgroundTask,
   type ServerProviderModel,
   type OrchestrationV2ExecutionNode,
+  type OrchestrationV2RunTrigger,
   type OrchestrationV2ThreadProjection,
+  orchestrationV2MessageRunTrigger,
   orchestrationV2RunWorkStartedAt,
   type ThreadId,
 } from "@t3tools/contracts";
@@ -47,6 +49,14 @@ function latestMatchingRun(
   );
 }
 
+function runTrigger(
+  projection: OrchestrationV2ThreadProjection,
+  run: OrchestrationV2ThreadProjection["runs"][number],
+): OrchestrationV2RunTrigger | null {
+  const message = projection.messages.find((candidate) => candidate.id === run.userMessageId);
+  return message === undefined ? null : orchestrationV2MessageRunTrigger(message);
+}
+
 function summarizeThreadRun(
   projection: OrchestrationV2ThreadProjection,
   run: OrchestrationV2ThreadProjection["runs"][number],
@@ -61,6 +71,7 @@ function summarizeThreadRun(
       projection.messages.findLast(
         (message) => message.runId === run.id && message.role === "assistant",
       )?.id ?? null,
+    trigger: runTrigger(projection, run),
     ...(run.sourcePlanRef === undefined ? {} : { sourcePlanRef: run.sourcePlanRef }),
   };
 }
@@ -384,6 +395,7 @@ export function notificationChildThreadId(
       return source.childThreadId;
     case "command":
     case "monitor":
+    case "heartbeat":
     case "background_task":
       return undefined;
     default:

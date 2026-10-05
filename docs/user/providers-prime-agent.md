@@ -65,6 +65,10 @@ started finishes, a heartbeat or schedule fires, or another agent messages it. T
 work as a new run in the same thread, introduced by a notice of what woke Prime Agent. If you send
 a message while that work is still running, your message waits until it finishes.
 
+A heartbeat run is treated as a routine check: when it finishes, T3 Code sends no "Thread completed"
+notification or mobile push. If the check fails or Prime Agent asks for approval or input, you are
+notified as usual. Open the thread to read what a check reported.
+
 ## Permission Modes
 
 - **Supervised** asks before every kernel cell and extension tool, showing the cell's code.
