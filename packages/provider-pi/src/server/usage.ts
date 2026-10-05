@@ -1,3 +1,7 @@
+/**
+ * Native Pi and Prime Agent session usage, including calls billed outside the
+ * main conversation. Prime Agent is a Pi fork and writes the same session log.
+ */
 import * as Effect from "effect/Effect";
 import * as Option from "effect/Option";
 import * as Path from "effect/Path";
@@ -14,6 +18,8 @@ import {
 } from "@t3tools/provider-core/server/usage";
 import * as HostProcess from "@t3tools/shared/HostProcess";
 import type { PiSettings } from "../settings.ts";
+
+type PiUsageProvider = "pi" | "primeAgent";
 
 const PiScanState = Schema.Struct({ sessionId: Schema.mutableKey(Schema.String) });
 const Usage = Schema.Struct({
@@ -50,7 +56,11 @@ const Entry = Schema.Union([
 ]);
 const decodeEntry = Schema.decodeUnknownOption(Entry);
 
-function parseRecord(parsed: unknown, state: typeof PiScanState.Type): readonly UsageRecord[] {
+function parseRecord(
+  provider: PiUsageProvider,
+  parsed: unknown,
+  state: typeof PiScanState.Type,
+): readonly UsageRecord[] {
   const decoded = decodeEntry(parsed);
   if (Option.isNone(decoded)) return [];
   const entry = decoded.value;
@@ -88,7 +98,7 @@ function parseRecord(parsed: unknown, state: typeof PiScanState.Type): readonly 
   if (totalTokens(totals) === 0 && reportedCostUsd === null) return [];
   return [
     {
-      provider: "pi",
+      provider,
       timestampMs,
       model,
       ...(rateModel === undefined ? {} : { rateModel }),
@@ -99,12 +109,14 @@ function parseRecord(parsed: unknown, state: typeof PiScanState.Type): readonly 
       // Forks copy entries verbatim, including ID/timestamp. Entry IDs are only
       // eight random hex digits, so retain timestamp/model to avoid collisions
       // across unrelated sessions.
-      dedupeKey: JSON.stringify(["pi", entry.id, entry.timestamp, model]),
+      dedupeKey: JSON.stringify([provider, entry.id, entry.timestamp, model]),
     },
   ];
 }
 
-export const piUsageFormat: TranscriptUsageFormat<typeof PiScanState.Type> = {
+const makePiUsageFormat = (
+  provider: PiUsageProvider,
+): TranscriptUsageFormat<typeof PiScanState.Type> => ({
   selectFields: {
     type: true,
     id: true,
@@ -122,11 +134,14 @@ export const piUsageFormat: TranscriptUsageFormat<typeof PiScanState.Type> = {
     } catch {
       return [];
     }
-    return parseRecord(parsed, state);
+    return parseRecord(provider, parsed, state);
   },
-  parseProjected: parseRecord,
+  parseProjected: (projected, state) => parseRecord(provider, projected, state),
   state: { initial: () => ({ sessionId: "" }), schema: PiScanState },
-};
+});
+
+export const piUsageFormat = makePiUsageFormat("pi");
+export const primeAgentUsageFormat = makePiUsageFormat("primeAgent");
 
 export const piUsageReader: ProviderUsageReader<PiSettings, Path.Path> = {
   kind: "transcripts",
@@ -146,5 +161,24 @@ export const piUsageReader: ProviderUsageReader<PiSettings, Path.Path> = {
         ),
       },
     ];
+  }),
+};
+
+/**
+ * Prime Agent keeps parent sessions in `sessions` and subagent sessions under
+ * `session-artifacts`, so both count.
+ */
+export const primeAgentUsageReader: ProviderUsageReader<PiSettings, Path.Path> = {
+  kind: "transcripts",
+  provider: "primeAgent",
+  format: primeAgentUsageFormat,
+  directories: Effect.fn("primeAgentUsageReader.directories")(function* ({ environment }) {
+    const path = yield* Path.Path;
+    const home = yield* HostProcess.HomeDirectory;
+    const agentDir = environment.PRIME_AGENT_CODING_AGENT_DIR?.trim();
+    const root = path.resolve(
+      agentDir ? expandHomePath(agentDir, home) : path.join(home, ".prime", "agent"),
+    );
+    return [{ dir: path.join(root, "sessions") }, { dir: path.join(root, "session-artifacts") }];
   }),
 };

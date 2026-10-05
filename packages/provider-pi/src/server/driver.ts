@@ -19,7 +19,7 @@ import * as ChildProcessSpawner from "effect/process/ChildProcessSpawner";
 
 import * as ProviderLatestVersions from "@t3tools/provider-core/server/ProviderLatestVersions";
 import * as ProviderHost from "@t3tools/provider-core/server/ProviderHost";
-import { piUsageReader } from "./usage.ts";
+import { piUsageReader, primeAgentUsageReader } from "./usage.ts";
 import { makePiTextGeneration } from "./textGeneration.ts";
 import {
   PiAdapterV2Driver,
@@ -259,4 +259,5 @@ export const PrimeAgentDriver = makePiFlavorDriver({
   defaultConfig: Schema.decodeSync(PrimeAgentSettings)({}),
   adapterDriver: PrimeAgentAdapterV2Driver,
   update: PRIME_AGENT_UPDATE,
+  usage: primeAgentUsageReader,
 });
