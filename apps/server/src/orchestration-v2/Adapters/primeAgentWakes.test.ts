@@ -48,6 +48,22 @@ describe("piCustomMessageNotification", () => {
     expect(notification?.detail).toBe("Check the deploy.");
   });
 
+  it("names the heartbeat that fired, so its run reads as a routine check", () => {
+    const heartbeat = (details: unknown) =>
+      piCustomMessageNotification({
+        role: "custom",
+        customType: "heartbeat_prompt",
+        content: "[heartbeat: every 5m run#3]\n\nCheck the deploy.",
+        details,
+      })?.source;
+    expect(heartbeat({ jobId: "deploy", runCount: 3 })).toEqual({
+      kind: "heartbeat",
+      heartbeatId: "deploy",
+    });
+    expect(heartbeat(undefined)).toEqual({ kind: "heartbeat" });
+    expect(heartbeat({ jobId: " " })).toEqual({ kind: "heartbeat" });
+  });
+
   it("shows why a child failed or exited, when it says", () => {
     expect(
       piCustomMessageNotification({
