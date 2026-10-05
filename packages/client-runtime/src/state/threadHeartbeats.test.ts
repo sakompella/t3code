@@ -12,6 +12,7 @@ import {
   heartbeatsEqual,
   presentHeartbeats,
   runCompletedTask,
+  threadUnreadCompletionAt,
 } from "./threadHeartbeats.ts";
 
 const at = (epochMillis: number) => DateTime.toDate(DateTime.makeUnsafe(epochMillis));
@@ -162,5 +163,40 @@ describe("runCompletedTask", () => {
     expect(runCompletedTask(latestRun(null))).toBe(true);
     // Servers from before the trigger existed never sent one.
     expect(runCompletedTask(latestRun())).toBe(true);
+  });
+});
+
+describe("threadUnreadCompletionAt", () => {
+  const userEnded = "2026-10-05T10:00:00.000Z";
+  const checkEnded = "2026-10-05T10:05:00.000Z";
+  const shellAfter = (
+    status: "completed" | "failed" | "running",
+    latestRunTrigger: "heartbeat" | null,
+    latestTaskRunCompletedAt?: string,
+  ) =>
+    presentThreadShell(EnvironmentId.make("environment"), {
+      ...v2ThreadShell,
+      latestRunId: RunId.make("run-latest"),
+      status,
+      latestRunTrigger,
+      latestRunCompletedAt:
+        status === "running" ? null : DateTime.makeUnsafe(Date.parse(checkEnded)),
+      ...(latestTaskRunCompletedAt === undefined
+        ? {}
+        : { latestTaskRunCompletedAt: DateTime.makeUnsafe(Date.parse(latestTaskRunCompletedAt)) }),
+    });
+
+  it("points a finished check back at the end of the run someone asked for", () => {
+    expect(threadUnreadCompletionAt(shellAfter("completed", "heartbeat", userEnded))).toBe(
+      userEnded,
+    );
+    // Nothing someone asked for has ended yet.
+    expect(threadUnreadCompletionAt(shellAfter("completed", "heartbeat"))).toBeNull();
+  });
+
+  it("treats a failed check, and any run someone asked for, as unread news", () => {
+    expect(threadUnreadCompletionAt(shellAfter("failed", "heartbeat", userEnded))).toBe(checkEnded);
+    expect(threadUnreadCompletionAt(shellAfter("completed", null, checkEnded))).toBe(checkEnded);
+    expect(threadUnreadCompletionAt(shellAfter("running", "heartbeat", userEnded))).toBeNull();
   });
 });

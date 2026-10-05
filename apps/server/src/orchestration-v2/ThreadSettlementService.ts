@@ -3,6 +3,7 @@ import { resolveProjectSettings } from "@t3tools/shared/projectSettings";
 import { visibleThreadPullRequests } from "@t3tools/shared/threadPullRequests";
 import {
   CommandId,
+  isOrchestrationV2RoutineRun,
   type ThreadId,
   type OrchestrationV2DomainEvent,
   type OrchestrationV2ThreadShell,
@@ -106,6 +107,38 @@ export function threadHasQueuedTurnStart(
   ].every((value) => value === null || value < messageAtMs);
 }
 
+type SettlementActivityShell = Pick<
+  OrchestrationV2ThreadShell,
+  | "status"
+  | "latestRunTrigger"
+  | "latestTaskRunCompletedAt"
+  | "latestRunRequestedAt"
+  | "latestRunStartedAt"
+  | "latestRunCompletedAt"
+>;
+
+/**
+ * The latest run's times that count as thread activity. A routine heartbeat
+ * check is not activity, so after one only the end of the latest run someone
+ * asked for counts; otherwise a thread with a heartbeat would never go stale.
+ */
+function activityRunTimes(thread: SettlementActivityShell): {
+  readonly requestedAt: number | null;
+  readonly all: ReadonlyArray<number | null>;
+} {
+  if (isOrchestrationV2RoutineRun({ status: thread.status, trigger: thread.latestRunTrigger })) {
+    return { requestedAt: null, all: [toMillis(thread.latestTaskRunCompletedAt)] };
+  }
+  return {
+    requestedAt: toMillis(thread.latestRunRequestedAt),
+    all: [
+      toMillis(thread.latestRunRequestedAt),
+      toMillis(thread.latestRunStartedAt),
+      toMillis(thread.latestRunCompletedAt),
+    ],
+  };
+}
+
 /**
  * A merged or closed pull request settles the thread unless the user wrote to
  * it afterwards. Runs that background work, a PR watch, or another agent
@@ -195,9 +228,7 @@ export function resolveAutoSettlementAt(input: {
   if (!isAutoSettlementCandidate(thread, input.nowMs)) return null;
   const activityAtMs = latestMillis([
     toMillis(thread.latestUserMessageAt),
-    toMillis(thread.latestRunRequestedAt),
-    toMillis(thread.latestRunStartedAt),
-    toMillis(thread.latestRunCompletedAt),
+    ...activityRunTimes(thread).all,
   ]);
   if (pullRequest !== null && pullRequestSettles(thread, pullRequest, input.autoSettleOnMerge)) {
     return activityAtMs === null ? thread.createdAt : DateTime.makeUnsafe(activityAtMs);
