@@ -404,6 +404,18 @@ function wakeWorkStartedAt(
   return previous === undefined ? {} : { workStartedAt: orchestrationV2RunWorkStartedAt(previous) };
 }
 
+/**
+ * A message the agent's own background work sent to wake it: a provider
+ * self-wake, a monitor notification, or a delegated task's result. It is not
+ * the user re-engaging, so it never undoes the user's settle or snooze.
+ */
+function isAutomaticWake(message: {
+  readonly notification?: unknown;
+  readonly delegatedCompletion?: unknown;
+}): boolean {
+  return message.notification !== undefined || message.delegatedCompletion !== undefined;
+}
+
 export function isNativeMaintenanceCommand(message: {
   readonly text: string;
   readonly attachments: ReadonlyArray<ChatAttachment>;
@@ -2620,12 +2632,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         { turnItemTypes: [], messageRoles: ["user"] },
       );
       const automaticMessageIds = new Set(
-        projection.messages
-          .filter(
-            (message) =>
-              message.notification !== undefined || message.delegatedCompletion !== undefined,
-          )
-          .map((message) => message.id),
+        projection.messages.filter(isAutomaticWake).map((message) => message.id),
       );
       const automaticQueuedRuns = projection.runs.filter(
         (run) => run.status === "queued" && automaticMessageIds.has(run.userMessageId),
@@ -4599,7 +4606,9 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         (run) => run.id === command.restartContinuationOfRunId,
       )?.delegatedTaskId;
 
-      if (projection.thread.settledOverride !== null) {
+      // Clients still surface a parked thread whose wake needs the user.
+      const userReengaged = !isAutomaticWake(command);
+      if (userReengaged && projection.thread.settledOverride !== null) {
         const now = yield* DateTime.now;
         const thread: OrchestrationV2AppThread = {
           ...projection.thread,
@@ -4623,7 +4632,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         });
         projection = yield* getProjectionWithPendingEvents(command.threadId, events);
       }
-      if (projection.thread.snoozedUntil != null) {
+      if (userReengaged && projection.thread.snoozedUntil != null) {
         const now = yield* DateTime.now;
         const thread: OrchestrationV2AppThread = {
           ...projection.thread,
