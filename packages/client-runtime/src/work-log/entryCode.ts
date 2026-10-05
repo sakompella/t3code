@@ -1,5 +1,5 @@
-import { commandDisplayText } from "./commandLabel.js";
-import type { WorkLogPresentationEntry } from "./presentation.js";
+import { commandDisplayText } from "./commandLabel.ts";
+import type { WorkLogPresentationEntry } from "./presentation.ts";
 
 /** Languages a work row's code can have. Clients map these to their highlighter. */
 export type WorkEntryCodeLanguage = "python" | "shellscript";
