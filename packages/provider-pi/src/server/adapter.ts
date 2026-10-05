@@ -105,6 +105,10 @@ import type {
   PiThreadState,
 } from "./adapterState.ts";
 import { makePrimeAgentChildThreads } from "./primeAgentChildThreads.ts";
+import {
+  makePrimeAgentChildDialogs,
+  materializePrimeAgentDialogExtension,
+} from "./primeAgentChildDialogs.ts";
 import { makePrimeAgentReconciler, transcriptMessageKey } from "./primeAgentReconciler.ts";
 import { primeAgentHeartbeats } from "./primeAgentHeartbeats.ts";
 import { makePrimeAgentStream, snapshotBlock } from "./primeAgentStream.ts";
@@ -512,7 +516,7 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
               endpoint: mcpSession.endpoint,
             }).pipe(Effect.provideService(FileSystem.FileSystem, options.fileSystem));
       const skillPath = kernelMcpAccess?.declared
-        ? yield* provideCacheFs(materializePiT3Skill(options.serverConfig.providerStatusCacheDir))
+        ? yield* provideCacheFs(materializePiT3Skill(host.paths.providerStatusCacheDir))
         : undefined;
       const mcpSetupHint =
         kernelMcpAccess !== undefined && !kernelMcpAccess.declared
@@ -523,6 +527,19 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
       if (!resolvedLaunchArgs.ok) {
         return yield* protocolError(resolvedLaunchArgs.message);
       }
+      const childDialogs = makePrimeAgentChildDialogs();
+      const dialogExtensionPath = flavor.childThreads
+        ? yield* provideCacheFs(
+            materializePrimeAgentDialogExtension(host.paths.providerStatusCacheDir),
+          )
+        : undefined;
+      const daemonSocketIndex = resolvedLaunchArgs.args.indexOf("--daemon-socket");
+      const dialogSocketPath =
+        daemonSocketIndex < 0
+          ? resolvedLaunchArgs.args
+              .find((arg) => arg.startsWith("--daemon-socket="))
+              ?.slice("--daemon-socket=".length)
+          : resolvedLaunchArgs.args[daemonSocketIndex + 1];
       const launchProcess = (processScope: Scope.Scope, resumeSessionFile?: string) =>
         Effect.gen(function* () {
           const launch = buildPiRpcLaunch({
@@ -536,7 +553,10 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
           });
           const scopedLaunch = yield* agentScope.wrap({
             command: binary,
-            args: launch.args,
+            args:
+              dialogExtensionPath === undefined
+                ? launch.args
+                : [...launch.args, "--extension", dialogExtensionPath],
             name: flavor.defaultBinary,
             threadId: input.threadId,
             env: launch.env,
@@ -547,6 +567,7 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
             cwd,
             env: launch.env,
             terminationGrace: flavor.terminationGrace,
+            ...(flavor.childThreads ? { consumeEvent: childDialogs.consumeEvent } : {}),
           }).pipe(
             Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner),
             Scope.provide(processScope),
@@ -1302,6 +1323,8 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
         instanceId: options.instanceId,
         name,
         childThreads: flavor.childThreads,
+        beforeObserve: (activeSessionId) =>
+          childDialogs.attach(connection, activeSessionId, dialogSocketPath),
         sessionThread: () => ({
           threadId: threadState?.providerThread.appThreadId ?? input.threadId,
           providerThreadId: threadState?.providerThread.id ?? null,
