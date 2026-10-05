@@ -1,9 +1,11 @@
 import { RunId } from "@t3tools/contracts";
+import * as DateTime from "effect/DateTime";
 import { describe, expect, it } from "vite-plus/test";
 
 import { runFoldSegmentKey, runFoldSegmentKeyIsForRun, runFoldSegmentLabel } from "./runFold.ts";
 
-const at = (second: number) => new Date(Date.UTC(2026, 0, 1, 0, 0, second)).toISOString();
+const at = (second: number) =>
+  DateTime.formatIso(DateTime.makeUnsafe(1767225600000 + second * 1000));
 const span = (start: number, end: number, isFirst: boolean, isLast: boolean) => ({
   start: at(start),
   end: at(end),
