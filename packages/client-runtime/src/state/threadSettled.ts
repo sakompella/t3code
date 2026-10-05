@@ -126,6 +126,36 @@ export function threadRaisedHandWhileSnoozed(shell: ThreadSnoozeShell): boolean 
   return false;
 }
 
+/** The settle fields plus everything needed to detect a raised hand. */
+export interface ThreadSettleShell {
+  readonly settledOverride: "settled" | "active" | null;
+  readonly settledAt: string | null;
+  readonly latestTurn?: SettlementRunLike | null;
+  readonly latestRun?: SettlementRunLike | null;
+  readonly hasPendingApprovals: boolean;
+  readonly hasPendingUserInput: boolean;
+}
+
+/**
+ * Settled resolution. The agent's own wakes (finished background commands,
+ * heartbeats, subagent messages) run on a settled thread without un-settling
+ * it, so a thread still raises its hand when such a run needs the user: it is
+ * blocked on an approval or a question, or a run failed after the settle.
+ * Its completion does not: the user said they were done with it. Like snooze,
+ * the server fields stay set; the thread only stops classifying as settled.
+ */
+export function effectiveSettled(shell: ThreadSettleShell): boolean {
+  if (shell.settledOverride !== "settled") return false;
+  if (shell.hasPendingApprovals || shell.hasPendingUserInput) return false;
+  const latestRun = shell.latestRun ?? shell.latestTurn ?? null;
+  const failedAfterSettle =
+    (latestRun?.status === "failed" || latestRun?.state === "failed") &&
+    latestRun.completedAt != null &&
+    shell.settledAt !== null &&
+    Date.parse(latestRun.completedAt) > Date.parse(shell.settledAt);
+  return !failedAfterSettle;
+}
+
 /**
  * A thread may be snoozed unless the agent is blocked on the user: hiding a
  * pending approval or user-input request defeats the request, and a queued

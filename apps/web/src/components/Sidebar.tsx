@@ -28,6 +28,7 @@ import { restrictToFirstScrollableAncestor, restrictToVerticalAxis } from "@dnd-
 import { CSS } from "@dnd-kit/utilities";
 import {
   canSnooze,
+  effectiveSettled,
   effectiveSnoozed,
   threadWokeAt,
 } from "@t3tools/client-runtime/state/thread-settled";
@@ -2755,7 +2756,7 @@ export default function Sidebar() {
       } else {
         const section = resolveSidebarThreadSection({
           snoozed: supportsSnooze && effectiveSnoozed(thread, { now: preciseNow }),
-          settled: supportsSettlement && thread.settledOverride === "settled",
+          settled: supportsSettlement && effectiveSettled(thread),
           pinned: thread.pinnedAt != null,
         });
         (section === "snoozed"
@@ -3576,7 +3577,7 @@ export default function Sidebar() {
     }
     const canonicalSection = effectiveSnoozed(thread, { now: new Date().toISOString() })
       ? "snoozed"
-      : thread.settledOverride === "settled"
+      : effectiveSettled(thread)
         ? "settled"
         : thread.pinnedAt != null
           ? "pinned"
