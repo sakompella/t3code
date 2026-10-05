@@ -1,6 +1,7 @@
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, describe, it } from "@effect/vitest";
 import * as Clock from "effect/Clock";
+import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
 import * as Fiber from "effect/Fiber";
@@ -18,6 +19,7 @@ import {
   makeJsonlFramer,
   makePiRpcConnection,
   type PiFrame,
+  type PiRpcSpawnOptions,
 } from "./PiRpc.ts";
 
 // Reports its pid, then idles until signalled, like an idle `pi --mode rpc`.
@@ -101,7 +103,10 @@ const FAKE_PID = 999_999_999;
 const encoder = new TextEncoder();
 
 /** Opens a connection whose stdout the test feeds by hand. */
-const openConnection = Effect.fnUntraced(function* (maxRecordChars?: number) {
+const openConnection = Effect.fnUntraced(function* (
+  maxRecordChars?: number,
+  consumeEvent?: PiRpcSpawnOptions["consumeEvent"],
+) {
   const stdout = yield* Queue.unbounded<Uint8Array>();
   const spawner = ChildProcessSpawner.make(() =>
     Effect.succeed(
@@ -126,6 +131,7 @@ const openConnection = Effect.fnUntraced(function* (maxRecordChars?: number) {
     cwd: undefined,
     env: {},
     ...(maxRecordChars === undefined ? {} : { maxRecordChars }),
+    ...(consumeEvent === undefined ? {} : { consumeEvent }),
   }).pipe(Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner));
 
   const pushBytes = (bytes: Uint8Array) => Queue.offer(stdout, bytes).pipe(Effect.asVoid);
@@ -153,6 +159,21 @@ const response = (id: string, data: unknown) =>
   JSON.stringify({ id, type: "response", command: "get_messages", success: true, data });
 
 describe("PiRpc framing", () => {
+  it.effect("delivers internal acknowledgements while the adapter event consumer is waiting", () =>
+    Effect.gen(function* () {
+      const acknowledged = yield* Deferred.make<void>();
+      const { connection, pushText } = yield* openConnection(undefined, (event) =>
+        event["type"] === "route_ready"
+          ? Deferred.succeed(acknowledged, undefined).pipe(Effect.as(true))
+          : Effect.succeed(false),
+      );
+      yield* pushText('{"type":"route_ready"}\n{"type":"child_dialog"}\n');
+      // Do not drain the event queue until the setup acknowledgement has landed.
+      yield* Deferred.await(acknowledged);
+      assert.equal((yield* Queue.take(connection.events))["type"], "child_dialog");
+    }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+  );
+
   it.effect("reassembles records across chunk boundaries and strips CR", () =>
     Effect.gen(function* () {
       const { connection, pushText } = yield* openConnection();
