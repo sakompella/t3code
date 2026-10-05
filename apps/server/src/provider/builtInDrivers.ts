@@ -46,7 +46,8 @@ export type BuiltInUsageReadersEnv =
   | ProviderUsageReaderEnv<typeof OpenCodeDriver>
   | ProviderUsageReaderEnv<typeof AntigravityDriver>
   | ProviderUsageReaderEnv<typeof CursorDriver>
-  | ProviderUsageReaderEnv<typeof PiDriver>;
+  | ProviderUsageReaderEnv<typeof PiDriver>
+  | ProviderUsageReaderEnv<typeof PrimeAgentDriver>;
 
 /**
  * Aggregation keeps the first copy of a duplicate record, so the order is part
@@ -59,6 +60,7 @@ export const BUILT_IN_USAGE_DRIVERS: ReadonlyArray<
   CodexDriver,
   GrokDriver,
   PiDriver,
+  PrimeAgentDriver,
   OpenCodeDriver,
   AntigravityDriver,
   CursorDriver,

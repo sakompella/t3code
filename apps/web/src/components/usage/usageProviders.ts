@@ -40,6 +40,11 @@ export const PROVIDER_PRESENTATION = {
     color: "#4d9f8a",
     driverKind: ProviderDriverKind.make("pi"),
   },
+  primeAgent: {
+    label: "Prime Agent",
+    color: "#c59b44",
+    driverKind: ProviderDriverKind.make("primeAgent"),
+  },
 } satisfies Record<UsageProviderKind, UsageProviderPresentation>;
 
 export const PROVIDER_ORDER = Object.keys(PROVIDER_PRESENTATION) as UsageProviderKind[];
