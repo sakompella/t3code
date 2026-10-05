@@ -108,6 +108,8 @@ const serviceLayers = (input: {
       Layer.succeed(HostProcessEnvironment, {
         HOME: input.home,
         GROK_HOME: NodePath.join(input.home, "grok"),
+        PI_CODING_AGENT_DIR: NodePath.join(input.home, "pi"),
+        PRIME_AGENT_CODING_AGENT_DIR: NodePath.join(input.home, "prime"),
         OPENCODE_DATA_DIR: NodePath.join(input.home, "opencode"),
         ANTIGRAVITY_DATA_DIR: NodePath.join(input.home, "antigravity"),
         XDG_CONFIG_HOME: NodePath.join(input.home, "config"),
@@ -122,6 +124,82 @@ function totalOutputTokens(summary: { buckets: readonly { totals: { outputTokens
 }
 
 describe("UsageService", () => {
+  it.live("counts Pi and Prime Agent custom homes, child sessions and disabled accounts once", () =>
+    Effect.gen(function* () {
+      const { home, settings } = yield* setup;
+      const primeHome = NodePath.join(home, "prime");
+      const otherHome = NodePath.join(home, "other-prime");
+      const makeLine = (id: string, output: number) =>
+        encodeUnknownJsonString({
+          type: "message",
+          id,
+          message: {
+            role: "assistant",
+            model: "claude-opus-5-5",
+            timestamp: Date.parse("2026-08-01T10:00:00Z"),
+            responseId: id,
+            usage: { input: 2, output, cacheRead: 3, cacheWrite: 5, cost: { total: 0.5 } },
+          },
+        }) + "\n";
+      yield* Effect.promise(async () => {
+        for (const [root, id, output] of [
+          [NodePath.join(primeHome, "sessions"), "parent", 7],
+          [NodePath.join(primeHome, "session-artifacts", "parent", "child"), "child", 11],
+          [NodePath.join(otherHome, "sessions"), "other", 13],
+          [NodePath.join(home, "pi", "sessions", "project"), "pi", 17],
+        ] as const) {
+          await NodeFSP.mkdir(root, { recursive: true });
+          await NodeFSP.writeFile(NodePath.join(root, id + ".jsonl"), makeLine(id, output));
+        }
+        await NodeFSP.writeFile(
+          NodePath.join(primeHome, "sessions", "fork.jsonl"),
+          makeLine("parent", 7),
+        );
+      });
+      const result = yield* Effect.gen(function* () {
+        const service = yield* UsageService.make;
+        const cold = yield* service.readSummary(WINDOW);
+        const warm = yield* service.readSummary(WINDOW);
+        assert.deepStrictEqual(warm.buckets, cold.buckets);
+        return warm;
+      }).pipe(
+        Effect.provide(
+          serviceLayers({
+            prefix: "usage-pi-prime",
+            home,
+            settings: {
+              ...settings,
+              providerInstances: {
+                [ProviderInstanceId.make("prime-extra")]: {
+                  driver: ProviderDriverKind.make("primeAgent"),
+                  enabled: false,
+                  environment: [
+                    { name: "PRIME_AGENT_CODING_AGENT_DIR", value: otherHome, sensitive: false },
+                  ],
+                },
+              },
+            },
+          }),
+        ),
+      );
+      assert.strictEqual(totalOutputTokens(result), 48);
+      assert.strictEqual(
+        result.buckets.reduce((sum, b) => sum + b.records, 0),
+        4,
+      );
+      assert.strictEqual(
+        result.buckets.reduce((sum, b) => sum + b.costUsd, 0),
+        2,
+      );
+      assert.strictEqual(
+        result.buckets
+          .filter((b) => b.provider === "primeAgent")
+          .reduce((sum, b) => sum + b.totals.outputTokens, 0),
+        31,
+      );
+    }).pipe(Effect.scoped),
+  );
+
   it.live.each([
     { explicitDefault: true, label: "explicit" },
     { explicitDefault: false, label: "legacy" },

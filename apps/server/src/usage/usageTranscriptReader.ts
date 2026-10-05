@@ -32,6 +32,8 @@ import {
   parseCodexRecord,
   parseGrokLine,
   parseGrokRecord,
+  parsePiLine,
+  parsePiRecord,
   type CodexScanState,
   type UsageRecord,
 } from "./usageTranscripts.ts";
@@ -91,7 +93,12 @@ type SelectedFields = { readonly [key: string]: true | SelectedFields };
 
 // Keep the fields consumed by usageTranscripts, including reducer state and
 // dedupe/cost metadata. A selected subtree (usage) keeps future token fields.
-const USAGE_FIELDS: Record<"claude" | "codex" | "grok", SelectedFields> = {
+const USAGE_FIELDS: Record<"claude" | "codex" | "grok" | "pi", SelectedFields> = {
+  pi: {
+    type: true,
+    id: true,
+    message: { role: true, model: true, timestamp: true, responseId: true, usage: true },
+  },
   claude: {
     type: true,
     timestamp: true,
@@ -125,7 +132,14 @@ const USAGE_FIELDS: Record<"claude" | "codex" | "grok", SelectedFields> = {
 };
 
 function selectUsageFields(provider: UsageProviderKind) {
-  const fields = USAGE_FIELDS[provider === "codex" || provider === "grok" ? provider : "claude"];
+  const fields =
+    USAGE_FIELDS[
+      provider === "pi" || provider === "primeAgent"
+        ? "pi"
+        : provider === "codex" || provider === "grok"
+          ? provider
+          : "claude"
+    ];
   return (path: ReadonlyArray<string | number | null>): boolean => {
     let selected: true | SelectedFields = fields;
     for (const key of path) {
@@ -299,7 +313,10 @@ export async function readTranscriptRecords(
         for (const grokRecord of parseGrokLine(line)) out.push(grokRecord);
         return;
       }
-      const record = parseClaudeLine(line);
+      const record =
+        provider === "pi" || provider === "primeAgent"
+          ? parsePiLine(line, provider, NodePath.basename(filePath, ".jsonl"))
+          : parseClaudeLine(line);
       if (record !== null) out.push(record);
     };
 
@@ -349,7 +366,9 @@ export async function readTranscriptRecords(
           const record =
             provider === "codex"
               ? parseCodexRecord(projected, state)
-              : parseClaudeRecord(projected);
+              : provider === "pi" || provider === "primeAgent"
+                ? parsePiRecord(projected, provider, NodePath.basename(filePath, ".jsonl"))
+                : parseClaudeRecord(projected);
           if (record !== null) out.push(record);
         }
       } else if (pendingBytes > 0) {

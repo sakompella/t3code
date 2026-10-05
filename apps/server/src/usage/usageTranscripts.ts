@@ -82,7 +82,8 @@ export function totalTokens(totals: UsageTokenTotals): number {
  * an order of magnitude.
  */
 export function mightCarryUsage(line: string, provider: UsageProviderKind): boolean {
-  if (provider === "claude") return line.includes('"usage"');
+  if (provider === "claude" || provider === "pi" || provider === "primeAgent")
+    return line.includes('"usage"');
   if (provider === "grok") return line.includes('"turn_completed"');
   return line.includes('"token_count"');
 }
@@ -96,6 +97,80 @@ export const GROK_COST_USD_TICKS_PER_DOLLAR = 10_000_000_000;
 function grokCostTicksToUsd(ticks: unknown): number | null {
   if (typeof ticks !== "number" || !Number.isFinite(ticks) || ticks < 0) return null;
   return ticks / GROK_COST_USD_TICKS_PER_DOLLAR;
+}
+
+/* Pi and Prime Agent share the same assistant-message JSONL format. */
+export function parsePiLine(
+  line: string,
+  provider: "pi" | "primeAgent",
+  sessionId: string,
+): UsageRecord | null {
+  try {
+    return parsePiRecord(JSON.parse(line), provider, sessionId);
+  } catch {
+    return null;
+  }
+}
+
+export function parsePiRecord(
+  parsed: unknown,
+  provider: "pi" | "primeAgent",
+  sessionId: string,
+): UsageRecord | null {
+  if (
+    typeof parsed !== "object" ||
+    parsed === null ||
+    !("type" in parsed) ||
+    parsed.type !== "message"
+  )
+    return null;
+  if (!("message" in parsed)) return null;
+  const message = parsed.message;
+  if (
+    typeof message !== "object" ||
+    message === null ||
+    !("role" in message) ||
+    message.role !== "assistant"
+  )
+    return null;
+  if (!("usage" in message) || !("model" in message) || !("timestamp" in message)) return null;
+  const { usage, model, timestamp } = message;
+  if (typeof usage !== "object" || usage === null || typeof model !== "string" || !model.trim())
+    return null;
+  const timestampMs = typeof timestamp === "number" ? timestamp : parseTimestampMs(timestamp);
+  if (timestampMs === null || !Number.isFinite(timestampMs)) return null;
+  const totals = {
+    uncachedInputTokens: int("input" in usage ? usage.input : undefined),
+    cachedInputTokens: int("cacheRead" in usage ? usage.cacheRead : undefined),
+    cacheCreationTokens: int("cacheWrite" in usage ? usage.cacheWrite : undefined),
+    outputTokens: int("output" in usage ? usage.output : undefined),
+    reasoningTokens: 0,
+  };
+  if (totalTokens(totals) === 0) return null;
+  const cost = "cost" in usage ? usage.cost : undefined;
+  const reported =
+    typeof cost === "object" && cost !== null && "total" in cost ? cost.total : undefined;
+  const responseId =
+    "responseId" in message && typeof message.responseId === "string" ? message.responseId : "";
+  const entryId = "id" in parsed && typeof parsed.id === "string" ? parsed.id : "";
+  return {
+    provider,
+    timestampMs,
+    model,
+    sessionId,
+    totals,
+    // Zero is also Pi's placeholder for models without configured prices.
+    reportedCostUsd:
+      typeof reported === "number" && Number.isFinite(reported) && reported > 0 ? reported : null,
+    speed: "standard",
+    // A response ID survives copied/forked sessions. Without one, scope Pi's
+    // short entry IDs to the session instead of dropping unrelated responses.
+    dedupeKey: responseId
+      ? `pi-response:${responseId}`
+      : entryId
+        ? `pi-entry:${sessionId}:${entryId}`
+        : null,
+  };
 }
 
 /* -------------------------------------------------------------------------- */

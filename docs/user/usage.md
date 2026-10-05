@@ -6,12 +6,19 @@ desktop when the terminal is not focused. Customize `usage.open` in
 
 ## Understand your usage
 
-**Usage** combines Codex, Claude Code, Grok Build, OpenCode, Antigravity, and Cursor history from your connected
+**Usage** combines Codex, Claude Code, Grok Build, OpenCode, Antigravity, Cursor, Pi, and Prime Agent history from your connected
 environments. It shows token use, cache savings, model breakdowns, and estimated API-equivalent
 cost, split by token type and by speed. These estimates are not your subscription bill.
 **Premium** is what Fast and Ultrafast requests cost above standard rates. Cost that cannot be
 split, such as a provider-reported cost for a model without public rates, shows as **Other**.
 Select a model under **Breakdown** to see its trend, cache hit rate, and cost per million tokens.
+
+Pi and Prime Agent usage includes saved assistant responses and Prime Agent subagent sessions.
+Copied responses count once per server. Recorded costs are API-equivalent estimates from the
+agent’s model configuration, not subscription charges. Models without configured costs use the
+price table when available. Custom homes follow `PI_CODING_AGENT_DIR` and
+`PRIME_AGENT_CODING_AGENT_DIR` in the account’s environment settings. Hub requests from other
+clients are not included.
 
 Totals depend on the history available on each server. Grok turns without a saved completed-turn
 record are missing from the totals.
