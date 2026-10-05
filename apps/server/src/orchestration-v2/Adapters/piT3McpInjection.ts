@@ -40,6 +40,7 @@ const RESERVED_PI_LAUNCH_ARGUMENTS = new Set([
 
 const PI_ARGUMENTS_WITH_VALUES = new Set([
   "--api-key",
+  "--daemon-socket",
   "--append-system-prompt",
   "--exclude-tools",
   "-xt",
