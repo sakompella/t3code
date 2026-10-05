@@ -3215,6 +3215,116 @@ it.layer(TestLayer)("OrchestrationV2LayerLive lifecycle", (it) => {
     }),
   );
 
+  it.effect("runs a heartbeat check as a routine run that does not move unread or user time", () =>
+    Effect.gen(function* () {
+      const orchestrator = yield* Orchestrator.OrchestratorV2;
+      const eventSink = yield* EventSink.EventSinkV2;
+      const threadId = ThreadId.make("runtime-layer-heartbeat-check-thread");
+      const messageId = (key: string) => MessageId.make(`runtime-layer-heartbeat-check-${key}`);
+
+      yield* orchestrator.dispatch({
+        type: "thread.create",
+        createdBy: "user",
+        creationSource: "web",
+        commandId: CommandId.make("runtime-layer-heartbeat-check-create"),
+        threadId,
+        projectId: ProjectId.make("runtime-layer-heartbeat-check-project"),
+        title: "Heartbeat check",
+        modelSelection,
+        runtimeMode: "full-access",
+        interactionMode: "default",
+        branch: null,
+        worktreePath: process.cwd(),
+      });
+      const runFor = (key: string) =>
+        Effect.map(orchestrator.getThreadProjection(threadId), ({ runs }) => {
+          const run = runs.find((candidate) => candidate.userMessageId === messageId(key));
+          assert.isDefined(run);
+          return run;
+        });
+      // Runs settle the way the provider would report them.
+      const settle = (key: string, completedAt: DateTime.Utc) =>
+        Effect.gen(function* () {
+          const run = yield* runFor(key);
+          yield* eventSink.write({
+            events: [
+              {
+                id: EventId.make(`runtime-layer-heartbeat-check-${key}-completed`),
+                type: "run.updated",
+                threadId,
+                runId: run.id,
+                ...(run.rootNodeId === null ? {} : { nodeId: run.rootNodeId }),
+                providerInstanceId: run.providerInstanceId,
+                occurredAt: completedAt,
+                payload: {
+                  ...run,
+                  status: "completed",
+                  startedAt: run.startedAt ?? completedAt,
+                  completedAt,
+                },
+              },
+            ],
+          });
+        });
+
+      yield* orchestrator.dispatch({
+        type: "message.dispatch",
+        createdBy: "user",
+        creationSource: "web",
+        commandId: CommandId.make("runtime-layer-heartbeat-check-prompt"),
+        threadId,
+        messageId: messageId("prompt"),
+        text: "Watch the deploy",
+        attachments: [],
+        modelSelection,
+        dispatchMode: { type: "start_immediately" },
+      });
+      const promptDoneAt = yield* DateTime.now;
+      yield* settle("prompt", promptDoneAt);
+      const userMessageAt = (yield* orchestrator.getThreadShell(threadId))?.latestUserMessageAt;
+      assert.isDefined(userMessageAt);
+
+      // The shape ProviderContinuationService dispatches for a heartbeat wake.
+      yield* orchestrator.dispatch({
+        type: "message.dispatch",
+        createdBy: "agent",
+        creationSource: "provider",
+        notification: {
+          source: { kind: "heartbeat", heartbeatId: "deploy" },
+          outcome: "updated",
+          summary: "Heartbeat",
+        },
+        commandId: CommandId.make("runtime-layer-heartbeat-check-wake"),
+        threadId,
+        messageId: messageId("wake"),
+        text: "Background activity updated",
+        attachments: [],
+        dispatchMode: { type: "queue_after_active" },
+      });
+      // An idle thread starts the wake in the same commit as its message.
+      assert.equal((yield* runFor("wake")).status, "starting");
+      yield* settle("wake", DateTime.add(promptDoneAt, { minutes: 5 }));
+
+      const shell = yield* orchestrator.getThreadShell(threadId);
+      assert.equal(shell?.latestRunId, (yield* runFor("wake")).id);
+      assert.equal(shell?.status, "completed");
+      assert.equal(shell?.latestRunTrigger, "heartbeat");
+      assert.deepEqual(shell?.latestUserMessageAt, userMessageAt);
+      assert.deepEqual(shell?.latestTaskRunCompletedAt, promptDoneAt);
+
+      // Mark unread rewinds to the user's run, not to the check after it.
+      yield* orchestrator.dispatch({
+        type: "thread.mark-unread",
+        commandId: CommandId.make("runtime-layer-heartbeat-check-mark-unread"),
+        threadId,
+      });
+      assert.deepEqual(
+        (yield* orchestrator.getThreadProjection(threadId)).thread.lastVisitedAt,
+        DateTime.subtract(promptDoneAt, { milliseconds: 1 }),
+      );
+    }),
+  );
+
   it.effect.each(["usage_limit", "provider_error"] as const)(
     "handles a queued message after a %s failure",
     (failureClass) =>

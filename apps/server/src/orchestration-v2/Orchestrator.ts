@@ -86,6 +86,7 @@ import {
 import {
   applyToProjection,
   emptyProjection,
+  isRoutineProjectedRun,
   threadShellFromProjection,
   ProjectionStoreV2,
   type ProjectionRecordField,
@@ -2628,8 +2629,13 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
     }
     let markUnreadVisitedAt: DateTime.Utc | null = null;
     if (command.type === "thread.mark-unread") {
-      const projection = yield* loadProjectionForCommand(command, ["runs"]);
-      const latestRunCompletedAt = projection.runs.at(-1)?.completedAt ?? null;
+      const projection = yield* loadProjectionForCommand(command, ["runs", "messages"], {
+        messageRoles: ["user"],
+      });
+      // Clients read unread from the latest run that is not a routine check.
+      const latestRunCompletedAt =
+        projection.runs.findLast((run) => !isRoutineProjectedRun(projection, run))?.completedAt ??
+        null;
       if (latestRunCompletedAt === null) {
         return yield* new OrchestratorDispatchError({
           commandId: command.commandId,

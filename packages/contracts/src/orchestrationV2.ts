@@ -1108,6 +1108,18 @@ export type OrchestrationV2ConversationMessage = typeof OrchestrationV2Conversat
 export const OrchestrationV2RunTrigger = Schema.Literal("heartbeat");
 export type OrchestrationV2RunTrigger = typeof OrchestrationV2RunTrigger.Type;
 
+/**
+ * A heartbeat run that completed: a routine check, so its end is neither a
+ * finished task, unread news, nor thread activity. A heartbeat run that
+ * failed, was interrupted or is still going is not routine.
+ */
+export function isOrchestrationV2RoutineRun(run: {
+  readonly status: string;
+  readonly trigger?: OrchestrationV2RunTrigger | null | undefined;
+}): boolean {
+  return run.status === "completed" && run.trigger === "heartbeat";
+}
+
 /** The trigger of the run a message starts, or null for a message someone sent. */
 export function orchestrationV2MessageRunTrigger(
   message: Pick<OrchestrationV2ConversationMessage, "notification">,
@@ -1782,6 +1794,12 @@ export const OrchestrationV2ThreadShell = Schema.Struct({
   latestRunCompletedAt: Schema.optional(Schema.NullOr(Schema.DateTimeUtc)),
   /** Null for a run someone asked for. Omitted by servers that predate it. */
   latestRunTrigger: Schema.optional(Schema.NullOr(OrchestrationV2RunTrigger)),
+  /**
+   * When the latest run that is not routine (see isOrchestrationV2RoutineRun)
+   * ended: what unread state and auto-settle read once a heartbeat check has
+   * run since. Omitted by servers that predate it.
+   */
+  latestTaskRunCompletedAt: Schema.optional(Schema.NullOr(Schema.DateTimeUtc)),
   activeRunId: Schema.NullOr(RunId),
   /**
    * orchestrationV2RunWorkStartedAt of the activity-owning run: a wake keeps
@@ -2318,6 +2336,7 @@ export const OrchestrationV2ThreadShellJson = OrchestrationV2ThreadShell.mapFiel
   latestRunRequestedAt: Schema.optional(Schema.NullOr(Schema.DateTimeUtcFromString)),
   latestRunStartedAt: Schema.optional(Schema.NullOr(Schema.DateTimeUtcFromString)),
   latestRunCompletedAt: Schema.optional(Schema.NullOr(Schema.DateTimeUtcFromString)),
+  latestTaskRunCompletedAt: Schema.optional(Schema.NullOr(Schema.DateTimeUtcFromString)),
   activityRunStartedAt: Schema.optional(Schema.NullOr(Schema.DateTimeUtcFromString)),
   pendingRuntimeRequest: Schema.NullOr(OrchestrationV2PendingRuntimeRequestSummaryJson),
   latestVisibleMessage: Schema.NullOr(OrchestrationV2LatestVisibleMessageSummaryJson),

@@ -311,6 +311,43 @@ describe("resolveAutoSettlementAt", () => {
       }),
     ).toBeNull();
   });
+
+  it("does not count routine heartbeat checks as activity, but counts their failures", () => {
+    // The user's last run ended 4 days ago; a heartbeat checked an hour ago.
+    const heartbeatChecked = (status: OrchestrationV2ThreadShell["status"]) =>
+      shell({
+        status,
+        latestUserMessageAt: at(-4 * DAY_MS - 60_000),
+        latestRunTrigger: "heartbeat",
+        latestRunRequestedAt: at(-60 * 60 * 1_000),
+        latestRunStartedAt: at(-60 * 60 * 1_000),
+        latestRunCompletedAt: at(-59 * 60 * 1_000),
+        latestTaskRunCompletedAt: at(-4 * DAY_MS),
+      });
+    const input = {
+      thread: heartbeatChecked("completed"),
+      pullRequest: null,
+      nowMs: NOW_MS,
+      autoSettleAfterDays: 2,
+      autoSettleOnMerge: true,
+    };
+    expect(ThreadSettlementService.resolveAutoSettlementAt(input)).toEqual(at(-4 * DAY_MS));
+    // A failed check is news, so it is activity like any run.
+    expect(
+      ThreadSettlementService.resolveAutoSettlementAt({
+        ...input,
+        thread: heartbeatChecked("failed"),
+      }),
+    ).toBeNull();
+    // A check after a merge does not stand for the user acting after it.
+    expect(
+      ThreadSettlementService.resolveAutoSettlementAt({
+        ...input,
+        autoSettleAfterDays: null,
+        pullRequest: { state: "merged", mergedAt: DateTime.formatIso(at(-2 * 60 * 60 * 1_000)) },
+      }),
+    ).toEqual(at(-4 * DAY_MS));
+  });
 });
 
 const NOW = "2026-08-28T12:00:00.000Z";

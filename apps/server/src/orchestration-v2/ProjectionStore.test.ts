@@ -1753,9 +1753,12 @@ it.layer(TestLayer)("ProjectionStoreV2", (it) => {
         assert.equal(shell.latestRunId, heartbeat.runId);
         assert.equal(shell.latestRunTrigger, "heartbeat");
       }
-      // The heartbeat's prompt does not reorder the thread as if someone wrote.
+      // The heartbeat's prompt does not reorder the thread as if someone wrote,
+      // and its end is not what unread state and auto-settle read.
       for (const shell of Object.values(afterHeartbeat)) {
         assert.deepEqual(shell.latestUserMessageAt, deploy.at);
+        assert.deepEqual(shell.latestTaskRunCompletedAt, deploy.at);
+        assert.equal(shell.latestRunTrigger, "heartbeat");
       }
 
       const followUp = yield* addRun(3, "user");
@@ -1766,6 +1769,7 @@ it.layer(TestLayer)("ProjectionStoreV2", (it) => {
       }
       for (const shell of Object.values(afterFollowUp)) {
         assert.deepEqual(shell.latestUserMessageAt, followUp.at);
+        assert.deepEqual(shell.latestTaskRunCompletedAt, followUp.at);
       }
     }),
   );

@@ -3,13 +3,14 @@
  * composer area. A heartbeat is configuration, not work: it is kept out of the
  * pending-background-work roster so it never makes a thread look busy.
  */
-import type {
-  OrchestrationV2ProviderHeartbeat,
-  OrchestrationV2ThreadProjection,
+import {
+  isOrchestrationV2RoutineRun,
+  type OrchestrationV2ProviderHeartbeat,
+  type OrchestrationV2ThreadProjection,
 } from "@t3tools/contracts";
 import * as DateTime from "effect/DateTime";
 
-import type { ThreadRunSummary } from "./models.ts";
+import type { EnvironmentThreadShell, ThreadRunSummary } from "./models.ts";
 
 type Projection = OrchestrationV2ThreadProjection;
 
@@ -101,5 +102,21 @@ export function presentHeartbeats(
 export function runCompletedTask(
   run: Pick<ThreadRunSummary, "status" | "trigger"> | null,
 ): boolean {
-  return run?.status === "completed" && run.trigger !== "heartbeat";
+  return run?.status === "completed" && !isOrchestrationV2RoutineRun(run);
+}
+
+/**
+ * When the thread last ended work the user may not have seen, for unread
+ * state: the latest run's end, unless that run was a routine heartbeat check.
+ * Then it is the end of the latest run someone asked for, so a check neither
+ * marks the thread unread nor hides an unseen completion from before it.
+ */
+export function threadUnreadCompletionAt(
+  thread: Pick<EnvironmentThreadShell, "latestRun" | "latestTaskRunCompletedAt">,
+): string | null {
+  const run = thread.latestRun;
+  if (run === null) return null;
+  return isOrchestrationV2RoutineRun(run)
+    ? (thread.latestTaskRunCompletedAt ?? null)
+    : run.completedAt;
 }

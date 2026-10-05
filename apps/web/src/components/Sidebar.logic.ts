@@ -7,6 +7,7 @@ import {
   type AtomCommandResult,
 } from "@t3tools/client-runtime/state/runtime";
 import { defaultAnimateLayoutChanges, type AnimateLayoutChanges } from "@dnd-kit/sortable";
+import { threadUnreadCompletionAt } from "@t3tools/client-runtime/state/thread-heartbeats";
 import { threadSearchMatchKey } from "@t3tools/client-runtime/state/thread-search";
 import type { ContextMenuItem, EnvironmentId, ThreadId } from "@t3tools/contracts";
 import type { SidebarProjectSortOrder, SidebarThreadSortOrder } from "@t3tools/contracts/settings";
@@ -620,6 +621,7 @@ type ThreadStatusInput = Pick<
   | "hasPendingUserInput"
   | "interactionMode"
   | "latestRun"
+  | "latestTaskRunCompletedAt"
   | "runtime"
 > & {
   lastVisitedAt?: string | null | undefined;
@@ -737,8 +739,9 @@ export function resolveThreadLastVisitedAt(
 }
 
 export function hasUnseenCompletion(thread: ThreadStatusInput): boolean {
-  if (!thread.latestRun?.completedAt) return false;
-  const completedAt = Date.parse(thread.latestRun.completedAt);
+  const unreadCompletionAt = threadUnreadCompletionAt(thread);
+  if (!unreadCompletionAt) return false;
+  const completedAt = Date.parse(unreadCompletionAt);
   if (Number.isNaN(completedAt)) return false;
   if (!thread.lastVisitedAt) return false;
 
