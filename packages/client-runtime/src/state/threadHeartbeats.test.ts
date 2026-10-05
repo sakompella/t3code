@@ -1,13 +1,17 @@
+import { EnvironmentId, RunId } from "@t3tools/contracts";
 import { derivePendingBackgroundWork } from "@t3tools/shared/orchestrationV2PendingBackgroundWork";
 import * as DateTime from "effect/DateTime";
 import { describe, expect, it } from "vite-plus/test";
 
+import { presentThreadShell } from "./models.ts";
+import { v2ThreadShell } from "./orchestrationV2TestFixtures.ts";
 import { deriveRunningTurnBackgroundWork } from "./threadBackgroundWork.ts";
 import {
   deriveThreadHeartbeats,
   formatHeartbeatNextRun,
   heartbeatsEqual,
   presentHeartbeats,
+  runCompletedTask,
 } from "./threadHeartbeats.ts";
 
 const at = (epochMillis: number) => DateTime.toDate(DateTime.makeUnsafe(epochMillis));
@@ -129,5 +133,34 @@ describe("formatHeartbeatNextRun", () => {
     );
     expect(otherDay).not.toBe(sameDay);
     expect(otherDay.endsWith(sameDay)).toBe(true);
+  });
+});
+
+describe("runCompletedTask", () => {
+  it("counts a finished run someone asked for, never a heartbeat check or an unfinished run", () => {
+    const statuses = ["completed", "failed", "interrupted", "cancelled", "running"] as const;
+    for (const status of statuses) {
+      expect(runCompletedTask({ status })).toBe(status === "completed");
+      for (const trigger of [null, "heartbeat"] as const) {
+        expect(runCompletedTask({ status, trigger })).toBe(
+          status === "completed" && trigger !== "heartbeat",
+        );
+      }
+    }
+    expect(runCompletedTask(null)).toBe(false);
+  });
+
+  it("reads the trigger the server sent with the thread's latest run", () => {
+    const latestRun = (latestRunTrigger?: "heartbeat" | null) =>
+      presentThreadShell(EnvironmentId.make("environment"), {
+        ...v2ThreadShell,
+        latestRunId: RunId.make("run-heartbeat"),
+        status: "completed",
+        ...(latestRunTrigger === undefined ? {} : { latestRunTrigger }),
+      }).latestRun;
+    expect(runCompletedTask(latestRun("heartbeat"))).toBe(false);
+    expect(runCompletedTask(latestRun(null))).toBe(true);
+    // Servers from before the trigger existed never sent one.
+    expect(runCompletedTask(latestRun())).toBe(true);
   });
 });
