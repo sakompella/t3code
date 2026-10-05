@@ -144,43 +144,24 @@ describe("isAutoSettlementCandidate", () => {
     ).toBe(false);
   });
 
-  it("keeps snoozed threads parked until they wake early on error or completion", () => {
+  it("keeps snoozed threads parked until the timer ends, whatever they did meanwhile", () => {
     const snoozed = shell({
       snoozedUntil: at(60 * 60 * 1_000),
       snoozedAt: at(-60 * 60 * 1_000),
     });
     expect(ThreadSettlementService.isAutoSettlementCandidate(snoozed, NOW_MS)).toBe(false);
-    expect(
-      ThreadSettlementService.isAutoSettlementCandidate(
-        shell({ ...snoozed, status: "failed", latestRunCompletedAt: at(-30 * 60 * 1_000) }),
-        NOW_MS,
-      ),
-    ).toBe(true);
-    expect(
-      ThreadSettlementService.isAutoSettlementCandidate(
-        shell({ ...snoozed, latestRunCompletedAt: at(-30 * 60 * 1_000) }),
-        NOW_MS,
-      ),
-    ).toBe(true);
-    expect(
-      ThreadSettlementService.isAutoSettlementCandidate(
-        shell({ ...snoozed, status: "failed", latestRunCompletedAt: at(-2 * 60 * 60 * 1_000) }),
-        NOW_MS,
-      ),
-    ).toBe(false);
-    expect(
-      ThreadSettlementService.isAutoSettlementCandidate(
-        shell({ ...snoozed, status: "failed", latestRunCompletedAt: snoozed.snoozedAt }),
-        NOW_MS,
-      ),
-    ).toBe(false);
-    expect(
-      ThreadSettlementService.isAutoSettlementCandidate(
-        shell({ ...snoozed, status: "failed", latestRunCompletedAt: null }),
-        NOW_MS,
-      ),
-    ).toBe(false);
-    // Expired snooze is no longer a park.
+    for (const afterSnooze of [
+      { status: "failed" as const, latestRunCompletedAt: at(-30 * 60 * 1_000) },
+      { latestRunCompletedAt: at(-30 * 60 * 1_000) },
+    ]) {
+      expect(
+        ThreadSettlementService.isAutoSettlementCandidate(
+          shell({ ...snoozed, ...afterSnooze }),
+          NOW_MS,
+        ),
+      ).toBe(false);
+    }
+    // Timer expiry is the only way out; `NOW_MS` passing the wake time is enough.
     expect(
       ThreadSettlementService.isAutoSettlementCandidate(
         shell({ ...snoozed, snoozedUntil: at(-1) }),

@@ -21,7 +21,10 @@ import {
   setNotificationBadge,
   unlockNotificationAudio,
 } from "../threadNotifications";
-import { resolveSidebarThreadStatus } from "./Sidebar.logic";
+import {
+  observeThreadForNotification,
+  type ThreadNotificationMemory,
+} from "./ThreadNotificationCoordinator.logic";
 import { toastManager } from "./ui/toast";
 
 export function ThreadNotificationCoordinator() {
@@ -104,43 +107,25 @@ function EnvironmentNotifications({
   const { environmentId: activeEnvironmentId, threadId: activeThreadId } = useParams({
     strict: false,
   });
-  const previous = useRef(
-    new Map<ThreadId, { attention: string | null; completion: number | null }>(),
-  );
+  const previous = useRef(new Map<ThreadId, ThreadNotificationMemory>());
 
   useEffect(() => {
     if (shell.status !== "live" || Option.isNone(shell.snapshot)) {
       previous.current.clear();
       return;
     }
-    const next = new Map<ThreadId, { attention: string | null; completion: number | null }>();
+    const next = new Map<ThreadId, ThreadNotificationMemory>();
+    const now = new Date().toISOString();
     for (const rawThread of shell.snapshot.value.threads) {
       if (rawThread.lineage.relationshipToParent === "subagent") continue;
       const thread = presentThreadShell(environmentId, rawThread);
-      let status = resolveSidebarThreadStatus(thread);
-      if (status === "ready" && thread.latestRun?.status === "failed") status = "failed";
-      const prior = previous.current.get(thread.id);
-      const attention =
-        status === "input" || status === "approval" || status === "failed" || status === "limited"
-          ? `${thread.latestRun?.runId ?? ""}:${status}`
-          : null;
-      const completedAt = Date.parse(thread.latestRun?.completedAt ?? "");
-      // Commands left running (a dev server) read as ready; subagents and monitors wait.
-      const completion =
-        status === "ready" &&
-        thread.latestRun?.status === "completed" &&
-        Number.isFinite(completedAt)
-          ? completedAt
-          : (prior?.completion ?? null);
-      next.set(thread.id, { attention, completion });
-      if (!prior || thread.archivedAt !== null) continue;
-      const kind =
-        attention && attention !== prior.attention
-          ? "input"
-          : completion !== null && (prior.completion === null || completion > prior.completion)
-            ? "completion"
-            : null;
-      if (!kind) continue;
+      const { status, memory, kind } = observeThreadForNotification(
+        thread,
+        previous.current.get(thread.id),
+        now,
+      );
+      next.set(thread.id, memory);
+      if (!kind || thread.archivedAt !== null) continue;
       const title =
         kind === "completion"
           ? "Thread completed"

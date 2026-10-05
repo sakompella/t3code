@@ -11,6 +11,7 @@ import {
   ProjectId,
   ProviderInstanceId,
   RunId,
+  RuntimeRequestId,
   ThreadId,
   TurnItemId,
 } from "@t3tools/contracts";
@@ -104,6 +105,7 @@ describe("startup agent activity", () => {
     const ids = AgentAwarenessRelay.resolveAgentAwarenessRelayActiveThreadIds({
       environmentId: EnvironmentId.make("relay-env"),
       startedAt,
+      now: DateTime.makeUnsafe(NOW),
       projects: [{ id: PROJECT_ID, title: "Project" }],
       threads: [
         shell(),
@@ -282,6 +284,8 @@ describe("AgentAwarenessRelay", () => {
       "provider-turn.updated",
       "thread.visited",
       "thread.pinned",
+      // Ending a snooze must not push what happened meanwhile as if it were new.
+      "thread.unsnoozed",
     ] as const) {
       assert.isFalse(AgentAwarenessRelay.shouldPublishAgentAwarenessEvent({ type }));
     }
@@ -298,6 +302,8 @@ describe("AgentAwarenessRelay", () => {
       "thread.archived",
       "thread.unarchived",
       "thread.deleted",
+      // A snooze withdraws the published state.
+      "thread.snoozed",
     ] as const) {
       assert.isTrue(AgentAwarenessRelay.shouldPublishAgentAwarenessEvent({ type }));
     }
@@ -680,6 +686,51 @@ describe("AgentAwarenessRelay", () => {
       yield* TestClock.adjust("5 seconds");
       yield* relay.drain;
       assert.equal(publications.length, 0);
+    }),
+  );
+
+  it.effect("publishes nothing for a snoozed thread until its timer ends", () =>
+    Effect.gen(function* () {
+      const { relay, currentShell, publications } = yield* makeTestRelay();
+      yield* relay.publishThread(THREAD_ID);
+      assert.equal(publications[0]?.state?.phase, "running");
+
+      const snoozedUntil = DateTime.add(yield* DateTime.now, { hours: 1 });
+      const settleTombstone = Effect.gen(function* () {
+        yield* TestClock.adjust("5 seconds");
+        yield* relay.drain;
+      });
+      const finishedWhileSnoozed = shell({
+        status: "completed",
+        snoozedUntil,
+        latestRunCompletedAt: DateTime.makeUnsafe("1970-01-01T00:00:10.000Z"),
+      });
+      for (const snoozedShell of [
+        shell({ snoozedUntil }),
+        finishedWhileSnoozed,
+        shell({ status: "failed", snoozedUntil }),
+        shell({
+          snoozedUntil,
+          pendingRuntimeRequest: {
+            id: RuntimeRequestId.make("snoozed-question"),
+            kind: "user_input",
+            createdAt: DateTime.makeUnsafe(NOW),
+          },
+        }),
+      ]) {
+        yield* Ref.set(currentShell, snoozedShell);
+        yield* relay.publishThread(THREAD_ID);
+        yield* settleTombstone;
+      }
+      assert.isTrue(publications.length > 1);
+      assert.isTrue(publications.slice(1).every((publication) => publication.state === null));
+
+      // The timer ending is the only thing that lets the finished run through.
+      yield* Ref.set(currentShell, finishedWhileSnoozed);
+      yield* TestClock.adjust("2 hours");
+      yield* relay.publishThread(THREAD_ID);
+      yield* settleTombstone;
+      assert.equal(publications.at(-1)?.state?.phase, "completed");
     }),
   );
 

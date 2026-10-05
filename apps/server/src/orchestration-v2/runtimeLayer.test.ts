@@ -15,6 +15,7 @@ import {
   RuntimeRequestId,
   TurnItemId,
   type ModelSelection,
+  type OrchestrationV2Notification,
   type OrchestrationV2Run,
   ProjectId,
   type PullRequestDetail,
@@ -2689,7 +2690,7 @@ it.layer(TestLayer)("OrchestrationV2LayerLive lifecycle", (it) => {
     }),
   );
 
-  it.effect("an agent wake keeps a parked thread parked; a user message brings it back", () =>
+  it.effect("agent wakes keep a thread settled and snoozed; only a user message un-settles", () =>
     Effect.gen(function* () {
       const orchestrator = yield* Orchestrator.OrchestratorV2;
       const eventSink = yield* EventSink.EventSinkV2;
@@ -2710,7 +2711,7 @@ it.layer(TestLayer)("OrchestrationV2LayerLive lifecycle", (it) => {
         branch: null,
         worktreePath: "/tmp/runtime-layer-wake-parked",
       });
-      const finishRuns = (commandId: string) =>
+      const finishRuns = (commandId: string, status: "completed" | "failed" = "completed") =>
         Effect.gen(function* () {
           const projection = yield* orchestrator.getThreadProjection(threadId);
           const finishedAt = yield* DateTime.now;
@@ -2720,14 +2721,14 @@ it.layer(TestLayer)("OrchestrationV2LayerLive lifecycle", (it) => {
             commandType: "provider-runtime.reconcile",
             acceptedAt: finishedAt,
             events: projection.runs
-              .filter((run) => run.status !== "completed")
+              .filter((run) => run.status !== "completed" && run.status !== "failed")
               .map((run) => ({
                 id: EventId.make(`${commandId}:${run.id}`),
                 type: "run.updated" as const,
                 threadId,
                 runId: run.id,
                 occurredAt: finishedAt,
-                payload: { ...run, status: "completed" as const, completedAt: finishedAt },
+                payload: { ...run, status, completedAt: finishedAt },
               })),
             effects: [],
           });
@@ -2746,22 +2747,84 @@ it.layer(TestLayer)("OrchestrationV2LayerLive lifecycle", (it) => {
           dispatchMode: { type: "start_immediately" },
         });
       // The shape ProviderContinuationService dispatches for a provider self-wake.
-      const wake = (id: string) =>
+      const wake = (
+        id: string,
+        notification: OrchestrationV2Notification = {
+          source: { kind: "command" },
+          outcome: "completed",
+          summary: "Background command finished",
+        },
+      ) =>
         orchestrator.dispatch({
           type: "message.dispatch",
           createdBy: "agent",
           creationSource: "provider",
-          notification: {
-            source: { kind: "command" },
-            outcome: "completed",
-            summary: "Background command finished",
-          },
+          notification,
           commandId: CommandId.make(id),
           threadId,
           messageId: MessageId.make(id),
           text: id,
           attachments: [],
           dispatchMode: { type: "queue_after_active" },
+        });
+      // What ProviderContinuationService dispatches when delegated tasks finish:
+      // the parent run holds an open cohort whose pending delivery names the message.
+      const delegatedResult = (id: string) =>
+        Effect.gen(function* () {
+          const parentRun = (yield* orchestrator.getThreadProjection(threadId)).runs.at(-1);
+          assert.isDefined(parentRun);
+          const taskIds = [NodeId.make(`${id}-task`)];
+          const armedAt = yield* DateTime.now;
+          yield* eventSink.commitCommand({
+            commandId: CommandId.make(`${id}-arm`),
+            threadId,
+            commandType: "provider-runtime.reconcile",
+            acceptedAt: armedAt,
+            events: [
+              {
+                id: EventId.make(`${id}-arm`),
+                type: "run.updated" as const,
+                threadId,
+                runId: parentRun.id,
+                occurredAt: armedAt,
+                payload: {
+                  ...parentRun,
+                  delegatedCompletion: {
+                    disposition: "open" as const,
+                    nextGeneration: 2,
+                    delivery: { generation: 1, messageId: MessageId.make(id), taskIds },
+                  },
+                },
+              },
+            ],
+            effects: [],
+          });
+          return yield* orchestrator.dispatch({
+            type: "message.dispatch",
+            createdBy: "agent",
+            creationSource: "server",
+            delegatedCompletion: { parentRunId: parentRun.id, generation: 1, taskIds },
+            commandId: CommandId.make(id),
+            threadId,
+            messageId: MessageId.make(id),
+            text: id,
+            attachments: [],
+            dispatchMode: { type: "queue_after_active" },
+          });
+        });
+      // A scheduled task posts as its creator, not as a wake notification.
+      const scheduledMessage = (id: string) =>
+        orchestrator.dispatch({
+          type: "message.dispatch",
+          createdBy: "agent",
+          creationSource: "mcp",
+          commandId: CommandId.make(id),
+          threadId,
+          messageId: MessageId.make(id),
+          text: id,
+          attachments: [],
+          modelSelection,
+          dispatchMode: { type: "start_immediately" },
         });
 
       yield* sendUserMessage("wake-parked-first");
@@ -2800,12 +2863,59 @@ it.layer(TestLayer)("OrchestrationV2LayerLive lifecycle", (it) => {
         threadId,
         snoozedUntil: DateTime.formatIso(snoozedUntil),
       });
-      yield* wake("wake-parked-snoozed-wake");
-      const afterSnoozedWake = yield* orchestrator.getThreadProjection(threadId);
-      assert.deepEqual(afterSnoozedWake.thread.snoozedUntil, snoozedUntil);
-      yield* finishRuns("wake-parked-snoozed-wake-done");
+      const snoozedAt = (yield* orchestrator.getThreadProjection(threadId)).thread.snoozedAt;
+      assert.isNotNull(snoozedAt);
 
-      // An explicit un-settle ("keep active") is also the user's choice.
+      // Nothing that reaches a snoozed thread ends the snooze, and none of it
+      // is dropped: each message still starts its own run.
+      const arrivals = [
+        { id: "wake-parked-snoozed-command", send: wake("wake-parked-snoozed-command") },
+        {
+          id: "wake-parked-snoozed-subagent",
+          send: wake("wake-parked-snoozed-subagent", {
+            source: { kind: "subagent" },
+            outcome: "completed",
+            summary: "Subagent finished",
+          }),
+        },
+        {
+          id: "wake-parked-snoozed-heartbeat",
+          send: wake("wake-parked-snoozed-heartbeat", {
+            source: { kind: "background_task" },
+            outcome: "updated",
+            summary: "Heartbeat",
+          }),
+        },
+        {
+          id: "wake-parked-snoozed-delegated",
+          send: delegatedResult("wake-parked-snoozed-delegated"),
+        },
+        {
+          id: "wake-parked-snoozed-scheduled",
+          send: scheduledMessage("wake-parked-snoozed-scheduled"),
+        },
+        { id: "wake-parked-snoozed-user", send: sendUserMessage("wake-parked-snoozed-user") },
+      ];
+      for (const arrival of arrivals) {
+        yield* arrival.send;
+        const projection = yield* orchestrator.getThreadProjection(threadId);
+        assert.deepEqual(projection.thread.snoozedUntil, snoozedUntil, arrival.id);
+        assert.deepEqual(projection.thread.snoozedAt, snoozedAt, arrival.id);
+        assert.isTrue(
+          projection.runs.some((run) => run.userMessageId === MessageId.make(arrival.id)),
+          arrival.id,
+        );
+        yield* finishRuns(`${arrival.id}-done`);
+      }
+
+      // A run that fails under the snooze leaves it too.
+      yield* wake("wake-parked-snoozed-failing");
+      yield* finishRuns("wake-parked-snoozed-failing-done", "failed");
+      const afterFailure = yield* orchestrator.getThreadProjection(threadId);
+      assert.deepEqual(afterFailure.thread.snoozedUntil, snoozedUntil);
+      assert.deepEqual(afterFailure.thread.snoozedAt, snoozedAt);
+
+      // An explicit un-settle ("keep active") does not touch the snooze either.
       yield* orchestrator.dispatch({
         type: "thread.unsettle",
         commandId: CommandId.make("wake-parked-keep-active"),
@@ -2813,16 +2923,27 @@ it.layer(TestLayer)("OrchestrationV2LayerLive lifecycle", (it) => {
         reason: "user",
       });
       yield* wake("wake-parked-active-wake");
-      assert.equal(
-        (yield* orchestrator.getThreadProjection(threadId)).thread.settledOverride,
-        "active",
-      );
+      const afterActiveWake = yield* orchestrator.getThreadProjection(threadId);
+      assert.equal(afterActiveWake.thread.settledOverride, "active");
+      assert.deepEqual(afterActiveWake.thread.snoozedUntil, snoozedUntil);
       yield* finishRuns("wake-parked-active-wake-done");
 
-      yield* sendUserMessage("wake-parked-user-unsnoozes");
-      const afterUserUnsnooze = yield* orchestrator.getThreadProjection(threadId);
-      assert.isNull(afterUserUnsnooze.thread.snoozedUntil);
-      assert.isNull(afterUserUnsnooze.thread.settledOverride);
+      // The user's message still ends "keep active", but not the snooze.
+      yield* sendUserMessage("wake-parked-user-after-active");
+      const afterUserOnActive = yield* orchestrator.getThreadProjection(threadId);
+      assert.isNull(afterUserOnActive.thread.settledOverride);
+      assert.deepEqual(afterUserOnActive.thread.snoozedUntil, snoozedUntil);
+      yield* finishRuns("wake-parked-user-after-active-done");
+
+      // Only an explicit unsnooze ends it.
+      yield* orchestrator.dispatch({
+        type: "thread.unsnooze",
+        commandId: CommandId.make("wake-parked-unsnooze"),
+        threadId,
+      });
+      const afterUnsnooze = yield* orchestrator.getThreadProjection(threadId);
+      assert.isNull(afterUnsnooze.thread.snoozedUntil);
+      assert.isNull(afterUnsnooze.thread.snoozedAt);
     }),
   );
 
@@ -3933,12 +4054,21 @@ it.layer(SharedApplicationDataPlaneTestLayer)("snooze projection", (it) => {
         commandId: CommandId.make("runtime-layer-snoozed-message"),
         threadId,
         messageId: MessageId.make("runtime-layer-snoozed-message"),
-        text: "Wake this thread.",
+        text: "This message does not wake the thread.",
         attachments: [],
         modelSelection,
         dispatchMode: { type: "start_immediately" },
       });
 
+      const afterMessage = yield* orchestrator.getThreadProjection(threadId);
+      assert.equal(DateTime.formatIso(afterMessage.thread.snoozedUntil!), snoozedUntil);
+      assert.deepEqual(afterMessage.thread.snoozedAt, firstSnoozedAt);
+
+      yield* orchestrator.dispatch({
+        type: "thread.unsnooze",
+        commandId: CommandId.make("runtime-layer-snoozed-thread-unsnooze"),
+        threadId,
+      });
       const awakened = yield* orchestrator.getThreadProjection(threadId);
       assert.isNull(awakened.thread.snoozedUntil);
       assert.isNull(awakened.thread.snoozedAt);

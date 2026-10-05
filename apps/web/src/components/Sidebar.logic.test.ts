@@ -2022,18 +2022,10 @@ describe("navigation after parking a thread", () => {
     ["snooze", null, "2099-01-01T00:00:00.000Z", "thread", true],
     ["snooze", null, null, "thread", false],
     ["snooze", null, "2026-09-12T09:00:00.000Z", "thread", false],
-    ["snooze", null, "2099-01-01T00:00:00.000Z", "thread", false, true],
     ["snooze", null, "2099-01-01T00:00:00.000Z", "other-thread", false],
   ] as const)(
     "%s with state %s / %s on %s navigates: %s",
-    (
-      action,
-      settledOverride,
-      snoozedUntil,
-      currentThreadKey,
-      expected,
-      hasPendingApprovals: boolean = false,
-    ) => {
+    (action, settledOverride, snoozedUntil, currentThreadKey, expected) => {
       expect(
         shouldNavigateAfterThreadPark({
           threadKey: "thread",
@@ -2043,11 +2035,6 @@ describe("navigation after parking a thread", () => {
           thread: {
             settledOverride,
             snoozedUntil,
-            snoozedAt: null,
-            session: null,
-            latestTurn: null,
-            hasPendingApprovals,
-            hasPendingUserInput: false,
           },
         }),
       ).toBe(expected);

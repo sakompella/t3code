@@ -6704,26 +6704,11 @@ export default function ChatView(props: ChatViewProps) {
     if (activeThreadShell?.settledOverride === "settled") return false;
     const wokeAtMs = Date.parse(activeThreadWokeAt);
     if (Number.isNaN(wokeAtMs)) return false;
-    // Having the thread open counts as a visit at completedAt (the effect
-    // above stamps it); folding that floor in here keeps a completion-
-    // triggered wake from flashing a banner for one frame before the stamp
-    // lands. An unparseable stored visit counts as never-visited: corrupt
-    // data must not eat the wake signal.
+    // An unparseable stored visit counts as never-visited: corrupt data must
+    // not eat the wake signal.
     const storedVisitMs = activeThreadLastVisitedAt ? Date.parse(activeThreadLastVisitedAt) : NaN;
-    const completedAtMs = activeLatestRun?.completedAt
-      ? Date.parse(activeLatestRun.completedAt)
-      : NaN;
-    const lastVisitedMs = Math.max(
-      Number.isNaN(storedVisitMs) ? -Infinity : storedVisitMs,
-      Number.isNaN(completedAtMs) ? -Infinity : completedAtMs,
-    );
-    return lastVisitedMs < wokeAtMs;
-  }, [
-    activeLatestRun?.completedAt,
-    activeThreadLastVisitedAt,
-    activeThreadShell,
-    activeThreadWokeAt,
-  ]);
+    return Number.isNaN(storedVisitMs) || storedVisitMs < wokeAtMs;
+  }, [activeThreadLastVisitedAt, activeThreadShell, activeThreadWokeAt]);
   const activeThreadSettled =
     supportsSettlement && activeThreadShell?.settledOverride === "settled";
   const unsettleThreadMutation = useAtomCommand(threadEnvironment.unsettle, {
@@ -7108,7 +7093,9 @@ export default function ChatView(props: ChatViewProps) {
       variant: "info",
       icon: isSnoozed ? <AlarmClockIcon /> : <CheckCircle2Icon />,
       title: `This thread is ${isSnoozed ? "snoozed" : "settled"}`,
-      description: `Send a message to ${isSnoozed ? "wake" : "unsettle"}`,
+      description: isSnoozed
+        ? "Only its timer or Wake now brings it back. Messages and agent updates do not."
+        : "Send a message to unsettle",
       actions: (
         <Button
           size="xs"

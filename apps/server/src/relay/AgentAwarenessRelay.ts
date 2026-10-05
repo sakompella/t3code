@@ -106,9 +106,12 @@ export function shouldPublishAgentAwarenessEvent(
     case "subagent.updated":
     case "provider-thread.updated":
       return true;
+    // A snooze withdraws the published state. Ending one republishes nothing:
+    // that would push what happened meanwhile as if it were new.
+    case "thread.snoozed":
+      return true;
     case "thread.settled":
     case "thread.unsettled":
-    case "thread.snoozed":
     case "thread.unsnoozed":
     case "thread.auto-settle-set":
     case "thread.pinned":
@@ -297,6 +300,7 @@ function resolveAgentAwarenessRelayPublishSnapshot(input: {
   readonly threadId: ThreadId;
   readonly thread: Option.Option<OrchestrationV2ThreadShell>;
   readonly project: Option.Option<Project>;
+  readonly now: DateTime.Utc;
 }): {
   readonly projectId: string | null;
   readonly state: RelayAgentActivityState | null;
@@ -323,6 +327,7 @@ function resolveAgentAwarenessRelayPublishSnapshot(input: {
         environmentId: input.environmentId,
         project: input.project.value,
         thread: input.thread.value,
+        now: input.now,
       }),
     ),
     reason: "snapshot",
@@ -339,6 +344,7 @@ function terminalWorkSinceStart(thread: OrchestrationV2ThreadShell, startedAt: n
 export function resolveAgentAwarenessRelayActiveThreadIds(input: {
   readonly environmentId: EnvironmentId;
   readonly startedAt: number;
+  readonly now: DateTime.Utc;
   readonly projects: ReadonlyArray<Pick<Project, "id" | "title">>;
   readonly threads: ReadonlyArray<OrchestrationV2ThreadShell>;
 }): ReadonlyArray<ThreadId> {
@@ -353,6 +359,7 @@ export function resolveAgentAwarenessRelayActiveThreadIds(input: {
         environmentId: input.environmentId,
         project,
         thread,
+        now: input.now,
       });
       return (
         state !== null &&
@@ -544,6 +551,7 @@ export const make = Effect.gen(function* () {
       threadId,
       thread,
       project,
+      now: yield* DateTime.now,
     });
     const publishIdentity = agentAwarenessPublishIdentity(snapshot.state);
     const publishedStateByThread = yield* Ref.get(publishedStateByThreadRef);
@@ -732,6 +740,7 @@ export const make = Effect.gen(function* () {
     const activeThreadIds = resolveAgentAwarenessRelayActiveThreadIds({
       environmentId,
       startedAt,
+      now: yield* DateTime.now,
       projects: projectSnapshot.projects,
       threads: shellSnapshot.threads,
     });

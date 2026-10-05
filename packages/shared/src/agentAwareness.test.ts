@@ -50,6 +50,7 @@ describe("projectThreadAwarenessV2", () => {
       projectThreadAwarenessV2({
         environmentId: "env-1" as EnvironmentId,
         project,
+        now: updatedAt,
         thread: v2Thread(),
       }),
     ).toMatchObject({ phase: "running", headline: "Agent is working" });
@@ -62,6 +63,7 @@ describe("projectThreadAwarenessV2", () => {
         projectThreadAwarenessV2({
           environmentId: "env-1" as EnvironmentId,
           project,
+          now: updatedAt,
           thread: v2Thread({
             status,
             lineage: {
@@ -80,6 +82,7 @@ describe("projectThreadAwarenessV2", () => {
       projectThreadAwarenessV2({
         environmentId: "env-1" as EnvironmentId,
         project,
+        now: updatedAt,
         thread: v2Thread({ status: "cancelled", activityRunStatus: "running" }),
       }),
     ).toMatchObject({ phase: "running", headline: "Agent is working" });
@@ -101,6 +104,7 @@ describe("projectThreadAwarenessV2", () => {
       projectThreadAwarenessV2({
         environmentId: "env-1" as EnvironmentId,
         project,
+        now: updatedAt,
         thread: v2Thread({ status: "completed", pendingBackgroundTasks: tasks }),
       }),
     ).toMatchObject({ phase });
@@ -111,6 +115,7 @@ describe("projectThreadAwarenessV2", () => {
       projectThreadAwarenessV2({
         environmentId: "env-1" as EnvironmentId,
         project,
+        now: updatedAt,
         thread: v2Thread({
           pendingRuntimeRequest: {
             id: RuntimeRequestId.make("request-1"),
@@ -127,6 +132,7 @@ describe("projectThreadAwarenessV2", () => {
       projectThreadAwarenessV2({
         environmentId: "env-1" as EnvironmentId,
         project,
+        now: updatedAt,
         thread: v2Thread({
           pendingRuntimeRequest: {
             id: RuntimeRequestId.make("request-auth-refresh"),
@@ -136,5 +142,57 @@ describe("projectThreadAwarenessV2", () => {
         }),
       }),
     ).toMatchObject({ phase: "running", headline: "Agent is working" });
+  });
+
+  describe("while snoozed", () => {
+    const WAKE = "2026-05-22T18:00:00.000Z";
+    const snoozedThread = (overrides: Parameters<typeof v2Thread>[0] = {}) => ({
+      ...v2Thread(overrides),
+      snoozedUntil: DateTime.makeUnsafe(WAKE),
+    });
+    const awareness = (
+      thread: ReturnType<typeof snoozedThread>,
+      now: string = NOW,
+    ): ReturnType<typeof projectThreadAwarenessV2> =>
+      projectThreadAwarenessV2({
+        environmentId: "env-1" as EnvironmentId,
+        project,
+        thread,
+        now: DateTime.makeUnsafe(now),
+      });
+
+    it.each([
+      ["a run in progress", { status: "running" }],
+      ["a finished run", { status: "completed" }],
+      ["a failed run", { status: "failed" }],
+      [
+        "a question",
+        {
+          pendingRuntimeRequest: {
+            id: RuntimeRequestId.make("request-snoozed-input"),
+            kind: "user_input",
+            createdAt: updatedAt,
+          },
+        },
+      ],
+      [
+        "an approval",
+        {
+          pendingRuntimeRequest: {
+            id: RuntimeRequestId.make("request-snoozed-approval"),
+            kind: "command",
+            createdAt: updatedAt,
+          },
+        },
+      ],
+    ] as const)("publishes nothing for %s", (_case, overrides) => {
+      expect(awareness(snoozedThread(overrides))).toBeNull();
+    });
+
+    it("publishes again from the moment the snooze timer ends", () => {
+      const thread = snoozedThread({ status: "completed" });
+      expect(awareness(thread, "2026-05-22T17:59:59.999Z")).toBeNull();
+      expect(awareness(thread, WAKE)).toMatchObject({ phase: "completed" });
+    });
   });
 });
