@@ -4832,7 +4832,6 @@ export default function ChatView(props: ChatViewProps) {
     wokeAt: activeThreadWokeAt,
     settled: activeThreadShell?.settledOverride === "settled",
     lastVisitedAt: activeThreadLastVisitedAt,
-    latestRunCompletedAt: activeLatestRun?.completedAt ?? null,
   });
   const activeThreadSettled =
     supportsSettlement && activeThreadShell?.settledOverride === "settled";

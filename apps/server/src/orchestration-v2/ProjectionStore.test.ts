@@ -6134,7 +6134,9 @@ it.layer(layerTest)("ProjectionStoreV2", (it) => {
       const environmentId = EnvironmentId.make("environment:held-completion");
       const held = yield* store.getThreadShell(threadId);
       assert.equal(
-        held && projectThreadAwarenessV2({ environmentId, project, thread: held })?.phase,
+        held &&
+          projectThreadAwarenessV2({ environmentId, project, thread: held, now: completedAt })
+            ?.phase,
         "running",
       );
 
@@ -6149,7 +6151,8 @@ it.layer(layerTest)("ProjectionStoreV2", (it) => {
       });
       const released = yield* store.getThreadShell(threadId);
       const state =
-        released && projectThreadAwarenessV2({ environmentId, project, thread: released });
+        released &&
+        projectThreadAwarenessV2({ environmentId, project, thread: released, now: releasedAt });
       assert.equal(state?.phase, "completed");
       assert.equal(state?.updatedAt, DateTime.formatIso(releasedAt));
 

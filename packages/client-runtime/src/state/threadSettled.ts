@@ -70,35 +70,14 @@ export function hasQueuedTurnStart(
   );
 }
 
-export interface ThreadSnoozeShell extends QueuedThreadShell {
+/**
+ * The snooze lifecycle fields. Snooze is an overlay on the active state: a
+ * snoozed thread stays "active" in the data model and is only suppressed
+ * from the inbox (and from alerts) until its wake time passes or the user
+ * unsnoozes it. Nothing the thread does or receives ends it early.
+ */
+export interface ThreadSnoozeShell {
   readonly snoozedUntil?: string | null;
-  readonly snoozedAt?: string | null;
-  readonly hasPendingApprovals: boolean;
-  readonly hasPendingUserInput: boolean;
-  readonly pendingSubagentRequest?: PendingSubagentRequest | null;
-}
-
-export function threadRaisedHandWhileSnoozed(shell: ThreadSnoozeShell): boolean {
-  if (shell.hasPendingApprovals || shell.hasPendingUserInput) return true;
-  if (shell.pendingSubagentRequest != null) return true;
-  const runtime = shell.runtime ?? shell.session ?? null;
-  const latestRun = shell.latestRun ?? shell.latestTurn ?? null;
-  if (
-    (runtime?.status === "error" || runtime?.status === "failed") &&
-    (shell.snoozedAt == null ||
-      (runtime.updatedAt != null && Date.parse(runtime.updatedAt) > Date.parse(shell.snoozedAt)))
-  ) {
-    return true;
-  }
-  if (
-    shell.snoozedAt != null &&
-    (latestRun?.state === "completed" || latestRun?.status === "completed") &&
-    latestRun.completedAt != null &&
-    Date.parse(latestRun.completedAt) > Date.parse(shell.snoozedAt)
-  ) {
-    return true;
-  }
-  return false;
 }
 
 /** The settle fields plus everything needed to detect a raised hand. */
@@ -131,18 +110,21 @@ export function effectiveSettled(shell: ThreadSettleShell): boolean {
   return !failedAfterSettle;
 }
 
+/**
+ * A thread may be snoozed unless the agent or one of its subagents is
+ * blocked on the user right now: hiding a pending approval or user-input
+ * request defeats the request, and a queued turn start (a message no turn has
+ * adopted yet) is invisible pending work the same way it is for settle. A running session IS snoozable —
+ * snooze only affects visibility, never the agent. Requests that arrive after
+ * the snooze do not undo it; the open thread still shows them. Client-side
+ * twin of the server invariants so the UI can reject before a round trip.
+ */
 export function canSnooze(
-  shell: Pick<
-    ThreadSnoozeShell,
-    | "hasPendingApprovals"
-    | "hasPendingUserInput"
-    | "pendingSubagentRequest"
-    | "latestUserMessageAt"
-    | "latestTurn"
-    | "latestRun"
-    | "session"
-    | "runtime"
-  >,
+  shell: QueuedThreadShell & {
+    readonly hasPendingApprovals: boolean;
+    readonly hasPendingUserInput: boolean;
+    readonly pendingSubagentRequest?: PendingSubagentRequest | null;
+  },
   options: { readonly now: string },
 ): boolean {
   if (shell.hasPendingApprovals || shell.hasPendingUserInput) return false;
@@ -151,6 +133,14 @@ export function canSnooze(
   return true;
 }
 
+/**
+ * Snoozed resolution: hidden from the inbox while the wake time is in the
+ * future, whatever the thread does meanwhile. Approvals, questions, failures,
+ * finished runs and new messages (the user's too) all leave it snoozed; only
+ * the timer or an explicit unsnooze ends it. Timer wakes are derived — no
+ * server event fires when snoozedUntil passes; the stale fields simply stop
+ * classifying as snoozed (and feed the woke indicator until the user visits).
+ */
 export function effectiveSnoozed(
   shell: ThreadSnoozeShell,
   options: { readonly now: string },
@@ -158,10 +148,16 @@ export function effectiveSnoozed(
   if (shell.snoozedUntil == null) return false;
   const wakeAtMs = Date.parse(shell.snoozedUntil);
   if (Number.isNaN(wakeAtMs)) return false;
-  if (wakeAtMs <= Date.parse(options.now)) return false;
-  return !threadRaisedHandWhileSnoozed(shell);
+  return wakeAtMs > Date.parse(options.now);
 }
 
+/**
+ * When a previously-snoozed thread's timer ran out, or null if it never
+ * snoozed / is still snoozed. Used for the "Woke" indicator: the thread
+ * reappears in its original sort position (the inbox sort is deliberately
+ * static), so the wake signal has to carry the weight. Compare against the
+ * client's lastVisitedAt — visiting clears the indicator like it clears unread.
+ */
 export function threadWokeAt(
   shell: ThreadSnoozeShell,
   options: { readonly now: string },
@@ -169,23 +165,6 @@ export function threadWokeAt(
   if (shell.snoozedUntil == null) return null;
   const wakeAtMs = Date.parse(shell.snoozedUntil);
   if (Number.isNaN(wakeAtMs)) return null;
-  // An early hand-raise wake stays authoritative even after the scheduled
-  // wake time passes: reporting snoozedUntil then would resurface a Woke
-  // indicator the user already cleared by visiting (snoozedUntil is newer
-  // than that visit's lastVisitedAt).
-  if (threadRaisedHandWhileSnoozed(shell)) {
-    const latestRun = shell.latestRun ?? shell.latestTurn ?? null;
-    const runtime = shell.runtime ?? shell.session ?? null;
-    if (
-      shell.snoozedAt != null &&
-      (latestRun?.state === "completed" || latestRun?.status === "completed") &&
-      latestRun.completedAt != null &&
-      Date.parse(latestRun.completedAt) > Date.parse(shell.snoozedAt)
-    ) {
-      return latestRun.completedAt;
-    }
-    return runtime?.updatedAt ?? shell.snoozedAt ?? null;
-  }
   return wakeAtMs <= Date.parse(options.now) ? shell.snoozedUntil : null;
 }
 
