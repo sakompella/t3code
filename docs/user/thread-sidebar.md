@@ -190,6 +190,7 @@ continuations after a restart. Sending a new message, archiving, or settling the
 thread prevents a pending continuation from starting.
 
 Choose **Snooze until reset** to hide the thread until its allowance returns.
+A thread that is already snoozed keeps its own wake time; use **Snooze** to change it.
 Snooze and auto-resume are independent: snooze alone wakes the thread without
 sending a message; enabling both wakes and continues it. **Wake now** cancels
 the snooze. Enable **Snooze limited threads** in thread behavior settings to

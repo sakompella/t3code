@@ -2805,12 +2805,21 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
                     snooze: command.limitRecovery.snooze ?? previousRecovery?.snooze ?? false,
                     requestId: command.commandId,
                   };
+          // A snooze the user already set belongs to its timer. Recovery
+          // metadata may arm a snooze, but never retimes one that is running;
+          // `thread.snooze` is how the user changes a deadline.
+          const otherSnoozeIsRunning =
+            thread.snoozedUntil != null &&
+            DateTime.toEpochMillis(thread.snoozedUntil) > DateTime.toEpochMillis(now) &&
+            DateTime.toEpochMillis(thread.snoozedUntil) !==
+              Date.parse(limitRecovery?.resetAt ?? "");
           return {
             ...thread,
             ...(command.title === undefined ? {} : { title: command.title }),
             ...(command.limitRecovery === undefined ? {} : { limitRecovery }),
             ...(command.limitRecovery !== undefined &&
             limitRecovery?.snooze === true &&
+            !otherSnoozeIsRunning &&
             Date.parse(limitRecovery.resetAt) > DateTime.toEpochMillis(now)
               ? {
                   snoozedUntil: DateTime.makeUnsafe(limitRecovery.resetAt),

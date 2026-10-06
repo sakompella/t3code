@@ -4757,6 +4757,137 @@ it.layer(TestLayer)("usage-limit recovery", (it) => {
   );
 
   it.effect.each([
+    ["a nearer reset", { hours: 24 }, { minutes: 30 }],
+    ["a later reset", { minutes: 10 }, { minutes: 30 }],
+  ] as const)(
+    "a recovery armed by %s leaves a running manual snooze and still resumes",
+    ([name, snoozeFor, resetIn]) =>
+      Effect.gen(function* () {
+        const orchestrator = yield* Orchestrator.OrchestratorV2;
+        const events = yield* EventSink.EventSinkV2;
+        const key = name.replaceAll(" ", "-");
+        const threadId = ThreadId.make(`recovery:manual:${key}`);
+        const projectId = ProjectId.make(`recovery:project:manual:${key}`);
+        yield* seedProject({
+          projectId,
+          title: "Recovery project",
+          workspaceRoot: process.cwd(),
+          defaultModelSelection: modelSelection,
+          createdAt: DateTime.formatIso(yield* DateTime.now),
+        });
+        yield* orchestrator.dispatch({
+          type: "thread.create",
+          commandId: CommandId.make(`recovery:manual:create:${key}`),
+          threadId,
+          projectId,
+          title: "Manually snoozed",
+          modelSelection,
+          runtimeMode: "full-access",
+          interactionMode: "default",
+          branch: null,
+          worktreePath: null,
+          createdBy: "user",
+          creationSource: "web",
+        });
+        yield* orchestrator.dispatch({
+          type: "message.dispatch",
+          commandId: CommandId.make(`recovery:manual:message:${key}`),
+          threadId,
+          messageId: MessageId.make(`recovery:manual:message:${key}`),
+          text: "Work on this.",
+          attachments: [],
+          dispatchMode: { type: "start_immediately" },
+          createdBy: "user",
+          creationSource: "web",
+        });
+        const manualDeadline = DateTime.add(yield* DateTime.now, snoozeFor);
+        yield* orchestrator.dispatch({
+          type: "thread.snooze",
+          commandId: CommandId.make(`recovery:manual:snooze:${key}`),
+          threadId,
+          snoozedUntil: DateTime.formatIso(manualDeadline),
+        });
+        const snoozed = (yield* orchestrator.getThreadProjection(threadId)).thread;
+
+        // The run fails under the manual snooze with a limit that resets sooner or later.
+        const run = (yield* orchestrator.getThreadProjection(threadId)).runs[0]!;
+        const failedAt = yield* DateTime.now;
+        const resetAt = DateTime.add(failedAt, resetIn);
+        yield* events.write({
+          commandId: CommandId.make(`recovery:manual:fail:${key}`),
+          events: [
+            {
+              id: EventId.make(`recovery:manual:run:${key}`),
+              type: "run.updated",
+              threadId,
+              occurredAt: failedAt,
+              payload: { ...run, status: "failed", completedAt: failedAt },
+            },
+            {
+              id: EventId.make(`recovery:manual:error:${key}`),
+              type: "turn-item.updated",
+              threadId,
+              occurredAt: failedAt,
+              payload: {
+                id: TurnItemId.make(`recovery:manual:error:${key}`),
+                type: "error",
+                threadId,
+                runId: run.id,
+                nodeId: run.rootNodeId,
+                providerThreadId: null,
+                providerTurnId: null,
+                nativeItemRef: null,
+                parentItemId: null,
+                ordinal: 2,
+                status: "failed",
+                title: "Usage limit reached",
+                startedAt: failedAt,
+                completedAt: failedAt,
+                updatedAt: failedAt,
+                failure: {
+                  class: "usage_limit",
+                  message: "Plan limit reached.",
+                  code: "usageLimitExceeded",
+                  retryable: null,
+                  resetAt: DateTime.formatIso(resetAt),
+                },
+              },
+            },
+          ],
+        });
+
+        // The worker arms it with the global snooze setting on.
+        const shell = (yield* orchestrator.getShellSnapshot()).threads.find(
+          (thread) => thread.id === threadId,
+        )!;
+        const arm = limitRecoveryCommand(shell, true, DateTime.toEpochMillis(failedAt), true)!;
+        yield* orchestrator.dispatch(arm);
+        const armed = (yield* orchestrator.getThreadProjection(threadId)).thread;
+        assert.isTrue(armed.limitRecovery?.autoResume);
+        assert.deepEqual(armed.snoozedUntil, manualDeadline);
+        assert.deepEqual(armed.snoozedAt, snoozed.snoozedAt);
+        assert.isUndefined(armed.snoozeEndedAt);
+
+        // The retry still comes due at the reset, and the snooze outlives or
+        // follows it untouched.
+        yield* TestClock.adjust(resetIn);
+        const due = (yield* orchestrator.getShellSnapshot()).threads.find(
+          (thread) => thread.id === threadId,
+        )!;
+        const resume = limitRecoveryCommand(
+          due,
+          true,
+          DateTime.toEpochMillis(yield* DateTime.now),
+        )!;
+        assert.equal(resume.type, "message.dispatch");
+        yield* orchestrator.dispatch(resume);
+        const resumed = yield* orchestrator.getThreadProjection(threadId);
+        assert.lengthOf(resumed.runs, 2);
+        assert.deepEqual(resumed.thread.snoozedUntil, manualDeadline);
+      }),
+  );
+
+  it.effect.each([
     "resume",
     "queued-resume",
     "cancel",
