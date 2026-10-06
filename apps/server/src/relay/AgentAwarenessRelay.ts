@@ -11,7 +11,7 @@ import {
   type RelayAgentActivityPublishProofPayload,
   type RelayAgentActivityState,
 } from "@t3tools/contracts/relay";
-import { projectThreadAwarenessV2 } from "@t3tools/shared/agentAwareness";
+import { isAgentAwarenessSnoozed, projectThreadAwarenessV2 } from "@t3tools/shared/agentAwareness";
 import { turnItemUpdateCanEndBackgroundWork } from "@t3tools/shared/orchestrationV2PendingBackgroundWork";
 import { makeDrainableWorker } from "@t3tools/shared/DrainableWorker";
 import { withRelayClientTracing } from "@t3tools/shared/relayTracing";
@@ -106,8 +106,8 @@ export function shouldPublishAgentAwarenessEvent(
     case "subagent.updated":
     case "provider-thread.updated":
       return true;
-    // A snooze withdraws the published state. Ending one republishes nothing:
-    // that would push what happened meanwhile as if it were new.
+    // A snooze withdraws the published state. Ending one republishes nothing,
+    // and the outcomes it hid stay hidden (see outcomeSeenWhileSnoozed).
     case "thread.snoozed":
       return true;
     case "thread.settled":
@@ -334,6 +334,13 @@ function resolveAgentAwarenessRelayPublishSnapshot(input: {
   };
 }
 
+/** Identifies the finished run a terminal alert would announce. */
+function terminalOutcomeKey(thread: OrchestrationV2ThreadShell): string | null {
+  return thread.latestRunId != null && thread.latestRunCompletedAt != null
+    ? `${thread.latestRunId}:${DateTime.formatIso(thread.latestRunCompletedAt)}`
+    : null;
+}
+
 function terminalWorkSinceStart(thread: OrchestrationV2ThreadShell, startedAt: number): boolean {
   return (
     thread.latestRunCompletedAt != null &&
@@ -385,6 +392,10 @@ export const make = Effect.gen(function* () {
   // Holds at most one pending wake, so a burst of requests costs one retry.
   const catchUpRequests = yield* Queue.dropping<void>(1);
   const publishedStateByThreadRef = yield* Ref.make(new Map<ThreadId, string>());
+  // The finished run each thread had while snoozed. Ending a snooze emits no
+  // event, so without this a later metadata update would announce that old
+  // outcome as new. A later run has another key and still alerts.
+  const outcomeSeenWhileSnoozed = new Map<ThreadId, string>();
 
   const readSecretString = (name: string) =>
     secrets
@@ -546,15 +557,34 @@ export const make = Effect.gen(function* () {
     const project = Option.isSome(thread)
       ? yield* projects.getById(thread.value.projectId)
       : Option.none<Project>();
+    const snapshotNow = yield* DateTime.now;
     const snapshot = resolveAgentAwarenessRelayPublishSnapshot({
       environmentId,
       threadId,
       thread,
       project,
-      now: yield* DateTime.now,
+      now: snapshotNow,
     });
+    if (Option.isSome(thread) && isAgentAwarenessSnoozed(thread.value, snapshotNow)) {
+      const outcome = terminalOutcomeKey(thread.value);
+      if (outcome !== null) outcomeSeenWhileSnoozed.set(threadId, outcome);
+    } else if (Option.isNone(thread)) {
+      outcomeSeenWhileSnoozed.delete(threadId);
+    }
     const publishIdentity = agentAwarenessPublishIdentity(snapshot.state);
     const publishedStateByThread = yield* Ref.get(publishedStateByThreadRef);
+    if (
+      (snapshot.state?.phase === "completed" || snapshot.state?.phase === "failed") &&
+      Option.isSome(thread) &&
+      outcomeSeenWhileSnoozed.get(threadId) === terminalOutcomeKey(thread.value)
+    ) {
+      publishConfirmDeadlines.delete(threadId);
+      yield* Effect.logDebug("agent activity publish skipped; outcome already hidden by a snooze", {
+        environmentId,
+        threadId,
+      });
+      return;
+    }
     if (
       (snapshot.state?.phase === "completed" || snapshot.state?.phase === "failed") &&
       !publishedStateByThread.has(threadId)

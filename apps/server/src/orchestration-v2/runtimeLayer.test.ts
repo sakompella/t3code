@@ -2625,6 +2625,139 @@ it.layer(TestLayer)("OrchestrationV2LayerLive lifecycle", (it) => {
     }),
   );
 
+  it.effect("a restart continuation of a settled thread leaves it settled", () =>
+    Effect.gen(function* () {
+      const orchestrator = yield* Orchestrator.OrchestratorV2;
+      const eventSink = yield* EventSink.EventSinkV2;
+      const threadId = ThreadId.make("runtime-layer-restart-settled");
+      yield* orchestrator.dispatch({
+        type: "thread.create",
+        createdBy: "user",
+        creationSource: "web",
+        commandId: CommandId.make("restart-settled-create"),
+        threadId,
+        projectId: ProjectId.make("restart-settled-project"),
+        title: "Restart settled",
+        modelSelection,
+        runtimeMode: "full-access",
+        interactionMode: "default",
+        branch: null,
+        worktreePath: "/tmp/runtime-layer-restart-settled",
+      });
+      yield* orchestrator.dispatch({
+        type: "message.dispatch",
+        createdBy: "user",
+        creationSource: "web",
+        commandId: CommandId.make("restart-settled-user-message"),
+        threadId,
+        messageId: MessageId.make("restart-settled-user-message"),
+        text: "Original work",
+        attachments: [],
+        modelSelection,
+        dispatchMode: { type: "start_immediately" },
+      });
+      const original = (yield* orchestrator.getThreadProjection(threadId)).runs[0]!;
+      const cancelledAt = yield* DateTime.now;
+      yield* eventSink.commitCommand({
+        commandId: CommandId.make("restart-settled-cancel"),
+        threadId,
+        commandType: "provider-runtime.reconcile",
+        acceptedAt: cancelledAt,
+        events: [
+          {
+            id: EventId.make("restart-settled-cancel-event"),
+            type: "run.updated",
+            threadId,
+            runId: original.id,
+            occurredAt: cancelledAt,
+            payload: { ...original, status: "cancelled", completedAt: cancelledAt },
+          },
+        ],
+        effects: [],
+      });
+      yield* orchestrator.dispatch({
+        type: "thread.settle",
+        commandId: CommandId.make("restart-settled-settle"),
+        threadId,
+      });
+      const settledAt = (yield* orchestrator.getThreadProjection(threadId)).thread.settledAt;
+      assert.isNotNull(settledAt);
+
+      yield* orchestrator.dispatch({
+        type: "message.dispatch",
+        createdBy: "agent",
+        creationSource: "server",
+        commandId: CommandId.make("restart-settled-continuation"),
+        threadId,
+        messageId: MessageId.make("restart-settled-continuation"),
+        text: "Continue where you left off.",
+        attachments: [],
+        modelSelection,
+        dispatchMode: { type: "start_immediately" },
+        restartContinuationOfRunId: original.id,
+      });
+      const resumed = yield* orchestrator.getThreadProjection(threadId);
+      assert.lengthOf(resumed.runs, 2);
+      assert.equal(resumed.thread.settledOverride, "settled");
+      assert.deepEqual(resumed.thread.settledAt, settledAt);
+    }),
+  );
+
+  it.effect("pinning un-settles a thread but leaves its snooze to the timer or an unsnooze", () =>
+    Effect.gen(function* () {
+      const orchestrator = yield* Orchestrator.OrchestratorV2;
+      const threadId = ThreadId.make("runtime-layer-pin-keeps-snooze");
+      yield* orchestrator.dispatch({
+        type: "thread.create",
+        createdBy: "user",
+        creationSource: "web",
+        commandId: CommandId.make("pin-snooze-create"),
+        threadId,
+        projectId: ProjectId.make("pin-snooze-project"),
+        title: "Pin keeps snooze",
+        modelSelection,
+        runtimeMode: "full-access",
+        interactionMode: "default",
+        branch: null,
+        worktreePath: "/tmp/runtime-layer-pin-snooze",
+      });
+      yield* orchestrator.dispatch({
+        type: "thread.settle",
+        commandId: CommandId.make("pin-snooze-settle"),
+        threadId,
+      });
+      const snoozedUntil = DateTime.add(yield* DateTime.now, { hours: 6 });
+      yield* orchestrator.dispatch({
+        type: "thread.snooze",
+        commandId: CommandId.make("pin-snooze-snooze"),
+        threadId,
+        snoozedUntil: DateTime.formatIso(snoozedUntil),
+      });
+      const snoozedAt = (yield* orchestrator.getThreadProjection(threadId)).thread.snoozedAt;
+
+      yield* orchestrator.dispatch({
+        type: "thread.pin",
+        commandId: CommandId.make("pin-snooze-pin"),
+        threadId,
+      });
+      const pinned = (yield* orchestrator.getThreadProjection(threadId)).thread;
+      assert.isNotNull(pinned.pinnedAt);
+      assert.equal(pinned.settledOverride, "active");
+      assert.deepEqual(pinned.snoozedUntil, snoozedUntil);
+      assert.deepEqual(pinned.snoozedAt, snoozedAt);
+
+      yield* orchestrator.dispatch({
+        type: "thread.unsnooze",
+        commandId: CommandId.make("pin-snooze-unsnooze"),
+        threadId,
+        reason: "user",
+      });
+      const woken = (yield* orchestrator.getThreadProjection(threadId)).thread;
+      assert.isNull(woken.snoozedUntil);
+      assert.isNotNull(woken.pinnedAt);
+    }),
+  );
+
   it.effect("rejects settling a thread while a run is active", () =>
     Effect.gen(function* () {
       const orchestrator = yield* Orchestrator.OrchestratorV2;
@@ -2940,6 +3073,7 @@ it.layer(TestLayer)("OrchestrationV2LayerLive lifecycle", (it) => {
         type: "thread.unsnooze",
         commandId: CommandId.make("wake-parked-unsnooze"),
         threadId,
+        reason: "user",
       });
       const afterUnsnooze = yield* orchestrator.getThreadProjection(threadId);
       assert.isNull(afterUnsnooze.thread.snoozedUntil);
@@ -4068,6 +4202,7 @@ it.layer(SharedApplicationDataPlaneTestLayer)("snooze projection", (it) => {
         type: "thread.unsnooze",
         commandId: CommandId.make("runtime-layer-snoozed-thread-unsnooze"),
         threadId,
+        reason: "user",
       });
       const awakened = yield* orchestrator.getThreadProjection(threadId);
       assert.isNull(awakened.thread.snoozedUntil);
@@ -4425,7 +4560,7 @@ it.layer(TestLayer)("usage-limit recovery", (it) => {
     "queued-resume",
     "cancel",
     "rearm",
-    "snooze-race",
+    "snoozed-past-reset",
     "new-message",
     "archive",
     "settle",
@@ -4741,30 +4876,29 @@ it.layer(TestLayer)("usage-limit recovery", (it) => {
       );
       if (autoResume && scenario !== "cancel-resume-keep-snooze") assert.isNotNull(resume);
       else assert.isNull(resume);
-      if (scenario === "snooze-race") {
-        const wakeAt = DateTime.formatIso(DateTime.add(yield* DateTime.now, { minutes: 1 }));
+      if (scenario === "snoozed-past-reset") {
+        // Snooze hides the thread; it never delays a due provider retry.
+        const wakeAt = DateTime.add(yield* DateTime.now, { hours: 6 });
         yield* orchestrator.dispatch({
           type: "thread.snooze",
-          commandId: CommandId.make("recovery:raced-snooze"),
+          commandId: CommandId.make("recovery:snoozed-past-reset"),
           threadId,
-          snoozedUntil: wakeAt,
+          snoozedUntil: DateTime.formatIso(wakeAt),
         });
-        yield* orchestrator.dispatch(resume!);
-        assert.lengthOf((yield* orchestrator.getThreadProjection(threadId)).runs, 1);
-        yield* TestClock.adjust("1 minute");
-        const current = (yield* orchestrator.getShellSnapshot()).threads.find(
+        const snoozedShell = (yield* orchestrator.getShellSnapshot()).threads.find(
           (thread) => thread.id === threadId,
         )!;
-        const freshResume = limitRecoveryCommand(
-          current,
-          true,
-          DateTime.toEpochMillis(yield* DateTime.now),
+        assert.deepEqual(snoozedShell.snoozedUntil, wakeAt);
+        assert.deepEqual(
+          limitRecoveryCommand(snoozedShell, true, DateTime.toEpochMillis(yield* DateTime.now))
+            ?.commandId,
+          resume!.commandId,
         );
-        assert.isNotNull(freshResume);
-        assert.notEqual(freshResume!.commandId, resume!.commandId);
-        yield* orchestrator.dispatch(freshResume!);
-        yield* orchestrator.dispatch(freshResume!);
-        assert.lengthOf((yield* orchestrator.getThreadProjection(threadId)).runs, 2);
+        yield* orchestrator.dispatch(resume!);
+        yield* orchestrator.dispatch(resume!);
+        const resumed = yield* orchestrator.getThreadProjection(threadId);
+        assert.lengthOf(resumed.runs, 2);
+        assert.deepEqual(resumed.thread.snoozedUntil, wakeAt);
       }
       if (scenario === "expired-snooze") {
         const staleSnooze = yield* orchestrator

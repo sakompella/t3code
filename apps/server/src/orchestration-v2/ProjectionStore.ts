@@ -150,7 +150,6 @@ export type ProjectionLimitRecoveryCandidate = Pick<
   | "latestRunCompletedAt"
   | "updatedAt"
   | "limitRecovery"
-  | "snoozedUntil"
 >;
 
 /** The thread fields pull request sync reads, for a thread with at least one link. */
@@ -3352,10 +3351,6 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
                 AND json_extract(t.payload_json, '$.limitRecovery.resetAt') IS json_extract(item.payload_json, '$.failure.resetAt')
                 AND json_extract(t.payload_json, '$.limitRecovery.autoResume') = 1
                 AND julianday(json_extract(item.payload_json, '$.failure.resetAt')) <= julianday(${DateTime.formatIso(options.now)})
-                AND (
-                  json_extract(t.payload_json, '$.snoozedUntil') IS NULL
-                  OR julianday(json_extract(t.payload_json, '$.snoozedUntil')) <= julianday(${DateTime.formatIso(options.now)})
-                )
               )
               OR (
                 (
@@ -3396,7 +3391,6 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
             settledOverride: thread.settledOverride,
             pendingRuntimeRequest: null,
             limitRecovery: thread.limitRecovery ?? null,
-            snoozedUntil: thread.snoozedUntil ?? null,
           });
         }
         return candidates;
@@ -5688,12 +5682,7 @@ export const layerMemory: Layer.Layer<ProjectionStoreV2> = Layer.effect(
                 ) {
                   return options.autoResume || (options.snooze && resetMs > nowMs);
                 }
-                return (
-                  thread.limitRecovery.autoResume &&
-                  resetMs <= nowMs &&
-                  (thread.snoozedUntil == null ||
-                    DateTime.toEpochMillis(thread.snoozedUntil) <= nowMs)
-                );
+                return thread.limitRecovery.autoResume && resetMs <= nowMs;
               })
               .toSorted((left, right) => left.id.localeCompare(right.id)),
           ),

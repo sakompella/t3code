@@ -700,14 +700,9 @@ describe("AgentAwarenessRelay", () => {
         yield* TestClock.adjust("5 seconds");
         yield* relay.drain;
       });
-      const finishedWhileSnoozed = shell({
-        status: "completed",
-        snoozedUntil,
-        latestRunCompletedAt: DateTime.makeUnsafe("1970-01-01T00:00:10.000Z"),
-      });
       for (const snoozedShell of [
         shell({ snoozedUntil }),
-        finishedWhileSnoozed,
+        shell({ status: "completed", snoozedUntil }),
         shell({ status: "failed", snoozedUntil }),
         shell({
           snoozedUntil,
@@ -725,13 +720,75 @@ describe("AgentAwarenessRelay", () => {
       assert.isTrue(publications.length > 1);
       assert.isTrue(publications.slice(1).every((publication) => publication.state === null));
 
-      // The timer ending is the only thing that lets the finished run through.
-      yield* Ref.set(currentShell, finishedWhileSnoozed);
+      // The timer ending lets a question that is still waiting through.
+      yield* Ref.set(
+        currentShell,
+        shell({
+          snoozedUntil,
+          pendingRuntimeRequest: {
+            id: RuntimeRequestId.make("snoozed-question"),
+            kind: "user_input",
+            createdAt: DateTime.makeUnsafe(NOW),
+          },
+        }),
+      );
       yield* TestClock.adjust("2 hours");
       yield* relay.publishThread(THREAD_ID);
       yield* settleTombstone;
-      assert.equal(publications.at(-1)?.state?.phase, "completed");
+      assert.equal(publications.at(-1)?.state?.phase, "waiting_for_input");
     }),
+  );
+
+  it.effect.each(["completed", "failed"] as const)(
+    "does not announce a %s run that finished under a snooze once the snooze is over",
+    (status) =>
+      Effect.gen(function* () {
+        const { relay, currentShell, publications } = yield* makeTestRelay();
+        yield* relay.publishThread(THREAD_ID);
+        const settle = Effect.gen(function* () {
+          yield* TestClock.adjust("5 seconds");
+          yield* relay.drain;
+        });
+        const snoozedUntil = DateTime.add(yield* DateTime.now, { hours: 1 });
+        const finishedWhileSnoozed = shell({
+          status,
+          snoozedUntil,
+          latestRunId: RunId.make("run-under-snooze"),
+          latestRunCompletedAt: DateTime.makeUnsafe("1970-01-01T00:00:10.000Z"),
+        });
+        yield* Ref.set(currentShell, finishedWhileSnoozed);
+        yield* relay.publishThread(THREAD_ID);
+        yield* settle;
+        const published = publications.length;
+        assert.isNull(publications.at(-1)?.state);
+
+        // Unrelated metadata updates after the timer or an explicit unsnooze
+        // republish the thread, and must not replay the hidden outcome.
+        yield* TestClock.adjust("2 hours");
+        for (const afterSnooze of [
+          finishedWhileSnoozed,
+          { ...finishedWhileSnoozed, snoozedUntil: null },
+        ]) {
+          yield* Ref.set(currentShell, afterSnooze);
+          yield* relay.publishThread(THREAD_ID);
+          yield* settle;
+          assert.equal(publications.length, published);
+        }
+
+        // Work that finishes after the snooze is genuinely new.
+        yield* Ref.set(
+          currentShell,
+          shell({
+            status,
+            latestRunId: RunId.make("run-after-snooze"),
+            latestRunCompletedAt: DateTime.makeUnsafe("1970-01-01T03:00:00.000Z"),
+          }),
+        );
+        yield* relay.publishThread(THREAD_ID);
+        yield* settle;
+        assert.equal(publications.length, published + 1);
+        assert.equal(publications.at(-1)?.state?.phase, status);
+      }),
   );
 
   it.effect("confirms a first completed state and respects disabling during confirmation", () =>

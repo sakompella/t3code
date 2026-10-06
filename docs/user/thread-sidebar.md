@@ -216,6 +216,8 @@ several selected threads together.
 A snoozed thread stays out of your inbox until its time ends or you choose
 **Wake thread** (or **Wake now** in the open thread). Nothing else brings it
 back: not a finished run, a failure, an approval or question, an agent update,
-or a message you send. The agent keeps working and the thread keeps its
-history, and opening it shows its status and any request waiting for you. A
-snoozed thread sends no notifications.
+pinning it, or a message you send. The agent keeps working, including a limit
+auto-resume that comes due, and the thread keeps its history. Opening it shows
+its status and any request waiting for you. A snoozed thread sends no
+notifications, and it does not announce afterward what finished while it was
+snoozed.
