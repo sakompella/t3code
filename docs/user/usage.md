@@ -15,9 +15,10 @@ Select a model under **Breakdown** to see its trend, cache hit rate, and cost pe
 
 Prime Agent usage reads the same session log as Pi, from `~/.prime/agent/sessions` and its
 subagent sessions in `~/.prime/agent/session-artifacts`, or the same directories under
-`PRIME_AGENT_CODING_AGENT_DIR` in the account's environment settings. Copied responses count once
-per server. Recorded costs are API-equivalent estimates from the agent's model configuration, not
-subscription charges. Hub requests from other clients are not included.
+`PRIME_AGENT_CODING_AGENT_DIR` in the account's environment settings. A response saved with its
+subagents' usage folded in counts once, at its own usage. Copied responses count once per server.
+Recorded costs are API-equivalent estimates from the agent's model configuration, not subscription
+charges. Hub requests from other clients are not included.
 
 Totals depend on the history available on each server. Grok turns without a saved completed-turn
 record are missing from the totals.

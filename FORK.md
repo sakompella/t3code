@@ -58,7 +58,7 @@ Changes against upstream `main`, grouped by feature. Each item says what changed
 
 ### Usage accounting
 
-- **Usage Cost/Tokens includes Prime Agent session logs**, including its subagent sessions (`session-artifacts`), disabled accounts and custom agent homes (`PRIME_AGENT_CODING_AGENT_DIR`). Upstream reads Pi's logs; Prime Agent writes the same format, so its reader (`provider-pi/src/server/usage.ts`) reuses Pi's parser under its own series. Copied responses count once per server. Saved model costs win; zero or missing costs fall back to model pricing. Web and mobile show separate Pi and Prime Agent series.
+- **Usage Cost/Tokens includes Prime Agent session logs**, including its subagent sessions (`session-artifacts`), disabled accounts and custom agent homes (`PRIME_AGENT_CODING_AGENT_DIR`). Upstream reads Pi's logs; Prime Agent writes the same format, so its reader (`provider-pi/src/server/usage.ts`) reuses Pi's parser under its own series. Copied responses count once per server. A parent response a fork or rewrite saved with its subagents' usage folded in counts at its own usage, read from the `child_usage_attributed` entries; a late attribution reparses only its changed file to correct cached totals. Summaries go under upstream's `Tools/summaries`. Saved model costs win; zero or missing costs fall back to model pricing. Web and mobile show separate Pi and Prime Agent series.
   - Why: the hub quota connection supplies limits, not durable request history. Local logs cover agent work without an always-on hub collector. Other hub clients are not included, and copied history on separate machines may still count twice.
 
 ### Prime Agent UI (keep)
