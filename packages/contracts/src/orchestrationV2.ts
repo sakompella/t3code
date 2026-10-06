@@ -1809,6 +1809,11 @@ export const OrchestrationV2ThreadShell = Schema.Struct({
    * run since. Omitted by servers that predate it.
    */
   latestTaskRunCompletedAt: Schema.optional(Schema.NullOr(Schema.DateTimeUtc)),
+  /**
+   * The status of that same run, so a client can tell a completed task from
+   * one that failed or was interrupted. Omitted by servers that predate it.
+   */
+  latestTaskRunStatus: Schema.optional(Schema.NullOr(OrchestrationV2RunStatus)),
   activeRunId: Schema.NullOr(RunId),
   /**
    * orchestrationV2RunWorkStartedAt of the activity-owning run: a wake keeps

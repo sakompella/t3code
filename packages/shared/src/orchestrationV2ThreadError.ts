@@ -110,13 +110,13 @@ export function latestUnheldRun(
 }
 
 /**
- * When the newest unheld run that is not a routine heartbeat check ended:
- * OrchestrationV2ThreadShell.latestTaskRunCompletedAt, which the SQL thread
- * shell selects the same way.
+ * The newest unheld run that is not a routine heartbeat check: the run behind
+ * OrchestrationV2ThreadShell.latestTaskRunCompletedAt and latestTaskRunStatus,
+ * which the SQL thread shell selects the same way.
  */
-export function latestTaskRunCompletedAt(
+export function latestTaskRun(
   projection: Pick<OrchestrationV2ThreadProjection, "runs" | "messages">,
-): DateTime.Utc | null {
+): OrchestrationV2Run | null {
   const taskRuns = projection.runs.filter(
     (run) =>
       !isOrchestrationV2RoutineRun({
@@ -124,5 +124,5 @@ export function latestTaskRunCompletedAt(
         trigger: orchestrationV2RunTrigger(projection.messages, run),
       }),
   );
-  return latestUnheldRun(taskRuns)?.completedAt ?? null;
+  return latestUnheldRun(taskRuns);
 }

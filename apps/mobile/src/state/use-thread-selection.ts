@@ -18,7 +18,7 @@ import {
   deriveLatestThreadRun,
   deriveThreadRuntime,
 } from "@t3tools/client-runtime/state/thread-execution";
-import { latestTaskRunCompletedAt } from "@t3tools/shared/orchestrationV2ThreadError";
+import { latestTaskRun } from "@t3tools/shared/orchestrationV2ThreadError";
 import * as Option from "effect/Option";
 
 import { scopedThreadKey } from "../lib/scopedEntities";
@@ -73,6 +73,7 @@ function threadDetailToShell(
   const thread = projection.thread;
   const latestRun = deriveLatestThreadRun(projection);
   const runtime = deriveThreadRuntime(projection);
+  const taskRun = latestTaskRun(projection);
   const pendingRequest =
     projection.runtimeRequests.find((request) => request.status === "pending") ?? null;
   return presentThreadShell(environmentId, {
@@ -95,7 +96,8 @@ function threadDetailToShell(
     creationSource: thread.creationSource,
     latestRunId: latestRun?.runId ?? null,
     latestRunTrigger: latestRun?.trigger ?? null,
-    latestTaskRunCompletedAt: latestTaskRunCompletedAt(projection),
+    latestTaskRunCompletedAt: taskRun?.completedAt ?? null,
+    latestTaskRunStatus: taskRun?.status ?? null,
     activeRunId: runtime?.activeRunId ?? null,
     status: runtime?.status ?? "idle",
     pendingRuntimeRequest:

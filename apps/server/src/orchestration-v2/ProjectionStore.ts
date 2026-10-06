@@ -1,6 +1,6 @@
 import {
   latestRootProviderFailure,
-  latestTaskRunCompletedAt,
+  latestTaskRun,
   latestUnheldRun,
   threadErrorSummary,
   usageLimitRunPresentedAsLatest,
@@ -18,6 +18,7 @@ import type {
   OrchestrationV2ProviderThread,
   OrchestrationV2ProviderTurn,
   OrchestrationV2Run,
+  OrchestrationV2RunStatus,
   OrchestrationV2RunTrigger,
   OrchestrationV2Subagent,
   OrchestrationV2ThreadShellSnapshot,
@@ -905,6 +906,7 @@ type ShellThreadRow = {
   readonly latest_run_completed_at: string | null;
   readonly latest_run_trigger_work: string | null;
   readonly latest_task_run_completed_at: string | null;
+  readonly latest_task_run_status: string | null;
   readonly active_run_id: string | null;
   readonly activity_run_status: string | null;
   readonly activity_run_started_at: string | null;
@@ -1347,6 +1349,7 @@ export function threadShellFromProjection(
       projection.turnItems,
       providerSession?.lastError ?? null,
     ) ?? latestUnheldRun(projection.runs);
+  const taskRun = latestTaskRun(projection);
   const activeRun =
     projection.runs
       .filter(isInterruptibleRunForShell)
@@ -1412,7 +1415,8 @@ export function threadShellFromProjection(
     latestRunCompletedAt: latestRun?.completedAt ?? null,
     latestRunTrigger:
       latestRun === null ? null : orchestrationV2RunTrigger(projection.messages, latestRun),
-    latestTaskRunCompletedAt: latestTaskRunCompletedAt(projection),
+    latestTaskRunCompletedAt: taskRun?.completedAt ?? null,
+    latestTaskRunStatus: taskRun?.status ?? null,
     activeRunId: activeRun?.id ?? null,
     activityRunStatus: activityRun?.status ?? null,
     activityRunStartedAt:
@@ -1512,6 +1516,7 @@ type ShellThreadState = {
   readonly latestRunCompletedAt: DateTime.Utc | null;
   readonly latestRunTrigger: OrchestrationV2RunTrigger | null;
   readonly latestTaskRunCompletedAt: DateTime.Utc | null;
+  readonly latestTaskRunStatus: OrchestrationV2RunStatus | null;
   readonly activeRunId: RunId | null;
   readonly activityRunStatus: ShellActivityRunStatus | null;
   readonly activityRunStartedAt: DateTime.Utc | null;
@@ -1532,9 +1537,12 @@ type ShellThreadState = {
 };
 
 function shellStatusFromStoredRunStatus(status: string | null): OrchestrationV2ShellThreadStatus {
+  return status === null ? "idle" : runStatusFromStored(status);
+}
+
+/** A stored run status; an unknown one reads as failed. */
+function runStatusFromStored(status: string): OrchestrationV2RunStatus {
   switch (status) {
-    case null:
-      return "idle";
     case "preparing":
     case "queued":
     case "starting":
@@ -1653,6 +1661,7 @@ function shellFromState(input: {
     latestRunCompletedAt: input.state.latestRunCompletedAt,
     latestRunTrigger: input.state.latestRunTrigger,
     latestTaskRunCompletedAt: input.state.latestTaskRunCompletedAt,
+    latestTaskRunStatus: input.state.latestTaskRunStatus,
     activeRunId: input.state.activeRunId,
     activityRunStatus: input.state.activityRunStatus,
     activityRunStartedAt: input.state.activityRunStartedAt,
@@ -4809,10 +4818,10 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
           ),
         );
 
-    // Mirrors latestTaskRunCompletedAt in threadShellFromProjection: the newest
-    // unheld run that is not a routine heartbeat check (runTriggerFromStoredWork).
-    const latestTaskRunCompletedAtSql = sql`
-      SELECT task.completed_at
+    // Mirrors latestTaskRun in threadShellFromProjection: the newest unheld run
+    // that is not a routine heartbeat check (runTriggerFromStoredWork).
+    const latestTaskRunIdSql = sql`
+      SELECT task.run_id
       FROM orchestration_v2_projection_runs task
       LEFT JOIN orchestration_v2_projection_messages task_message
         ON task_message.message_id = json_extract(task.payload_json, '$.userMessageId')
@@ -4850,7 +4859,8 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
                 FROM orchestration_v2_projection_messages message
                 WHERE message.message_id = json_extract(presented.payload_json, '$.userMessageId')
               ) AS latest_run_trigger_work,
-              (${latestTaskRunCompletedAtSql}) AS latest_task_run_completed_at,
+              task_run.completed_at AS latest_task_run_completed_at,
+              task_run.status AS latest_task_run_status,
               (
                 SELECT r.run_id
                 FROM orchestration_v2_projection_runs r
@@ -4986,6 +4996,8 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
                 )
               ORDER BY candidate.ordinal DESC, candidate.run_id DESC LIMIT 1
             ) AND blocked.status = 'failed'
+            LEFT JOIN orchestration_v2_projection_runs task_run
+              ON task_run.run_id = (${latestTaskRunIdSql})
             WHERE t.deleted_at IS NULL${threadId === undefined ? sql`` : sql` AND t.thread_id = ${threadId}`}${
               location === "active"
                 ? sql` AND json_extract(t.payload_json, '$.archivedAt') IS NULL`
@@ -5147,7 +5159,7 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
                 FROM orchestration_v2_projection_messages message
                 WHERE message.message_id = json_extract(r.payload_json, '$.userMessageId')
               ) AS latest_run_trigger_work,
-              (${latestTaskRunCompletedAtSql}) AS latest_task_run_completed_at,
+              task_run.completed_at AS latest_task_run_completed_at,
               (
                 SELECT message.updated_at
                 FROM orchestration_v2_projection_messages message
@@ -5164,6 +5176,8 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
               ORDER BY latest.ordinal DESC, latest.run_id DESC
               LIMIT 1
             )
+            LEFT JOIN orchestration_v2_projection_runs task_run
+              ON task_run.run_id = (${latestTaskRunIdSql})
             WHERE t.deleted_at IS NULL${threadId === undefined ? sql`` : sql` AND t.thread_id = ${threadId}`}
               AND json_extract(t.payload_json, '$.archivedAt') IS NULL
               AND json_extract(t.payload_json, '$.settledOverride') IS NULL
@@ -5371,6 +5385,10 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
             row.latest_task_run_completed_at === null
               ? null
               : DateTime.makeUnsafe(row.latest_task_run_completed_at),
+          latestTaskRunStatus:
+            row.latest_task_run_status === null
+              ? null
+              : runStatusFromStored(row.latest_task_run_status),
           activeRunId: row.active_run_id === null ? null : RunId.make(row.active_run_id),
           activityRunStartedAt:
             row.activity_run_started_at === null

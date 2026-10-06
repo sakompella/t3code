@@ -1669,7 +1669,11 @@ it.layer(TestLayer)("ProjectionStoreV2", (it) => {
           deletedAt: null,
         },
       });
-      const addRun = Effect.fnUntraced(function* (ordinal: number, sender: "user" | "heartbeat") {
+      const addRun = Effect.fnUntraced(function* (
+        ordinal: number,
+        sender: "user" | "heartbeat",
+        status: "completed" | "failed" | "interrupted" = "completed",
+      ) {
         const at = DateTime.add(startedAt, { minutes: ordinal });
         const runId = RunId.make(`run:projection-heartbeat:${ordinal}`);
         const nodeId = NodeId.make(`node:projection-heartbeat:${ordinal}`);
@@ -1725,7 +1729,7 @@ it.layer(TestLayer)("ProjectionStoreV2", (it) => {
             userMessageId: messageId,
             rootNodeId: nodeId,
             activeAttemptId: null,
-            status: "completed",
+            status,
             requestedAt: at,
             startedAt: at,
             completedAt: at,
@@ -1760,6 +1764,9 @@ it.layer(TestLayer)("ProjectionStoreV2", (it) => {
         assert.deepEqual(shell.latestTaskRunCompletedAt, deploy.at);
         assert.equal(shell.latestRunTrigger, "heartbeat");
       }
+      for (const shell of [afterHeartbeat.memory, afterHeartbeat.sql]) {
+        assert.equal(shell.latestTaskRunStatus, "completed");
+      }
 
       const followUp = yield* addRun(3, "user");
       const afterFollowUp = yield* shells();
@@ -1770,6 +1777,24 @@ it.layer(TestLayer)("ProjectionStoreV2", (it) => {
       for (const shell of Object.values(afterFollowUp)) {
         assert.deepEqual(shell.latestUserMessageAt, followUp.at);
         assert.deepEqual(shell.latestTaskRunCompletedAt, followUp.at);
+      }
+
+      // A task that ended without completing still counts as its end for unread
+      // and auto-settle, and its status says it did not complete.
+      for (const [ordinal, status] of [
+        [4, "interrupted"],
+        [6, "failed"],
+      ] as const) {
+        const task = yield* addRun(ordinal, "user", status);
+        yield* addRun(ordinal + 1, "heartbeat");
+        const afterCheck = yield* shells();
+        for (const shell of Object.values(afterCheck)) {
+          assert.deepEqual(shell.latestTaskRunCompletedAt, task.at);
+        }
+        for (const shell of [afterCheck.memory, afterCheck.sql]) {
+          assert.equal(shell.latestRunTrigger, "heartbeat");
+          assert.equal(shell.latestTaskRunStatus, status);
+        }
       }
     }),
   );

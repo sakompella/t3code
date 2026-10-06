@@ -1,7 +1,7 @@
 import {
   latestExecutedRun,
   latestRootProviderFailure,
-  latestTaskRunCompletedAt,
+  latestTaskRun,
   usageLimitBlockedRun,
 } from "@t3tools/shared/orchestrationV2ThreadError";
 import { threadPullRequestsOf } from "@t3tools/shared/threadPullRequests";
@@ -2633,7 +2633,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         messageRoles: ["user"],
       });
       // Clients read unread from the latest run that is not a routine check.
-      const latestRunCompletedAt = latestTaskRunCompletedAt(projection);
+      const latestRunCompletedAt = latestTaskRun(projection)?.completedAt ?? null;
       if (latestRunCompletedAt === null) {
         return yield* new OrchestratorDispatchError({
           commandId: command.commandId,
