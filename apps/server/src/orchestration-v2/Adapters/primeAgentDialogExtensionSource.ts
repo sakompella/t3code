@@ -13,7 +13,22 @@ const ENTRY = "t3-child-dialog-route";
 const HANDOFF = "t3-child-dialog-route-handoff";
 
 type Route = { readonly activeSessionId: string; readonly socketPath?: string };
-type LiveRoute = { readonly route: Route; readonly client: DaemonClient; readonly pending: Map<string, AbortController> };
+type ReconnectStatus = Parameters<NonNullable<Parameters<DaemonClient["enableAutoReconnect"]>[0]["onStatus"]>>[0];
+type LiveRoute = {
+  readonly route: Route;
+  readonly client: DaemonClient;
+  /** Child requests open in the parent UI. */
+  readonly pending: Map<string, AbortController>;
+  /** Requests whose parent dialog closed while the socket was down; each gets cancelled:true once reattached. */
+  readonly outbox: Set<string>;
+  /** Only a ready route counts as attached. A reconnecting route is still owned and listened to. */
+  ready: boolean;
+  /** The current owner's reconnect handler. A reload moves it with the route. */
+  onReconnect?: (status: ReconnectStatus) => void;
+};
+
+/** Bounds stock DaemonClient recovery after a lost socket, as Prime Agent's own default does. */
+const RECONNECT_TIMEOUT_MS = 60_000;
 /** Takes ownership of a live route. Passed from a reloaded extension to the one it replaces. */
 type Adopt = (route: LiveRoute) => void;
 
@@ -26,7 +41,7 @@ function parseRoute(value: unknown): Route {
 }
 
 export default function childDialogs(pi: ExtensionAPI) {
-  // A route is listed only while its client is attached and connected.
+  // Owned routes. A ready route is attached; any other is reconnecting.
   const routes = new Map<string, { live: LiveRoute; release: () => void }>();
   const connecting = new Map<string, Promise<void>>();
   let stopped = false;
@@ -44,18 +59,48 @@ export default function childDialogs(pi: ExtensionAPI) {
     }));
   };
 
+  const attachRequest = (activeSessionId: string) =>
+    ({ type: "attach", activeSessionId, supportsExtensionUi: true, capabilities: ["extension_ui", "slim_attach"] }) as const;
+
   /** Answers the route's dialogs through ctx until released. */
   const listen = (live: LiveRoute, ctx: Pick<ExtensionContext, "ui">) => {
     const { activeSessionId } = live.route;
-    const forget = () => {
+    const drop = () => {
       if (routes.get(activeSessionId)?.live === live) routes.delete(activeSessionId);
       for (const controller of live.pending.values()) controller.abort();
+      live.client.close();
+    };
+    const fail = (reason: string) => {
+      drop();
+      try { ctx.ui.notify(\`Child \${activeSessionId}: dialog routing to T3 was lost (\${reason}). Its questions can no longer be answered here.\`, "error"); } catch { /* The parent context may have been retired. */ }
+    };
+    // A lost socket cannot carry answers. Close the open parent dialogs and cancel them once reattached.
+    const lose = () => {
+      live.ready = false;
+      for (const [requestId, controller] of live.pending) {
+        live.outbox.add(requestId);
+        controller.abort();
+      }
+    };
+    live.onReconnect = (status) => {
+      if (status.status === "failed") return fail(status.error);
+      if (status.status !== "connected") return;
+      void live.client.request(attachRequest(activeSessionId), undefined, { recoverable: false }).then(async (response) => {
+        if (!response.success) return fail(response.error);
+        if (!live.client.isConnected) return; // Lost again; the next reconnect retries.
+        live.ready = true;
+        for (const requestId of [...live.outbox]) {
+          live.outbox.delete(requestId);
+          await live.client.request({ type: "extension_ui_response", activeSessionId, requestId, response: { cancelled: true } }).catch(() => undefined);
+        }
+      }, () => {
+        if (live.client.isConnected) fail("the child could not be reattached");
+      });
     };
     const stopMessages = live.client.onMessage((message) => {
       if (message.type === "session_closed" && message.activeSessionId === activeSessionId) {
-        forget();
+        drop();
         try { pi.appendEntry(ENTRY, { ...live.route, closed: true }); } catch { /* A retired parent cannot persist lifecycle entries. */ }
-        live.client.close();
         return;
       }
       if (message.type !== "extension_ui_request" || message.activeSessionId !== activeSessionId || !["select", "confirm", "input", "editor"].includes(message.method)) return;
@@ -88,13 +133,16 @@ export default function childDialogs(pi: ExtensionAPI) {
       void answer().catch((error: unknown): AgentConnectionExtensionUiResponse => {
         try { ctx.ui.notify(\`Child dialog could not reach T3: \${String(error)}\`, "error"); } catch { /* The parent context may have been retired. */ }
         return { cancelled: true };
-      }).then((response) => live.client.request({ type: "extension_ui_response", activeSessionId, requestId: message.id, response })).catch(() => {
+      }).then((response) => {
+        // A request whose dialog closed on a lost socket gets only the outbox's cancellation.
+        if (live.outbox.has(message.id)) return;
+        return live.client.request({ type: "extension_ui_response", activeSessionId, requestId: message.id, response });
+      }).catch(() => {
         // The child may have cancelled the request while its parent UI was open.
       }).finally(() => live.pending.delete(message.id));
     });
-    // A lost daemon socket cannot carry answers. Forgetting the route makes T3's next attach reconnect.
-    const stopClose = live.client.onClose(forget);
-    return () => { stopMessages(); stopClose(); };
+    const stopClose = live.client.onClose(lose);
+    return () => { stopMessages(); stopClose(); live.onReconnect = undefined; };
   };
 
   const register = (live: LiveRoute, ctx: Pick<ExtensionContext, "ui">) => {
@@ -110,13 +158,15 @@ export default function childDialogs(pi: ExtensionAPI) {
 
   const openRoute = async (route: Route, ctx: Pick<ExtensionContext, "ui">) => {
     if (stopped) throw new Error("The parent dialog bridge has shut down.");
-    if (routes.has(route.activeSessionId)) return;
-    const live: LiveRoute = { route, client: new DaemonClient(route.socketPath ?? defaultDaemonSocketPath()), pending: new Map() };
+    const existing = routes.get(route.activeSessionId);
+    if (existing?.live.ready) return;
+    if (existing) throw new Error("The child dialog route is reconnecting to the Prime Agent daemon.");
+    const live: LiveRoute = { route, client: new DaemonClient(route.socketPath ?? defaultDaemonSocketPath()), pending: new Map(), outbox: new Set(), ready: false };
     // Listen before attaching: the daemon may send a dialog right after the attach response.
     const release = listen(live, ctx);
     try {
       await live.client.connect();
-      const response = await live.client.request({ type: "attach", activeSessionId: route.activeSessionId, supportsExtensionUi: true, capabilities: ["extension_ui", "slim_attach"] });
+      const response = await live.client.request(attachRequest(route.activeSessionId), undefined, { recoverable: false });
       if (!response.success) throw new Error(response.error);
       if (stopped || !live.client.isConnected) throw new Error("The parent or child dialog bridge closed while attaching.");
     } catch (error) {
@@ -125,6 +175,9 @@ export default function childDialogs(pi: ExtensionAPI) {
       throw error;
     }
     release();
+    live.ready = true;
+    // The parent's own daemon connection owns daemon restarts; this client only reconnects to the same socket.
+    live.client.enableAutoReconnect({ recoverDaemon: async () => {}, timeoutMs: RECONNECT_TIMEOUT_MS, onStatus: (status) => live.onReconnect?.(status) });
     register(live, ctx);
   };
 
