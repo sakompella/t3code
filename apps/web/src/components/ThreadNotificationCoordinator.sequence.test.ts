@@ -33,12 +33,18 @@ const working = (runId: string, trigger: "heartbeat" | null = null): ObservedThr
 
 const ended = (
   thread: ObservedThread,
-  status: "completed" | "failed",
+  status: "completed" | "failed" | "interrupted",
   completedAt: string,
 ): ObservedThread => ({
   ...thread,
   latestRun: { ...thread.latestRun!, status, completedAt },
   runtime: null,
+});
+
+/** A thread whose latest run that is not a routine check ended at `taskEndedAt`. */
+const afterTask = (thread: ObservedThread, taskEndedAt: string | null): ObservedThread => ({
+  ...thread,
+  latestTaskRunCompletedAt: taskEndedAt,
 });
 
 /** Feeds snapshots through the coordinator's memory and returns the alerts each raised. */
@@ -96,5 +102,71 @@ describe("thread alerts across user runs and heartbeat checks", () => {
       null,
       null,
     ]);
+  });
+
+  describe("when a check follows a user's run within one shell update", () => {
+    const userEndedAt = "2026-10-05T10:01:00.000Z";
+    const userRun = working("run-user");
+    // While a check runs it is the latest run that is not routine, and it has not ended.
+    const checkRunning = afterTask(working("run-check", "heartbeat"), null);
+    const checkDone = afterTask(
+      ended(working("run-check", "heartbeat"), "completed", "2026-10-05T10:01:30.000Z"),
+      userEndedAt,
+    );
+    const nextCheckRunning = afterTask(working("run-check-2", "heartbeat"), null);
+    const nextCheckDone = afterTask(
+      ended(working("run-check-2", "heartbeat"), "completed", "2026-10-05T10:06:00.000Z"),
+      userEndedAt,
+    );
+
+    it("announces the user's completion once the check ends, and only once", () => {
+      expect(
+        alertsFor([userRun, checkRunning, checkDone, checkDone, nextCheckRunning, nextCheckDone]),
+      ).toEqual([null, null, "completion", null, null, null]);
+    });
+
+    it("announces it when the check also ended in that update", () => {
+      expect(alertsFor([userRun, checkDone, nextCheckDone])).toEqual([null, "completion", null]);
+    });
+
+    it("does not announce it again after a user's completion already alerted", () => {
+      const userDone = afterTask(ended(userRun, "completed", userEndedAt), userEndedAt);
+      expect(alertsFor([userRun, userDone, checkRunning, checkDone])).toEqual([
+        null,
+        "completion",
+        null,
+        null,
+      ]);
+    });
+
+    it("stays quiet when the first snapshot after a reconnect is the check", () => {
+      expect(alertsFor([checkDone, nextCheckRunning, nextCheckDone])).toEqual([null, null, null]);
+    });
+  });
+
+  it("never announces a run that failed or was interrupted when a later check ends", () => {
+    const interruptedAt = "2026-10-05T10:02:00.000Z";
+    const interrupted = afterTask(
+      ended(working("run-user"), "interrupted", interruptedAt),
+      interruptedAt,
+    );
+    const failedAt = "2026-10-05T10:12:00.000Z";
+    const failedCheck = afterTask(
+      ended(working("run-check-1", "heartbeat"), "failed", failedAt),
+      failedAt,
+    );
+    const checkAfter = (runId: string, taskEndedAt: string, completedAt: string) =>
+      afterTask(ended(working(runId, "heartbeat"), "completed", completedAt), taskEndedAt);
+    expect(
+      alertsFor([
+        working("run-user"),
+        interrupted,
+        afterTask(working("run-check", "heartbeat"), null),
+        checkAfter("run-check", interruptedAt, "2026-10-05T10:05:00.000Z"),
+        failedCheck,
+        afterTask(working("run-check-2", "heartbeat"), null),
+        checkAfter("run-check-2", failedAt, "2026-10-05T10:15:00.000Z"),
+      ]),
+    ).toEqual([null, null, null, null, "input", null, null]);
   });
 });

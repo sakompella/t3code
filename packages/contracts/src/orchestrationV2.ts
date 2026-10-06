@@ -1114,7 +1114,7 @@ export type OrchestrationV2RunTrigger = typeof OrchestrationV2RunTrigger.Type;
  * failed, was interrupted or is still going is not routine.
  */
 export function isOrchestrationV2RoutineRun(run: {
-  readonly status: string;
+  readonly status: OrchestrationV2ShellThreadStatus;
   readonly trigger?: OrchestrationV2RunTrigger | null | undefined;
 }): boolean {
   return run.status === "completed" && run.trigger === "heartbeat";
@@ -1125,6 +1125,15 @@ export function orchestrationV2MessageRunTrigger(
   message: Pick<OrchestrationV2ConversationMessage, "notification">,
 ): OrchestrationV2RunTrigger | null {
   return message.notification?.source.kind === "heartbeat" ? "heartbeat" : null;
+}
+
+/** The trigger of a run, read from the message that started it. */
+export function orchestrationV2RunTrigger(
+  messages: ReadonlyArray<Pick<OrchestrationV2ConversationMessage, "id" | "notification">>,
+  run: Pick<OrchestrationV2Run, "userMessageId">,
+): OrchestrationV2RunTrigger | null {
+  const message = messages.find((candidate) => candidate.id === run.userMessageId);
+  return message === undefined ? null : orchestrationV2MessageRunTrigger(message);
 }
 
 export const OrchestrationV2PlanStep = Schema.Struct({

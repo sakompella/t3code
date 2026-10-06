@@ -18,6 +18,7 @@ import {
   deriveLatestThreadRun,
   deriveThreadRuntime,
 } from "@t3tools/client-runtime/state/thread-execution";
+import { latestTaskRunCompletedAt } from "@t3tools/shared/orchestrationV2ThreadError";
 import * as Option from "effect/Option";
 
 import { scopedThreadKey } from "../lib/scopedEntities";
@@ -94,6 +95,7 @@ function threadDetailToShell(
     creationSource: thread.creationSource,
     latestRunId: latestRun?.runId ?? null,
     latestRunTrigger: latestRun?.trigger ?? null,
+    latestTaskRunCompletedAt: latestTaskRunCompletedAt(projection),
     activeRunId: runtime?.activeRunId ?? null,
     status: runtime?.status ?? "idle",
     pendingRuntimeRequest:

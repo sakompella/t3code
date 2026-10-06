@@ -1,6 +1,7 @@
 import {
   latestExecutedRun,
   latestRootProviderFailure,
+  latestTaskRunCompletedAt,
   usageLimitBlockedRun,
 } from "@t3tools/shared/orchestrationV2ThreadError";
 import { threadPullRequestsOf } from "@t3tools/shared/threadPullRequests";
@@ -86,7 +87,6 @@ import {
 import {
   applyToProjection,
   emptyProjection,
-  isRoutineProjectedRun,
   threadShellFromProjection,
   ProjectionStoreV2,
   type ProjectionRecordField,
@@ -2633,9 +2633,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         messageRoles: ["user"],
       });
       // Clients read unread from the latest run that is not a routine check.
-      const latestRunCompletedAt =
-        projection.runs.findLast((run) => !isRoutineProjectedRun(projection, run))?.completedAt ??
-        null;
+      const latestRunCompletedAt = latestTaskRunCompletedAt(projection);
       if (latestRunCompletedAt === null) {
         return yield* new OrchestratorDispatchError({
           commandId: command.commandId,

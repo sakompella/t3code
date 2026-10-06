@@ -1,4 +1,4 @@
-import { EnvironmentId, RunId } from "@t3tools/contracts";
+import { EnvironmentId, isOrchestrationV2RoutineRun, RunId } from "@t3tools/contracts";
 import { derivePendingBackgroundWork } from "@t3tools/shared/orchestrationV2PendingBackgroundWork";
 import * as DateTime from "effect/DateTime";
 import { describe, expect, it } from "vite-plus/test";
@@ -11,7 +11,6 @@ import {
   formatHeartbeatNextRun,
   heartbeatsEqual,
   presentHeartbeats,
-  runCompletedTask,
   threadUnreadCompletionAt,
 } from "./threadHeartbeats.ts";
 
@@ -137,32 +136,22 @@ describe("formatHeartbeatNextRun", () => {
   });
 });
 
-describe("runCompletedTask", () => {
-  it("counts a finished run someone asked for, never a heartbeat check or an unfinished run", () => {
-    const statuses = ["completed", "failed", "interrupted", "cancelled", "running"] as const;
-    for (const status of statuses) {
-      expect(runCompletedTask({ status })).toBe(status === "completed");
-      for (const trigger of [null, "heartbeat"] as const) {
-        expect(runCompletedTask({ status, trigger })).toBe(
-          status === "completed" && trigger !== "heartbeat",
-        );
-      }
-    }
-    expect(runCompletedTask(null)).toBe(false);
-  });
-
+describe("a shell's latest run trigger", () => {
   it("reads the trigger the server sent with the thread's latest run", () => {
-    const latestRun = (latestRunTrigger?: "heartbeat" | null) =>
-      presentThreadShell(EnvironmentId.make("environment"), {
+    const latestRun = (latestRunTrigger?: "heartbeat" | null) => {
+      const run = presentThreadShell(EnvironmentId.make("environment"), {
         ...v2ThreadShell,
         latestRunId: RunId.make("run-heartbeat"),
         status: "completed",
         ...(latestRunTrigger === undefined ? {} : { latestRunTrigger }),
       }).latestRun;
-    expect(runCompletedTask(latestRun("heartbeat"))).toBe(false);
-    expect(runCompletedTask(latestRun(null))).toBe(true);
+      if (run === null) throw new Error("expected a latest run");
+      return run;
+    };
+    expect(isOrchestrationV2RoutineRun(latestRun("heartbeat"))).toBe(true);
+    expect(isOrchestrationV2RoutineRun(latestRun(null))).toBe(false);
     // Servers from before the trigger existed never sent one.
-    expect(runCompletedTask(latestRun())).toBe(true);
+    expect(isOrchestrationV2RoutineRun(latestRun())).toBe(false);
   });
 });
 

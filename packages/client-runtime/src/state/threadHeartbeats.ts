@@ -10,7 +10,7 @@ import {
 } from "@t3tools/contracts";
 import * as DateTime from "effect/DateTime";
 
-import type { EnvironmentThreadShell, ThreadRunSummary } from "./models.ts";
+import type { EnvironmentThreadShell } from "./models.ts";
 
 type Projection = OrchestrationV2ThreadProjection;
 
@@ -92,17 +92,6 @@ export function presentHeartbeats(
     return when === null ? heartbeat.schedule : `${heartbeat.schedule}, ${when}`;
   });
   return { title: `${heartbeats.length} heartbeats`, detail: lines.join("; ") };
-}
-
-/**
- * Whether a run's end finished a task, and so merits a completion alert. A
- * heartbeat run is a routine check: it ending is just execution finishing.
- * Its failures and requests are not completions, so they still alert.
- */
-export function runCompletedTask(
-  run: Pick<ThreadRunSummary, "status" | "trigger"> | null,
-): boolean {
-  return run?.status === "completed" && !isOrchestrationV2RoutineRun(run);
 }
 
 /**

@@ -1,7 +1,10 @@
-import type {
-  OrchestrationV2ProviderFailure,
-  OrchestrationV2Run,
-  OrchestrationV2TurnItem,
+import {
+  isOrchestrationV2RoutineRun,
+  orchestrationV2RunTrigger,
+  type OrchestrationV2ProviderFailure,
+  type OrchestrationV2Run,
+  type OrchestrationV2ThreadProjection,
+  type OrchestrationV2TurnItem,
 } from "@t3tools/contracts";
 import * as DateTime from "effect/DateTime";
 
@@ -104,4 +107,22 @@ export function latestUnheldRun(
     if (latest === null || run.ordinal > latest.ordinal) latest = run;
   }
   return latest;
+}
+
+/**
+ * When the newest unheld run that is not a routine heartbeat check ended:
+ * OrchestrationV2ThreadShell.latestTaskRunCompletedAt, which the SQL thread
+ * shell selects the same way.
+ */
+export function latestTaskRunCompletedAt(
+  projection: Pick<OrchestrationV2ThreadProjection, "runs" | "messages">,
+): DateTime.Utc | null {
+  const taskRuns = projection.runs.filter(
+    (run) =>
+      !isOrchestrationV2RoutineRun({
+        status: run.status,
+        trigger: orchestrationV2RunTrigger(projection.messages, run),
+      }),
+  );
+  return latestUnheldRun(taskRuns)?.completedAt ?? null;
 }

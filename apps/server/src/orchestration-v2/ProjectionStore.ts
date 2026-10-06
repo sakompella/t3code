@@ -1,5 +1,6 @@
 import {
   latestRootProviderFailure,
+  latestTaskRunCompletedAt,
   latestUnheldRun,
   threadErrorSummary,
   usageLimitRunPresentedAsLatest,
@@ -49,8 +50,8 @@ import {
   OrchestrationV2RuntimeRequestJson as OrchestrationV2RuntimeRequestJsonSchema,
   OrchestrationV2SubagentJson as OrchestrationV2SubagentJsonSchema,
   OrchestrationV2TurnItemJson as OrchestrationV2TurnItemJsonSchema,
-  isOrchestrationV2RoutineRun,
   orchestrationV2MessageRunTrigger,
+  orchestrationV2RunTrigger,
   orchestrationV2RunWorkStartedAt,
   RunId,
   CheckpointScopeId,
@@ -1330,23 +1331,6 @@ function runTriggerFromStoredWork(work: string | null): OrchestrationV2RunTrigge
   return work === "heartbeat" ? "heartbeat" : null;
 }
 
-function runTrigger(
-  message: OrchestrationV2ThreadProjection["messages"][number] | undefined,
-): OrchestrationV2RunTrigger | null {
-  return message === undefined ? null : orchestrationV2MessageRunTrigger(message);
-}
-
-/** Whether a run is a routine heartbeat check, read from the message that started it. */
-export function isRoutineProjectedRun(
-  projection: Pick<OrchestrationV2ThreadProjection, "messages">,
-  run: OrchestrationV2Run,
-): boolean {
-  return isOrchestrationV2RoutineRun({
-    status: run.status,
-    trigger: runTrigger(projection.messages.find((message) => message.id === run.userMessageId)),
-  });
-}
-
 export function threadShellFromProjection(
   projection: OrchestrationV2ThreadProjection,
 ): OrchestrationV2ThreadShell {
@@ -1426,12 +1410,9 @@ export function threadShellFromProjection(
     latestRunRequestedAt: latestRun?.requestedAt ?? null,
     latestRunStartedAt: latestRun?.startedAt ?? null,
     latestRunCompletedAt: latestRun?.completedAt ?? null,
-    latestRunTrigger: runTrigger(
-      projection.messages.find((message) => message.id === latestRun?.userMessageId),
-    ),
-    latestTaskRunCompletedAt:
-      latestUnheldRun(projection.runs.filter((run) => !isRoutineProjectedRun(projection, run)))
-        ?.completedAt ?? null,
+    latestRunTrigger:
+      latestRun === null ? null : orchestrationV2RunTrigger(projection.messages, latestRun),
+    latestTaskRunCompletedAt: latestTaskRunCompletedAt(projection),
     activeRunId: activeRun?.id ?? null,
     activityRunStatus: activityRun?.status ?? null,
     activityRunStartedAt:
