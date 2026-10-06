@@ -67,6 +67,9 @@ function makeDaemon(options: { connect?: Promise<void>; attachFails?: boolean } 
     readonly answered = Promise.withResolvers<RecordValue>();
     readonly attachSent = Promise.withResolvers<void>();
     readonly requests: Array<RecordValue> = [];
+    readonly handled: Array<{ type: string; done: (command: RecordValue) => void }> = [];
+    reconnectStatus: ((status: RecordValue) => void) | undefined;
+    reconnecting: PromiseWithResolvers<void> | undefined;
     connected = false;
     closed = false;
     attachedSession: string | undefined;
@@ -86,18 +89,32 @@ function makeDaemon(options: { connect?: Promise<void>; attachFails?: boolean } 
       this.closeListeners.add(listener);
       return () => this.closeListeners.delete(listener);
     }
+    enableAutoReconnect(reconnect: { onStatus: (status: RecordValue) => void }) {
+      this.reconnectStatus = reconnect.onStatus;
+    }
     async connect() {
       await options.connect;
       this.connected = true;
     }
     async request(command: RecordValue) {
+      // Stock auto-reconnect opens the new socket at once, so a request made while
+      // reconnecting waits for the new hello instead of failing.
+      if (!this.connected && this.reconnecting !== undefined) await this.reconnecting.promise;
       if (!this.connected) throw new Error(`Cannot send ${String(command["type"])}: not connected`);
       this.requests.push(command);
+      const response = await this.respond(command);
+      for (const waiter of this.handled.filter((waiter) => waiter.type === command["type"])) {
+        this.handled.splice(this.handled.indexOf(waiter), 1);
+        waiter.done(command);
+      }
+      return response;
+    }
+    private async respond(command: RecordValue) {
       if (command["type"] === "attach") {
         const session = String(command["activeSessionId"]);
         this.attachSent.resolve();
         await attachGates.get(session);
-        if (options.attachFails) return { success: false, error: "Child closed" };
+        if (daemon.attachError !== undefined) return { success: false, error: daemon.attachError };
         this.attachedSession = session;
       }
       if (command["type"] === "extension_ui_response") {
@@ -106,14 +123,35 @@ function makeDaemon(options: { connect?: Promise<void>; attachFails?: boolean } 
       }
       return { success: true };
     }
-    // Stock close() does not notify close listeners; only a lost socket does.
+    /** Resolves after the client's next request of this type has its response. */
+    nextHandled(type: string) {
+      return new Promise<RecordValue>((done) => this.handled.push({ type, done }));
+    }
+    // Stock close() stops reconnecting and does not notify close listeners; only a lost socket does.
     close() {
       this.connected = false;
       this.closed = true;
+      this.reconnectStatus = undefined;
+      this.reconnecting?.resolve();
+      this.reconnecting = undefined;
     }
     loseSocket() {
       this.connected = false;
+      this.attachedSession = undefined;
+      if (this.reconnectStatus !== undefined) this.reconnecting = Promise.withResolvers();
       for (const listener of this.closeListeners) listener(new Error("Daemon socket closed"));
+    }
+    /** Stock auto-reconnect: a new socket and hello, but no attach. */
+    reconnect() {
+      this.connected = true;
+      this.reconnectStatus?.({ status: "connected" });
+      this.reconnecting?.resolve();
+      this.reconnecting = undefined;
+    }
+    giveUpReconnecting(error: string) {
+      this.reconnectStatus?.({ status: "failed", error });
+      this.reconnecting?.resolve();
+      this.reconnecting = undefined;
     }
     dispatch(message: RecordValue) {
       for (const listener of this.listeners) listener(message);
@@ -126,7 +164,15 @@ function makeDaemon(options: { connect?: Promise<void>; attachFails?: boolean } 
         client.dispatch(message);
     }
   };
-  return { FakeClient, clients, responses, attachGates, broadcast };
+  const daemon = {
+    FakeClient,
+    clients,
+    responses,
+    attachGates,
+    broadcast,
+    attachError: options.attachFails ? "Child closed" : (undefined as string | undefined),
+  };
+  return daemon;
 }
 
 const question = (activeSessionId: string, method = "confirm", id = "child-request-1") => ({
@@ -393,21 +439,34 @@ describe("Prime Agent child dialog extension", () => {
     assert.isTrue(first.clients[0]!.closed);
   });
 
-  it("reattaches only routes whose daemon socket was lost when the parent reloads", async () => {
+  it("hands a reconnecting route to the reloaded parent, which reattaches it and cancels its lost question", async () => {
     const first = await loadExtension();
+    first.ctx.ui.confirm = (_title, _message, opts) =>
+      new Promise<boolean>((resolve) =>
+        opts?.signal.addEventListener("abort", () => resolve(false), { once: true }),
+      );
     await first.attach(first.ctx, "child-a");
     await first.attach(first.ctx, "child-b");
-    first.clients[1]!.loseSocket();
-    const { started } = await first.reload();
+    first.daemon.broadcast(question("child-b"));
+    const lost = first.clients[1]!;
+    lost.loseSocket();
+    const { next, started } = await first.reload();
     await started;
-    assert.deepEqual(
-      first.clients.map((client) => [client.attachedSession, client.connected]),
-      [
-        ["child-a", true],
-        ["child-b", false],
-        ["child-b", true],
-      ],
-    );
+    // The reload neither attached a second recipient nor forgot the route.
+    assert.lengthOf(first.clients, 2);
+    const reattached = lost.nextHandled("extension_ui_response");
+    lost.reconnect();
+    assert.deepEqual((await reattached)["response"], { cancelled: true });
+    assert.equal(lost.attachedSession, "child-b");
+    let newParentCalls = 0;
+    next.ctx.ui.confirm = async () => {
+      newParentCalls++;
+      return true;
+    };
+    const answered = lost.nextHandled("extension_ui_response");
+    first.daemon.broadcast(question("child-b", "confirm", "child-request-2"));
+    assert.deepEqual((await answered)["response"], { confirmed: true });
+    assert.equal(newParentCalls, 1);
   });
 
   it("skips a malformed saved route and still adopts live clients on reload", async () => {
@@ -422,30 +481,98 @@ describe("Prime Agent child dialog extension", () => {
     assert.deepEqual(next.notices, []);
   });
 
-  it("forgets a route whose daemon socket closed, so the next attach really reconnects", async () => {
+  it("reattaches by itself after a lost socket and cancels the question it could not deliver", async () => {
     const fixture = await loadExtension();
     const aborted = Promise.withResolvers<void>();
     fixture.ctx.ui.confirm = (_title, _message, opts) =>
-      new Promise<boolean>(() =>
-        opts?.signal.addEventListener("abort", () => aborted.resolve(), { once: true }),
+      new Promise<boolean>((resolve) =>
+        opts?.signal.addEventListener(
+          "abort",
+          () => {
+            aborted.resolve();
+            resolve(false);
+          },
+          { once: true },
+        ),
       );
     await fixture.attach();
     fixture.daemon.broadcast(question("child-1"));
-    fixture.clients[0]!.loseSocket();
-    // The open parent question could no longer reach the child.
+    const client = fixture.clients[0]!;
+    client.loseSocket();
+    // The open parent question can no longer reach the child.
     await aborted.promise;
+    // While reconnecting, the route is not reported ready.
+    await fixture.attach();
+    assert.deepEqual(fixture.lastResult(), {
+      requestId: "route-child-1",
+      ok: false,
+      error: "Error: The child dialog route is reconnecting to the Prime Agent daemon.",
+    });
+    // No T3 roster update or attach command: stock reconnect alone restores the route.
+    const cancelled = client.nextHandled("extension_ui_response");
+    client.reconnect();
+    assert.deepEqual(await cancelled, {
+      type: "extension_ui_response",
+      activeSessionId: "child-1",
+      requestId: "child-request-1",
+      response: { cancelled: true },
+    });
+    assert.deepEqual(
+      client.requests.map((request) => [request["type"], request["activeSessionId"]]),
+      [
+        ["attach", "child-1"],
+        ["attach", "child-1"],
+        ["extension_ui_response", "child-1"],
+      ],
+    );
     fixture.ctx.ui.confirm = async () => true;
+    const answered = client.nextHandled("extension_ui_response");
+    fixture.daemon.broadcast(question("child-1", "confirm", "child-request-2"));
+    assert.deepEqual((await answered)["response"], { confirmed: true });
+    await fixture.attach();
+    assert.deepEqual(fixture.lastResult(), { requestId: "route-child-1", ok: true });
+    assert.lengthOf(fixture.clients, 1);
+  });
+
+  it("shows a parent error and drops the route when bounded reconnect gives up", async () => {
+    const fixture = await loadExtension();
+    await fixture.attach();
+    const client = fixture.clients[0]!;
+    client.loseSocket();
+    client.giveUpReconnecting("Daemon reconnection failed: no daemon");
+    assert.isTrue(client.closed);
+    assert.include(
+      fixture.notices.at(-1)!,
+      "Child child-1: dialog routing to T3 was lost (Daemon reconnection failed: no daemon).",
+    );
+    // A later attach starts over with a fresh client instead of reusing the dead one.
     await fixture.attach();
     assert.deepEqual(fixture.lastResult(), { requestId: "route-child-1", ok: true });
     assert.lengthOf(fixture.clients, 2);
-    assert.equal(fixture.clients[1]!.attachedSession, "child-1");
-    fixture.daemon.broadcast(question("child-1", "confirm", "child-request-2"));
-    assert.deepEqual(await fixture.clients[1]!.answered.promise, {
-      type: "extension_ui_response",
-      activeSessionId: "child-1",
-      requestId: "child-request-2",
-      response: { confirmed: true },
-    });
+  });
+
+  it("shows a parent error when the child cannot be reattached after reconnect", async () => {
+    const fixture = await loadExtension();
+    await fixture.attach();
+    const client = fixture.clients[0]!;
+    client.loseSocket();
+    fixture.daemon.attachError = "Unknown session child-1";
+    const reattach = client.nextHandled("attach");
+    client.reconnect();
+    await reattach;
+    await Promise.resolve();
+    assert.isTrue(client.closed);
+    assert.include(fixture.notices.at(-1)!, "(Unknown session child-1)");
+  });
+
+  it("stops reconnecting when the parent exits during recovery", async () => {
+    const fixture = await loadExtension();
+    await fixture.attach();
+    const client = fixture.clients[0]!;
+    client.loseSocket();
+    await fixture.handlers.get("session_shutdown")!({ reason: "exit" }, fixture.ctx);
+    assert.isTrue(client.closed);
+    assert.isUndefined(client.reconnectStatus);
   });
 
   it("does not report readiness when the daemon socket closes during attach", async () => {
