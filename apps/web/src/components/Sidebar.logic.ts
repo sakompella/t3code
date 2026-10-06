@@ -257,6 +257,18 @@ export type SidebarThreadDropPlan =
     }
   | { readonly kind: "settle" };
 
+/**
+ * Whether the dropped row should be held at its destination while the server
+ * applies the plan. A snoozed row stays on the snoozed shelf unless the plan
+ * wakes it, so pinning or settling it has no destination to hold.
+ */
+export function sidebarDropHoldsPlacement(
+  from: SidebarSection,
+  plan: SidebarThreadDropPlan,
+): boolean {
+  return from !== "snoozed" || (plan.kind === "move-active" && plan.unsnooze);
+}
+
 /** What dropping in `to` does to a thread lifted from `from`, for the badge
     on the lifted row. Null while reordering inside one section and for the
     working and snoozed shelves, which cannot be drop targets. */

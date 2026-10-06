@@ -359,6 +359,43 @@ function wakeWorkStartedAt(
   return previous === undefined ? {} : { workStartedAt: orchestrationV2RunWorkStartedAt(previous) };
 }
 
+/**
+ * The fields that end a snooze on the user's request. The moment it
+ * effectively ended (the earlier of its deadline and now) is kept after the
+ * deadline is cleared, so work finished by then stays hidden. A deadline that
+ * already passed keeps its own time, so work finished after it stays fresh,
+ * and an unsnooze with no snooze to end leaves the recorded moment alone.
+ */
+function endSnoozeEarly(
+  thread: Pick<OrchestrationV2AppThread, "snoozedUntil" | "snoozeEndedAt">,
+  now: DateTime.Utc,
+): Pick<OrchestrationV2AppThread, "snoozedUntil" | "snoozedAt" | "snoozeEndedAt"> {
+  const endedNow = thread.snoozedUntil == null ? null : DateTime.min(thread.snoozedUntil, now);
+  const previous = thread.snoozeEndedAt ?? null;
+  return {
+    snoozedUntil: null,
+    snoozedAt: null,
+    snoozeEndedAt:
+      endedNow === null
+        ? previous
+        : previous === null
+          ? endedNow
+          : DateTime.max(previous, endedNow),
+  };
+}
+
+/**
+ * A message the agent's own background work sent to wake it: a provider
+ * self-wake, a monitor notification, or a delegated task's result. It is not
+ * the user re-engaging, so it never undoes the user's settle.
+ */
+function isAutomaticWake(message: {
+  readonly notification?: unknown;
+  readonly delegatedCompletion?: unknown;
+}): boolean {
+  return message.notification !== undefined || message.delegatedCompletion !== undefined;
+}
+
 /** A native /compact or /logout turn: provider maintenance, not agent work. */
 export function isNativeMaintenanceCommand(message: {
   readonly text: string;
@@ -2549,12 +2586,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       // They are not user messages and are hidden from the queue UI, so they
       // must not block settling; they are cancelled below instead.
       const automaticMessageIds = new Set(
-        projection.messages
-          .filter(
-            (message) =>
-              message.notification !== undefined || message.delegatedCompletion !== undefined,
-          )
-          .map((message) => message.id),
+        projection.messages.filter(isAutomaticWake).map((message) => message.id),
       );
       const automaticQueuedRuns = projection.runs.filter(
         (run) => run.status === "queued" && automaticMessageIds.has(run.userMessageId),
@@ -2786,8 +2818,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           const alreadyAwake = thread.snoozedUntil == null;
           return {
             ...thread,
-            snoozedUntil: null,
-            snoozedAt: null,
+            ...endSnoozeEarly(thread, now),
             updatedAt: alreadyAwake ? thread.updatedAt : now,
           };
         }
@@ -2800,11 +2831,11 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           };
         }
         case "thread.pin": {
-          // Pinning is a promotion: it clears the parked states rather than
-          // silently outranking them — an explicit settle is un-settled and a
-          // snooze's return ticket is spent (the thread is on top NOW).
+          // Pinning is a promotion: an explicit settle is un-settled rather
+          // than silently outranking the pin. A snooze is presentation only and
+          // belongs to its timer and an explicit unsnooze, so pinning leaves it.
           const alreadyPinned = thread.pinnedAt != null;
-          const promotes = thread.settledOverride === "settled" || thread.snoozedUntil != null;
+          const promotes = thread.settledOverride === "settled";
           return {
             ...thread,
             pinnedAt: alreadyPinned ? thread.pinnedAt : now,
@@ -2817,8 +2848,6 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
             settledOverride:
               thread.settledOverride === "settled" ? "active" : thread.settledOverride,
             settledAt: thread.settledOverride === "settled" ? null : thread.settledAt,
-            snoozedUntil: null,
-            snoozedAt: null,
             updatedAt: alreadyPinned && !promotes ? thread.updatedAt : now,
           };
         }
@@ -2872,12 +2901,21 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
                     snooze: command.limitRecovery.snooze ?? previousRecovery?.snooze ?? false,
                     requestId: command.commandId,
                   };
+          // A snooze the user already set belongs to its timer. Recovery
+          // metadata may arm a snooze, but never retimes one that is running;
+          // `thread.snooze` is how the user changes a deadline.
+          const otherSnoozeIsRunning =
+            thread.snoozedUntil != null &&
+            DateTime.toEpochMillis(thread.snoozedUntil) > DateTime.toEpochMillis(now) &&
+            DateTime.toEpochMillis(thread.snoozedUntil) !==
+              Date.parse(limitRecovery?.resetAt ?? "");
           return {
             ...thread,
             ...(command.title === undefined ? {} : { title: command.title }),
             ...(command.limitRecovery === undefined ? {} : { limitRecovery }),
             ...(command.limitRecovery !== undefined &&
             limitRecovery?.snooze === true &&
+            !otherSnoozeIsRunning &&
             Date.parse(limitRecovery.resetAt) > DateTime.toEpochMillis(now)
               ? {
                   snoozedUntil: DateTime.makeUnsafe(limitRecovery.resetAt),
@@ -2885,12 +2923,14 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
                   // metadata timestamp from appearing as a fresh failure wake.
                   snoozedAt: now,
                 }
-              : command.limitRecovery !== undefined &&
-                  thread.limitRecovery?.snooze &&
+              : // Only the user's explicit "stop snoozing until reset" ends the
+                // recovery's snooze; other recovery updates leave it to its timer.
+                command.limitRecovery?.snooze === false &&
+                  previousRecovery?.snooze &&
                   thread.snoozedUntil != null &&
                   DateTime.toEpochMillis(thread.snoozedUntil) ===
-                    Date.parse(thread.limitRecovery.resetAt)
-                ? { snoozedUntil: null, snoozedAt: null }
+                    Date.parse(previousRecovery.resetAt)
+                ? endSnoozeEarly(thread, now)
                 : {}),
             ...(command.branch === undefined ? {} : { branch: command.branch }),
             ...(command.worktreePath === undefined ? {} : { worktreePath: command.worktreePath }),
@@ -4427,9 +4467,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           projection.thread.deletedAt !== null ||
           projection.thread.settledOverride === "settled" ||
           projection.thread.providerInstanceId !== run.providerInstanceId ||
-          projection.runtimeRequests.some((request) => request.status === "pending") ||
-          (projection.thread.snoozedUntil != null &&
-            DateTime.toEpochMillis(projection.thread.snoozedUntil) > DateTime.toEpochMillis(now))
+          projection.runtimeRequests.some((request) => request.status === "pending")
         ) {
           yield* emit(
             events,
@@ -4438,16 +4476,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
             type: "thread.metadata-updated",
             threadId: command.threadId,
             occurredAt: now,
-            payload: {
-              ...projection.thread,
-              ...(recovery?.autoResume &&
-              recovery.requestId === command.usageLimitRecoveryRequestId &&
-              recovery.runId === command.usageLimitContinuationOfRunId &&
-              projection.thread.snoozedUntil != null &&
-              DateTime.toEpochMillis(projection.thread.snoozedUntil) > DateTime.toEpochMillis(now)
-                ? { limitRecovery: { ...recovery, requestId: command.commandId } }
-                : {}),
-            },
+            payload: projection.thread,
           });
           return;
         }
@@ -4483,7 +4512,14 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         }
       }
 
-      if (projection.thread.settledOverride !== null) {
+      // Only a user message un-settles. Snooze is untouched by every message,
+      // the user's included: only its timer or an explicit unsnooze ends it.
+      // A restart note is the server resuming lost background work, not the user.
+      if (
+        !isAutomaticWake(command) &&
+        command.restartContinuationOfRunId === undefined &&
+        projection.thread.settledOverride !== null
+      ) {
         const now = yield* DateTime.now;
         const thread: OrchestrationV2AppThread = {
           ...projection.thread,
@@ -4500,26 +4536,6 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           command,
         )({
           type: "thread.unsettled",
-          threadId: command.threadId,
-          providerInstanceId: thread.providerInstanceId,
-          occurredAt: now,
-          payload: thread,
-        });
-        projection = yield* getProjectionWithPendingEvents(command.threadId, events);
-      }
-      if (projection.thread.snoozedUntil != null) {
-        const now = yield* DateTime.now;
-        const thread: OrchestrationV2AppThread = {
-          ...projection.thread,
-          snoozedUntil: null,
-          snoozedAt: null,
-          updatedAt: now,
-        };
-        yield* emit(
-          events,
-          command,
-        )({
-          type: "thread.unsnoozed",
           threadId: command.threadId,
           providerInstanceId: thread.providerInstanceId,
           occurredAt: now,

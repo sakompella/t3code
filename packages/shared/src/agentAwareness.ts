@@ -48,18 +48,25 @@ export interface ProjectThreadAwarenessV2Input {
     | "modelSelection"
     | "pendingBackgroundTasks"
     | "pendingRuntimeRequest"
+    | "snoozedUntil"
     | "status"
     | "title"
     | "updatedAt"
   >;
+  readonly now: DateTime.Utc;
 }
 
-/** Build relay activity directly from the V2 shell projection. */
+/**
+ * Build relay activity directly from the V2 shell projection. A snoozed
+ * thread publishes nothing, so its approvals, questions, failures and
+ * completions send no push until the snooze timer ends or the user unsnoozes.
+ */
 export function projectThreadAwarenessV2(
   input: ProjectThreadAwarenessV2Input,
 ): AgentAwarenessState | null {
-  const { environmentId, project, thread } = input;
+  const { environmentId, project, thread, now } = input;
   if (thread.lineage.relationshipToParent === "subagent") return null;
+  if (thread.snoozedUntil != null && DateTime.isGreaterThan(thread.snoozedUntil, now)) return null;
   const phase = resolveThreadAwarenessPhaseV2(thread);
   if (phase === null) {
     return null;
