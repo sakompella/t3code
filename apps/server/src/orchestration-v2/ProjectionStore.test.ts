@@ -871,6 +871,116 @@ it.effect("memory shell snapshots scope to one project", () =>
   ),
 );
 
+it.effect.each([
+  ["sql", ProjectionStore.layer.pipe(Layer.provideMerge(SqlitePersistence.layerMemory))],
+  ["memory", ProjectionStore.layerMemory],
+] as const)(
+  "%s: a due usage-limit retry stays a candidate while the thread is snoozed",
+  ([, testLayer]) =>
+    Effect.gen(function* () {
+      const store = yield* ProjectionStore.ProjectionStoreV2;
+      const threadId = yield* addRolledBackRecoveryCandidate("snoozed-limit");
+      const original = (yield* store.getThreadProjection(threadId)).runs[0]!;
+      const failedAt = yield* DateTime.now;
+      const resetAt = DateTime.add(failedAt, { minutes: 1 });
+      yield* store.apply({
+        id: EventId.make("event:snoozed-limit:error"),
+        type: "turn-item.updated",
+        threadId,
+        occurredAt: failedAt,
+        payload: {
+          id: TurnItemId.make("snoozed-limit:error"),
+          threadId,
+          runId: original.id,
+          nodeId: original.rootNodeId,
+          providerThreadId: null,
+          providerTurnId: null,
+          nativeItemRef: null,
+          parentItemId: null,
+          ordinal: 2,
+          status: "failed",
+          title: "Usage limit reached",
+          startedAt: failedAt,
+          completedAt: failedAt,
+          updatedAt: failedAt,
+          type: "error",
+          failure: {
+            class: "usage_limit",
+            message: "Plan limit reached.",
+            resetAt: DateTime.formatIso(resetAt),
+            code: "usageLimitExceeded",
+            retryable: null,
+          },
+        },
+      });
+      yield* store.apply({
+        id: EventId.make("event:snoozed-limit:run-failed"),
+        type: "run.updated",
+        threadId,
+        occurredAt: failedAt,
+        payload: { ...original, status: "failed", completedAt: failedAt },
+      });
+      const failed = (yield* store.getThreadProjection(threadId)).thread;
+      yield* store.apply({
+        id: EventId.make("event:snoozed-limit:armed-and-snoozed"),
+        type: "thread.metadata-updated",
+        threadId,
+        occurredAt: failedAt,
+        payload: {
+          ...failed,
+          limitRecovery: {
+            runId: original.id,
+            resetAt: DateTime.formatIso(resetAt),
+            autoResume: true,
+            snooze: false,
+            requestId: CommandId.make("recovery:snoozed-limit"),
+          },
+          snoozedUntil: DateTime.add(resetAt, { hours: 6 }),
+          snoozedAt: failedAt,
+        },
+      });
+      const options = { autoResume: false, snooze: false };
+      assert.isUndefined(
+        (yield* store.getLimitRecoveryCandidates({ ...options, now: failedAt })).find(
+          (row) => row.id === threadId,
+        ),
+      );
+      const due = (yield* store.getLimitRecoveryCandidates({ ...options, now: resetAt })).find(
+        (row) => row.id === threadId,
+      );
+      assert.equal(due?.limitRecovery?.requestId, "recovery:snoozed-limit");
+    }).pipe(Effect.provide(testLayer)),
+);
+
+it.effect.each([
+  ["sql", ProjectionStore.layer.pipe(Layer.provideMerge(SqlitePersistence.layerMemory))],
+  ["memory", ProjectionStore.layerMemory],
+] as const)(
+  "%s: shells carry the recorded end of a snooze, and omit it for old threads",
+  ([, testLayer]) =>
+    Effect.gen(function* () {
+      const store = yield* ProjectionStore.ProjectionStoreV2;
+      const threadId = yield* addRolledBackRecoveryCandidate("snooze-ended");
+      const before = yield* store.getThreadShell(threadId);
+      // A thread written before the field existed reads as no recorded end.
+      assert.isNull(before?.snoozeEndedAt ?? null);
+
+      const endedAt = DateTime.makeUnsafe("2026-09-04T12:30:00.000Z");
+      const thread = (yield* store.getThreadProjection(threadId)).thread;
+      yield* store.apply({
+        id: EventId.make("event:snooze-ended:unsnoozed"),
+        type: "thread.unsnoozed",
+        threadId,
+        occurredAt: endedAt,
+        payload: { ...thread, snoozedUntil: null, snoozedAt: null, snoozeEndedAt: endedAt },
+      });
+      const shell = yield* store.getThreadShell(threadId);
+      assert.deepEqual(shell?.snoozeEndedAt, endedAt);
+      const listed = (yield* store.getShellSnapshot()).threads.find((row) => row.id === threadId);
+      assert.deepEqual(listed?.snoozeEndedAt, endedAt);
+    }).pipe(Effect.provide(testLayer)),
+);
+
 it.layer(layerTest)("ProjectionStoreV2", (it) => {
   it.effect(
     "SQL recovery selects unfinished runless native subagents",
@@ -3418,7 +3528,6 @@ it.layer(layerTest)("ProjectionStoreV2", (it) => {
             settledOverride: sqlShell.settledOverride,
             pendingRuntimeRequest: null,
             limitRecovery: sqlShell.limitRecovery,
-            snoozedUntil: sqlShell.snoozedUntil,
           });
         } else assert.isUndefined(candidate);
         assert.isUndefined(candidates.find((row) => row.id === otherThreadId));
@@ -3606,15 +3715,7 @@ it.layer(layerTest)("ProjectionStoreV2", (it) => {
       );
       yield* sql`DELETE FROM orchestration_v2_projection_runtime_requests WHERE runtime_request_id = 'limit-shell:pending-request'`;
       yield* sql`UPDATE orchestration_v2_projection_threads
-        SET payload_json = json_set(payload_json, '$.snoozedUntil', ${DateTime.formatIso(DateTime.add(reset, { minutes: 1 }))})
-        WHERE thread_id = ${threadId}`;
-      assert.isUndefined(
-        (yield* store.getLimitRecoveryCandidates({ ...recoveryOptions, now: reset })).find(
-          (row) => row.id === threadId,
-        ),
-      );
-      yield* sql`UPDATE orchestration_v2_projection_threads
-        SET payload_json = json_set(payload_json, '$.snoozedUntil', NULL, '$.limitRecovery.autoResume', json('false'))
+        SET payload_json = json_set(payload_json, '$.limitRecovery.autoResume', json('false'))
         WHERE thread_id = ${threadId}`;
       assert.isUndefined(
         (yield* store.getLimitRecoveryCandidates({
@@ -6134,7 +6235,9 @@ it.layer(layerTest)("ProjectionStoreV2", (it) => {
       const environmentId = EnvironmentId.make("environment:held-completion");
       const held = yield* store.getThreadShell(threadId);
       assert.equal(
-        held && projectThreadAwarenessV2({ environmentId, project, thread: held })?.phase,
+        held &&
+          projectThreadAwarenessV2({ environmentId, project, thread: held, now: completedAt })
+            ?.phase,
         "running",
       );
 
@@ -6149,7 +6252,8 @@ it.layer(layerTest)("ProjectionStoreV2", (it) => {
       });
       const released = yield* store.getThreadShell(threadId);
       const state =
-        released && projectThreadAwarenessV2({ environmentId, project, thread: released });
+        released &&
+        projectThreadAwarenessV2({ environmentId, project, thread: released, now: releasedAt });
       assert.equal(state?.phase, "completed");
       assert.equal(state?.updatedAt, DateTime.formatIso(releasedAt));
 

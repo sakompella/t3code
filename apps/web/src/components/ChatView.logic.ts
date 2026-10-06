@@ -1336,20 +1336,19 @@ export function mergeDirectPreviewAnnotation(input: {
 }
 
 /**
- * Whether a woken thread woke after the user last saw it. A run that completed
- * after the last visit counts as seeing it, since the user watched it finish.
+ * Whether a woken thread woke after the user last visited it. Only a visit
+ * counts: a run that finishes on its own is not the user re-engaging. An
+ * unparseable stored visit counts as never-visited, so corrupt data cannot
+ * eat the wake signal.
  */
 export function isThreadWokeUnseen(input: {
   readonly wokeAt: string | null;
   readonly settled: boolean;
   readonly lastVisitedAt: string | null | undefined;
-  readonly latestRunCompletedAt: string | null;
 }): boolean {
   if (input.wokeAt === null || input.settled) return false;
   const wokeAtMs = Date.parse(input.wokeAt);
   if (Number.isNaN(wokeAtMs)) return false;
-  const seenAt = [input.lastVisitedAt, input.latestRunCompletedAt]
-    .map((value) => (value ? Date.parse(value) : NaN))
-    .filter((ms) => !Number.isNaN(ms));
-  return seenAt.every((ms) => ms < wokeAtMs);
+  const visitedAtMs = input.lastVisitedAt ? Date.parse(input.lastVisitedAt) : NaN;
+  return Number.isNaN(visitedAtMs) || visitedAtMs < wokeAtMs;
 }
