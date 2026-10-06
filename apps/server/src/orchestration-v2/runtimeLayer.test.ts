@@ -4625,6 +4625,137 @@ it.layer(TestLayer)("usage-limit recovery", (it) => {
       }),
   );
 
+  it.effect(
+    "an automatic recovery for a different failure keeps a snooze the old recovery owns",
+    () =>
+      Effect.gen(function* () {
+        const orchestrator = yield* Orchestrator.OrchestratorV2;
+        const events = yield* EventSink.EventSinkV2;
+        const threadId = ThreadId.make("recovery:different-failure");
+        const projectId = ProjectId.make("recovery:project:different-failure");
+        yield* seedProject({
+          projectId,
+          title: "Recovery project",
+          workspaceRoot: process.cwd(),
+          defaultModelSelection: modelSelection,
+          createdAt: DateTime.formatIso(yield* DateTime.now),
+        });
+        yield* orchestrator.dispatch({
+          type: "thread.create",
+          commandId: CommandId.make("recovery:different:create"),
+          threadId,
+          projectId,
+          title: "Limited twice",
+          modelSelection,
+          runtimeMode: "full-access",
+          interactionMode: "default",
+          branch: null,
+          worktreePath: null,
+          createdBy: "user",
+          creationSource: "web",
+        });
+        const send = (name: string, mode: "defer_start" | "start_immediately") =>
+          orchestrator.dispatch({
+            type: "message.dispatch",
+            commandId: CommandId.make(`recovery:different:${name}`),
+            threadId,
+            messageId: MessageId.make(`recovery:different:${name}`),
+            text: name,
+            attachments: [],
+            dispatchMode: { type: mode },
+            createdBy: "user",
+            creationSource: "web",
+          });
+        const failWithLimit = (name: string, resetAt: DateTime.Utc) =>
+          Effect.gen(function* () {
+            const run = (yield* orchestrator.getThreadProjection(threadId)).runs.at(-1)!;
+            const failedAt = yield* DateTime.now;
+            yield* events.write({
+              commandId: CommandId.make(`recovery:different:fail:${name}`),
+              events: [
+                {
+                  id: EventId.make(`recovery:different:run:${name}`),
+                  type: "run.updated",
+                  threadId,
+                  occurredAt: failedAt,
+                  payload: { ...run, status: "failed", completedAt: failedAt },
+                },
+                {
+                  id: EventId.make(`recovery:different:error:${name}`),
+                  type: "turn-item.updated",
+                  threadId,
+                  occurredAt: failedAt,
+                  payload: {
+                    id: TurnItemId.make(`recovery:different:error:${name}`),
+                    type: "error",
+                    threadId,
+                    runId: run.id,
+                    nodeId: run.rootNodeId,
+                    providerThreadId: null,
+                    providerTurnId: null,
+                    nativeItemRef: null,
+                    parentItemId: null,
+                    ordinal: 2,
+                    status: "failed",
+                    title: "Usage limit reached",
+                    startedAt: failedAt,
+                    completedAt: failedAt,
+                    updatedAt: failedAt,
+                    failure: {
+                      class: "usage_limit",
+                      message: "Plan limit reached.",
+                      code: "usageLimitExceeded",
+                      retryable: null,
+                      resetAt: DateTime.formatIso(resetAt),
+                    },
+                  },
+                },
+              ],
+            });
+            return run;
+          });
+
+        yield* send("first", "defer_start");
+        const firstReset = DateTime.add(yield* DateTime.now, { minutes: 30 });
+        const first = yield* failWithLimit("first", firstReset);
+        yield* orchestrator.dispatch({
+          type: "thread.metadata.update",
+          commandId: CommandId.make("recovery:different:arm-first"),
+          threadId,
+          limitRecovery: {
+            runId: first.id,
+            resetAt: DateTime.formatIso(firstReset),
+            autoResume: true,
+            snooze: true,
+          },
+        });
+        const snoozed = (yield* orchestrator.getThreadProjection(threadId)).thread;
+        assert.deepEqual(snoozed.snoozedUntil, firstReset);
+
+        // Work continues under the snooze and hits a different limit; the
+        // worker arms that failure with the global snooze setting off.
+        yield* send("second", "start_immediately");
+        const secondReset = DateTime.add(yield* DateTime.now, { minutes: 50 });
+        const second = yield* failWithLimit("second", secondReset);
+        yield* orchestrator.dispatch({
+          type: "thread.metadata.update",
+          commandId: CommandId.make("recovery:different:arm-second"),
+          threadId,
+          limitRecovery: {
+            runId: second.id,
+            resetAt: DateTime.formatIso(secondReset),
+            autoResume: true,
+            snooze: false,
+          },
+        });
+        const rearmed = (yield* orchestrator.getThreadProjection(threadId)).thread;
+        assert.equal(rearmed.limitRecovery?.runId, second.id);
+        assert.deepEqual(rearmed.snoozedUntil, firstReset);
+        assert.deepEqual(rearmed.snoozedAt, snoozed.snoozedAt);
+        assert.isUndefined(rearmed.snoozeEndedAt);
+      }),
+  );
+
   it.effect.each([
     "resume",
     "queued-resume",

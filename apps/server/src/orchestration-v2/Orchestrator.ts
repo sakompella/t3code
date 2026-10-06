@@ -2821,10 +2821,10 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
               : // Only the user's explicit "stop snoozing until reset" ends the
                 // recovery's snooze; other recovery updates leave it to its timer.
                 command.limitRecovery?.snooze === false &&
-                  thread.limitRecovery?.snooze &&
+                  previousRecovery?.snooze &&
                   thread.snoozedUntil != null &&
                   DateTime.toEpochMillis(thread.snoozedUntil) ===
-                    Date.parse(thread.limitRecovery.resetAt)
+                    Date.parse(previousRecovery.resetAt)
                 ? endSnoozeEarly(thread, now)
                 : {}),
             ...(command.branch === undefined ? {} : { branch: command.branch }),
