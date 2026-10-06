@@ -1,13 +1,17 @@
+import { EnvironmentId, isOrchestrationV2RoutineRun, RunId } from "@t3tools/contracts";
 import { derivePendingBackgroundWork } from "@t3tools/shared/orchestrationV2PendingBackgroundWork";
 import * as DateTime from "effect/DateTime";
 import { describe, expect, it } from "vite-plus/test";
 
+import { presentThreadShell } from "./models.ts";
+import { v2ThreadShell } from "./orchestrationV2TestFixtures.ts";
 import { deriveRunningTurnBackgroundWork } from "./threadBackgroundWork.ts";
 import {
   deriveThreadHeartbeats,
   formatHeartbeatNextRun,
   heartbeatsEqual,
   presentHeartbeats,
+  threadUnreadCompletionAt,
 } from "./threadHeartbeats.ts";
 
 const at = (epochMillis: number) => DateTime.toDate(DateTime.makeUnsafe(epochMillis));
@@ -129,5 +133,59 @@ describe("formatHeartbeatNextRun", () => {
     );
     expect(otherDay).not.toBe(sameDay);
     expect(otherDay.endsWith(sameDay)).toBe(true);
+  });
+});
+
+describe("a shell's latest run trigger", () => {
+  it("reads the trigger the server sent with the thread's latest run", () => {
+    const latestRun = (latestRunTrigger?: "heartbeat" | null) => {
+      const run = presentThreadShell(EnvironmentId.make("environment"), {
+        ...v2ThreadShell,
+        latestRunId: RunId.make("run-heartbeat"),
+        status: "completed",
+        ...(latestRunTrigger === undefined ? {} : { latestRunTrigger }),
+      }).latestRun;
+      if (run === null) throw new Error("expected a latest run");
+      return run;
+    };
+    expect(isOrchestrationV2RoutineRun(latestRun("heartbeat"))).toBe(true);
+    expect(isOrchestrationV2RoutineRun(latestRun(null))).toBe(false);
+    // Servers from before the trigger existed never sent one.
+    expect(isOrchestrationV2RoutineRun(latestRun())).toBe(false);
+  });
+});
+
+describe("threadUnreadCompletionAt", () => {
+  const userEnded = "2026-10-05T10:00:00.000Z";
+  const checkEnded = "2026-10-05T10:05:00.000Z";
+  const shellAfter = (
+    status: "completed" | "failed" | "running",
+    latestRunTrigger: "heartbeat" | null,
+    latestTaskRunCompletedAt?: string,
+  ) =>
+    presentThreadShell(EnvironmentId.make("environment"), {
+      ...v2ThreadShell,
+      latestRunId: RunId.make("run-latest"),
+      status,
+      latestRunTrigger,
+      latestRunCompletedAt:
+        status === "running" ? null : DateTime.makeUnsafe(Date.parse(checkEnded)),
+      ...(latestTaskRunCompletedAt === undefined
+        ? {}
+        : { latestTaskRunCompletedAt: DateTime.makeUnsafe(Date.parse(latestTaskRunCompletedAt)) }),
+    });
+
+  it("points a finished check back at the end of the run someone asked for", () => {
+    expect(threadUnreadCompletionAt(shellAfter("completed", "heartbeat", userEnded))).toBe(
+      userEnded,
+    );
+    // Nothing someone asked for has ended yet.
+    expect(threadUnreadCompletionAt(shellAfter("completed", "heartbeat"))).toBeNull();
+  });
+
+  it("treats a failed check, and any run someone asked for, as unread news", () => {
+    expect(threadUnreadCompletionAt(shellAfter("failed", "heartbeat", userEnded))).toBe(checkEnded);
+    expect(threadUnreadCompletionAt(shellAfter("completed", null, checkEnded))).toBe(checkEnded);
+    expect(threadUnreadCompletionAt(shellAfter("running", "heartbeat", userEnded))).toBeNull();
   });
 });

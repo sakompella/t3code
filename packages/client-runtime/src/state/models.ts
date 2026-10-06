@@ -7,6 +7,7 @@ import type {
   OrchestrationProjectShell,
   OrchestrationV2ProviderGoal,
   OrchestrationV2RunStatus,
+  OrchestrationV2RunTrigger,
   OrchestrationV2ProviderFailureClass,
   OrchestrationV2ThreadProjection,
   OrchestrationV2ThreadShell,
@@ -41,6 +42,8 @@ export interface ThreadRunSummary {
   readonly startedAt: string | null;
   readonly completedAt: string | null;
   readonly assistantMessageId: MessageId | null;
+  /** What started the run when nobody asked for it; absent or null when someone did. */
+  readonly trigger?: OrchestrationV2RunTrigger | null;
   readonly sourcePlanRef?: {
     readonly threadId: ThreadId;
     readonly planId: PlanId;
@@ -97,6 +100,10 @@ export interface EnvironmentThreadShell {
   readonly forkedFrom: OrchestrationV2ThreadShell["forkedFrom"];
   readonly activeProviderThreadId: OrchestrationV2ThreadShell["activeProviderThreadId"];
   readonly latestRun: ThreadRunSummary | null;
+  /** See OrchestrationV2ThreadShell.latestTaskRunCompletedAt; absent from older servers. */
+  readonly latestTaskRunCompletedAt?: string | null;
+  /** See OrchestrationV2ThreadShell.latestTaskRunStatus; absent from older servers. */
+  readonly latestTaskRunStatus?: OrchestrationV2RunStatus | null;
   readonly runtime: ThreadRuntimeSummary | null;
   readonly latestUserMessageAt: string | null;
   readonly latestUserAuthoredMessageAt?: string | null;
@@ -214,6 +221,7 @@ export function presentThreadShell(
                 : null
               : nullableIso(thread.latestRunCompletedAt),
           assistantMessageId: null,
+          trigger: thread.latestRunTrigger ?? null,
         } satisfies ThreadRunSummary);
   return {
     environmentId,
@@ -236,6 +244,12 @@ export function presentThreadShell(
     forkedFrom: thread.forkedFrom,
     activeProviderThreadId: thread.activeProviderThreadId,
     latestRun,
+    ...(thread.latestTaskRunCompletedAt === undefined
+      ? {}
+      : { latestTaskRunCompletedAt: nullableIso(thread.latestTaskRunCompletedAt) }),
+    ...(thread.latestTaskRunStatus === undefined
+      ? {}
+      : { latestTaskRunStatus: thread.latestTaskRunStatus }),
     runtime: shellRuntime(thread),
     latestUserMessageAt: nullableIso(thread.latestUserMessageAt),
     ...(thread.latestUserAuthoredMessageAt === undefined
