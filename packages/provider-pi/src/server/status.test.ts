@@ -115,8 +115,9 @@ describe("PiProvider", () => {
     }).pipe(Effect.provide(NodeServices.layer)),
   );
 
-  for (const flavor of [PI_FLAVOR, PRIME_AGENT_FLAVOR]) {
-    it.effect(`waits out a ${flavor.displayName} --version that a busy machine slows down`, () =>
+  it.effect.each([PI_FLAVOR, PRIME_AGENT_FLAVOR])(
+    "waits out a $displayName --version that a busy machine slows down",
+    (flavor) =>
       Effect.gen(function* () {
         const slowVersionSpawner = ChildProcessSpawner.make((command) => {
           const args = ChildProcess.isStandardCommand(command) ? command.args : [];
@@ -147,6 +148,5 @@ describe("PiProvider", () => {
         assert.equal(snapshot.status, "ready");
         assert.equal(snapshot.version, flavor.minimumVersion);
       }).pipe(Effect.provide(NodeServices.layer)),
-    );
-  }
+  );
 });
