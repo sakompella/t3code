@@ -4,6 +4,7 @@
  */
 import * as Effect from "effect/Effect";
 import * as Option from "effect/Option";
+import * as Predicate from "effect/Predicate";
 import * as Path from "effect/Path";
 import * as Schema from "effect/Schema";
 
@@ -18,6 +19,7 @@ import {
 } from "@t3tools/provider-core/server/usage";
 import * as HostProcess from "@t3tools/shared/HostProcess";
 import type { PiSettings } from "../settings.ts";
+import { PRIME_AGENT_FLAVOR, resolvePiAgentDir } from "./flavor.ts";
 
 type PiUsageProvider = "pi" | "primeAgent";
 
@@ -141,7 +143,114 @@ const makePiUsageFormat = (
 });
 
 export const piUsageFormat = makePiUsageFormat("pi");
-export const primeAgentUsageFormat = makePiUsageFormat("primeAgent");
+
+const decodeAttribution = Schema.decodeUnknownOption(
+  Schema.Struct({
+    type: Schema.Literal("child_usage_attributed"),
+    targetId: Schema.NonEmptyString,
+    childUsage: Usage,
+    aggregateUsage: Usage,
+  }),
+);
+
+type MutableUsageRecord = { -readonly [Key in keyof UsageRecord]: UsageRecord[Key] };
+
+/**
+ * The responses one parse of a file has produced so far, by entry id. They only
+ * matter within that parse, so they sit beside the serializable scan state.
+ */
+const parsedResponses = new WeakMap<
+  typeof PiScanState.Type,
+  Map<string, MutableUsageRecord>
+>();
+/** Parses whose attribution named a response an earlier, cached parse produced. */
+const lateAttributions = new WeakSet<typeof PiScanState.Type>();
+
+const usageCost = (usage: typeof Usage.Type): number => {
+  const cost = usage.cost?.total;
+  return typeof cost === "number" && Number.isFinite(cost) ? cost : 0;
+};
+
+/**
+ * Prime Agent folds a subagent's usage into its parent response in memory.
+ * Appended lines stay raw, but a fork or file rewrite persists the folded value
+ * under the same entry, followed by the copied `child_usage_attributed` entries
+ * that give the parent's own usage back. The first attribution for a response
+ * restores its own totals; on a raw line it changes nothing.
+ */
+function restoreOwnUsage(parsed: unknown, state: typeof PiScanState.Type): boolean {
+  const attribution = decodeAttribution(parsed);
+  if (Option.isNone(attribution)) return false;
+  const responses = parsedResponses.get(state);
+  const record = responses?.get(attribution.value.targetId);
+  if (responses === undefined || record === undefined) {
+    lateAttributions.add(state);
+    return true;
+  }
+  responses.delete(attribution.value.targetId);
+  const { aggregateUsage, childUsage } = attribution.value;
+  const own = (key: "input" | "output" | "cacheRead" | "cacheWrite") =>
+    Math.max(0, tokenCount(aggregateUsage[key]) - tokenCount(childUsage[key]));
+  const totals = {
+    uncachedInputTokens: own("input"),
+    cachedInputTokens: own("cacheRead"),
+    cacheCreationTokens: own("cacheWrite"),
+    outputTokens: own("output"),
+    reasoningTokens: 0,
+  };
+  const unchanged =
+    totals.uncachedInputTokens === record.totals.uncachedInputTokens &&
+    totals.cachedInputTokens === record.totals.cachedInputTokens &&
+    totals.cacheCreationTokens === record.totals.cacheCreationTokens &&
+    totals.outputTokens === record.totals.outputTokens;
+  // A raw line already holds these totals; keep its exact recorded cost.
+  if (totalTokens(totals) === 0 || unchanged) return true;
+  const ownCost = usageCost(aggregateUsage) - usageCost(childUsage);
+  record.totals = { ...totals, reasoningTokens: Math.min(totals.outputTokens, record.totals.reasoningTokens) };
+  record.reportedCostUsd = ownCost > 0 ? ownCost : null;
+  return true;
+}
+
+function parsePrimeAgentRecord(
+  parsed: unknown,
+  state: typeof PiScanState.Type,
+): readonly UsageRecord[] {
+  if (restoreOwnUsage(parsed, state)) return [];
+  const records = parseRecord("primeAgent", parsed, state);
+  const entryId = Predicate.isObject(parsed) && typeof parsed["id"] === "string" ? parsed["id"] : "";
+  const [record] = records;
+  if (entryId && record !== undefined && records.length === 1) {
+    const responses = parsedResponses.get(state) ?? new Map<string, MutableUsageRecord>();
+    parsedResponses.set(state, responses);
+    responses.set(entryId, record as MutableUsageRecord);
+  }
+  return records;
+}
+
+const piFormat = makePiUsageFormat("primeAgent");
+
+export const primeAgentUsageFormat: TranscriptUsageFormat<typeof PiScanState.Type> = {
+  ...piFormat,
+  selectFields: { ...piFormat.selectFields, targetId: true, childUsage: true, aggregateUsage: true },
+  mightCarryUsage: (line) =>
+    piFormat.mightCarryUsage(line) || line.includes('"child_usage_attributed"'),
+  parseLine: (line, state) => {
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(line);
+    } catch {
+      return [];
+    }
+    return parsePrimeAgentRecord(parsed, state);
+  },
+  parseProjected: parsePrimeAgentRecord,
+  state: {
+    ...piFormat.state!,
+    // A resumed parse starts without the records before its resume point, so
+    // an attribution for one of them repairs the cached totals by a full parse.
+    needsFullParse: (state) => lateAttributions.has(state),
+  },
+};
 
 export const piUsageReader: ProviderUsageReader<PiSettings, Path.Path> = {
   kind: "transcripts",
@@ -174,10 +283,12 @@ export const primeAgentUsageReader: ProviderUsageReader<PiSettings, Path.Path> =
   format: primeAgentUsageFormat,
   directories: Effect.fn("primeAgentUsageReader.directories")(function* ({ environment }) {
     const path = yield* Path.Path;
-    const home = yield* HostProcess.HomeDirectory;
-    const agentDir = environment.PRIME_AGENT_CODING_AGENT_DIR?.trim();
     const root = path.resolve(
-      agentDir ? expandHomePath(agentDir, home) : path.join(home, ".prime", "agent"),
+      resolvePiAgentDir({
+        agentDir: PRIME_AGENT_FLAVOR.agentDir,
+        environment,
+        home: yield* HostProcess.HomeDirectory,
+      }),
     );
     return [{ dir: path.join(root, "sessions") }, { dir: path.join(root, "session-artifacts") }];
   }),
