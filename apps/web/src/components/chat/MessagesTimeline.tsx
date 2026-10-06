@@ -5258,7 +5258,8 @@ function WorkEntryLogRow(props: WorkEntryRowProps) {
     workEntry.projectedItem !== undefined &&
     turnItemNeedsDetailFetch(workEntry.projectedItem.item);
   const canExpandProjectedItem =
-    workEntryHasInspectableContent(workEntry) && (plainOutput !== undefined
+    workEntryHasInspectableContent(workEntry) &&
+    (plainOutput !== undefined
       ? Boolean(plainOutput || viewedImage || workEntry.questionAnswer || plainOutputFetches)
       : workEntry.projectedItem === undefined
         ? canExpand
@@ -5268,10 +5269,10 @@ function WorkEntryLogRow(props: WorkEntryRowProps) {
               workEntry.projectedItem.item.type === "system_notice"
             ? true
             : Boolean(
-              viewedImage ||
-              workEntry.questionAnswer ||
-              turnItemHasDetail(workEntry.projectedItem.item),
-            ));
+                viewedImage ||
+                workEntry.questionAnswer ||
+                turnItemHasDetail(workEntry.projectedItem.item),
+              ));
   // Reserve destructive row styling for severe failures, not routine tool errors.
   const iconWrapperClass = cn(
     "flex size-4 items-center justify-center",
@@ -5335,14 +5336,11 @@ function WorkEntryLogRow(props: WorkEntryRowProps) {
         <div className="min-w-0 flex-1 overflow-hidden">
           <p className="flex min-w-0 w-full items-baseline gap-1.5 text-sm leading-relaxed">
             <span
-              ref={props.active && !showFailedIndicator ? observeVisibleAnimation : undefined}
               className={cn(
                 answerPreview ? "min-w-0" : "min-w-0 flex-1",
                 "truncate",
                 headingClass,
-                props.active &&
-                  !showFailedIndicator &&
-                  (labelCode !== null ? "live-code-shine" : "live-tool-shine"),
+                props.active && !showFailedIndicator && "text-foreground",
               )}
             >
               {isReasoning && !expanded ? (
@@ -5483,16 +5481,25 @@ function WorkEntryLogRow(props: WorkEntryRowProps) {
                     <Fragment key={block.text}>
                       {index > 0 ? "\n\n" : null}
                       {block.language ? (
-                        <HighlightedCode code={block.text} language={block.language}
-                          theme={ctx.resolvedTheme} kind="body" />
-                      ) : block.text}
+                        <HighlightedCode
+                          code={block.text}
+                          language={block.language}
+                          theme={ctx.resolvedTheme}
+                          kind="body"
+                        />
+                      ) : (
+                        block.text
+                      )}
                     </Fragment>
                   ))}
                 </pre>
               ) : null}
               {plainOutputFetches && workEntry.projectedItem ? (
-                <FetchedToolOutput projectedItem={workEntry.projectedItem}
-                  environmentId={ctx.activeThreadEnvironmentId} onImageExpand={onImageExpand} />
+                <FetchedToolOutput
+                  projectedItem={workEntry.projectedItem}
+                  environmentId={ctx.activeThreadEnvironmentId}
+                  onImageExpand={onImageExpand}
+                />
               ) : null}
             </>
           )}

@@ -263,7 +263,7 @@ function collectPendingBackgroundTasks(input: {
   readonly providerThreads: ReadonlyArray<PendingBackgroundWorkProviderThread>;
   readonly activeProviderThreadId?: string | null | undefined;
   readonly turnItems: ReadonlyArray<PendingBackgroundWorkTurnItem>;
-  readonly pullRequests?: ReadonlyArray<PendingBackgroundWorkPullRequest>;
+  readonly pullRequests?: ReadonlyArray<PendingBackgroundWorkPullRequest> | undefined;
 }): ReadonlyArray<PendingBackgroundWorkTask> {
   const byTaskId = new Map<string, PendingBackgroundWorkTask>();
 

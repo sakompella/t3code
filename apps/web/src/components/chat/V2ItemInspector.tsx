@@ -92,7 +92,12 @@ function StructuredValue({
   return (
     <pre className={cn("max-h-80 overflow-auto text-muted-foreground", monoClassName)}>
       {code ? (
-        <HighlightedCode code={code.code} language={code.language} theme={resolvedTheme} kind="body" />
+        <HighlightedCode
+          code={code.code}
+          language={code.language}
+          theme={resolvedTheme}
+          kind="body"
+        />
       ) : isJson ? (
         <RenderErrorBoundary fallback={text}>
           <Suspense fallback={text}>
@@ -210,7 +215,9 @@ function ToolCallBody(
   const call = toolCallLines({ command: props.command, args: props.args });
   return (
     <div className={cn("space-y-1.5", monoClassName)}>
-      {props.code ? <StructuredValue value={props.command ?? props.args} code={props.code} /> : null}
+      {props.code ? (
+        <StructuredValue value={props.command ?? props.args} code={props.code} />
+      ) : null}
       {!props.code && call.command ? <ShellCommandBlock command={call.command} /> : null}
       {!props.code && call.args ? (
         <div className="text-foreground/85">
@@ -222,7 +229,9 @@ function ToolCallBody(
           ))}
         </div>
       ) : null}
-      {!props.code && call.argsText ? <StructuredValue value={call.argsText} highlightJson /> : null}
+      {!props.code && call.argsText ? (
+        <StructuredValue value={call.argsText} highlightJson />
+      ) : null}
       <ToolOutput {...props} />
       {props.exitCode !== undefined && props.exitCode !== 0 ? (
         <div className="text-destructive">exit {props.exitCode}</div>
@@ -361,7 +370,12 @@ export const V2ItemInspector = memo(function V2ItemInspector(props: V2ItemInspec
       ) : null}
 
       {item.type === "dynamic_tool" ? (
-        <ToolCallBody args={item.input} code={props.code} {...outputState} onImageExpand={props.onImageExpand} />
+        <ToolCallBody
+          args={item.input}
+          code={props.code}
+          {...outputState}
+          onImageExpand={props.onImageExpand}
+        />
       ) : null}
 
       {item.type === "approval_request" ? <StructuredValue value={item.prompt} /> : null}

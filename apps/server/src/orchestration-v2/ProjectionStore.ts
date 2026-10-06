@@ -1417,7 +1417,9 @@ export function threadShellFromProjection(
         )[0] ?? null,
     );
   const userMessages = projection.messages
-    .filter((message) => message.role === "user" && orchestrationV2MessageRunTrigger(message) === null)
+    .filter(
+      (message) => message.role === "user" && orchestrationV2MessageRunTrigger(message) === null,
+    )
     .toSorted(
       (left, right) =>
         DateTime.toEpochMillis(right.updatedAt) - DateTime.toEpochMillis(left.updatedAt),
