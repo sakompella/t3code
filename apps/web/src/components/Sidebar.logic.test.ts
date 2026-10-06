@@ -2240,5 +2240,28 @@ describe("Working shelf (beta)", () => {
         unsnooze: false,
       });
     });
+
+    it("pins a snoozed row without waking it, unlike dropping it into Active", () => {
+      const base = {
+        activeKey: "z1",
+        activeSection: "snoozed" as const,
+        pinnedOrder: ["p1"],
+        pinnedKeysById: new Map([["p1", "m"]]),
+        activeOrder: ["a1"],
+        activeKeysById: new Map([["a1", "f"]]),
+      };
+      const pinPlan = planSidebarThreadDrop({
+        ...base,
+        target: { section: "pinned", pinnedOrder: ["p1", "z1"], activeOrder: [] },
+      });
+      expect(pinPlan.kind).toBe("pin");
+      expect(pinPlan).not.toHaveProperty("unsnooze");
+      expect(
+        planSidebarThreadDrop({
+          ...base,
+          target: { section: "active", pinnedOrder: ["p1"], activeOrder: ["a1", "z1"] },
+        }),
+      ).toMatchObject({ kind: "move-active", unsnooze: true });
+    });
   });
 });
