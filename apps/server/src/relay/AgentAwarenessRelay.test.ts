@@ -92,6 +92,19 @@ function shell(overrides: Partial<OrchestrationV2ThreadShell> = {}): Orchestrati
   };
 }
 
+function unsnoozedEvent(
+  occurredAt: DateTime.Utc,
+  updatedAt: DateTime.Utc,
+): OrchestrationV2DomainEvent {
+  return {
+    id: EventId.make("event:unsnoozed"),
+    type: "thread.unsnoozed",
+    threadId: THREAD_ID,
+    occurredAt,
+    payload: { ...appThread(), updatedAt },
+  };
+}
+
 function appThread(): OrchestrationV2AppThread {
   return {
     id: THREAD_ID,
@@ -948,15 +961,8 @@ describe("AgentAwarenessRelay", () => {
         yield* Ref.set(currentShell, finished);
         yield* TestClock.adjust("1 hour");
         const unsnoozedAt = yield* DateTime.now;
-        yield* Queue.offer(events, {
-          id: EventId.make("event:unsnoozed"),
-          type: "thread.unsnoozed",
-          threadId: THREAD_ID,
-          occurredAt: unsnoozedAt,
-          payload: appThread(),
-        });
+        yield* Queue.offer(events, unsnoozedEvent(unsnoozedAt, unsnoozedAt));
         yield* settle;
-        // Draining the relay proves the event was handled, not just queued.
         yield* relay.publishThread(THREAD_ID);
         yield* settle;
         assert.equal(publications.length, 0);
@@ -971,6 +977,105 @@ describe("AgentAwarenessRelay", () => {
         );
         yield* relay.publishThread(THREAD_ID);
         yield* settle;
+        assert.equal(publications.length, 1);
+        assert.equal(publications.at(-1)?.state?.phase, status);
+      }),
+  );
+
+  it.effect("an unsnooze of an awake thread does not hide a fresh outcome", () =>
+    Effect.gen(function* () {
+      const events = yield* Queue.unbounded<OrchestrationV2DomainEvent>();
+      const pulls = yield* Queue.unbounded<void>();
+      const { relay, currentShell, publications } = yield* makeTestRelay({
+        domainEvents: Stream.fromEffectRepeat(
+          Queue.offer(pulls, undefined).pipe(Effect.andThen(Queue.take(events))),
+        ),
+      });
+      yield* relay.start();
+      yield* Queue.take(pulls);
+      yield* TestClock.adjust("1 hour");
+      const now = yield* DateTime.now;
+      yield* Ref.set(
+        currentShell,
+        shell({
+          status: "completed",
+          latestRunId: RunId.make("run-fresh"),
+          latestRunCompletedAt: DateTime.add(now, { seconds: -1 }),
+        }),
+      );
+      // The thread was never snoozed: the command left updatedAt alone.
+      yield* Queue.offer(events, unsnoozedEvent(now, DateTime.makeUnsafe(NOW)));
+      yield* Queue.take(pulls);
+      yield* relay.publishThread(THREAD_ID);
+      yield* TestClock.adjust("5 seconds");
+      yield* relay.drain;
+      assert.equal(publications.at(-1)?.state?.phase, "completed");
+    }),
+  );
+
+  it.effect.each(["completed", "failed"] as const)(
+    "an unsnooze is recorded ahead of a publish that reads the cleared deadline (%s)",
+    (status) =>
+      Effect.gen(function* () {
+        const events = yield* Queue.unbounded<OrchestrationV2DomainEvent>();
+        const pulls = yield* Queue.unbounded<void>();
+        const hold = yield* Ref.make(false);
+        const readStarted = yield* Deferred.make<void>();
+        const release = yield* Deferred.make<void>();
+        const shellRef = yield* Ref.make<OrchestrationV2ThreadShell | null>(shell());
+        const { relay, publications } = yield* makeTestRelay({
+          // While held, any shell read waits, as a slow observer read would.
+          readShell: () =>
+            Ref.get(hold).pipe(
+              Effect.flatMap((held) =>
+                held
+                  ? Deferred.succeed(readStarted, undefined).pipe(
+                      Effect.andThen(Deferred.await(release)),
+                    )
+                  : Effect.void,
+              ),
+              Effect.andThen(Ref.get(shellRef)),
+            ),
+          domainEvents: Stream.fromEffectRepeat(
+            Queue.offer(pulls, undefined).pipe(Effect.andThen(Queue.take(events))),
+          ),
+        });
+        yield* relay.start();
+        yield* Queue.take(pulls);
+        yield* Ref.set(
+          shellRef,
+          shell({
+            status,
+            latestRunId: RunId.make("run-before-unsnooze"),
+            latestRunCompletedAt: DateTime.makeUnsafe("1970-01-01T00:00:10.000Z"),
+          }),
+        );
+        yield* TestClock.adjust("1 hour");
+        const unsnoozedAt = yield* DateTime.now;
+
+        yield* Ref.set(hold, true);
+        yield* Queue.offer(events, unsnoozedEvent(unsnoozedAt, unsnoozedAt));
+        // Either the event is already handled (it needed no read) or its
+        // handler is stuck in a held read; both are the moment to publish.
+        yield* Effect.race(Deferred.await(readStarted), Queue.take(pulls));
+        yield* Ref.set(hold, false);
+        yield* relay.publishThread(THREAD_ID);
+        yield* TestClock.adjust("5 seconds");
+        yield* relay.drain;
+        assert.equal(publications.length, 0);
+        yield* Deferred.succeed(release, undefined);
+
+        yield* Ref.set(
+          shellRef,
+          shell({
+            status,
+            latestRunId: RunId.make("run-after-unsnooze"),
+            latestRunCompletedAt: DateTime.makeUnsafe("1970-01-01T02:00:00.000Z"),
+          }),
+        );
+        yield* relay.publishThread(THREAD_ID);
+        yield* TestClock.adjust("5 seconds");
+        yield* relay.drain;
         assert.equal(publications.length, 1);
         assert.equal(publications.at(-1)?.state?.phase, status);
       }),
