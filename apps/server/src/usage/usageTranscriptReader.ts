@@ -32,8 +32,9 @@ import {
   parseCodexRecord,
   parseGrokLine,
   parseGrokRecord,
-  parsePiLine,
-  parsePiRecord,
+  applyPiEntry,
+  initialPiScanState,
+  isPiUsageProvider,
   type CodexScanState,
   type UsageRecord,
 } from "./usageTranscripts.ts";
@@ -99,6 +100,11 @@ const USAGE_FIELDS: Record<"claude" | "codex" | "grok" | "pi", SelectedFields> =
   pi: {
     type: true,
     id: true,
+    timestamp: true,
+    usage: true,
+    targetId: true,
+    childUsage: true,
+    aggregateUsage: true,
     message: { role: true, model: true, timestamp: true, responseId: true, usage: true },
   },
   claude: {
@@ -136,7 +142,7 @@ const USAGE_FIELDS: Record<"claude" | "codex" | "grok" | "pi", SelectedFields> =
 function selectUsageFields(provider: UsageProviderKind) {
   const fields =
     USAGE_FIELDS[
-      provider === "pi" || provider === "primeAgent"
+      isPiUsageProvider(provider)
         ? "pi"
         : provider === "codex" || provider === "grok"
           ? provider
@@ -292,6 +298,8 @@ export async function readTranscriptRecords(
 
   try {
     let codexState = initialCodexScanState();
+    const piState = initialPiScanState();
+    const piSessionId = NodePath.basename(filePath, ".jsonl");
     let resumed = false;
     let start = 0;
     if (
@@ -304,6 +312,24 @@ export async function readTranscriptRecords(
       start = resumeFrom.resumeOffset;
       resumed = true;
     }
+
+    let requiresFullPiScan = false;
+    const applyPiParsedEntry = (parsed: unknown, out: UsageRecord[]): void => {
+      if (!isPiUsageProvider(provider)) return;
+      if (
+        resumed &&
+        typeof parsed === "object" &&
+        parsed !== null &&
+        "type" in parsed &&
+        parsed.type === "child_usage_attributed" &&
+        "targetId" in parsed &&
+        typeof parsed.targetId === "string" &&
+        !piState.recordsByEntryId.has(parsed.targetId)
+      ) {
+        requiresFullPiScan = true;
+      }
+      applyPiEntry(parsed, provider, piSessionId, piState, out);
+    };
 
     const parseLine = (line: string, state: CodexScanState, out: UsageRecord[]): void => {
       if (provider === "codex") {
@@ -324,10 +350,17 @@ export async function readTranscriptRecords(
         for (const grokRecord of parseGrokLine(line)) out.push(grokRecord);
         return;
       }
-      const record =
-        provider === "pi" || provider === "primeAgent"
-          ? parsePiLine(line, provider, NodePath.basename(filePath, ".jsonl"))
-          : parseClaudeLine(line);
+      if (isPiUsageProvider(provider)) {
+        let parsed: unknown;
+        try {
+          parsed = JSON.parse(line);
+        } catch {
+          return;
+        }
+        applyPiParsedEntry(parsed, out);
+        return;
+      }
+      const record = parseClaudeLine(line);
       if (record !== null) out.push(record);
     };
 
@@ -373,13 +406,13 @@ export async function readTranscriptRecords(
         const projected = streaming.finish();
         if (provider === "grok") {
           out.push(...parseGrokRecord(projected));
+        } else if (isPiUsageProvider(provider)) {
+          applyPiParsedEntry(projected, out);
         } else {
           const record =
             provider === "codex"
               ? parseCodexRecord(projected, state)
-              : provider === "pi" || provider === "primeAgent"
-                ? parsePiRecord(projected, provider, NodePath.basename(filePath, ".jsonl"))
-                : parseClaudeRecord(projected);
+              : parseClaudeRecord(projected);
           if (record !== null) out.push(record);
         }
       } else if (pendingBytes > 0) {
@@ -423,6 +456,12 @@ export async function readTranscriptRecords(
 
     const tailRecords: UsageRecord[] = [];
     finish({ ...codexState }, tailRecords);
+
+    // A late attribution can correct a cached folded parent. Reparse only
+    // this changed file; ordinary appended responses still use the fast path.
+    if (requiresFullPiScan) {
+      return await readTranscriptRecords(filePath, provider, undefined, options);
+    }
 
     const guardLength = Math.min(GUARD_LENGTH, resumeOffset);
     let guardHash = 0;
