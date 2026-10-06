@@ -29,6 +29,7 @@ export function observeThreadForNotification(
     EnvironmentThreadShell,
     | "latestRun"
     | "latestTaskRunCompletedAt"
+    | "latestTaskRunStatus"
     | "runtime"
     | "hasPendingApprovals"
     | "hasPendingUserInput"
@@ -58,24 +59,26 @@ export function observeThreadForNotification(
 /**
  * The end of work a snapshot accounts for, and whether it finished a task.
  * Shell updates are coalesced, so a check can start or end in the same update
- * a user's run completed in. A routine check therefore stands for the end of
- * the latest run someone asked for (latestTaskRunCompletedAt), which then
- * alerts once. A run that ended without completing is remembered but not
- * announced, so its end cannot alert later as a completion.
+ * a user's run ended in. A routine check therefore stands for the latest run
+ * someone asked for (latestTaskRunCompletedAt and latestTaskRunStatus). A run
+ * that ended without completing, or whose status an older server did not
+ * send, is remembered but not announced, so it never alerts as a completion.
  */
 function endedWork(
-  thread: Pick<EnvironmentThreadShell, "latestRun" | "latestTaskRunCompletedAt">,
+  thread: Pick<
+    EnvironmentThreadShell,
+    "latestRun" | "latestTaskRunCompletedAt" | "latestTaskRunStatus"
+  >,
   status: SidebarThreadStatus,
 ): { readonly at: number; readonly isCompletion: boolean } | null {
   const run = thread.latestRun;
   if (run === null) return null;
-  // Commands left running (a dev server) read as ready; subagents and monitors wait.
-  if (isOrchestrationV2RoutineRun(run)) {
-    const at = Date.parse(thread.latestTaskRunCompletedAt ?? "");
-    return status === "ready" && Number.isFinite(at) ? { at, isCompletion: true } : null;
-  }
-  const at = Date.parse(run.completedAt ?? "");
+  const endedRun = isOrchestrationV2RoutineRun(run)
+    ? { completedAt: thread.latestTaskRunCompletedAt, status: thread.latestTaskRunStatus }
+    : run;
+  const at = Date.parse(endedRun.completedAt ?? "");
   if (!Number.isFinite(at)) return null;
-  if (run.status !== "completed") return { at, isCompletion: false };
+  if (endedRun.status !== "completed") return { at, isCompletion: false };
+  // Commands left running (a dev server) read as ready; subagents and monitors wait.
   return status === "ready" ? { at, isCompletion: true } : null;
 }

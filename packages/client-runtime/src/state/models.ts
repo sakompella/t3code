@@ -106,6 +106,8 @@ export interface EnvironmentThreadShell {
   readonly latestRun: ThreadRunSummary | null;
   /** See OrchestrationV2ThreadShell.latestTaskRunCompletedAt; absent from older servers. */
   readonly latestTaskRunCompletedAt?: string | null;
+  /** See OrchestrationV2ThreadShell.latestTaskRunStatus; absent from older servers. */
+  readonly latestTaskRunStatus?: OrchestrationV2RunStatus | null;
   readonly runtime: ThreadRuntimeSummary | null;
   readonly latestUserMessageAt: string | null;
   /** The last message the user wrote. `undefined` means the server predates it. */
@@ -256,6 +258,9 @@ export function presentThreadShell(
     ...(thread.latestTaskRunCompletedAt === undefined
       ? {}
       : { latestTaskRunCompletedAt: nullableIso(thread.latestTaskRunCompletedAt) }),
+    ...(thread.latestTaskRunStatus === undefined
+      ? {}
+      : { latestTaskRunStatus: thread.latestTaskRunStatus }),
     runtime: shellRuntime(thread),
     latestUserMessageAt: nullableIso(thread.latestUserMessageAt),
     ...(thread.latestUserAuthoredMessageAt === undefined
