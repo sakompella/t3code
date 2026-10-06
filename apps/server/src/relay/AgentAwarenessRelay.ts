@@ -343,16 +343,25 @@ function terminalOutcomeKey(thread: OrchestrationV2ThreadShell): string | null {
 }
 
 /**
- * Whether the finished run is news. A snooze keeps its deadline after the
- * timer ends, and everything that finished by then was hidden or already seen,
- * so it is never announced afterward, even once publishing turns on later.
+ * Whether the finished run ended by its snooze deadline. A snooze keeps the
+ * deadline after the timer ends, and everything that finished by then was
+ * hidden or already seen, so it is never announced afterward, whether or not
+ * the thread was published before and even once publishing turns on later.
  */
-function terminalWorkSinceStart(thread: OrchestrationV2ThreadShell, startedAt: number): boolean {
-  if (thread.latestRunCompletedAt == null) return false;
-  const completedAt = DateTime.toEpochMillis(thread.latestRunCompletedAt);
+function terminalEndedUnderSnooze(thread: OrchestrationV2ThreadShell): boolean {
   return (
-    completedAt > startedAt &&
-    (thread.snoozedUntil == null || completedAt > DateTime.toEpochMillis(thread.snoozedUntil))
+    thread.snoozedUntil != null &&
+    thread.latestRunCompletedAt != null &&
+    DateTime.toEpochMillis(thread.latestRunCompletedAt) <=
+      DateTime.toEpochMillis(thread.snoozedUntil)
+  );
+}
+
+function terminalWorkSinceStart(thread: OrchestrationV2ThreadShell, startedAt: number): boolean {
+  return (
+    thread.latestRunCompletedAt != null &&
+    DateTime.toEpochMillis(thread.latestRunCompletedAt) > startedAt &&
+    !terminalEndedUnderSnooze(thread)
   );
 }
 
@@ -587,7 +596,7 @@ export const make = Effect.gen(function* () {
     const project = Option.isSome(thread)
       ? yield* projects.getById(thread.value.projectId)
       : Option.none<Project>();
-    const snapshot = resolveAgentAwarenessRelayPublishSnapshot({
+    const projected = resolveAgentAwarenessRelayPublishSnapshot({
       environmentId,
       threadId,
       thread,
@@ -595,15 +604,20 @@ export const make = Effect.gen(function* () {
       now: yield* DateTime.now,
     });
     if (Option.isNone(thread)) outcomeHiddenByUnsnooze.delete(threadId);
+    // An outcome a snooze hid is withdrawn like any other hidden state, so a
+    // row published before the snooze cannot linger or turn into an alert.
+    const outcomeIsHidden =
+      (projected.state?.phase === "completed" || projected.state?.phase === "failed") &&
+      Option.isSome(thread) &&
+      (terminalEndedUnderSnooze(thread.value) ||
+        outcomeHiddenByUnsnooze.get(threadId) === terminalOutcomeKey(thread.value));
+    const snapshot = outcomeIsHidden ? { ...projected, state: null } : projected;
     const publishIdentity = agentAwarenessPublishIdentity(snapshot.state);
     const publishedStateByThread = yield* Ref.get(publishedStateByThreadRef);
-    if (
-      (snapshot.state?.phase === "completed" || snapshot.state?.phase === "failed") &&
-      Option.isSome(thread) &&
-      outcomeHiddenByUnsnooze.get(threadId) === terminalOutcomeKey(thread.value)
-    ) {
+    if (outcomeIsHidden && !publishedStateByThread.has(threadId)) {
+      // Nothing is published for this thread, so there is nothing to withdraw.
       publishConfirmDeadlines.delete(threadId);
-      yield* Effect.logDebug("agent activity publish skipped; outcome predates an unsnooze", {
+      yield* Effect.logDebug("agent activity publish skipped; outcome hidden by a snooze", {
         environmentId,
         threadId,
       });

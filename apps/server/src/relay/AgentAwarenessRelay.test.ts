@@ -842,6 +842,56 @@ describe("AgentAwarenessRelay", () => {
   );
 
   it.effect.each(["completed", "failed"] as const)(
+    "withdraws a published row and does not announce a %s run that finished in a short snooze",
+    (status) =>
+      Effect.gen(function* () {
+        const { relay, currentShell, publications } = yield* makeTestRelay();
+        yield* relay.publishThread(THREAD_ID);
+        assert.equal(publications.at(-1)?.state?.phase, "running");
+
+        // The snooze is shorter than the 5 s withdrawal confirmation, so the
+        // thread is awake again by the time that confirmation runs.
+        const snoozedUntil = DateTime.add(yield* DateTime.now, { seconds: 2 });
+        yield* Ref.set(
+          currentShell,
+          shell({
+            status,
+            snoozedUntil,
+            latestRunId: RunId.make("run-in-short-snooze"),
+            latestRunCompletedAt: DateTime.makeUnsafe("1970-01-01T00:00:01.000Z"),
+          }),
+        );
+        yield* relay.publishThread(THREAD_ID);
+        yield* TestClock.adjust("5 seconds");
+        yield* relay.drain;
+        assert.isNull(publications.at(-1)?.state);
+        assert.isTrue(publications.every((publication) => publication.state?.phase !== status));
+        const published = publications.length;
+
+        // Current work after the deadline is genuine and still shows.
+        yield* Ref.set(currentShell, shell({ status: "running", snoozedUntil }));
+        yield* relay.publishThread(THREAD_ID);
+        assert.equal(publications.at(-1)?.state?.phase, "running");
+        assert.equal(publications.length, published + 1);
+
+        // So does a run that finishes after it.
+        yield* Ref.set(
+          currentShell,
+          shell({
+            status,
+            snoozedUntil,
+            latestRunId: RunId.make("run-after-short-snooze"),
+            latestRunCompletedAt: DateTime.makeUnsafe("1970-01-01T00:00:30.000Z"),
+          }),
+        );
+        yield* relay.publishThread(THREAD_ID);
+        yield* TestClock.adjust("5 seconds");
+        yield* relay.drain;
+        assert.equal(publications.at(-1)?.state?.phase, status);
+      }),
+  );
+
+  it.effect.each(["completed", "failed"] as const)(
     "does not announce a %s run hidden by a snooze when publishing is turned on after it ends",
     (status) =>
       Effect.gen(function* () {
