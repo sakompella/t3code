@@ -9,7 +9,7 @@ import {
   PRIME_AGENT_DIALOG_RESULT,
 } from "./primeAgentDialogExtensionSource.ts";
 import { daemonSocketFromLaunchArgs } from "./primeAgentChildDialogs.ts";
-import { resolvePiLaunchArgs } from "./piT3McpInjection.ts";
+import { resolvePiLaunchArgs } from "./mcpInjection.ts";
 
 const encodeJson = Schema.encodeSync(Schema.fromJsonString(Schema.Unknown));
 const decodeJson = Schema.decodeUnknownSync(Schema.fromJsonString(Schema.Unknown));

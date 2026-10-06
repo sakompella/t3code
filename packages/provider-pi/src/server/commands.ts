@@ -2,7 +2,7 @@ import { type ServerProviderSkill, type ServerProviderSlashCommand } from "@t3to
 import * as Predicate from "effect/Predicate";
 
 import { T3_NAVIGATE_TREE_COMMAND } from "./mcpExtensionSource.ts";
-import { PRIME_AGENT_DIALOG_COMMAND } from "../orchestration-v2/Adapters/primeAgentDialogExtensionSource.ts";
+import { PRIME_AGENT_DIALOG_COMMAND } from "./primeAgentDialogExtensionSource.ts";
 
 // Pi RPC get_commands omits TUI builtins. Advertise /compact so T3 can map it to RPC compact.
 export const PI_COMPACT_SLASH_COMMAND: ServerProviderSlashCommand = {

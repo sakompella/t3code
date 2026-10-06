@@ -465,7 +465,7 @@ it.effect(
       });
 
       assert.deepEqual(yield* heartbeats, []);
-    }).pipe(Effect.provide(testLayer)),
+    }).pipe(Effect.provide(layerTest)),
 );
 
 it.effect("settles only the stopped run's background work, once", () =>

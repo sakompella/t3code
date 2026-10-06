@@ -10,6 +10,7 @@ import * as Stream from "effect/Stream";
 import * as ChildProcessSpawner from "effect/process/ChildProcessSpawner";
 
 import { makePiTextGeneration } from "./textGeneration.ts";
+import { PI_FLAVOR } from "./flavor.ts";
 
 const decodeJsonLine = Schema.decodeUnknownSync(Schema.fromJsonString(Schema.Unknown));
 const encodeJsonLine = Schema.encodeSync(Schema.fromJsonString(Schema.Unknown));
@@ -65,6 +66,7 @@ it.effect("puts linked source control context in the Pi thread title prompt", ()
   Effect.gen(function* () {
     const pi = yield* makeFakePi(encodeJsonLine({ title: "Route Reset Credits Through Hub" }));
     const textGeneration = yield* makePiTextGeneration(
+      PI_FLAVOR,
       { enabled: true, binaryPath: "pi", launchArgs: "", customModels: [] },
       {},
     ).pipe(Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, pi.spawner));
