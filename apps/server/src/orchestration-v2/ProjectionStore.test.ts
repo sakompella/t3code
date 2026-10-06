@@ -6271,7 +6271,10 @@ it.layer(layerTest)("ProjectionStoreV2", (it) => {
           (candidate) => candidate.id === threadId,
         );
         assert.deepEqual(listed?.pendingBackgroundTasks, shell?.pendingBackgroundTasks);
-        return shell && projectThreadAwarenessV2({ environmentId, project, thread: shell })?.phase;
+        return (
+          shell &&
+          projectThreadAwarenessV2({ environmentId, project, thread: shell, now: at })?.phase
+        );
       });
 
       yield* syncPullRequests("watched", [

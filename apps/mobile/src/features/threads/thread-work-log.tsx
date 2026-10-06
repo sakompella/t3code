@@ -1220,7 +1220,8 @@ const ThreadWorkLogRow = memo(function ThreadWorkLogRow(
       </WorkLogPressable>
 
       {expanded &&
-      (reasoning || bodyCode ||
+      (reasoning ||
+        bodyCode ||
         fullDetail ||
         call ||
         fetchedOutput ||

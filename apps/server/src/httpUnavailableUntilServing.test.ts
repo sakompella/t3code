@@ -5,7 +5,7 @@ import * as NodeNet from "node:net";
 import * as NodeHttpServer from "@effect/platform-node/NodeHttpServer";
 import { describe, expect, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
-import { HttpServerResponse } from "effect/unstable/http";
+import { HttpServerResponse } from "effect/http";
 
 import { guardHttpResponseWriteErrors } from "./httpResponseErrorGuard.ts";
 import { answerUnavailableUntilServing } from "./httpUnavailableUntilServing.ts";

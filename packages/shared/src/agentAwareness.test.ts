@@ -208,6 +208,7 @@ describe("projectThreadAwarenessV2", () => {
       projectThreadAwarenessV2({
         environmentId: "env-1" as EnvironmentId,
         project,
+        now: DateTime.makeUnsafe(NOW),
         thread: v2Thread({
           latestRunId: heartbeatRun,
           latestRunTrigger: "heartbeat",
