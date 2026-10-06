@@ -3,8 +3,8 @@ import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
 
-import { PiRpcError, PiRpcTimeoutError, type PiRpcConnection, type PiRpcRecord } from "./PiRpc.ts";
-import { materializeExtensionSource } from "./piT3McpInjection.ts";
+import { PiRpcError, PiRpcTimeoutError, type PiRpcConnection, type PiRpcRecord } from "./rpc.ts";
+import { materializeExtensionSource } from "./mcpInjection.ts";
 import {
   PRIME_AGENT_DIALOG_COMMAND,
   PRIME_AGENT_DIALOG_EXTENSION_FILENAME,

@@ -755,8 +755,9 @@ it.layer(
       );
     });
 
-    for (const driver of ["pi", "primeAgent"] as const) {
-      it(`keeps ${driver} commands and skills through a probe that discovered nothing`, () => {
+    it.each(["pi", "primeAgent"] as const)(
+      "keeps %s commands and skills through a probe that discovered nothing",
+      (driver) => {
         const previousProvider = {
           instanceId: ProviderInstanceId.make(driver),
           driver: ProviderDriverKind.make(driver),
@@ -798,9 +799,12 @@ it.layer(
           ProviderRegistry.mergeProviderSnapshot(previousProvider, failedProbe).skills,
           previousProvider.skills,
         );
-      });
+      },
+    );
 
-      it(`replaces ${driver} commands once discovery completes and clears them for a missing CLI`, () => {
+    it.each(["pi", "primeAgent"] as const)(
+      "replaces %s commands once discovery completes and clears them for a missing CLI",
+      (driver) => {
         const previousProvider = {
           instanceId: ProviderInstanceId.make(driver),
           driver: ProviderDriverKind.make(driver),
@@ -831,9 +835,12 @@ it.layer(
           slashCommands: [],
           skills: [],
         } satisfies ServerProvider;
-        assert.deepStrictEqual(ProviderRegistry.mergeProviderSnapshot(previousProvider, missing).skills, []);
-      });
-    }
+        assert.deepStrictEqual(
+          ProviderRegistry.mergeProviderSnapshot(previousProvider, missing).skills,
+          [],
+        );
+      },
+    );
 
     it("drops custom models the refreshed snapshot no longer carries", () => {
       const previousProvider = {

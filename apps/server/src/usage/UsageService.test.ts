@@ -291,7 +291,7 @@ describe("UsageService", () => {
         return warm;
       }).pipe(
         Effect.provide(
-          serviceLayers({
+          layerService({
             prefix: "usage-pi-prime",
             home,
             settings: {

@@ -223,7 +223,7 @@ export function FloatingWorkingControl(props: {
           onLayout={(event) => setBackgroundWidth(event.nativeEvent.layout.width)}
           className="h-11 flex-row items-center gap-1.5 px-3"
         >
-          {hasStatus || hasDevicePreview || hasAgents ? (
+          {hasStatus || hasPreview || hasAgents ? (
             <View className="mr-1 h-4 w-px bg-border" />
           ) : null}
           <SymbolView name="terminal" size={13} tintColorClassName="accent-foreground-muted" />
