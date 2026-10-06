@@ -56,14 +56,6 @@ export interface ProjectThreadAwarenessV2Input {
   readonly now: DateTime.Utc;
 }
 
-/** Whether a snooze deadline still hides the thread at `now`. */
-export function isAgentAwarenessSnoozed(
-  thread: Pick<OrchestrationV2ThreadShell, "snoozedUntil">,
-  now: DateTime.Utc,
-): boolean {
-  return thread.snoozedUntil != null && DateTime.isGreaterThan(thread.snoozedUntil, now);
-}
-
 /**
  * Build relay activity directly from the V2 shell projection. A snoozed
  * thread publishes nothing, so its approvals, questions, failures and
@@ -74,7 +66,7 @@ export function projectThreadAwarenessV2(
 ): AgentAwarenessState | null {
   const { environmentId, project, thread, now } = input;
   if (thread.lineage.relationshipToParent === "subagent") return null;
-  if (isAgentAwarenessSnoozed(thread, now)) return null;
+  if (thread.snoozedUntil != null && DateTime.isGreaterThan(thread.snoozedUntil, now)) return null;
   const phase = resolveThreadAwarenessPhaseV2(thread);
   if (phase === null) {
     return null;

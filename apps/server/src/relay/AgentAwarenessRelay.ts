@@ -11,7 +11,7 @@ import {
   type RelayAgentActivityPublishProofPayload,
   type RelayAgentActivityState,
 } from "@t3tools/contracts/relay";
-import { isAgentAwarenessSnoozed, projectThreadAwarenessV2 } from "@t3tools/shared/agentAwareness";
+import { projectThreadAwarenessV2 } from "@t3tools/shared/agentAwareness";
 import { turnItemUpdateCanEndBackgroundWork } from "@t3tools/shared/orchestrationV2PendingBackgroundWork";
 import { makeDrainableWorker } from "@t3tools/shared/DrainableWorker";
 import { withRelayClientTracing } from "@t3tools/shared/relayTracing";
@@ -107,7 +107,8 @@ export function shouldPublishAgentAwarenessEvent(
     case "provider-thread.updated":
       return true;
     // A snooze withdraws the published state. Ending one republishes nothing,
-    // and the outcomes it hid stay hidden (see outcomeSeenWhileSnoozed).
+    // and the outcomes it hid stay hidden (see terminalWorkSinceStart and
+    // outcomeHiddenByUnsnooze).
     case "thread.snoozed":
       return true;
     case "thread.settled":
@@ -341,10 +342,17 @@ function terminalOutcomeKey(thread: OrchestrationV2ThreadShell): string | null {
     : null;
 }
 
+/**
+ * Whether the finished run is news. A snooze keeps its deadline after the
+ * timer ends, and everything that finished by then was hidden or already seen,
+ * so it is never announced afterward, even once publishing turns on later.
+ */
 function terminalWorkSinceStart(thread: OrchestrationV2ThreadShell, startedAt: number): boolean {
+  if (thread.latestRunCompletedAt == null) return false;
+  const completedAt = DateTime.toEpochMillis(thread.latestRunCompletedAt);
   return (
-    thread.latestRunCompletedAt != null &&
-    DateTime.toEpochMillis(thread.latestRunCompletedAt) > startedAt
+    completedAt > startedAt &&
+    (thread.snoozedUntil == null || completedAt > DateTime.toEpochMillis(thread.snoozedUntil))
   );
 }
 
@@ -392,10 +400,32 @@ export const make = Effect.gen(function* () {
   // Holds at most one pending wake, so a burst of requests costs one retry.
   const catchUpRequests = yield* Queue.dropping<void>(1);
   const publishedStateByThreadRef = yield* Ref.make(new Map<ThreadId, string>());
-  // The finished run each thread had while snoozed. Ending a snooze emits no
-  // event, so without this a later metadata update would announce that old
-  // outcome as new. A later run has another key and still alerts.
-  const outcomeSeenWhileSnoozed = new Map<ThreadId, string>();
+  // The finished run each thread had when the user ended its snooze, which
+  // clears the deadline that would otherwise date the outcome (see
+  // terminalWorkSinceStart). A later run has another key and still alerts.
+  const outcomeHiddenByUnsnooze = new Map<ThreadId, string>();
+  // Runs before the publishing gates, so it works while unlinked or disabled.
+  const rememberOutcomeAtUnsnooze = (threadId: ThreadId, unsnoozedAt: DateTime.Utc) =>
+    threads.getThreadShell(threadId).pipe(
+      Effect.tap((shell) =>
+        Effect.sync(() => {
+          const outcome = shell === null ? null : terminalOutcomeKey(shell);
+          if (
+            shell?.latestRunCompletedAt != null &&
+            outcome !== null &&
+            DateTime.isLessThanOrEqualTo(shell.latestRunCompletedAt, unsnoozedAt)
+          ) {
+            outcomeHiddenByUnsnooze.set(threadId, outcome);
+          }
+        }),
+      ),
+      Effect.catchCause((cause) =>
+        Effect.logWarning("agent activity could not record an outcome at unsnooze", {
+          threadId,
+          cause: Cause.pretty(cause),
+        }),
+      ),
+    );
 
   const readSecretString = (name: string) =>
     secrets
@@ -557,29 +587,23 @@ export const make = Effect.gen(function* () {
     const project = Option.isSome(thread)
       ? yield* projects.getById(thread.value.projectId)
       : Option.none<Project>();
-    const snapshotNow = yield* DateTime.now;
     const snapshot = resolveAgentAwarenessRelayPublishSnapshot({
       environmentId,
       threadId,
       thread,
       project,
-      now: snapshotNow,
+      now: yield* DateTime.now,
     });
-    if (Option.isSome(thread) && isAgentAwarenessSnoozed(thread.value, snapshotNow)) {
-      const outcome = terminalOutcomeKey(thread.value);
-      if (outcome !== null) outcomeSeenWhileSnoozed.set(threadId, outcome);
-    } else if (Option.isNone(thread)) {
-      outcomeSeenWhileSnoozed.delete(threadId);
-    }
+    if (Option.isNone(thread)) outcomeHiddenByUnsnooze.delete(threadId);
     const publishIdentity = agentAwarenessPublishIdentity(snapshot.state);
     const publishedStateByThread = yield* Ref.get(publishedStateByThreadRef);
     if (
       (snapshot.state?.phase === "completed" || snapshot.state?.phase === "failed") &&
       Option.isSome(thread) &&
-      outcomeSeenWhileSnoozed.get(threadId) === terminalOutcomeKey(thread.value)
+      outcomeHiddenByUnsnooze.get(threadId) === terminalOutcomeKey(thread.value)
     ) {
       publishConfirmDeadlines.delete(threadId);
-      yield* Effect.logDebug("agent activity publish skipped; outcome already hidden by a snooze", {
+      yield* Effect.logDebug("agent activity publish skipped; outcome predates an unsnooze", {
         environmentId,
         threadId,
       });
@@ -864,6 +888,9 @@ export const make = Effect.gen(function* () {
       yield* forkParked(
         Stream.runForEach(threads.streamDomainEvents, (event) => {
           const threadId = eventThreadId(event);
+          if (event.type === "thread.unsnoozed") {
+            return rememberOutcomeAtUnsnooze(threadId, event.occurredAt);
+          }
           if (!shouldPublishAgentAwarenessEvent(event)) {
             return Effect.void;
           }

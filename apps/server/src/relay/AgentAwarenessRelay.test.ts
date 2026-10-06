@@ -5,6 +5,7 @@ import {
   EventId,
   MessageId,
   NodeId,
+  type OrchestrationV2AppThread,
   type OrchestrationV2DomainEvent,
   type OrchestrationV2ThreadShell,
   type OrchestrationV2TurnItem,
@@ -91,6 +92,32 @@ function shell(overrides: Partial<OrchestrationV2ThreadShell> = {}): Orchestrati
   };
 }
 
+function appThread(): OrchestrationV2AppThread {
+  return {
+    id: THREAD_ID,
+    projectId: PROJECT_ID,
+    title: "Thread",
+    providerInstanceId: ProviderInstanceId.make("codex"),
+    modelSelection: { instanceId: ProviderInstanceId.make("codex"), model: "test-model" },
+    runtimeMode: "full-access",
+    interactionMode: "default",
+    branch: null,
+    worktreePath: null,
+    activeProviderThreadId: null,
+    lineage: { rootThreadId: THREAD_ID, parentThreadId: null, relationshipToParent: null },
+    forkedFrom: null,
+    createdBy: "user",
+    creationSource: "web",
+    createdAt: DateTime.makeUnsafe(NOW),
+    updatedAt: DateTime.makeUnsafe(NOW),
+    archivedAt: null,
+    settledOverride: null,
+    settledAt: null,
+    lastVisitedAt: null,
+    deletedAt: null,
+  };
+}
+
 const PublishPayload = Schema.Struct({ state: Schema.NullOr(RelayAgentActivityState) });
 const decodePublishPayload = Schema.decodeUnknownSync(Schema.fromJsonString(PublishPayload));
 const unused = () => Effect.die("Unexpected test dependency call");
@@ -134,6 +161,34 @@ describe("startup agent activity", () => {
       ],
     });
     assert.deepStrictEqual(ids, [THREAD_ID, newCompleted, newFailed]);
+  });
+});
+
+describe("catch-up after a snooze", () => {
+  it("skips a terminal run that finished by the time an ended snooze was due", () => {
+    const hidden = ThreadId.make("hidden-by-snooze");
+    const after = ThreadId.make("after-snooze");
+    const ids = AgentAwarenessRelay.resolveAgentAwarenessRelayActiveThreadIds({
+      environmentId: EnvironmentId.make("relay-env"),
+      startedAt: DateTime.toEpochMillis(DateTime.makeUnsafe(NOW)),
+      now: DateTime.makeUnsafe("2026-09-04T14:00:00.000Z"),
+      projects: [{ id: PROJECT_ID, title: "Project" }],
+      threads: [
+        shell({
+          id: hidden,
+          status: "completed",
+          snoozedUntil: DateTime.makeUnsafe("2026-09-04T13:00:00.000Z"),
+          latestRunCompletedAt: DateTime.makeUnsafe("2026-09-04T12:30:00.000Z"),
+        }),
+        shell({
+          id: after,
+          status: "completed",
+          snoozedUntil: DateTime.makeUnsafe("2026-09-04T13:00:00.000Z"),
+          latestRunCompletedAt: DateTime.makeUnsafe("2026-09-04T13:30:00.000Z"),
+        }),
+      ],
+    });
+    assert.deepStrictEqual(ids, [after]);
   });
 });
 
@@ -740,7 +795,7 @@ describe("AgentAwarenessRelay", () => {
   );
 
   it.effect.each(["completed", "failed"] as const)(
-    "does not announce a %s run that finished under a snooze once the snooze is over",
+    "does not announce a %s run that finished under a snooze once the timer is over",
     (status) =>
       Effect.gen(function* () {
         const { relay, currentShell, publications } = yield* makeTestRelay();
@@ -762,24 +817,19 @@ describe("AgentAwarenessRelay", () => {
         const published = publications.length;
         assert.isNull(publications.at(-1)?.state);
 
-        // Unrelated metadata updates after the timer or an explicit unsnooze
-        // republish the thread, and must not replay the hidden outcome.
+        // An unrelated metadata update after the timer republishes the thread
+        // and must not replay the hidden outcome.
         yield* TestClock.adjust("2 hours");
-        for (const afterSnooze of [
-          finishedWhileSnoozed,
-          { ...finishedWhileSnoozed, snoozedUntil: null },
-        ]) {
-          yield* Ref.set(currentShell, afterSnooze);
-          yield* relay.publishThread(THREAD_ID);
-          yield* settle;
-          assert.equal(publications.length, published);
-        }
+        yield* relay.publishThread(THREAD_ID);
+        yield* settle;
+        assert.equal(publications.length, published);
 
         // Work that finishes after the snooze is genuinely new.
         yield* Ref.set(
           currentShell,
           shell({
             status,
+            snoozedUntil,
             latestRunId: RunId.make("run-after-snooze"),
             latestRunCompletedAt: DateTime.makeUnsafe("1970-01-01T03:00:00.000Z"),
           }),
@@ -787,6 +837,91 @@ describe("AgentAwarenessRelay", () => {
         yield* relay.publishThread(THREAD_ID);
         yield* settle;
         assert.equal(publications.length, published + 1);
+        assert.equal(publications.at(-1)?.state?.phase, status);
+      }),
+  );
+
+  it.effect.each(["completed", "failed"] as const)(
+    "does not announce a %s run hidden by a snooze when publishing is turned on after it ends",
+    (status) =>
+      Effect.gen(function* () {
+        const { relay, secrets, currentShell, publications } = yield* makeTestRelay({
+          linked: false,
+        });
+        const snoozedUntil = DateTime.add(yield* DateTime.now, { hours: 1 });
+        yield* Ref.set(
+          currentShell,
+          shell({
+            status,
+            snoozedUntil,
+            latestRunId: RunId.make("run-under-snooze"),
+            latestRunCompletedAt: DateTime.makeUnsafe("1970-01-01T00:00:10.000Z"),
+          }),
+        );
+        // Nothing can publish while unlinked, so nothing here sees the outcome.
+        yield* relay.publishThread(THREAD_ID);
+        yield* TestClock.adjust("2 hours");
+        for (const [name, value] of [
+          [PUBLISH_AGENT_ACTIVITY_SECRET, "true"],
+          [RELAY_URL_SECRET, "https://relay.example.test"],
+          [RELAY_ISSUER_SECRET, "https://relay.example.test"],
+          [RELAY_ENVIRONMENT_CREDENTIAL_SECRET, "credential-1"],
+        ] as const) {
+          yield* secrets.set(name, new TextEncoder().encode(value));
+        }
+        yield* relay.publishThread(THREAD_ID);
+        yield* TestClock.adjust("5 seconds");
+        yield* relay.drain;
+        assert.equal(publications.length, 0);
+      }),
+  );
+
+  it.effect.each(["completed", "failed"] as const)(
+    "does not announce a %s run that finished before the user ended the snooze",
+    (status) =>
+      Effect.gen(function* () {
+        const events = yield* Queue.unbounded<OrchestrationV2DomainEvent>();
+        const { relay, currentShell, publications } = yield* makeTestRelay({
+          domainEvents: Stream.fromQueue(events),
+        });
+        yield* relay.start();
+        const settle = Effect.gen(function* () {
+          yield* TestClock.adjust("5 seconds");
+          yield* relay.drain;
+        });
+        const finished = shell({
+          status,
+          latestRunId: RunId.make("run-before-unsnooze"),
+          latestRunCompletedAt: DateTime.makeUnsafe("1970-01-01T00:00:10.000Z"),
+        });
+        // The unsnooze clears the deadline, so only the event can date the outcome.
+        yield* Ref.set(currentShell, finished);
+        yield* TestClock.adjust("1 hour");
+        const unsnoozedAt = yield* DateTime.now;
+        yield* Queue.offer(events, {
+          id: EventId.make("event:unsnoozed"),
+          type: "thread.unsnoozed",
+          threadId: THREAD_ID,
+          occurredAt: unsnoozedAt,
+          payload: appThread(),
+        });
+        yield* settle;
+        // Draining the relay proves the event was handled, not just queued.
+        yield* relay.publishThread(THREAD_ID);
+        yield* settle;
+        assert.equal(publications.length, 0);
+
+        yield* Ref.set(
+          currentShell,
+          shell({
+            status,
+            latestRunId: RunId.make("run-after-unsnooze"),
+            latestRunCompletedAt: DateTime.makeUnsafe("1970-01-01T02:00:00.000Z"),
+          }),
+        );
+        yield* relay.publishThread(THREAD_ID);
+        yield* settle;
+        assert.equal(publications.length, 1);
         assert.equal(publications.at(-1)?.state?.phase, status);
       }),
   );
