@@ -42,8 +42,10 @@ export interface ProjectThreadAwarenessV2Input {
   readonly project: Pick<Project, "title">;
   readonly thread: Pick<
     OrchestrationV2ThreadShell,
+    | "activeRunId"
     | "activityRunStatus"
     | "id"
+    | "latestRunId"
     | "latestRunTrigger"
     | "lineage"
     | "modelSelection"
@@ -52,8 +54,7 @@ export interface ProjectThreadAwarenessV2Input {
     | "status"
     | "title"
     | "updatedAt"
-  > &
-    Partial<Pick<OrchestrationV2ThreadShell, "activeRunId" | "latestRunId">>;
+  >;
 }
 
 /** Build relay activity directly from the V2 shell projection. */

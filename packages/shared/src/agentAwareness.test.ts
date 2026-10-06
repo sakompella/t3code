@@ -44,6 +44,9 @@ describe("projectThreadAwarenessV2", () => {
     modelSelection: { instanceId: ProviderInstanceId.make("codex"), model: "gpt-5.4" },
     status: "running" as const,
     pendingRuntimeRequest: null,
+    activeRunId: null,
+    latestRunId: null,
+    latestRunTrigger: null,
     updatedAt,
     ...overrides,
   });
