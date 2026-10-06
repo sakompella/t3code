@@ -51,6 +51,53 @@ describe("Prime Agent usage", () => {
     assert.deepEqual(parse(attribution), []);
   });
 
+  // A fork or rewrite persists the parent's in-memory folded usage, followed by
+  // the attributions that give its own usage back.
+  it.each([
+    { name: "a raw parent", folded: false },
+    { name: "a folded parent copy", folded: true },
+  ])("counts $name at its own usage", ({ folded }) => {
+    const usage = (input: number, output: number, cost: number) => ({
+      input,
+      output,
+      cacheRead: 100,
+      cacheWrite: 10,
+      cost: { total: cost },
+    });
+    const parent = JSON.stringify({
+      ...JSON.parse(assistantLine),
+      id: "target01",
+      message: {
+        ...JSON.parse(assistantLine).message,
+        usage: folded ? usage(2 + 50 + 30, 7 + 5 + 3, 0.9) : usage(2, 7, 0.5),
+      },
+    });
+    const attribution = (id: string, child: number, aggregate: number, cost: number) =>
+      JSON.stringify({
+        type: "child_usage_attributed",
+        id,
+        timestamp: "2026-10-04T07:50:00.000Z",
+        targetId: "target01",
+        childUsage: { input: child, output: child / 10, cost: { total: cost } },
+        aggregateUsage: usage(aggregate, 7 + (aggregate - 2) / 10, 0.5 + cost),
+      });
+    const state = primeAgentUsageFormat.state!.initial();
+    const records = [
+      parent,
+      attribution("attr0001", 50, 52, 0.25),
+      attribution("attr0002", 30, 82, 0.15),
+    ].flatMap((line) => primeAgentUsageFormat.parseLine(line, state));
+    assert.lengthOf(records, 1);
+    assert.deepEqual(records[0]?.totals, {
+      uncachedInputTokens: 2,
+      cachedInputTokens: 100,
+      cacheCreationTokens: 10,
+      outputTokens: 7,
+      reasoningTokens: 0,
+    });
+    assert.closeTo(records[0]?.reportedCostUsd ?? 0, 0.5, 1e-9);
+  });
+
   it.effect("reads parent and subagent sessions under the agent home", () =>
     Effect.gen(function* () {
       const instance = (environment: NodeJS.ProcessEnv) => ({
