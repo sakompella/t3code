@@ -14,6 +14,7 @@ import {
   type ServerProviderModel,
   type OrchestrationV2ExecutionNode,
   type OrchestrationV2ThreadProjection,
+  orchestrationV2RunTrigger,
   orchestrationV2RunWorkStartedAt,
   type ThreadId,
 } from "@t3tools/contracts";
@@ -62,6 +63,7 @@ function summarizeThreadRun(
       projection.messages.findLast(
         (message) => message.runId === run.id && message.role === "assistant",
       )?.id ?? null,
+    trigger: orchestrationV2RunTrigger(projection.messages, run),
     ...(run.sourcePlanRef === undefined ? {} : { sourcePlanRef: run.sourcePlanRef }),
   };
 }
@@ -448,6 +450,7 @@ export function notificationChildThreadId(
       return source.childThreadId;
     case "command":
     case "monitor":
+    case "heartbeat":
     case "background_task":
       return undefined;
     default:

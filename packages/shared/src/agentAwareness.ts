@@ -42,8 +42,11 @@ export interface ProjectThreadAwarenessV2Input {
   readonly project: Pick<Project, "title">;
   readonly thread: Pick<
     OrchestrationV2ThreadShell,
+    | "activeRunId"
     | "activityRunStatus"
     | "id"
+    | "latestRunId"
+    | "latestRunTrigger"
     | "lineage"
     | "modelSelection"
     | "pendingBackgroundTasks"
@@ -68,7 +71,7 @@ export function projectThreadAwarenessV2(
   if (thread.lineage.relationshipToParent === "subagent") return null;
   if (thread.snoozedUntil != null && DateTime.isGreaterThan(thread.snoozedUntil, now)) return null;
   const phase = resolveThreadAwarenessPhaseV2(thread);
-  if (phase === null) {
+  if (phase === null || isRoutineHeartbeatPhase(thread, phase)) {
     return null;
   }
   const detail =
@@ -124,6 +127,21 @@ function resolveThreadAwarenessPhaseV2(
     case "rolled_back":
       return null;
   }
+}
+
+/**
+ * A heartbeat run is a routine check, so it starting, working and finishing
+ * publish nothing: no Live Activity and no completion push. Its failures and
+ * requests still do. Applies only while the phase describes that run, not a
+ * user's run that is still active ahead of it.
+ */
+function isRoutineHeartbeatPhase(
+  thread: ProjectThreadAwarenessV2Input["thread"],
+  phase: AgentAwarenessPhase,
+): boolean {
+  if (thread.latestRunTrigger !== "heartbeat") return false;
+  if (phase !== "starting" && phase !== "running" && phase !== "completed") return false;
+  return thread.activityRunStatus == null || thread.activeRunId === thread.latestRunId;
 }
 
 function headlineForPhase(phase: AgentAwarenessPhase): string {
