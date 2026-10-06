@@ -9,9 +9,8 @@
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 
-import { expandHomePath } from "../../pathExpansion.ts";
 import { T3_MCP_BEARER_ENV } from "./piT3McpExtensionSource.ts";
-import type { PiFlavor } from "./PiFlavor.ts";
+import { resolvePiAgentDir, type PiFlavor } from "./PiFlavor.ts";
 
 const T3_CODE_MCP_SERVER_NAME = "t3-code";
 
@@ -75,8 +74,7 @@ export const resolveKernelMcpAccess = Effect.fn("resolveKernelMcpAccess")(functi
   readonly endpoint: string;
 }) {
   const fs = yield* FileSystem.FileSystem;
-  const { agentDirEnvVar, defaultAgentDir } = input.kernelMcp;
-  const agentDir = expandHomePath(input.environment[agentDirEnvVar] || `~/${defaultAgentDir}`);
+  const agentDir = resolvePiAgentDir({ agentDir: input.kernelMcp, environment: input.environment });
   const settingsPath = `${agentDir.replace(/[\\/]+$/, "")}/settings.json`;
   const settingsJson = yield* fs.readFileString(settingsPath).pipe(
     Effect.map((text): string | undefined => text),

@@ -13,7 +13,9 @@ cost, split by token type and by speed. These estimates are not your subscriptio
 split, such as a provider-reported cost for a model without public rates, shows as **Other**.
 Select a model under **Breakdown** to see its trend, cache hit rate, and cost per million tokens.
 
-Pi and Prime Agent usage includes saved assistant responses and Prime Agent subagent sessions.
+Pi and Prime Agent usage includes saved assistant responses, compaction and branch summaries,
+and Prime Agent subagent sessions. Summaries appear as **summary (model not recorded)**; without
+recorded model metadata, their cost uses only the saved estimate.
 Copied responses count once per server. Recorded costs are API-equivalent estimates from the
 agent’s model configuration, not subscription charges. Models without configured costs use the
 price table when available. Custom homes follow `PI_CODING_AGENT_DIR` and

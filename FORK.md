@@ -58,7 +58,7 @@ Changes against upstream `main`, grouped by feature. Each item says what changed
 
 ### Usage accounting
 
-- **Usage Cost/Tokens includes Pi and Prime Agent session logs**, including Prime Agent child sessions, disabled accounts and custom agent homes. It uses the existing incremental transcript cache and drops duplicate response IDs per server. Saved model costs win; zero or missing costs fall back to model pricing. Web and mobile show separate Pi and Prime Agent series.
+- **Usage Cost/Tokens includes Pi and Prime Agent session logs**, including Prime Agent child sessions, disabled accounts and custom agent homes. It uses the existing incremental transcript cache and drops duplicate response IDs per server. A late child-usage attribution reparses only its changed file to correct cached parent totals. Compaction and branch summaries use saved costs under `summary (model not recorded)` when the log omits the model. Saved model costs win; zero or missing response costs fall back to model pricing. Web and mobile show separate Pi and Prime Agent series.
   - Why: the hub quota connection supplies limits, not durable request history. Local logs cover agent work without an always-on hub collector. Other hub clients are not included, and copied history on separate machines may still count twice.
 
 ### Prime Agent UI (keep)
