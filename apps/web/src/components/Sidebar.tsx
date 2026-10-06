@@ -3796,6 +3796,12 @@ export default function Sidebar() {
             return;
           break;
         case "pin":
+          // Pinning leaves a snooze alone; dragging out of the shelf is the wake.
+          if (
+            activeSection === "snoozed" &&
+            !(await run(unsnoozeThread(threadRef), "Failed to wake thread"))
+          )
+            return;
           if (
             !(await run(
               pinThread(threadRef, plan.orderKey === undefined ? {} : { orderKey: plan.orderKey }),

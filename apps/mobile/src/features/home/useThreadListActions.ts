@@ -659,6 +659,7 @@ export function useThreadListActions(): {
       try {
         if (crossSection) {
           if (section === "pinned") {
+            if (lifecycle.unsnooze && !(await unsnoozeThread(thread))) return false;
             const orderKey = assignments.find(
               ({ id }) => id === scopedThreadKey(thread.environmentId, thread.id),
             )?.orderKey;
