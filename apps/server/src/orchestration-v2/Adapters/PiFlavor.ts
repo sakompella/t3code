@@ -11,11 +11,17 @@
 import { ProviderDriverKind } from "@t3tools/contracts";
 import * as Duration from "effect/Duration";
 
+import { expandHomePath } from "../../pathExpansion.ts";
+
 export interface PiFlavor {
   readonly driverKind: ProviderDriverKind;
   /** Product name used in user-facing status and error text. */
   readonly displayName: string;
   readonly defaultBinary: string;
+  readonly agentDir: {
+    readonly agentDirEnvVar: string;
+    readonly defaultAgentDir: string;
+  };
   /** Oldest CLI version whose RPC this adapter was verified against. */
   readonly minimumVersion: string;
   /** Shown when the binary is missing from PATH. */
@@ -71,12 +77,7 @@ export interface PiFlavor {
    * declared the server in the agent's settings file, and shows a setup notice
    * until then. `null` means T3's extension registers the tools natively.
    */
-  readonly kernelMcp: {
-    /** Environment variable that relocates the agent's config directory. */
-    readonly agentDirEnvVar: string;
-    /** Config directory under the user's home when that variable is unset. */
-    readonly defaultAgentDir: string;
-  } | null;
+  readonly kernelMcp: PiFlavor["agentDir"] | null;
   /**
    * Whether the RPC lists the session's heartbeats (`list_heartbeats`), the
    * recurring prompts it runs while the client keeps it alive. The adapter
@@ -104,10 +105,24 @@ export interface PiFlavor {
   readonly resumesAtLaunch: boolean;
 }
 
+export function resolvePiAgentDir(input: {
+  readonly agentDir: PiFlavor["agentDir"];
+  readonly environment: NodeJS.ProcessEnv;
+}): string {
+  const { agentDirEnvVar, defaultAgentDir } = input.agentDir;
+  return expandHomePath(input.environment[agentDirEnvVar]?.trim() || `~/${defaultAgentDir}`);
+}
+
+const primeAgentDir = {
+  agentDirEnvVar: "PRIME_AGENT_CODING_AGENT_DIR",
+  defaultAgentDir: ".prime/agent",
+};
+
 export const PI_FLAVOR: PiFlavor = {
   driverKind: ProviderDriverKind.make("pi"),
   displayName: "Pi",
   defaultBinary: "pi",
+  agentDir: { agentDirEnvVar: "PI_CODING_AGENT_DIR", defaultAgentDir: ".pi/agent" },
   // get_entries arrived in 0.80.3 and agent_settled landed in source at
   // 0.80.4; 0.80.5 was the first published package containing both.
   minimumVersion: "0.80.5",
@@ -132,6 +147,7 @@ export const PRIME_AGENT_FLAVOR: PiFlavor = {
   driverKind: ProviderDriverKind.make("primeAgent"),
   displayName: "Prime Agent",
   defaultBinary: "prime-agent",
+  agentDir: primeAgentDir,
   // The RPC surface (get_state sessionActions, fork, get_fork_messages)
   // this adapter relies on was verified against 0.9.6 and 0.9.8.
   minimumVersion: "0.9.6",
@@ -145,7 +161,7 @@ export const PRIME_AGENT_FLAVOR: PiFlavor = {
   rollback: "tree",
   lossyStream: true,
   childThreads: true,
-  kernelMcp: { agentDirEnvVar: "PRIME_AGENT_CODING_AGENT_DIR", defaultAgentDir: ".prime/agent" },
+  kernelMcp: primeAgentDir,
   heartbeats: true,
   terminationGrace: Duration.seconds(15),
   resumesAtLaunch: true,

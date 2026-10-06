@@ -34,6 +34,7 @@ import {
   parseGrokRecord,
   applyPiEntry,
   initialPiScanState,
+  isPiUsageProvider,
   type CodexScanState,
   type UsageRecord,
 } from "./usageTranscripts.ts";
@@ -139,7 +140,7 @@ const USAGE_FIELDS: Record<"claude" | "codex" | "grok" | "pi", SelectedFields> =
 function selectUsageFields(provider: UsageProviderKind) {
   const fields =
     USAGE_FIELDS[
-      provider === "pi" || provider === "primeAgent"
+      isPiUsageProvider(provider)
         ? "pi"
         : provider === "codex" || provider === "grok"
           ? provider
@@ -301,6 +302,24 @@ export async function readTranscriptRecords(
       resumed = true;
     }
 
+    let requiresFullPiScan = false;
+    const applyPiParsedEntry = (parsed: unknown, out: UsageRecord[]): void => {
+      if (!isPiUsageProvider(provider)) return;
+      if (
+        resumed &&
+        typeof parsed === "object" &&
+        parsed !== null &&
+        "type" in parsed &&
+        parsed.type === "child_usage_attributed" &&
+        "targetId" in parsed &&
+        typeof parsed.targetId === "string" &&
+        !piState.recordsByEntryId.has(parsed.targetId)
+      ) {
+        requiresFullPiScan = true;
+      }
+      applyPiEntry(parsed, provider, piSessionId, piState, out);
+    };
+
     const parseLine = (line: string, state: CodexScanState, out: UsageRecord[]): void => {
       if (provider === "codex") {
         if (
@@ -320,14 +339,14 @@ export async function readTranscriptRecords(
         for (const grokRecord of parseGrokLine(line)) out.push(grokRecord);
         return;
       }
-      if (provider === "pi" || provider === "primeAgent") {
+      if (isPiUsageProvider(provider)) {
         let parsed: unknown;
         try {
           parsed = JSON.parse(line);
         } catch {
           return;
         }
-        applyPiEntry(parsed, provider, piSessionId, piState, out);
+        applyPiParsedEntry(parsed, out);
         return;
       }
       const record = parseClaudeLine(line);
@@ -376,8 +395,8 @@ export async function readTranscriptRecords(
         const projected = streaming.finish();
         if (provider === "grok") {
           out.push(...parseGrokRecord(projected));
-        } else if (provider === "pi" || provider === "primeAgent") {
-          applyPiEntry(projected, provider, piSessionId, piState, out);
+        } else if (isPiUsageProvider(provider)) {
+          applyPiParsedEntry(projected, out);
         } else {
           const record =
             provider === "codex"
@@ -426,6 +445,12 @@ export async function readTranscriptRecords(
 
     const tailRecords: UsageRecord[] = [];
     finish({ ...codexState }, tailRecords);
+
+    // A late attribution can correct a cached folded parent. Reparse only
+    // this changed file; ordinary appended responses still use the fast path.
+    if (requiresFullPiScan) {
+      return await readTranscriptRecords(filePath, provider, undefined, options);
+    }
 
     const guardLength = Math.min(GUARD_LENGTH, resumeOffset);
     let guardHash = 0;

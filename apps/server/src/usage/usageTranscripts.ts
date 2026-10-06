@@ -74,6 +74,10 @@ export function totalTokens(totals: UsageTokenTotals): number {
   );
 }
 
+export function isPiUsageProvider(provider: unknown): provider is "pi" | "primeAgent" {
+  return provider === "pi" || provider === "primeAgent";
+}
+
 /**
  * Cheap substring gate applied before `JSON.parse`.
  *
@@ -83,7 +87,7 @@ export function totalTokens(totals: UsageTokenTotals): number {
  */
 export function mightCarryUsage(line: string, provider: UsageProviderKind): boolean {
   if (provider === "claude") return line.includes('"usage"');
-  if (provider === "pi" || provider === "primeAgent")
+  if (isPiUsageProvider(provider))
     return line.includes('"usage"') || line.includes('"child_usage_attributed"');
   if (provider === "grok") return line.includes('"turn_completed"');
   return line.includes('"token_count"');
@@ -129,8 +133,8 @@ function parsePiUsage(
  * Prime Agent folds a subagent's usage into the parent response in memory. Appended
  * lines stay raw, but a fork (`--fork`), branch or file rewrite writes the folded
  * value under the same response ID. The attribution entries copied with it give
- * back the parent's own usage. A resumed parse starts without earlier records,
- * which is safe: appended attributions only follow raw, already-written lines.
+ * back the parent's own usage. If a resumed scan sees an attribution for an
+ * earlier response, the reader reparses that file to repair its cached totals.
  */
 export interface PiScanState {
   readonly recordsByEntryId: Map<string, { readonly out: UsageRecord[]; readonly index: number }>;

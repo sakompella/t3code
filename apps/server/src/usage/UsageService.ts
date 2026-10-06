@@ -69,7 +69,12 @@ import {
   SCAN_CACHE_FILE_NAME,
   type ScanCache,
 } from "./usageScanCache.ts";
-import type { UsageRecord } from "./usageTranscripts.ts";
+import { isPiUsageProvider, type UsageRecord } from "./usageTranscripts.ts";
+import {
+  PI_FLAVOR,
+  PRIME_AGENT_FLAVOR,
+  resolvePiAgentDir,
+} from "../orchestration-v2/Adapters/PiFlavor.ts";
 
 const LITELLM_RATES_URL =
   "https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json";
@@ -310,12 +315,11 @@ export const make = Effect.gen(function* () {
           home = configured
             ? expandHomePath(configured)
             : environment.CLAUDE_CONFIG_DIR?.trim() || path.join(NodeOS.homedir(), ".claude");
-        } else if (driver === "pi" || driver === "primeAgent") {
-          const variable = driver === "pi" ? "PI_CODING_AGENT_DIR" : "PRIME_AGENT_CODING_AGENT_DIR";
-          home = expandHomePath(
-            environment[variable]?.trim() ||
-              path.join(NodeOS.homedir(), driver === "pi" ? ".pi" : ".prime", "agent"),
-          );
+        } else if (isPiUsageProvider(driver)) {
+          home = resolvePiAgentDir({
+            agentDir: (driver === "pi" ? PI_FLAVOR : PRIME_AGENT_FLAVOR).agentDir,
+            environment,
+          });
         } else {
           home = expandHomePath(
             environment.GROK_HOME?.trim() || path.join(NodeOS.homedir(), ".grok"),

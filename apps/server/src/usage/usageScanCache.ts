@@ -17,7 +17,12 @@
 import type { UsageProviderKind } from "@t3tools/contracts";
 
 import { GUARD_LENGTH, type TranscriptParsePosition } from "./usageTranscriptReader.ts";
-import type { CodexScanState, UsageRecord, UsageSpeed } from "./usageTranscripts.ts";
+import {
+  isPiUsageProvider,
+  type CodexScanState,
+  type UsageRecord,
+  type UsageSpeed,
+} from "./usageTranscripts.ts";
 
 // v2: Codex fork-copy suppression changed what a file parses to, so v1
 // entries would keep serving double-counted records forever.
@@ -253,8 +258,7 @@ export function decodeScanCache(document: unknown): ScanCache {
       entry.p !== "claude" &&
       entry.p !== "codex" &&
       entry.p !== "grok" &&
-      entry.p !== "pi" &&
-      entry.p !== "primeAgent"
+      !isPiUsageProvider(entry.p)
     )
       continue;
     if (!isRecordArray(entry.r) || !isRecordArray(entry.t)) continue;
