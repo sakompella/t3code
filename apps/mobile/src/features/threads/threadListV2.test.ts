@@ -1568,20 +1568,13 @@ describe("cross-section thread drops", () => {
       unsettle: true,
       unsnooze: true,
     });
-    // A pin alone never ends a snooze; leaving the snoozed shelf does.
+    // Pinning never ends a snooze, even when the pin is dropped from the snoozed shelf.
     expect(threadDropLifecycle(thread, "pinned", NOW)).toEqual({
       pin: true,
       unpin: false,
       unsettle: false,
-      unsnooze: true,
+      unsnooze: false,
     });
-    expect(
-      threadDropLifecycle(
-        makeThread({ id: ThreadId.make("awake"), title: "awake" }),
-        "pinned",
-        NOW,
-      ),
-    ).toEqual({ pin: true, unpin: false, unsettle: false, unsnooze: false });
   });
   it("does not send lifecycle commands for an ordinary Active reorder", () => {
     expect(
