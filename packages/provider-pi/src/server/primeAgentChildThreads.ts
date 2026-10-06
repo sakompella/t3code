@@ -147,6 +147,10 @@ export function makePrimeAgentChildThreads(input: {
   readonly instanceId: ProviderInstanceId;
   readonly name: string;
   readonly childThreads: boolean;
+  /** Install a real dialog recipient before stock RPC observation advertises child UI support. */
+  readonly beforeObserve: (
+    activeSessionId: string,
+  ) => Effect.Effect<void, Effect.Error<ReturnType<PiRpcConnection["request"]>>>;
   /** The T3 thread and Pi thread the session is on, for updates that arrive with no turn. */
   readonly sessionThread: () => {
     readonly threadId: ThreadId;
@@ -479,6 +483,14 @@ export function makePrimeAgentChildThreads(input: {
       return;
     }
     yield* stopObservingChild(transcript, true);
+    const routing = yield* input.beforeObserve(sessionId).pipe(Effect.option);
+    if (Option.isNone(routing)) {
+      transcript.failedSessionIds.add(sessionId);
+      yield* Effect.logWarning(`${name} child dialog routing failed; observation was not enabled`, {
+        sessionId,
+      });
+      return;
+    }
     const observed = yield* request({ type: "observe", activeSessionId: sessionId }).pipe(
       Effect.option,
     );

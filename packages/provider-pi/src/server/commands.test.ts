@@ -164,10 +164,11 @@ it("prepends the builtin compact command without duplicating a discovered one", 
   ).toEqual([PI_COMPACT_SLASH_COMMAND, { name: "hello" }]);
 });
 
-it("keeps T3's internal rollback command out of the slash menu", () => {
+it("keeps T3's internal rollback and child-dialog commands out of the slash menu", () => {
   const data = {
     commands: [
       { name: "t3-navigate-tree", source: "extension" },
+      { name: "t3-route-child-dialogs", source: "extension" },
       { name: "review", source: "extension" },
     ],
   };
