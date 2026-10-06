@@ -1085,7 +1085,7 @@ it.effect("ProviderSessionManagerV2 releases sessions concurrently on server shu
 
     yield* effect.pipe(
       Effect.provide(
-        makeTestLayer({
+        layerTest({
           state,
           idleTimeoutMs: 60_000,
           onSessionScopeClose: waitForEverySessionToClose,

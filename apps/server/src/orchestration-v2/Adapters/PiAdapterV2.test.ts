@@ -577,7 +577,7 @@ describe("PiAdapterV2", () => {
 
       assert.isFalse(fake.allRequests().some((request) => request["type"] === "list_heartbeats"));
       assert.isUndefined(providerThread.heartbeats);
-    }).pipe(Effect.scoped, Effect.provide(testLayer)),
+    }).pipe(Effect.scoped, Effect.provide(layerTest)),
   );
 
   it.effect("stops provider-initiated work that has no T3 turn owner", () =>
@@ -662,7 +662,7 @@ describe("PiAdapterV2", () => {
       yield* runtime.resumeThread({ providerThread });
       assert.isTrue(fake.allRequests().some((request) => request.type === "switch_session"));
       assert.isFalse(fake.allRequests().some((request) => request.type === "abort_retry"));
-    }).pipe(Effect.scoped, Effect.provide(testLayer)),
+    }).pipe(Effect.scoped, Effect.provide(layerTest)),
   );
 
   it.effect("waits for a slow Pi resume without starting a replacement", () =>
@@ -804,7 +804,7 @@ describe("PiAdapterV2", () => {
 
         assert.equal(resumed.nativeThreadRef?.nativeId, FAKE_SESSION_FILE);
         assert.deepEqual(replacementRequests(fake), []);
-      }).pipe(Effect.scoped, Effect.provide(testLayer)),
+      }).pipe(Effect.scoped, Effect.provide(layerTest)),
     );
 
     it.effect("starts a new thread on the session the process created", () =>
@@ -826,7 +826,7 @@ describe("PiAdapterV2", () => {
 
         assert.isUndefined(resumeFile(fake.lastSpawn().args));
         assert.deepEqual(replacementRequests(fake), []);
-      }).pipe(Effect.scoped, Effect.provide(testLayer)),
+      }).pipe(Effect.scoped, Effect.provide(layerTest)),
     );
 
     it.effect("leaves Pi, which has no such controllers, to switch sessions", () =>
@@ -839,7 +839,7 @@ describe("PiAdapterV2", () => {
 
         assert.isUndefined(resumeFile(fake.lastSpawn().args));
         assert.equal(replacementRequests(fake).length, 1);
-      }).pipe(Effect.scoped, Effect.provide(testLayer)),
+      }).pipe(Effect.scoped, Effect.provide(layerTest)),
     );
 
     it.effect("retries the same session until the previous owner releases it", () =>
@@ -858,7 +858,7 @@ describe("PiAdapterV2", () => {
         assert.deepEqual(launches.spawnedArgs.map(resumeFile), Array(4).fill(FAKE_SESSION_FILE));
         assert.equal(resumed.nativeThreadRef?.nativeId, FAKE_SESSION_FILE);
         assert.deepEqual(replacementRequests(fake), []);
-      }).pipe(Effect.scoped, Effect.provide(testLayer)),
+      }).pipe(Effect.scoped, Effect.provide(layerTest)),
     );
 
     it.effect("falls back to a new session when the lease is never released", () =>
@@ -889,7 +889,7 @@ describe("PiAdapterV2", () => {
         assert.equal(failed._tag, "ProviderAdapterResumeThreadError");
         assert.isDefined(replacement.nativeThreadRef);
         assert.deepEqual(replacementRequests(fake), []);
-      }).pipe(Effect.scoped, Effect.provide(testLayer)),
+      }).pipe(Effect.scoped, Effect.provide(layerTest)),
     );
 
     it.effect("does not retry other launch failures", () =>
@@ -908,7 +908,7 @@ describe("PiAdapterV2", () => {
         assert.deepEqual(launches.spawnedArgs.map(resumeFile), [FAKE_SESSION_FILE, undefined]);
         assert.equal(failed._tag, "ProviderAdapterResumeThreadError");
         assert.deepEqual(replacementRequests(fake), []);
-      }).pipe(Effect.scoped, Effect.provide(testLayer)),
+      }).pipe(Effect.scoped, Effect.provide(layerTest)),
     );
   });
 
@@ -947,7 +947,7 @@ describe("PiAdapterV2", () => {
         assert.equal(resumedThread.nativeThreadRef?.nativeId, FAKE_SESSION_FILE);
         assert.equal(switchRequests(fake).length, 4);
         assert.isFalse(fake.allRequests().some((request) => request["type"] === "new_session"));
-      }).pipe(Effect.scoped, Effect.provide(testLayer)),
+      }).pipe(Effect.scoped, Effect.provide(layerTest)),
     );
 
     it.effect("gives up after the retry window with an ordinary resume failure", () =>
@@ -968,7 +968,7 @@ describe("PiAdapterV2", () => {
         assert.equal(error._tag, "ProviderAdapterResumeThreadError");
         assert.equal(switchRequests(fake).length, 16);
         assert.isFalse(fake.allRequests().some((request) => request["type"] === "new_session"));
-      }).pipe(Effect.scoped, Effect.provide(testLayer)),
+      }).pipe(Effect.scoped, Effect.provide(layerTest)),
     );
 
     it.effect("stops waiting when the resume is cancelled", () =>
@@ -986,7 +986,7 @@ describe("PiAdapterV2", () => {
         yield* Fiber.interrupt(resumed);
         yield* TestClock.adjust(Duration.seconds(60));
         assert.equal(switchRequests(fake).length, 1);
-      }).pipe(Effect.scoped, Effect.provide(testLayer)),
+      }).pipe(Effect.scoped, Effect.provide(layerTest)),
     );
 
     it.effect("does not retry other resume failures", () =>
@@ -1005,7 +1005,7 @@ describe("PiAdapterV2", () => {
         const error = yield* Fiber.join(resumed);
         assert.equal(error._tag, "ProviderAdapterResumeThreadError");
         assert.equal(switchRequests(fake).length, 1);
-      }).pipe(Effect.scoped, Effect.provide(testLayer)),
+      }).pipe(Effect.scoped, Effect.provide(layerTest)),
     );
   });
 
@@ -2994,7 +2994,7 @@ describe("PiAdapterV2 with the Prime Agent flavor", () => {
       const types = requestTypes();
       assert.isAbove(types.indexOf("abort_retry"), -1);
       assert.isBelow(types.indexOf("abort_retry"), types.indexOf("switch_session"));
-    }).pipe(Effect.scoped, Effect.provide(testLayer)),
+    }).pipe(Effect.scoped, Effect.provide(layerTest)),
   );
 
   it.effect("settles a turn after agent_end only once get_state shows no active work", () =>
@@ -3013,7 +3013,7 @@ describe("PiAdapterV2 with the Prime Agent flavor", () => {
 
       const terminal = yield* takeEvent((event) => event.type === "turn.terminal");
       assert.isTrue(terminal.type === "turn.terminal" && terminal.status === "completed");
-    }).pipe(Effect.scoped, Effect.provide(testLayer)),
+    }).pipe(Effect.scoped, Effect.provide(layerTest)),
   );
 
   // Prime Agent answers get_state through its daemon. Under heavy load a reply
@@ -3041,7 +3041,7 @@ describe("PiAdapterV2 with the Prime Agent flavor", () => {
 
       const terminal = yield* takeEvent((event) => event.type === "turn.terminal");
       assert.isTrue(terminal.type === "turn.terminal" && terminal.status === "completed");
-    }).pipe(Effect.scoped, Effect.provide(testLayer)),
+    }).pipe(Effect.scoped, Effect.provide(layerTest)),
   );
 
   it.effect("keeps a retrying turn open across agent_end and settles on the recovered run", () =>
@@ -3077,7 +3077,7 @@ describe("PiAdapterV2 with the Prime Agent flavor", () => {
 
       const terminal = yield* takeEvent((event) => event.type === "turn.terminal");
       assert.isTrue(terminal.type === "turn.terminal" && terminal.status === "completed");
-    }).pipe(Effect.scoped, Effect.provide(testLayer)),
+    }).pipe(Effect.scoped, Effect.provide(layerTest)),
   );
 
   type TakeEvent = (
@@ -3152,7 +3152,7 @@ describe("PiAdapterV2 with the Prime Agent flavor", () => {
       yield* takeQuietProbe(fake);
 
       assert.deepEqual(yield* takeCompletedReplies(takeEvent), ["The final reply."]);
-    }).pipe(Effect.scoped, Effect.provide(testLayer)),
+    }).pipe(Effect.scoped, Effect.provide(layerTest)),
   );
 
   it.effect("keeps a quiet turn open while get_state shows the agent still running", () =>
@@ -3176,7 +3176,7 @@ describe("PiAdapterV2 with the Prime Agent flavor", () => {
       yield* takeQuietProbe(fake);
       const terminal = yield* Fiber.join(terminalFiber);
       assert.isTrue(terminal.type === "turn.terminal" && terminal.status === "completed");
-    }).pipe(Effect.scoped, Effect.provide(testLayer)),
+    }).pipe(Effect.scoped, Effect.provide(layerTest)),
   );
 
   const fullReply =
@@ -3226,7 +3226,7 @@ describe("PiAdapterV2 with the Prime Agent flavor", () => {
         texts: [fullReply],
         status: "completed",
       });
-    }).pipe(Effect.scoped, Effect.provide(testLayer)),
+    }).pipe(Effect.scoped, Effect.provide(layerTest)),
   );
 
   // Thread 83be3aac lost 7 whole replies in one hour: none of their events
@@ -3245,7 +3245,7 @@ describe("PiAdapterV2 with the Prime Agent flavor", () => {
         texts: [fullReply],
         status: "completed",
       });
-    }).pipe(Effect.scoped, Effect.provide(testLayer)),
+    }).pipe(Effect.scoped, Effect.provide(layerTest)),
   );
 
   it.effect("settles a turn that went quiet without showing one agent event", () =>
@@ -3262,7 +3262,7 @@ describe("PiAdapterV2 with the Prime Agent flavor", () => {
         texts: [fullReply],
         status: "completed",
       });
-    }).pipe(Effect.scoped, Effect.provide(testLayer)),
+    }).pipe(Effect.scoped, Effect.provide(layerTest)),
   );
 
   it.effect("lengthens a cut-off reply whose item was already completed", () =>
@@ -3285,7 +3285,7 @@ describe("PiAdapterV2 with the Prime Agent flavor", () => {
         texts: [cutReply, fullReply],
         status: "completed",
       });
-    }).pipe(Effect.scoped, Effect.provide(testLayer)),
+    }).pipe(Effect.scoped, Effect.provide(layerTest)),
   );
 
   it.effect("completes a cut-off reply when Stop aborts the run", () =>
@@ -3309,7 +3309,7 @@ describe("PiAdapterV2 with the Prime Agent flavor", () => {
         texts: [fullReply],
         status: "interrupted",
       });
-    }).pipe(Effect.scoped, Effect.provide(testLayer)),
+    }).pipe(Effect.scoped, Effect.provide(layerTest)),
   );
 
   it.effect("completes a cut-off reply when Stop restarts Prime Agent", () =>
@@ -3338,7 +3338,7 @@ describe("PiAdapterV2 with the Prime Agent flavor", () => {
         texts: [fullReply],
         status: "interrupted",
       });
-    }).pipe(Effect.scoped, Effect.provide(testLayer)),
+    }).pipe(Effect.scoped, Effect.provide(layerTest)),
   );
 
   it.effect("adds only the messages this turn stored, not earlier history", () =>
@@ -3355,7 +3355,7 @@ describe("PiAdapterV2 with the Prime Agent flavor", () => {
       yield* takeQuietProbeAtItsTick(fake);
 
       assert.deepEqual(yield* takeCompletedReplies(takeEvent), [fullReply]);
-    }).pipe(Effect.scoped, Effect.provide(testLayer)),
+    }).pipe(Effect.scoped, Effect.provide(layerTest)),
   );
 
   it.effect("adds only this turn's messages when the first history read failed", () =>
@@ -3376,7 +3376,7 @@ describe("PiAdapterV2 with the Prime Agent flavor", () => {
         texts: [fullReply],
         status: "completed",
       });
-    }).pipe(Effect.scoped, Effect.provide(testLayer)),
+    }).pipe(Effect.scoped, Effect.provide(layerTest)),
   );
 
   it.effect("adds only this turn's messages on a thread that launched on its saved session", () =>
@@ -3409,7 +3409,7 @@ describe("PiAdapterV2 with the Prime Agent flavor", () => {
         fake.allRequests().some((request) => request["type"] === "switch_session"),
         "the thread stayed on the session the process launched on",
       );
-    }).pipe(Effect.scoped, Effect.provide(testLayer)),
+    }).pipe(Effect.scoped, Effect.provide(layerTest)),
   );
 
   it.effect("keeps a lost reply when the thread loads again on the same session", () =>
@@ -3433,7 +3433,7 @@ describe("PiAdapterV2 with the Prime Agent flavor", () => {
         texts: ["A reply whose events were all dropped.", fullReply],
         status: "completed",
       });
-    }).pipe(Effect.scoped, Effect.provide(testLayer)),
+    }).pipe(Effect.scoped, Effect.provide(layerTest)),
   );
 
   // Thread b0d440d5 run 68: on a 68-run session the get_messages reply was
@@ -3460,7 +3460,7 @@ describe("PiAdapterV2 with the Prime Agent flavor", () => {
         texts: [fullReply],
         status: "completed",
       });
-    }).pipe(Effect.scoped, Effect.provide(testLayer)),
+    }).pipe(Effect.scoped, Effect.provide(layerTest)),
   );
 
   /** Runs turn `runOrdinal`, whose stored reply is `reply` and whose events were all dropped. */
@@ -3508,7 +3508,7 @@ describe("PiAdapterV2 with the Prime Agent flavor", () => {
 
       assert.deepEqual(first.outcome, { texts: ["First reply."], status: "completed" });
       assert.deepEqual(second.outcome, { texts: ["Second reply."], status: "completed" });
-    }).pipe(Effect.scoped, Effect.provide(testLayer)),
+    }).pipe(Effect.scoped, Effect.provide(layerTest)),
   );
 
   it.effect("ignores a recovered reply's events that arrive after its turn settled", () =>
@@ -3552,7 +3552,7 @@ describe("PiAdapterV2 with the Prime Agent flavor", () => {
         texts: ["Second reply."],
         status: "completed",
       });
-    }).pipe(Effect.scoped, Effect.provide(testLayer)),
+    }).pipe(Effect.scoped, Effect.provide(layerTest)),
   );
 
   /** Steps virtual time in settle-probe steps until the turn ends, for probes that ask again. */
@@ -3590,7 +3590,7 @@ describe("PiAdapterV2 with the Prime Agent flavor", () => {
         texts: [fullReply, "Second reply."],
         status: "completed",
       });
-    }).pipe(Effect.scoped, Effect.provide(testLayer)),
+    }).pipe(Effect.scoped, Effect.provide(layerTest)),
   );
 
   // get_state and get_messages are separate reads, so the history can be from
@@ -3611,7 +3611,7 @@ describe("PiAdapterV2 with the Prime Agent flavor", () => {
         texts: [fullReply],
         status: "completed",
       });
-    }).pipe(Effect.scoped, Effect.provide(testLayer)),
+    }).pipe(Effect.scoped, Effect.provide(layerTest)),
   );
 
   it.effect("keeps the turn open when the agent goes busy while its history is read", () =>
@@ -3637,7 +3637,7 @@ describe("PiAdapterV2 with the Prime Agent flavor", () => {
         texts: [fullReply, "Then the follow-up."],
         status: "completed",
       });
-    }).pipe(Effect.scoped, Effect.provide(testLayer)),
+    }).pipe(Effect.scoped, Effect.provide(layerTest)),
   );
 
   const storedLookup = (timestamp: number) => [
@@ -3692,7 +3692,7 @@ describe("PiAdapterV2 with the Prime Agent flavor", () => {
         input: { key: "a" },
         output: "found it",
       });
-    }).pipe(Effect.scoped, Effect.provide(testLayer)),
+    }).pipe(Effect.scoped, Effect.provide(layerTest)),
   );
 
   it.effect("recovers a tool call whose every event was dropped", () =>
@@ -3709,7 +3709,7 @@ describe("PiAdapterV2 with the Prime Agent flavor", () => {
         input: { key: "a" },
         output: "found it",
       });
-    }).pipe(Effect.scoped, Effect.provide(testLayer)),
+    }).pipe(Effect.scoped, Effect.provide(layerTest)),
   );
 
   it.effect("keeps a reply whose message_start was dropped apart from the previous reply", () =>
@@ -3732,7 +3732,7 @@ describe("PiAdapterV2 with the Prime Agent flavor", () => {
       yield* fake.takeRequest("get_state");
 
       assert.deepEqual(yield* takeCompletedReplies(takeEvent), ["First reply.", "Second reply."]);
-    }).pipe(Effect.scoped, Effect.provide(testLayer)),
+    }).pipe(Effect.scoped, Effect.provide(layerTest)),
   );
 
   it.effect(
@@ -3759,7 +3759,7 @@ describe("PiAdapterV2 with the Prime Agent flavor", () => {
         yield* fake.takeRequest("get_state");
 
         assert.deepEqual(yield* takeCompletedReplies(takeEvent), ["First reply.", "Second reply."]);
-      }).pipe(Effect.scoped, Effect.provide(testLayer)),
+      }).pipe(Effect.scoped, Effect.provide(layerTest)),
   );
 
   const finalReply = {
@@ -3816,7 +3816,7 @@ describe("PiAdapterV2 with the Prime Agent flavor", () => {
       assert.deepStrictEqual(systemNotices(seen), [
         { message: "Finished up", tone: "progress", status: "completed" },
       ]);
-    }).pipe(Effect.scoped, Effect.provide(testLayer)),
+    }).pipe(Effect.scoped, Effect.provide(layerTest)),
   );
 
   it.effect("shows no Finishing up row when the run ends right after the final reply", () =>
@@ -3835,7 +3835,7 @@ describe("PiAdapterV2 with the Prime Agent flavor", () => {
         return event.type === "turn.terminal";
       });
       assert.deepStrictEqual(systemNotices(seen), []);
-    }).pipe(Effect.scoped, Effect.provide(testLayer)),
+    }).pipe(Effect.scoped, Effect.provide(layerTest)),
   );
 
   /**
@@ -3891,7 +3891,7 @@ describe("PiAdapterV2 with the Prime Agent flavor", () => {
       assert.deepStrictEqual(noticeIds(doneB), noticeIds(runningB));
       assert.notStrictEqual(noticeIds(runningA)?.id, noticeIds(runningB)?.id);
       assert.notStrictEqual(noticeIds(runningA)?.nodeId, noticeIds(runningB)?.nodeId);
-    }).pipe(Effect.scoped, Effect.provide(testLayer)),
+    }).pipe(Effect.scoped, Effect.provide(layerTest)),
   );
 
   it.effect("ignores refine events on plain Pi", () =>
@@ -3915,7 +3915,7 @@ describe("PiAdapterV2 with the Prime Agent flavor", () => {
         return event.type === "turn.terminal";
       });
       assert.deepStrictEqual(systemNotices(seen), []);
-    }).pipe(Effect.scoped, Effect.provide(testLayer)),
+    }).pipe(Effect.scoped, Effect.provide(layerTest)),
   );
 
   it.effect("emits no Finishing up row after a quick end, even once the delay has passed", () =>
@@ -3942,7 +3942,7 @@ describe("PiAdapterV2 with the Prime Agent flavor", () => {
         return event.type === "provider_turn.updated" && event.providerTurn.status === "running";
       });
       assert.deepStrictEqual(systemNotices(seen), []);
-    }).pipe(Effect.scoped, Effect.provide(testLayer)),
+    }).pipe(Effect.scoped, Effect.provide(layerTest)),
   );
 
   it.effect("shows no Finishing up row for a plain Pi final reply", () =>
@@ -3966,7 +3966,7 @@ describe("PiAdapterV2 with the Prime Agent flavor", () => {
         return event.type === "turn.terminal";
       });
       assert.deepStrictEqual(systemNotices(seen), []);
-    }).pipe(Effect.scoped, Effect.provide(testLayer)),
+    }).pipe(Effect.scoped, Effect.provide(layerTest)),
   );
 
   type PrimeSession = Effect.Success<ReturnType<typeof openPrimeThread>>;
@@ -4072,7 +4072,7 @@ describe("PiAdapterV2 with the Prime Agent flavor", () => {
           completed.turnItem.id === running.turnItem.id &&
           completed.turnItem.ordinal === running.turnItem.ordinal,
       );
-    }).pipe(Effect.scoped, Effect.provide(testLayer)),
+    }).pipe(Effect.scoped, Effect.provide(layerTest)),
   );
 
   it.effect("reports a finished refinement and a failed one as notices", () =>
@@ -4105,7 +4105,7 @@ describe("PiAdapterV2 with the Prime Agent flavor", () => {
           status: "completed",
         },
       ]);
-    }).pipe(Effect.scoped, Effect.provide(testLayer)),
+    }).pipe(Effect.scoped, Effect.provide(layerTest)),
   );
 
   it.effect("rebuilds streamed text from message snapshots when Prime Agent drops events", () =>
@@ -4171,7 +4171,7 @@ describe("PiAdapterV2 with the Prime Agent flavor", () => {
         "Hello, world. All done.",
         "Second block.",
       ]);
-    }).pipe(Effect.scoped, Effect.provide(testLayer)),
+    }).pipe(Effect.scoped, Effect.provide(layerTest)),
   );
 
   it.effect("shows ipython cells as bash commands, python tools, and file changes", () =>
@@ -4255,7 +4255,7 @@ describe("PiAdapterV2 with the Prime Agent flavor", () => {
           fileChange.turnItem.oldStr === "old" &&
           fileChange.turnItem.newStr === "new",
       );
-    }).pipe(Effect.scoped, Effect.provide(testLayer)),
+    }).pipe(Effect.scoped, Effect.provide(layerTest)),
   );
 
   const rlmChild = (status: string, extra: Record<string, unknown> = {}) => ({
@@ -4341,7 +4341,7 @@ describe("PiAdapterV2 with the Prime Agent flavor", () => {
         (event) => event.type === "turn.terminal" || event.type === "subagent.updated",
       );
       assert.equal(next.type, "turn.terminal");
-    }).pipe(Effect.scoped, Effect.provide(testLayer)),
+    }).pipe(Effect.scoped, Effect.provide(layerTest)),
   );
 
   it.effect("waits for a real child dialog recipient, not prompt admission, before observing", () =>
@@ -4365,7 +4365,7 @@ describe("PiAdapterV2 with the Prime Agent flavor", () => {
         message: `t3-child-dialog-route:${encodeJsonLine({ requestId: route.requestId, ok: true })}`,
       });
       assert.equal((yield* fake.takeRequest("observe"))["activeSessionId"], "active-1");
-    }).pipe(Effect.scoped, Effect.provide(testLayer)),
+    }).pipe(Effect.scoped, Effect.provide(layerTest)),
   );
 
   it.effect("does not advertise child UI when the dialog recipient cannot attach", () =>
@@ -4391,7 +4391,7 @@ describe("PiAdapterV2 with the Prime Agent flavor", () => {
         (event) => event.type === "subagent.updated" && event.subagent.title === "routing-barrier",
       );
       assert.isFalse(fake.allRequests().some((request) => request["type"] === "observe"));
-    }).pipe(Effect.scoped, Effect.provide(testLayer)),
+    }).pipe(Effect.scoped, Effect.provide(layerTest)),
   );
 
   it.effect("streams a running child's session into its own thread", () =>
@@ -4452,7 +4452,7 @@ describe("PiAdapterV2 with the Prime Agent flavor", () => {
 
       yield* fake.emit(rlmChild("done", { activeSessionId: "active-1" }));
       assert.equal((yield* fake.takeRequest("unobserve"))["activeSessionId"], "active-1");
-    }).pipe(Effect.scoped, Effect.provide(testLayer)),
+    }).pipe(Effect.scoped, Effect.provide(layerTest)),
   );
 
   /** Starts a child with an observed session, and leaves it with a running tool and an open reply. */
@@ -4599,7 +4599,7 @@ describe("PiAdapterV2 with the Prime Agent flavor", () => {
         streaming: false,
       });
       assert.equal(last("command_execution")?.status, "completed");
-    }).pipe(Effect.scoped, Effect.provide(testLayer)),
+    }).pipe(Effect.scoped, Effect.provide(layerTest)),
   );
 
   it.effect("settles a child's tool and stops its pending flush when the process dies", () =>
@@ -4620,7 +4620,7 @@ describe("PiAdapterV2 with the Prime Agent flavor", () => {
       assert.equal(last("assistant_message")?.status, "completed");
       // The 50 ms flush scheduled by the half reply must not publish a running item now.
       yield* assertNoLaterRunningItem(session, childThreadId);
-    }).pipe(Effect.scoped, Effect.provide(testLayer)),
+    }).pipe(Effect.scoped, Effect.provide(layerTest)),
   );
 
   it.effect("settles a child's running tool as interrupted when its session closes", () =>
@@ -4640,7 +4640,7 @@ describe("PiAdapterV2 with the Prime Agent flavor", () => {
         streaming: false,
       });
       yield* assertNoLaterRunningItem(session, childThreadId);
-    }).pipe(Effect.scoped, Effect.provide(testLayer)),
+    }).pipe(Effect.scoped, Effect.provide(layerTest)),
   );
 
   it.effect("nests a subagent's own children under it, even after the turn settled", () =>
@@ -4667,7 +4667,7 @@ describe("PiAdapterV2 with the Prime Agent flavor", () => {
           nested.subagent.parentNodeId === parent?.id &&
           nested.subagent.runId === parent.runId,
       );
-    }).pipe(Effect.scoped, Effect.provide(testLayer)),
+    }).pipe(Effect.scoped, Effect.provide(layerTest)),
   );
 
   it.effect(
@@ -4770,7 +4770,7 @@ describe("PiAdapterV2 with the Prime Agent flavor", () => {
               event.node.threadId === child?.childThreadId),
         );
         assert.deepEqual(rewrites, []);
-      }).pipe(Effect.scoped, Effect.provide(testLayer)),
+      }).pipe(Effect.scoped, Effect.provide(layerTest)),
   );
 
   it.effect("logs what became of every child update, with the reason for a drop", () =>
@@ -4834,7 +4834,7 @@ describe("PiAdapterV2 with the Prime Agent flavor", () => {
           null,
         ]);
       }).pipe(Effect.provide(captureChildUpdateLogs));
-    }).pipe(Effect.scoped, Effect.provide(testLayer)),
+    }).pipe(Effect.scoped, Effect.provide(layerTest)),
   );
 
   it.effect("stops background subagents from a settled turn by restarting the session", () =>
@@ -4852,7 +4852,7 @@ describe("PiAdapterV2 with the Prime Agent flavor", () => {
         (event) => event.type === "subagent.updated" && event.subagent.status === "interrupted",
       );
       assert.equal(stopped.type, "subagent.updated");
-    }).pipe(Effect.scoped, Effect.provide(testLayer)),
+    }).pipe(Effect.scoped, Effect.provide(layerTest)),
   );
 
   it.effect("lists background shell jobs until the kernel reports them finished", () =>
@@ -4909,7 +4909,7 @@ describe("PiAdapterV2 with the Prime Agent flavor", () => {
           (event.providerThread.pendingBackgroundTasks?.length ?? 0) === 0,
       );
       assert.equal(cleared.type, "provider_thread.updated");
-    }).pipe(Effect.scoped, Effect.provide(testLayer)),
+    }).pipe(Effect.scoped, Effect.provide(layerTest)),
   );
 
   /** The session id the fake reports from `get_state`; heartbeats are matched on it. */
@@ -4961,7 +4961,7 @@ describe("PiAdapterV2 with the Prime Agent flavor", () => {
       // A heartbeat is configuration. It must not keep the thread working.
       assert.isFalse(yield* runtime.hasPendingBackgroundWork!);
       assert.deepEqual(providerThread.pendingBackgroundTasks, []);
-    }).pipe(Effect.scoped, Effect.provide(testLayer)),
+    }).pipe(Effect.scoped, Effect.provide(layerTest)),
   );
 
   it.effect("follows a heartbeat as turns settle: changed, then removed", () =>
@@ -5009,7 +5009,7 @@ describe("PiAdapterV2 with the Prime Agent flavor", () => {
       yield* fake.takeRequest("get_state");
       const removed = yield* takeEvent((event) => heartbeatIds(event)?.length === 0);
       assert.equal(removed.type, "provider_thread.updated");
-    }).pipe(Effect.scoped, Effect.provide(testLayer)),
+    }).pipe(Effect.scoped, Effect.provide(layerTest)),
   );
 
   it.effect("keeps the heartbeats it showed when the agent cannot list them", () =>
@@ -5038,7 +5038,7 @@ describe("PiAdapterV2 with the Prime Agent flavor", () => {
           ["deploy"],
         );
       }
-    }).pipe(Effect.scoped, Effect.provide(testLayer)),
+    }).pipe(Effect.scoped, Effect.provide(layerTest)),
   );
 
   it.effect("shows a heartbeat that fires during a turn, with the prompt it ran", () =>
@@ -5069,7 +5069,7 @@ describe("PiAdapterV2 with the Prime Agent flavor", () => {
       assert.equal(notice.turnItem.summary, "Heartbeat");
       assert.deepEqual(notice.turnItem.source, { kind: "heartbeat", heartbeatId: "deploy" });
       assert.equal(notice.turnItem.detail, "Check the deploy.");
-    }).pipe(Effect.scoped, Effect.provide(testLayer)),
+    }).pipe(Effect.scoped, Effect.provide(layerTest)),
   );
 
   it.effect("shows a heartbeat that wakes an idle agent, with the prompt it ran", () =>
@@ -5093,7 +5093,7 @@ describe("PiAdapterV2 with the Prime Agent flavor", () => {
       assert.equal(offer.notification?.summary, "Heartbeat");
       assert.deepEqual(offer.notification?.source, { kind: "heartbeat", heartbeatId: "deploy" });
       assert.equal(offer.notification?.detail, "Check the deploy.");
-    }).pipe(Effect.scoped, Effect.provide(testLayer)),
+    }).pipe(Effect.scoped, Effect.provide(layerTest)),
   );
 
   /** Collects the events a turn publishes until it settles. */
@@ -5156,7 +5156,7 @@ describe("PiAdapterV2 with the Prime Agent flavor", () => {
       const seen = yield* drainUntilTerminal(takeEvent);
       assert.deepEqual(rosterLengths(seen).slice(0, 1), [0]);
       assert.isFalse(yield* runtime.hasPendingBackgroundWork!);
-    }).pipe(Effect.scoped, Effect.provide(testLayer)),
+    }).pipe(Effect.scoped, Effect.provide(layerTest)),
   );
 
   /**
@@ -5273,7 +5273,7 @@ describe("PiAdapterV2 with the Prime Agent flavor", () => {
       assert.isTrue(rosters.flat().every((task) => (task.description ?? "").trim().length > 0));
       // A job whose result was read may still run, so the session stays up for it.
       assert.isTrue(yield* runtime.hasPendingBackgroundWork!);
-    }).pipe(Effect.scoped, Effect.provide(testLayer)),
+    }).pipe(Effect.scoped, Effect.provide(layerTest)),
   );
 
   it.effect(
@@ -5299,7 +5299,7 @@ describe("PiAdapterV2 with the Prime Agent flavor", () => {
         const seen = yield* drainUntilTerminal(takeEvent);
         assert.deepEqual(rosterLengths(seen).slice(0, 1), [0]);
         assert.isTrue(yield* runtime.hasPendingBackgroundWork!);
-      }).pipe(Effect.scoped, Effect.provide(testLayer)),
+      }).pipe(Effect.scoped, Effect.provide(layerTest)),
   );
 
   it.effect("does not list a job its own cell killed", () =>
@@ -5315,7 +5315,7 @@ describe("PiAdapterV2 with the Prime Agent flavor", () => {
       const seen = yield* drainUntilTerminal(takeEvent);
       assert.isTrue(rosterLengths(seen).every((length) => length === 0));
       assert.isFalse(yield* runtime.hasPendingBackgroundWork!);
-    }).pipe(Effect.scoped, Effect.provide(testLayer)),
+    }).pipe(Effect.scoped, Effect.provide(layerTest)),
   );
 
   it.effect("settles a cell whose end event never came when the turn ends", () =>
@@ -5347,7 +5347,7 @@ describe("PiAdapterV2 with the Prime Agent flavor", () => {
           : [],
       );
       assert.deepEqual([cellStatuses[0], cellStatuses.at(-1)], ["running", "completed"]);
-    }).pipe(Effect.scoped, Effect.provide(testLayer)),
+    }).pipe(Effect.scoped, Effect.provide(layerTest)),
   );
 
   /** A cell that started but whose end event never arrives. */
@@ -5375,7 +5375,7 @@ describe("PiAdapterV2 with the Prime Agent flavor", () => {
       assert.deepEqual(cellStatuses(seen, "cell_lost").at(-1), "completed");
       assert.isTrue(rosterLengths(seen).every((length) => length === 0));
       assert.isFalse(yield* runtime.hasPendingBackgroundWork!);
-    }).pipe(Effect.scoped, Effect.provide(testLayer)),
+    }).pipe(Effect.scoped, Effect.provide(layerTest)),
   );
 
   it.effect("keeps a running job when a cell that would kill it never reported its end", () =>
@@ -5391,7 +5391,7 @@ describe("PiAdapterV2 with the Prime Agent flavor", () => {
       yield* fake.takeRequest("get_state");
       yield* drainUntilTerminal(takeEvent);
       assert.isTrue(yield* runtime.hasPendingBackgroundWork!);
-    }).pipe(Effect.scoped, Effect.provide(testLayer)),
+    }).pipe(Effect.scoped, Effect.provide(layerTest)),
   );
 
   it.effect("fails a cell whose end was lost and lists no job when the process dies", () =>
@@ -5407,7 +5407,7 @@ describe("PiAdapterV2 with the Prime Agent flavor", () => {
       assert.deepEqual(cellStatuses(seen, "cell_lost").at(-1), "failed");
       assert.isTrue(rosterLengths(seen).every((length) => length === 0));
       assert.isFalse(yield* runtime.hasPendingBackgroundWork!);
-    }).pipe(Effect.scoped, Effect.provide(testLayer)),
+    }).pipe(Effect.scoped, Effect.provide(layerTest)),
   );
 
   it.effect(
@@ -5432,7 +5432,7 @@ describe("PiAdapterV2 with the Prime Agent flavor", () => {
         assert.deepEqual(cellStatuses(seen, "cell_lost").at(-1), "interrupted");
         assert.isTrue(rosterLengths(seen).every((length) => length === 0));
         assert.isFalse(yield* runtime.hasPendingBackgroundWork!);
-      }).pipe(Effect.scoped, Effect.provide(testLayer)),
+      }).pipe(Effect.scoped, Effect.provide(layerTest)),
   );
 
   it.effect("drops a persisted job roster the reopened process never started", () =>
@@ -5450,7 +5450,7 @@ describe("PiAdapterV2 with the Prime Agent flavor", () => {
         },
       });
       assert.deepEqual(reopened.pendingBackgroundTasks, []);
-    }).pipe(Effect.scoped, Effect.provide(testLayer)),
+    }).pipe(Effect.scoped, Effect.provide(layerTest)),
   );
 
   it.effect("keeps the jobs a live process started when its thread is registered again", () =>
@@ -5474,7 +5474,7 @@ describe("PiAdapterV2 with the Prime Agent flavor", () => {
         reopened.pendingBackgroundTasks?.map((task) => task.description),
         ["sleep 300"],
       );
-    }).pipe(Effect.scoped, Effect.provide(testLayer)),
+    }).pipe(Effect.scoped, Effect.provide(layerTest)),
   );
 
   /** One assistant reply, as Prime Agent streams it. */
@@ -5544,7 +5544,7 @@ describe("PiAdapterV2 with the Prime Agent flavor", () => {
       assert.isTrue(
         second.type === "turn_item.updated" && second.turnItem.ordinal > notice.turnItem.ordinal,
       );
-    }).pipe(Effect.scoped, Effect.provide(testLayer)),
+    }).pipe(Effect.scoped, Effect.provide(layerTest)),
   );
 
   it.effect("names a message from a child agent that joins a running turn", () =>
@@ -5596,7 +5596,7 @@ describe("PiAdapterV2 with the Prime Agent flavor", () => {
       );
       assert.notEqual(first.turnItem.id, second.turnItem.id);
       assert.notEqual(first.turnItem.nodeId, second.turnItem.nodeId);
-    }).pipe(Effect.scoped, Effect.provide(testLayer)),
+    }).pipe(Effect.scoped, Effect.provide(layerTest)),
   );
 
   it.effect("names the command and handle of a background job that finishes during a run", () =>
@@ -5623,7 +5623,7 @@ describe("PiAdapterV2 with the Prime Agent flavor", () => {
       assert.isTrue(notice.type === "turn_item.updated" && notice.turnItem.type === "notification");
       if (notice.type !== "turn_item.updated" || notice.turnItem.type !== "notification") return;
       assert.equal(notice.turnItem.detail, "make build\n\nExit code 2\n\nHandle: build");
-    }).pipe(Effect.scoped, Effect.provide(testLayer)),
+    }).pipe(Effect.scoped, Effect.provide(layerTest)),
   );
 
   it.effect("names the command of a background job that wakes an idle agent", () =>
@@ -5653,7 +5653,7 @@ describe("PiAdapterV2 with the Prime Agent flavor", () => {
 
       assert.equal(offer.notification?.summary, "Background command finished");
       assert.equal(offer.notification?.detail, "make lint\n\nExit code 0\n\nHandle: lint");
-    }).pipe(Effect.scoped, Effect.provide(testLayer)),
+    }).pipe(Effect.scoped, Effect.provide(layerTest)),
   );
 
   it.effect("does not repeat a continuation run's own wake notification", () =>
@@ -5684,7 +5684,7 @@ describe("PiAdapterV2 with the Prime Agent flavor", () => {
       // The orchestrator shows the first wake message as the run's own
       // notification, so the adapter says nothing more about it.
       assert.deepEqual(adapterNotices, []);
-    }).pipe(Effect.scoped, Effect.provide(testLayer)),
+    }).pipe(Effect.scoped, Effect.provide(layerTest)),
   );
 
   it.effect("names the wake message when the user's turn adopts it", () =>
@@ -5703,7 +5703,7 @@ describe("PiAdapterV2 with the Prime Agent flavor", () => {
           notice.turnItem.type === "notification" &&
           notice.turnItem.summary === "Message from worker",
       );
-    }).pipe(Effect.scoped, Effect.provide(testLayer)),
+    }).pipe(Effect.scoped, Effect.provide(layerTest)),
   );
 
   it.effect("restarts Prime Agent when Stop interrupts a turn with a live subagent", () =>
@@ -5732,7 +5732,7 @@ describe("PiAdapterV2 with the Prime Agent flavor", () => {
       assert.equal(stopped.type, "subagent.updated");
       const terminal = yield* takeEvent((event) => event.type === "turn.terminal");
       assert.isTrue(terminal.type === "turn.terminal" && terminal.status === "interrupted");
-    }).pipe(Effect.scoped, Effect.provide(testLayer)),
+    }).pipe(Effect.scoped, Effect.provide(layerTest)),
   );
 
   const openPrimeThreadWithWakes = Effect.fnUntraced(function* (fake: FakePi) {
@@ -5839,7 +5839,7 @@ describe("PiAdapterV2 with the Prime Agent flavor", () => {
       // The terminal roster update drops the route only after the message used it.
       yield* fake.emit(rlmChild("done", { activeSessionId: "active-1" }));
       assert.equal((yield* fake.takeRequest("unobserve"))["activeSessionId"], "active-1");
-    }).pipe(Effect.scoped, Effect.provide(testLayer)),
+    }).pipe(Effect.scoped, Effect.provide(layerTest)),
   );
 
   it.effect("hands a self-wake to a continuation run instead of stopping the session", () =>
@@ -5887,7 +5887,7 @@ describe("PiAdapterV2 with the Prime Agent flavor", () => {
         promptsBefore,
         "a continuation run replays the wake and prompts nothing",
       );
-    }).pipe(Effect.scoped, Effect.provide(testLayer)),
+    }).pipe(Effect.scoped, Effect.provide(layerTest)),
   );
 
   it.effect("lets the user's next turn adopt a pending wake and queue behind it", () =>
@@ -5908,7 +5908,7 @@ describe("PiAdapterV2 with the Prime Agent flavor", () => {
       );
       const stale = yield* offer.dispatchIfCurrent!(Effect.succeed("dispatched"));
       assert.isTrue(Option.isNone(stale), "the adopted wake's continuation must not dispatch");
-    }).pipe(Effect.scoped, Effect.provide(testLayer)),
+    }).pipe(Effect.scoped, Effect.provide(layerTest)),
   );
 
   /** Lets every fiber that a step woke run before the next step. */
@@ -6001,7 +6001,7 @@ describe("PiAdapterV2 with the Prime Agent flavor", () => {
       assert.equal(Queue.sizeUnsafe(session.offers), 0);
       // The child only sent a message; nothing says it ended.
       assert.isTrue(yield* session.runtime.hasPendingBackgroundWork!);
-    }).pipe(Effect.scoped, Effect.provide(testLayer)),
+    }).pipe(Effect.scoped, Effect.provide(layerTest)),
   );
 
   it.effect("still names the heartbeat behind a wake whose every event was dropped", () =>
@@ -6024,7 +6024,7 @@ describe("PiAdapterV2 with the Prime Agent flavor", () => {
       const offer = yield* takeRecoveredOffer(session.offers);
       // Clients read the run as a routine check only through this source.
       assert.deepEqual(offer.notification?.source, { kind: "heartbeat", heartbeatId: "deploy" });
-    }).pipe(Effect.scoped, Effect.provide(testLayer)),
+    }).pipe(Effect.scoped, Effect.provide(layerTest)),
   );
 
   it.effect("offers a wake whose reply and end were dropped once the agent is idle", () =>
@@ -6045,7 +6045,7 @@ describe("PiAdapterV2 with the Prime Agent flavor", () => {
         texts: ["The child said child-ok"],
         status: "completed",
       });
-    }).pipe(Effect.scoped, Effect.provide(testLayer)),
+    }).pipe(Effect.scoped, Effect.provide(layerTest)),
   );
 
   /** What Prime Agent stores in the parent when a child ends without a reply of its own. */
@@ -6109,7 +6109,7 @@ describe("PiAdapterV2 with the Prime Agent flavor", () => {
           },
           { id: session.child?.id, status, result },
         );
-      }).pipe(Effect.scoped, Effect.provide(testLayer)),
+      }).pipe(Effect.scoped, Effect.provide(layerTest)),
   );
 
   /** Runs one turn whose end-of-turn branch lists `userEntries` as its user entries. */
@@ -6173,7 +6173,7 @@ describe("PiAdapterV2 with the Prime Agent flavor", () => {
       yield* rollBackToFirstTurn(session, [first, second]);
       const fork = fake.allRequests().find((request) => request["type"] === "fork");
       assert.equal(fork?.["entryId"], "u2");
-    }).pipe(Effect.scoped, Effect.provide(testLayer)),
+    }).pipe(Effect.scoped, Effect.provide(layerTest)),
   );
 
   it.effect("records a running turn's start entry before a steer adds another", () =>
@@ -6221,7 +6221,7 @@ describe("PiAdapterV2 with the Prime Agent flavor", () => {
       if (settled.type === "provider_turn.updated") {
         assert.equal(settled.providerTurn.nativeTurnRef?.nativeId, "u2");
       }
-    }).pipe(Effect.scoped, Effect.provide(testLayer)),
+    }).pipe(Effect.scoped, Effect.provide(layerTest)),
   );
 
   const T3_COMMANDS = { commands: [{ name: "t3-navigate-tree", source: "extension" }] };
@@ -6262,7 +6262,7 @@ describe("PiAdapterV2 with the Prime Agent flavor", () => {
         session.providerThread.nativeThreadRef?.nativeId,
         "an in-place rollback keeps the same session file",
       );
-    }).pipe(Effect.scoped, Effect.provide(testLayer)),
+    }).pipe(Effect.scoped, Effect.provide(layerTest)),
   );
 
   it.effect("reports an extension veto of the in-place rollback as a failure", () =>
@@ -6282,7 +6282,7 @@ describe("PiAdapterV2 with the Prime Agent flavor", () => {
       const error = yield* Fiber.join(rollback);
       assert.include(String(error.cause), "cancelled the rollback");
       assert.isFalse(fake.allRequests().some((request) => request["type"] === "fork"));
-    }).pipe(Effect.scoped, Effect.provide(testLayer)),
+    }).pipe(Effect.scoped, Effect.provide(layerTest)),
   );
 });
 
@@ -6295,7 +6295,7 @@ describe("PiAdapterV2 subagent capabilities", () => {
         const capabilities = yield* adapter.getCapabilities();
         assert.equal(capabilities.subagents.exposesSubagentThreadIds, flavor.childThreads);
       }
-    }).pipe(Effect.scoped, Effect.provide(testLayer)),
+    }).pipe(Effect.scoped, Effect.provide(layerTest)),
   );
 });
 
@@ -6360,7 +6360,7 @@ describe("PiAdapterV2 reaching T3 through the kernel's MCP client", () => {
         assert.equal(env.T3_PI_MCP_TOOLS, "kernel");
         assert.equal(env.T3_MCP_BEARER_TOKEN, "secret-prime-token");
       }),
-    ).pipe(Effect.scoped, Effect.provide(testLayer)),
+    ).pipe(Effect.scoped, Effect.provide(layerTest)),
   );
 
   it.effect(
@@ -6409,7 +6409,7 @@ describe("PiAdapterV2 reaching T3 through the kernel's MCP client", () => {
           );
           assert.lengthOf(yield* finishTurn(2), 0);
         }),
-      ).pipe(Effect.scoped, Effect.provide(testLayer)),
+      ).pipe(Effect.scoped, Effect.provide(layerTest)),
   );
 
   it.effect("treats a server declared for another port as undeclared", () =>
@@ -6424,7 +6424,7 @@ describe("PiAdapterV2 reaching T3 through the kernel's MCP client", () => {
         assert.notInclude(args, "--skill");
         assert.equal(env.T3_PI_MCP_TOOLS, "kernel");
       }),
-    ).pipe(Effect.scoped, Effect.provide(testLayer)),
+    ).pipe(Effect.scoped, Effect.provide(layerTest)),
   );
 
   it.effect("never uses the skill for plain Pi, even with a declared server", () =>
@@ -6449,6 +6449,6 @@ describe("PiAdapterV2 reaching T3 through the kernel's MCP client", () => {
         assert.notInclude(args, "--skill");
         assert.notProperty(env, "T3_PI_MCP_TOOLS");
       }),
-    ).pipe(Effect.scoped, Effect.provide(testLayer)),
+    ).pipe(Effect.scoped, Effect.provide(layerTest)),
   );
 });

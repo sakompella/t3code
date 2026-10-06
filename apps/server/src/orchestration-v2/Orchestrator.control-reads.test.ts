@@ -462,7 +462,7 @@ it.effect(
       });
 
       assert.deepEqual(yield* heartbeats, []);
-    }).pipe(Effect.provide(testLayer)),
+    }).pipe(Effect.provide(layerTest)),
 );
 
 // Stop's settle follow-up runs after the provider interrupt returns, possibly

@@ -7,7 +7,7 @@ import * as Stream from "effect/Stream";
 import { ChildProcess, ChildProcessSpawner } from "effect/process";
 import { TestClock } from "effect/testing";
 
-import { PI_FLAVOR, PRIME_AGENT_FLAVOR } from "../../orchestration-v2/Adapters/PiFlavor.ts";
+import { PI_FLAVOR, PRIME_AGENT_FLAVOR } from "../orchestration-v2/Adapters/PiFlavor.ts";
 import { checkPiProviderStatus } from "./PiProvider.ts";
 
 const encoder = new TextEncoder();

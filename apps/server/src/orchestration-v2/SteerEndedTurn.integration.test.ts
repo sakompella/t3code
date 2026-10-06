@@ -20,7 +20,7 @@ import * as EffectWorker from "./EffectWorker.ts";
 import * as Orchestrator from "./Orchestrator.ts";
 import type { ProviderAdapterV2Event, ProviderAdapterV2Shape } from "./ProviderAdapter.ts";
 import * as ProviderAdapterRegistry from "./ProviderAdapterRegistry.ts";
-import { makeOrchestratorV2ReplayLayerWithRegistry } from "./testkit/ProviderReplayHarness.ts";
+import { layerWithRegistry } from "./testkit/ProviderReplayHarness.ts";
 import { checkpointWorkspace } from "./testkit/ReplayFixtureWorkspace.ts";
 
 const driver = ProviderDriverKind.make("codex");
@@ -261,9 +261,9 @@ it.effect.each(endedSteerCases)("steer on a turn that $ending $delivered", ({ en
         assert.deepEqual(startedMessageIds, ["message:first", messageId]);
       }).pipe(
         Effect.provide(
-          makeOrchestratorV2ReplayLayerWithRegistry(
+          layerWithRegistry(
             { name: `steer-ended-${ending}-${timing}` },
-            ProviderAdapterRegistry.makeSingleLayer(adapter),
+            ProviderAdapterRegistry.layerSingle(adapter),
             { runEffectWorker: false },
           ),
         ),
