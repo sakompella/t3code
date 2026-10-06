@@ -9,6 +9,7 @@ import type {
 } from "@t3tools/contracts";
 import {
   latestRootProviderFailure,
+  latestTaskRun,
   latestUnheldRun,
   threadErrorSummary,
   usageLimitRunPresentedAsLatest,
@@ -26,6 +27,8 @@ import type {
   OrchestrationV2ProviderThread,
   OrchestrationV2ProviderTurn,
   OrchestrationV2Run,
+  OrchestrationV2RunStatus,
+  OrchestrationV2RunTrigger,
   OrchestrationV2Subagent,
   OrchestrationV2ThreadShellSnapshot,
   OrchestrationV2ShellThreadStatus,
@@ -55,6 +58,8 @@ import {
   OrchestrationV2RuntimeRequestJson as OrchestrationV2RuntimeRequestJsonSchema,
   OrchestrationV2SubagentJson as OrchestrationV2SubagentJsonSchema,
   OrchestrationV2TurnItemJson as OrchestrationV2TurnItemJsonSchema,
+  orchestrationV2MessageRunTrigger,
+  orchestrationV2RunTrigger,
   orchestrationV2RunWorkStartedAt,
   RunId,
   MessageId,
@@ -194,6 +199,8 @@ export type ProjectionSettlementCandidate = Pick<
   | "latestRunRequestedAt"
   | "latestRunStartedAt"
   | "latestRunCompletedAt"
+  | "latestRunTrigger"
+  | "latestTaskRunCompletedAt"
   | "latestUserMessageAt"
   | "status"
   | "activityRunStartedAt"
@@ -1012,6 +1019,9 @@ type ShellThreadRow = {
   readonly latest_run_requested_at: string | null;
   readonly latest_run_started_at: string | null;
   readonly latest_run_completed_at: string | null;
+  readonly latest_run_trigger_work: string | null;
+  readonly latest_task_run_completed_at: string | null;
+  readonly latest_task_run_status: string | null;
   readonly active_run_id: string | null;
   readonly activity_run_status: string | null;
   readonly activity_run_started_at: string | null;
@@ -1021,6 +1031,7 @@ type ShellThreadRow = {
   readonly blocking_run_requested_at: string | null;
   readonly blocking_run_started_at: string | null;
   readonly blocking_run_completed_at: string | null;
+  readonly blocking_run_trigger_work: string | null;
   readonly blocking_failure_payload_json: string | null;
   readonly pending_request_payload_json: string | null;
   readonly pending_secret_request_payload_json: string | null;
@@ -1047,6 +1058,8 @@ type SettlementThreadRow = Pick<
   | "latest_run_requested_at"
   | "latest_run_started_at"
   | "latest_run_completed_at"
+  | "latest_run_trigger_work"
+  | "latest_task_run_completed_at"
   | "latest_user_message_at"
   | "latest_user_authored_message_at"
 >;
@@ -1449,6 +1462,16 @@ function secretRequestAsPendingInput(
   };
 }
 
+/**
+ * A run's trigger from the `work` its starting message's notification source
+ * is stored with (`OrchestrationV2NotificationSource` encodes a heartbeat as
+ * `background_task` with `work: "heartbeat"`). Shell queries read that field
+ * with json_extract instead of decoding every message.
+ */
+function runTriggerFromStoredWork(work: string | null): OrchestrationV2RunTrigger | null {
+  return work === "heartbeat" ? "heartbeat" : null;
+}
+
 export function threadShellFromProjection(
   projection: OrchestrationV2ThreadProjection,
 ): OrchestrationV2ThreadShell {
@@ -1465,6 +1488,7 @@ export function threadShellFromProjection(
       projection.turnItems,
       providerSession?.lastError ?? null,
     ) ?? latestUnheldRun(projection.runs);
+  const taskRun = latestTaskRun(projection);
   const activeRun =
     projection.runs
       .filter(isInterruptibleRunForShell)
@@ -1496,7 +1520,7 @@ export function threadShellFromProjection(
         )[0] ?? null,
     );
   const userMessages = projection.messages
-    .filter((message) => message.role === "user")
+    .filter((message) => message.role === "user" && orchestrationV2MessageRunTrigger(message) === null)
     .toSorted(
       (left, right) =>
         DateTime.toEpochMillis(right.updatedAt) - DateTime.toEpochMillis(left.updatedAt),
@@ -1542,6 +1566,10 @@ export function threadShellFromProjection(
     latestRunRequestedAt: latestRun?.requestedAt ?? null,
     latestRunStartedAt: latestRun?.startedAt ?? null,
     latestRunCompletedAt: latestRun?.completedAt ?? null,
+    latestRunTrigger:
+      latestRun === null ? null : orchestrationV2RunTrigger(projection.messages, latestRun),
+    latestTaskRunCompletedAt: taskRun?.completedAt ?? null,
+    latestTaskRunStatus: taskRun?.status ?? null,
     activeRunId: activeRun?.id ?? null,
     activityRunStatus: activityRun?.status ?? null,
     activityRunStartedAt:
@@ -1648,6 +1676,9 @@ type ShellThreadState = {
   readonly latestRunRequestedAt: DateTime.Utc | null;
   readonly latestRunStartedAt: DateTime.Utc | null;
   readonly latestRunCompletedAt: DateTime.Utc | null;
+  readonly latestRunTrigger: OrchestrationV2RunTrigger | null;
+  readonly latestTaskRunCompletedAt: DateTime.Utc | null;
+  readonly latestTaskRunStatus: OrchestrationV2RunStatus | null;
   readonly activeRunId: RunId | null;
   readonly activityRunStatus: ShellActivityRunStatus | null;
   readonly activityRunStartedAt: DateTime.Utc | null;
@@ -1670,9 +1701,12 @@ type ShellThreadState = {
 };
 
 function shellStatusFromStoredRunStatus(status: string | null): OrchestrationV2ShellThreadStatus {
+  return status === null ? "idle" : runStatusFromStored(status);
+}
+
+/** A stored run status; an unknown one reads as failed. */
+function runStatusFromStored(status: string): OrchestrationV2RunStatus {
   switch (status) {
-    case null:
-      return "idle";
     case "preparing":
     case "queued":
     case "starting":
@@ -1803,6 +1837,9 @@ function shellFromState(input: {
     latestRunRequestedAt: input.state.latestRunRequestedAt,
     latestRunStartedAt: input.state.latestRunStartedAt,
     latestRunCompletedAt: input.state.latestRunCompletedAt,
+    latestRunTrigger: input.state.latestRunTrigger,
+    latestTaskRunCompletedAt: input.state.latestTaskRunCompletedAt,
+    latestTaskRunStatus: input.state.latestTaskRunStatus,
     activeRunId: input.state.activeRunId,
     activityRunStatus: input.state.activityRunStatus,
     activityRunStartedAt: input.state.activityRunStartedAt,
@@ -5281,6 +5318,23 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
           ),
         );
 
+    // Mirrors latestTaskRun in threadShellFromProjection: the newest unheld run
+    // that is not a routine heartbeat check (runTriggerFromStoredWork).
+    const latestTaskRunIdSql = sql`
+      SELECT task.run_id
+      FROM orchestration_v2_projection_runs task
+      LEFT JOIN orchestration_v2_projection_messages task_message
+        ON task_message.message_id = json_extract(task.payload_json, '$.userMessageId')
+      WHERE task.thread_id = t.thread_id
+        AND NOT (task.status = 'queued' AND json_extract(task.payload_json, '$.queueHeld') IS 1)
+        AND NOT (
+          task.status = 'completed'
+          AND json_extract(task_message.payload_json, '$.notification.source.work') IS 'heartbeat'
+        )
+      ORDER BY task.ordinal DESC, task.run_id DESC
+      LIMIT 1
+    `;
+
     const selectShellThreadRows = (
       threadId?: ThreadId,
       { location, projectId, unsettledOnly = false }: ShellSnapshotOptions = {},
@@ -5299,6 +5353,13 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
               presented.requested_at AS latest_run_requested_at,
               json_extract(presented.payload_json, '$.startedAt') AS latest_run_started_at,
               presented.completed_at AS latest_run_completed_at,
+              (
+                SELECT json_extract(message.payload_json, '$.notification.source.work')
+                FROM orchestration_v2_projection_messages message
+                WHERE message.message_id = json_extract(presented.payload_json, '$.userMessageId')
+              ) AS latest_run_trigger_work,
+              task_run.completed_at AS latest_task_run_completed_at,
+              task_run.status AS latest_task_run_status,
               (
                 SELECT r.run_id
                 FROM orchestration_v2_projection_runs r
@@ -5356,6 +5417,11 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
               json_extract(blocked.payload_json, '$.startedAt') AS blocking_run_started_at,
               blocked.completed_at AS blocking_run_completed_at,
               (
+                SELECT json_extract(message.payload_json, '$.notification.source.work')
+                FROM orchestration_v2_projection_messages message
+                WHERE message.message_id = json_extract(blocked.payload_json, '$.userMessageId')
+              ) AS blocking_run_trigger_work,
+              (
                 SELECT item.payload_json
                 FROM orchestration_v2_projection_turn_items item
                 WHERE item.thread_id = t.thread_id
@@ -5391,6 +5457,8 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
                 FROM orchestration_v2_projection_messages message
                 WHERE message.thread_id = t.thread_id
                   AND message.role = 'user'
+                  -- A heartbeat's prompt is not a message someone sent (runTriggerFromStoredWork).
+                  AND json_extract(message.payload_json, '$.notification.source.work') IS NOT 'heartbeat'
                 ORDER BY message.updated_at DESC, message.message_id DESC
                 LIMIT 1
               ) AS latest_user_message_at,
@@ -5457,6 +5525,8 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
                 candidate.ordinal DESC, candidate.run_id DESC
               LIMIT 1
             ) AND blocked.status = 'failed'
+            LEFT JOIN orchestration_v2_projection_runs task_run
+              ON task_run.run_id = (${latestTaskRunIdSql})
             WHERE t.deleted_at IS NULL${threadId === undefined ? sql`` : sql` AND t.thread_id = ${threadId}`}${
               projectId === undefined ? sql`` : sql` AND t.project_id = ${projectId}`
             }${
@@ -5626,9 +5696,17 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
               json_extract(r.payload_json, '$.startedAt') AS latest_run_started_at,
               r.completed_at AS latest_run_completed_at,
               (
+                SELECT json_extract(message.payload_json, '$.notification.source.work')
+                FROM orchestration_v2_projection_messages message
+                WHERE message.message_id = json_extract(r.payload_json, '$.userMessageId')
+              ) AS latest_run_trigger_work,
+              task_run.completed_at AS latest_task_run_completed_at,
+              (
                 SELECT message.updated_at
                 FROM orchestration_v2_projection_messages message
                 WHERE message.thread_id = t.thread_id AND message.role = 'user'
+                  -- A heartbeat's prompt is not a message someone sent (runTriggerFromStoredWork).
+                  AND json_extract(message.payload_json, '$.notification.source.work') IS NOT 'heartbeat'
                 ORDER BY message.updated_at DESC, message.message_id DESC
                 LIMIT 1
               ) AS latest_user_message_at,
@@ -5647,6 +5725,8 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
               ORDER BY latest.ordinal DESC, latest.run_id DESC
               LIMIT 1
             )
+            LEFT JOIN orchestration_v2_projection_runs task_run
+              ON task_run.run_id = (${latestTaskRunIdSql})
             WHERE t.deleted_at IS NULL${threadId === undefined ? sql`` : sql` AND t.thread_id = ${threadId}`}
               AND json_extract(t.payload_json, '$.archivedAt') IS NULL
               AND json_extract(t.payload_json, '$.settledOverride') IS NULL
@@ -5697,6 +5777,11 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
                     row.latest_run_completed_at === null
                       ? null
                       : DateTime.makeUnsafe(row.latest_run_completed_at),
+                  latestRunTrigger: runTriggerFromStoredWork(row.latest_run_trigger_work),
+                  latestTaskRunCompletedAt:
+                    row.latest_task_run_completed_at === null
+                      ? null
+                      : DateTime.makeUnsafe(row.latest_task_run_completed_at),
                   latestUserMessageAt:
                     row.latest_user_message_at === null
                       ? null
@@ -5819,6 +5904,7 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
           row.latest_run_completed_at === null
             ? null
             : DateTime.makeUnsafe(row.latest_run_completed_at);
+        let latestRunTrigger = runTriggerFromStoredWork(row.latest_run_trigger_work);
         if (row.blocking_run_id !== null && row.blocking_failure_payload_json !== null) {
           const blockingFailure = yield* decodeTurnItemPayload(
             row.blocking_failure_payload_json,
@@ -5844,6 +5930,7 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
               row.blocking_run_completed_at === null
                 ? null
                 : DateTime.makeUnsafe(row.blocking_run_completed_at);
+            latestRunTrigger = runTriggerFromStoredWork(row.blocking_run_trigger_work);
           }
         }
         const pendingBackgroundTasks = [
@@ -5870,6 +5957,15 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
           latestRunRequestedAt,
           latestRunStartedAt,
           latestRunCompletedAt,
+          latestRunTrigger,
+          latestTaskRunCompletedAt:
+            row.latest_task_run_completed_at === null
+              ? null
+              : DateTime.makeUnsafe(row.latest_task_run_completed_at),
+          latestTaskRunStatus:
+            row.latest_task_run_status === null
+              ? null
+              : runStatusFromStored(row.latest_task_run_status),
           activeRunId: row.active_run_id === null ? null : RunId.make(row.active_run_id),
           activityRunStartedAt:
             row.activity_run_started_at === null

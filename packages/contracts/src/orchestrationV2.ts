@@ -1053,12 +1053,24 @@ const SubagentNotificationSource = Schema.Struct({
   childThreadId: Schema.optional(ThreadId),
 });
 const CommandNotificationSource = Schema.Struct({ kind: Schema.Literal("command") });
+/** A provider's own recurring prompt (a Prime Agent heartbeat) that fired. */
+const HeartbeatNotificationSource = Schema.Struct({
+  kind: Schema.Literal("heartbeat"),
+  /** The provider's id for the heartbeat, as `OrchestrationV2ProviderHeartbeat.id`. */
+  heartbeatId: Schema.optional(TrimmedNonEmptyString),
+});
 
 /**
- * Sources are stored and sent in the shape clients before `subagent` and `command` existed decode,
- * since they reject a kind they do not know: a command is `background_command`, and a subagent is
- * `background_task` with `work: "subagent"`, a field those clients ignore. Encoding picks the first
- * member that fits, so those come first.
+ * What a notification reports on. Several pieces of work of one kind share
+ * that kind; mixed or unnamed work is `background_task`.
+ *
+ * Sources are stored and sent in the shape clients before `subagent` and
+ * `command` existed decode, since they reject a kind they do not know: a
+ * command is `background_command`, and a subagent or heartbeat is
+ * `background_task` with `work: "subagent"` or `work: "heartbeat"`, a field
+ * those clients ignore. Encoding picks the first member that fits, so those
+ * come first. The plain members after them decode values that were already
+ * decoded once.
  */
 export const OrchestrationV2NotificationSource = kindUnionWithFallback(
   [
@@ -1085,9 +1097,28 @@ export const OrchestrationV2NotificationSource = kindUnionWithFallback(
         })),
       }),
     ),
+    Schema.Struct({
+      kind: Schema.Literal("background_task"),
+      work: Schema.Literal("heartbeat"),
+      heartbeatId: HeartbeatNotificationSource.fields.heartbeatId,
+    }).pipe(
+      Schema.decodeTo(Schema.toType(HeartbeatNotificationSource), {
+        decode: SchemaGetter.transform(({ heartbeatId }) =>
+          heartbeatId === undefined
+            ? { kind: "heartbeat" as const }
+            : { kind: "heartbeat" as const, heartbeatId },
+        ),
+        encode: SchemaGetter.transform(({ heartbeatId }) => ({
+          kind: "background_task" as const,
+          work: "heartbeat" as const,
+          ...(heartbeatId === undefined ? {} : { heartbeatId }),
+        })),
+      }),
+    ),
     Schema.Struct({ kind: Schema.Literal("background_command").transform("command") }),
     SubagentNotificationSource,
     CommandNotificationSource,
+    HeartbeatNotificationSource,
     Schema.Struct({ kind: Schema.Literal("monitor") }),
     Schema.Struct({ kind: Schema.Literal("background_task") }),
     Schema.Struct({ kind: Schema.Literal("system") }),
@@ -1130,6 +1161,42 @@ export const OrchestrationV2ConversationMessage = Schema.Struct({
   ),
 });
 export type OrchestrationV2ConversationMessage = typeof OrchestrationV2ConversationMessage.Type;
+
+/**
+ * What started a run when nobody sent it a message: `heartbeat` is the
+ * provider's own recurring prompt. A heartbeat run is a routine check, so its
+ * finishing is not a finished task. Its failures and requests still are.
+ */
+export const OrchestrationV2RunTrigger = Schema.Literal("heartbeat");
+export type OrchestrationV2RunTrigger = typeof OrchestrationV2RunTrigger.Type;
+
+/**
+ * A heartbeat run that completed: a routine check, so its end is neither a
+ * finished task, unread news, nor thread activity. A heartbeat run that
+ * failed, was interrupted or is still going is not routine.
+ */
+export function isOrchestrationV2RoutineRun(run: {
+  readonly status: OrchestrationV2ShellThreadStatus;
+  readonly trigger?: OrchestrationV2RunTrigger | null | undefined;
+}): boolean {
+  return run.status === "completed" && run.trigger === "heartbeat";
+}
+
+/** The trigger of the run a message starts, or null for a message someone sent. */
+export function orchestrationV2MessageRunTrigger(
+  message: Pick<OrchestrationV2ConversationMessage, "notification">,
+): OrchestrationV2RunTrigger | null {
+  return message.notification?.source.kind === "heartbeat" ? "heartbeat" : null;
+}
+
+/** The trigger of a run, read from the message that started it. */
+export function orchestrationV2RunTrigger(
+  messages: ReadonlyArray<Pick<OrchestrationV2ConversationMessage, "id" | "notification">>,
+  run: Pick<OrchestrationV2Run, "userMessageId">,
+): OrchestrationV2RunTrigger | null {
+  const message = messages.find((candidate) => candidate.id === run.userMessageId);
+  return message === undefined ? null : orchestrationV2MessageRunTrigger(message);
+}
 
 export const OrchestrationV2PlanStep = Schema.Struct({
   id: TrimmedNonEmptyString,
@@ -1846,6 +1913,19 @@ export const OrchestrationV2ThreadShell = Schema.Struct({
   latestRunRequestedAt: Schema.optional(Schema.NullOr(Schema.DateTimeUtc)),
   latestRunStartedAt: Schema.optional(Schema.NullOr(Schema.DateTimeUtc)),
   latestRunCompletedAt: Schema.optional(Schema.NullOr(Schema.DateTimeUtc)),
+  /** Null for a run someone asked for. Omitted by servers that predate it. */
+  latestRunTrigger: Schema.optional(Schema.NullOr(OrchestrationV2RunTrigger)),
+  /**
+   * When the latest run that is not routine (see isOrchestrationV2RoutineRun)
+   * ended: what unread state and auto-settle read once a heartbeat check has
+   * run since. Omitted by servers that predate it.
+   */
+  latestTaskRunCompletedAt: Schema.optional(Schema.NullOr(Schema.DateTimeUtc)),
+  /**
+   * The status of that same run, so a client can tell a completed task from
+   * one that failed or was interrupted. Omitted by servers that predate it.
+   */
+  latestTaskRunStatus: Schema.optional(Schema.NullOr(OrchestrationV2RunStatus)),
   activeRunId: Schema.NullOr(RunId),
   activityRunStartedAt: Schema.optional(Schema.NullOr(Schema.DateTimeUtc)),
   activityRunStatus: Schema.optional(
@@ -1857,6 +1937,7 @@ export const OrchestrationV2ThreadShell = Schema.Struct({
   usageLimitResetAt: Schema.optional(Schema.NullOr(IsoDateTime)),
   pendingRuntimeRequest: Schema.NullOr(OrchestrationV2PendingRuntimeRequestSummary),
   latestVisibleMessage: Schema.NullOr(OrchestrationV2LatestVisibleMessageSummary),
+  /** The latest message someone sent; a heartbeat's prompt is not one. */
   latestUserMessageAt: Schema.NullOr(Schema.DateTimeUtc),
   /**
    * The last message the user wrote. Wakes and agent messages also use the
@@ -2386,6 +2467,7 @@ export const OrchestrationV2ThreadShellJson = OrchestrationV2ThreadShell.mapFiel
   latestRunRequestedAt: Schema.optional(Schema.NullOr(Schema.DateTimeUtcFromString)),
   latestRunStartedAt: Schema.optional(Schema.NullOr(Schema.DateTimeUtcFromString)),
   latestRunCompletedAt: Schema.optional(Schema.NullOr(Schema.DateTimeUtcFromString)),
+  latestTaskRunCompletedAt: Schema.optional(Schema.NullOr(Schema.DateTimeUtcFromString)),
   activityRunStartedAt: Schema.optional(Schema.NullOr(Schema.DateTimeUtcFromString)),
   pendingRuntimeRequest: Schema.NullOr(OrchestrationV2PendingRuntimeRequestSummaryJson),
   latestVisibleMessage: Schema.NullOr(OrchestrationV2LatestVisibleMessageSummaryJson),
