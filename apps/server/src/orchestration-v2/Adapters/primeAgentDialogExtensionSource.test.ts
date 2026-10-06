@@ -534,6 +534,78 @@ describe("Prime Agent child dialog extension", () => {
     assert.lengthOf(fixture.clients, 1);
   });
 
+  it.each([
+    { outcome: "fails", attachError: "Unknown session child-1" },
+    { outcome: "succeeds", attachError: undefined },
+  ])(
+    "lets the reloaded parent own a reattach that $outcome after the handoff",
+    async ({ attachError }) => {
+      const first = await loadExtension();
+      await first.attach();
+      const client = first.clients[0]!;
+      client.loseSocket();
+      const gate = Promise.withResolvers<void>();
+      first.daemon.attachGates.set("child-1", gate.promise);
+      const reattach = client.nextHandled("attach");
+      client.reconnect();
+      // The reattach is in flight when the parent reloads.
+      const { next, started } = await first.reload();
+      await started;
+      first.daemon.attachError = attachError;
+      first.daemon.attachGates.delete("child-1");
+      gate.resolve();
+      await reattach;
+      await Promise.resolve();
+      first.daemon.attachError = undefined;
+      await next.attach();
+      const lostNotices = (notices: ReadonlyArray<string>) =>
+        notices.filter((notice) => notice.includes("dialog routing to T3 was lost"));
+      if (attachError === undefined) {
+        assert.deepEqual(lostNotices(next.notices), []);
+        assert.isFalse(client.closed);
+        assert.deepEqual(next.lastResult(), { requestId: "route-child-1", ok: true });
+        assert.lengthOf(first.clients, 1);
+        return;
+      }
+      assert.isTrue(client.closed);
+      // The error reaches the current parent, and the dead route is gone from its map.
+      assert.lengthOf(lostNotices(next.notices), 1);
+      assert.include(lostNotices(next.notices)[0]!, "(Unknown session child-1)");
+      assert.deepEqual(lostNotices(first.notices), []);
+      // A fresh attach replaces the dead route instead of being told it is still reconnecting.
+      assert.deepEqual(next.lastResult(), { requestId: "route-child-1", ok: true });
+      assert.lengthOf(first.clients, 2);
+      assert.isFalse(first.clients[1]!.closed);
+    },
+  );
+
+  it("sends no late answer for a dialog the reconnect outbox already cancelled", async () => {
+    const fixture = await loadExtension();
+    const edited = Promise.withResolvers<string | undefined>();
+    fixture.ctx.ui.editor = () => edited.promise;
+    await fixture.attach();
+    const client = fixture.clients[0]!;
+    fixture.daemon.broadcast(question("child-1", "editor"));
+    client.loseSocket();
+    const cancelled = client.nextHandled("extension_ui_response");
+    client.reconnect();
+    await cancelled;
+    // The editor has no abort signal, so the parent can still answer it after the cancellation.
+    edited.resolve("too late");
+    // A later question's answer takes the same path, so a late answer would be sent before it.
+    fixture.ctx.ui.editor = async () => "next";
+    const next = client.nextHandled("extension_ui_response");
+    fixture.daemon.broadcast(question("child-1", "editor", "child-request-2"));
+    await next;
+    assert.deepEqual(
+      fixture.daemon.responses.map((response) => [response["requestId"], response["response"]]),
+      [
+        ["child-request-1", { cancelled: true }],
+        ["child-request-2", { value: "next" }],
+      ],
+    );
+  });
+
   it("shows a parent error and drops the route when bounded reconnect gives up", async () => {
     const fixture = await loadExtension();
     await fixture.attach();
