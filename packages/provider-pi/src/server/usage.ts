@@ -19,6 +19,7 @@ import {
 } from "@t3tools/provider-core/server/usage";
 import * as HostProcess from "@t3tools/shared/HostProcess";
 import type { PiSettings } from "../settings.ts";
+import { PRIME_AGENT_FLAVOR, resolvePiAgentDir } from "./flavor.ts";
 
 type PiUsageProvider = "pi" | "primeAgent";
 
@@ -162,6 +163,8 @@ const parsedResponses = new WeakMap<
   typeof PiScanState.Type,
   Map<string, MutableUsageRecord>
 >();
+/** Parses whose attribution named a response an earlier, cached parse produced. */
+const lateAttributions = new WeakSet<typeof PiScanState.Type>();
 
 const usageCost = (usage: typeof Usage.Type): number => {
   const cost = usage.cost?.total;
@@ -180,7 +183,10 @@ function restoreOwnUsage(parsed: unknown, state: typeof PiScanState.Type): boole
   if (Option.isNone(attribution)) return false;
   const responses = parsedResponses.get(state);
   const record = responses?.get(attribution.value.targetId);
-  if (responses === undefined || record === undefined) return true;
+  if (responses === undefined || record === undefined) {
+    lateAttributions.add(state);
+    return true;
+  }
   responses.delete(attribution.value.targetId);
   const { aggregateUsage, childUsage } = attribution.value;
   const own = (key: "input" | "output" | "cacheRead" | "cacheWrite") =>
@@ -238,6 +244,12 @@ export const primeAgentUsageFormat: TranscriptUsageFormat<typeof PiScanState.Typ
     return parsePrimeAgentRecord(parsed, state);
   },
   parseProjected: parsePrimeAgentRecord,
+  state: {
+    ...piFormat.state!,
+    // A resumed parse starts without the records before its resume point, so
+    // an attribution for one of them repairs the cached totals by a full parse.
+    needsFullParse: (state) => lateAttributions.has(state),
+  },
 };
 
 export const piUsageReader: ProviderUsageReader<PiSettings, Path.Path> = {
@@ -271,10 +283,12 @@ export const primeAgentUsageReader: ProviderUsageReader<PiSettings, Path.Path> =
   format: primeAgentUsageFormat,
   directories: Effect.fn("primeAgentUsageReader.directories")(function* ({ environment }) {
     const path = yield* Path.Path;
-    const home = yield* HostProcess.HomeDirectory;
-    const agentDir = environment.PRIME_AGENT_CODING_AGENT_DIR?.trim();
     const root = path.resolve(
-      agentDir ? expandHomePath(agentDir, home) : path.join(home, ".prime", "agent"),
+      resolvePiAgentDir({
+        agentDir: PRIME_AGENT_FLAVOR.agentDir,
+        environment,
+        home: yield* HostProcess.HomeDirectory,
+      }),
     );
     return [{ dir: path.join(root, "sessions") }, { dir: path.join(root, "session-artifacts") }];
   }),
