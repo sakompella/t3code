@@ -300,14 +300,22 @@ export function applyPendingThreadOrder<T extends OrderRow>(
   );
 }
 
-/** Match desktop re-entry: a pin wakes the thread on the server; Active clears
- * each underlying parked state before assigning its destination order key. */
+/** Match desktop re-entry: dragging a thread out of the snoozed shelf wakes it
+ * (a pin alone never does); Active clears each underlying parked state before
+ * assigning its destination order key. */
 export function threadDropLifecycle(
   thread: EnvironmentThreadShell,
   section: "pinned" | "active",
   now: string,
 ) {
-  if (section === "pinned") return { pin: true, unpin: false, unsettle: false, unsnooze: false };
+  if (section === "pinned") {
+    return {
+      pin: true,
+      unpin: false,
+      unsettle: false,
+      unsnooze: effectiveSnoozed(thread, { now }),
+    };
+  }
   return {
     pin: false,
     unpin: thread.pinnedAt != null,
