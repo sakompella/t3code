@@ -159,6 +159,14 @@ describe("pi T3 MCP injection", () => {
     assert.deepInclude(resolvePiLaunchArgs("--plan @instructions.md"), { ok: false });
   });
 
+  it.each(["--daemon-socket /tmp/prime.sock", "--daemon-socket=/tmp/prime.sock"])(
+    "preserves the stock daemon socket in %s",
+    (args) => {
+      const resolved = resolvePiLaunchArgs(args);
+      assert.deepEqual(resolved, { ok: true, args: ["--daemon-socket", "/tmp/prime.sock"] });
+    },
+  );
+
   it("rejects --provider without --model, which Pi 1.0 refuses at startup", () => {
     const rejection = {
       ok: false,

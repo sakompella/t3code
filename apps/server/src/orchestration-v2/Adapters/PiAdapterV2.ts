@@ -125,6 +125,11 @@ import type {
   PiThreadState,
 } from "./PiAdapterV2State.ts";
 import { makePrimeAgentChildThreads } from "./primeAgentChildThreads.ts";
+import {
+  daemonSocketFromLaunchArgs,
+  makePrimeAgentChildDialogs,
+  materializePrimeAgentDialogExtension,
+} from "./primeAgentChildDialogs.ts";
 import { makePrimeAgentReconciler, transcriptMessageKey } from "./primeAgentReconciler.ts";
 import { primeAgentHeartbeats } from "./primeAgentHeartbeats.ts";
 import { makePrimeAgentStream, snapshotBlock } from "./primeAgentStream.ts";
@@ -456,6 +461,13 @@ export function makePiAdapterV2(
       if (!resolvedLaunchArgs.ok) {
         return yield* protocolError(resolvedLaunchArgs.message);
       }
+      const childDialogs = makePrimeAgentChildDialogs();
+      const dialogExtensionPath = flavor.childThreads
+        ? yield* provideCacheFs(
+            materializePrimeAgentDialogExtension(options.serverConfig.providerStatusCacheDir),
+          )
+        : undefined;
+      const dialogSocketPath = daemonSocketFromLaunchArgs(resolvedLaunchArgs.args);
       const launchProcess = (processScope: Scope.Scope, resumeSessionFile?: string) => {
         const launch = buildPiRpcLaunch({
           launchArgs: resolvedLaunchArgs.args,
@@ -468,10 +480,14 @@ export function makePiAdapterV2(
         });
         return makePiRpcConnection({
           command: binary,
-          args: launch.args,
+          args:
+            dialogExtensionPath === undefined
+              ? launch.args
+              : [...launch.args, "--extension", dialogExtensionPath],
           cwd,
           env: launch.env,
           terminationGrace: flavor.terminationGrace,
+          ...(flavor.childThreads ? { consumeEvent: childDialogs.consumeEvent } : {}),
         }).pipe(
           Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, options.spawner),
           Scope.provide(processScope),
@@ -1253,6 +1269,8 @@ export function makePiAdapterV2(
         instanceId: options.instanceId,
         name,
         childThreads: flavor.childThreads,
+        beforeObserve: (activeSessionId) =>
+          childDialogs.attach(connection, activeSessionId, dialogSocketPath),
         sessionThread: () => ({
           threadId: threadState?.providerThread.appThreadId ?? input.threadId,
           providerThreadId: threadState?.providerThread.id ?? null,

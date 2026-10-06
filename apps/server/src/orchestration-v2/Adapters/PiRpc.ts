@@ -162,6 +162,8 @@ export interface PiRpcSpawnOptions {
   readonly terminationGrace?: Duration.Input;
   /** Longest stdout record accepted, in characters. */
   readonly maxRecordChars?: number;
+  /** Consume internal extension acknowledgements before the serialized event consumer can block. */
+  readonly consumeEvent?: (event: PiRpcRecord) => Effect.Effect<boolean>;
 }
 
 export interface PiRpcConnection {
@@ -453,6 +455,7 @@ export const makePiRpcConnection = Effect.fnUntraced(function* (options: PiRpcSp
           return;
         }
       }
+      if (options.consumeEvent !== undefined && (yield* options.consumeEvent(record))) return;
       yield* Queue.offer(events, record);
     });
 
