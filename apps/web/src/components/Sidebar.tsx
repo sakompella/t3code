@@ -706,7 +706,7 @@ function isOptimisticDropReleased(input: {
     return true;
   }
   if (optimisticDrop.order === null) {
-    // Settle also emits unpin/unsnooze events. Wait for the entire move
+    // Settle also clears the pin. Wait for the entire move
     // before releasing the projected fields and sort timestamps.
     if (
       canonicalSection === optimisticDrop.section &&
@@ -3736,10 +3736,7 @@ export default function Sidebar() {
       sourceSection: activeSection,
       section: target.section,
       occurredAt: new Date().toISOString(),
-      clearsSnooze:
-        plan.kind === "pin" ||
-        plan.kind === "settle" ||
-        (plan.kind === "move-active" && plan.unsnooze),
+      clearsSnooze: plan.kind === "move-active" && plan.unsnooze,
       order: plan.kind === "settle" ? null : plan.order,
       keysAtDrop: target.section === "active" ? activeKeysById : pinnedKeysById,
       assignedKeys: new Map(assignments.map(({ id, orderKey }) => [id, orderKey])),
@@ -3796,12 +3793,6 @@ export default function Sidebar() {
             return;
           break;
         case "pin":
-          // Pinning leaves a snooze alone; dragging out of the shelf is the wake.
-          if (
-            activeSection === "snoozed" &&
-            !(await run(unsnoozeThread(threadRef), "Failed to wake thread"))
-          )
-            return;
           if (
             !(await run(
               pinThread(threadRef, plan.orderKey === undefined ? {} : { orderKey: plan.orderKey }),
