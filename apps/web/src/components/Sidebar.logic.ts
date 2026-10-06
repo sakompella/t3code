@@ -226,6 +226,18 @@ export type SidebarThreadDropPlan =
     }
   | { readonly kind: "settle" };
 
+/**
+ * Whether the dropped row should be held at its destination while the server
+ * applies the plan. A snoozed row stays on the snoozed shelf unless the plan
+ * wakes it, so pinning or settling it has no destination to hold.
+ */
+export function sidebarDropHoldsPlacement(
+  from: SidebarSection,
+  plan: SidebarThreadDropPlan,
+): boolean {
+  return from !== "snoozed" || (plan.kind === "move-active" && plan.unsnooze);
+}
+
 export type SidebarDropVerb = "pin" | "unpin" | "settle" | "unsettle" | "wake";
 
 export function resolveSidebarDropVerb(
