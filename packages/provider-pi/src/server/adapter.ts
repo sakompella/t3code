@@ -106,6 +106,7 @@ import type {
 } from "./adapterState.ts";
 import { makePrimeAgentChildThreads } from "./primeAgentChildThreads.ts";
 import {
+  daemonSocketFromLaunchArgs,
   makePrimeAgentChildDialogs,
   materializePrimeAgentDialogExtension,
 } from "./primeAgentChildDialogs.ts";
@@ -514,7 +515,7 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
               kernelMcp: flavor.kernelMcp,
               environment: options.environment,
               endpoint: mcpSession.endpoint,
-            }).pipe(Effect.provideService(FileSystem.FileSystem, options.fileSystem));
+            }).pipe(Effect.provideService(FileSystem.FileSystem, fileSystem));
       const skillPath = kernelMcpAccess?.declared
         ? yield* provideCacheFs(materializePiT3Skill(host.paths.providerStatusCacheDir))
         : undefined;
@@ -533,13 +534,7 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
             materializePrimeAgentDialogExtension(host.paths.providerStatusCacheDir),
           )
         : undefined;
-      const daemonSocketIndex = resolvedLaunchArgs.args.indexOf("--daemon-socket");
-      const dialogSocketPath =
-        daemonSocketIndex < 0
-          ? resolvedLaunchArgs.args
-              .find((arg) => arg.startsWith("--daemon-socket="))
-              ?.slice("--daemon-socket=".length)
-          : resolvedLaunchArgs.args[daemonSocketIndex + 1];
+      const dialogSocketPath = daemonSocketFromLaunchArgs(resolvedLaunchArgs.args);
       const launchProcess = (processScope: Scope.Scope, resumeSessionFile?: string) =>
         Effect.gen(function* () {
           const launch = buildPiRpcLaunch({
