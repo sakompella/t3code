@@ -23,8 +23,8 @@ type LiveRoute = {
   readonly outbox: Set<string>;
   /** Only a ready route counts as attached. A reconnecting route is still owned and listened to. */
   ready: boolean;
-  /** The current owner's reconnect handler. A reload moves it with the route. */
-  onReconnect?: (status: ReconnectStatus) => void;
+  /** The current owner's failure handler. A reload moves the route to a new owner. */
+  owner?: { readonly fail: (reason: string) => void };
 };
 
 /** Bounds stock DaemonClient recovery after a lost socket, as Prime Agent's own default does. */
@@ -62,6 +62,24 @@ export default function childDialogs(pi: ExtensionAPI) {
   const attachRequest = (activeSessionId: string) =>
     ({ type: "attach", activeSessionId, supportsExtensionUi: true, capabilities: ["extension_ui", "slim_attach"] }) as const;
 
+  /** Restores a route after stock auto-reconnect. Failures go to whoever owns the route by then. */
+  const recover = (live: LiveRoute, status: ReconnectStatus) => {
+    const { activeSessionId } = live.route;
+    if (status.status === "failed") return live.owner?.fail(status.error);
+    if (status.status !== "connected") return;
+    void live.client.request(attachRequest(activeSessionId), undefined, { recoverable: false }).then(async (response) => {
+      if (!response.success) return live.owner?.fail(response.error);
+      if (!live.client.isConnected) return; // Lost again; the next reconnect retries.
+      live.ready = true;
+      for (const requestId of [...live.outbox]) {
+        live.outbox.delete(requestId);
+        await live.client.request({ type: "extension_ui_response", activeSessionId, requestId, response: { cancelled: true } }).catch(() => undefined);
+      }
+    }, () => {
+      if (live.client.isConnected) live.owner?.fail("the child could not be reattached");
+    });
+  };
+
   /** Answers the route's dialogs through ctx until released. */
   const listen = (live: LiveRoute, ctx: Pick<ExtensionContext, "ui">) => {
     const { activeSessionId } = live.route;
@@ -82,21 +100,7 @@ export default function childDialogs(pi: ExtensionAPI) {
         controller.abort();
       }
     };
-    live.onReconnect = (status) => {
-      if (status.status === "failed") return fail(status.error);
-      if (status.status !== "connected") return;
-      void live.client.request(attachRequest(activeSessionId), undefined, { recoverable: false }).then(async (response) => {
-        if (!response.success) return fail(response.error);
-        if (!live.client.isConnected) return; // Lost again; the next reconnect retries.
-        live.ready = true;
-        for (const requestId of [...live.outbox]) {
-          live.outbox.delete(requestId);
-          await live.client.request({ type: "extension_ui_response", activeSessionId, requestId, response: { cancelled: true } }).catch(() => undefined);
-        }
-      }, () => {
-        if (live.client.isConnected) fail("the child could not be reattached");
-      });
-    };
+    live.owner = { fail };
     const stopMessages = live.client.onMessage((message) => {
       if (message.type === "session_closed" && message.activeSessionId === activeSessionId) {
         drop();
@@ -134,15 +138,16 @@ export default function childDialogs(pi: ExtensionAPI) {
         try { ctx.ui.notify(\`Child dialog could not reach T3: \${String(error)}\`, "error"); } catch { /* The parent context may have been retired. */ }
         return { cancelled: true };
       }).then((response) => {
-        // A request whose dialog closed on a lost socket gets only the outbox's cancellation.
-        if (live.outbox.has(message.id)) return;
+        // An aborted dialog's terminal response is sent by whoever aborted it (shutdown or the reconnect outbox).
+        // The editor takes no signal, so its late answer must be dropped here.
+        if (controller.signal.aborted) return;
         return live.client.request({ type: "extension_ui_response", activeSessionId, requestId: message.id, response });
       }).catch(() => {
         // The child may have cancelled the request while its parent UI was open.
       }).finally(() => live.pending.delete(message.id));
     });
     const stopClose = live.client.onClose(lose);
-    return () => { stopMessages(); stopClose(); live.onReconnect = undefined; };
+    return () => { stopMessages(); stopClose(); live.owner = undefined; };
   };
 
   const register = (live: LiveRoute, ctx: Pick<ExtensionContext, "ui">) => {
@@ -177,7 +182,7 @@ export default function childDialogs(pi: ExtensionAPI) {
     release();
     live.ready = true;
     // The parent's own daemon connection owns daemon restarts; this client only reconnects to the same socket.
-    live.client.enableAutoReconnect({ recoverDaemon: async () => {}, timeoutMs: RECONNECT_TIMEOUT_MS, onStatus: (status) => live.onReconnect?.(status) });
+    live.client.enableAutoReconnect({ recoverDaemon: async () => {}, timeoutMs: RECONNECT_TIMEOUT_MS, onStatus: (status) => recover(live, status) });
     register(live, ctx);
   };
 
