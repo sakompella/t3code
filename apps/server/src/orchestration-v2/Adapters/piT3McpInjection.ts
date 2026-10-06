@@ -238,24 +238,33 @@ function withoutToolSelectionArgs(args: ReadonlyArray<string>): ReadonlyArray<st
   return filtered;
 }
 
-function piT3McpExtensionDestPath(cacheDir: string): string {
-  return `${cacheDir.replace(/\\/g, "/")}/${PI_T3_MCP_EXTENSION_FILENAME}`;
-}
-
 const writeFileIfChanged = Effect.fnUntraced(function* (dest: string, content: string) {
   const fs = yield* FileSystem.FileSystem;
   const existing = yield* fs.readFileString(dest).pipe(Effect.orElseSucceed(() => ""));
   if (existing !== content) yield* fs.writeFileString(dest, content);
 });
 
-export const materializePiT3McpExtension = Effect.fn("materializePiT3McpExtension")(function* (
+/** Writes a T3-shipped extension into the cache and returns its path, the value for `--extension`. */
+export const materializeExtensionSource = Effect.fnUntraced(function* (
   cacheDir: string,
+  fileName: string,
+  source: string,
 ) {
   const fs = yield* FileSystem.FileSystem;
   yield* fs.makeDirectory(cacheDir, { recursive: true });
-  const dest = piT3McpExtensionDestPath(cacheDir);
-  yield* writeFileIfChanged(dest, PI_T3_MCP_EXTENSION_SOURCE);
+  const dest = `${cacheDir.replace(/\\/g, "/")}/${fileName}`;
+  yield* writeFileIfChanged(dest, source);
   return dest;
+});
+
+export const materializePiT3McpExtension = Effect.fn("materializePiT3McpExtension")(function* (
+  cacheDir: string,
+) {
+  return yield* materializeExtensionSource(
+    cacheDir,
+    PI_T3_MCP_EXTENSION_FILENAME,
+    PI_T3_MCP_EXTENSION_SOURCE,
+  );
 });
 
 /**

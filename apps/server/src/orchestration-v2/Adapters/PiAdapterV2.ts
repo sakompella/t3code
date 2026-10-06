@@ -125,6 +125,7 @@ import type {
 } from "./PiAdapterV2State.ts";
 import { makePrimeAgentChildThreads } from "./primeAgentChildThreads.ts";
 import {
+  daemonSocketFromLaunchArgs,
   makePrimeAgentChildDialogs,
   materializePrimeAgentDialogExtension,
 } from "./primeAgentChildDialogs.ts";
@@ -465,13 +466,7 @@ export function makePiAdapterV2(
             materializePrimeAgentDialogExtension(options.serverConfig.providerStatusCacheDir),
           )
         : undefined;
-      const daemonSocketIndex = resolvedLaunchArgs.args.indexOf("--daemon-socket");
-      const dialogSocketPath =
-        daemonSocketIndex < 0
-          ? resolvedLaunchArgs.args
-              .find((arg) => arg.startsWith("--daemon-socket="))
-              ?.slice("--daemon-socket=".length)
-          : resolvedLaunchArgs.args[daemonSocketIndex + 1];
+      const dialogSocketPath = daemonSocketFromLaunchArgs(resolvedLaunchArgs.args);
       const launchProcess = (processScope: Scope.Scope, resumeSessionFile?: string) => {
         const launch = buildPiRpcLaunch({
           launchArgs: resolvedLaunchArgs.args,

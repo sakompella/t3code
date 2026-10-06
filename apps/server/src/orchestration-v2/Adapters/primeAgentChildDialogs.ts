@@ -1,10 +1,10 @@
 import * as Deferred from "effect/Deferred";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
-import * as FileSystem from "effect/FileSystem";
 import * as Schema from "effect/Schema";
 
 import { PiRpcError, PiRpcTimeoutError, type PiRpcConnection, type PiRpcRecord } from "./PiRpc.ts";
+import { materializeExtensionSource } from "./piT3McpInjection.ts";
 import {
   PRIME_AGENT_DIALOG_COMMAND,
   PRIME_AGENT_DIALOG_EXTENSION_FILENAME,
@@ -36,14 +36,21 @@ const encodeRoute = Schema.encodeSync(
 export const materializePrimeAgentDialogExtension = Effect.fn(
   "materializePrimeAgentDialogExtension",
 )(function* (cacheDir: string) {
-  const fs = yield* FileSystem.FileSystem;
-  yield* fs.makeDirectory(cacheDir, { recursive: true });
-  const path = `${cacheDir.replace(/\\/g, "/").replace(/\/+$/, "")}/${PRIME_AGENT_DIALOG_EXTENSION_FILENAME}`;
-  const previous = yield* fs.readFileString(path).pipe(Effect.orElseSucceed(() => ""));
-  if (previous !== PRIME_AGENT_DIALOG_EXTENSION_SOURCE)
-    yield* fs.writeFileString(path, PRIME_AGENT_DIALOG_EXTENSION_SOURCE);
-  return path;
+  return yield* materializeExtensionSource(
+    cacheDir,
+    PRIME_AGENT_DIALOG_EXTENSION_FILENAME,
+    PRIME_AGENT_DIALOG_EXTENSION_SOURCE,
+  );
 });
+
+/**
+ * The daemon socket Prime Agent uses, from `resolvePiLaunchArgs` output (equals forms already split).
+ * Like Prime Agent's own parser, the last `--daemon-socket` wins.
+ */
+export function daemonSocketFromLaunchArgs(args: ReadonlyArray<string>): string | undefined {
+  const index = args.lastIndexOf("--daemon-socket");
+  return index < 0 ? undefined : args[index + 1];
+}
 
 export function makePrimeAgentChildDialogs() {
   const pending = new Map<string, Deferred.Deferred<typeof Result.Type>>();
