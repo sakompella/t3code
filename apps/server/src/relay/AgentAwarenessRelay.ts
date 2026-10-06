@@ -336,19 +336,16 @@ function resolveAgentAwarenessRelayPublishSnapshot(input: {
 
 /**
  * Whether the finished run ended no later than the end of a snooze: its
- * deadline, which stays on the thread after the timer ends, or the moment the
- * user unsnoozed it. Everything that finished by then was hidden or already
- * seen, so it is never announced afterward, whether or not the thread was
- * published before and even once publishing turns on later.
+ * deadline, which stays on the thread after the timer ends, or the moment an
+ * unsnooze ended it early (`snoozeEndedAt`). Everything that finished by then
+ * was hidden or already seen, so it is never announced afterward, whether or
+ * not the thread was published before and even once publishing turns on later.
  */
-function terminalEndedUnderSnooze(
-  thread: OrchestrationV2ThreadShell,
-  unsnoozedAtMs: number | null = null,
-): boolean {
+function terminalEndedUnderSnooze(thread: OrchestrationV2ThreadShell): boolean {
   if (thread.latestRunCompletedAt == null) return false;
   const snoozeEndedAtMs = Math.max(
     thread.snoozedUntil == null ? -Infinity : DateTime.toEpochMillis(thread.snoozedUntil),
-    unsnoozedAtMs ?? -Infinity,
+    thread.snoozeEndedAt == null ? -Infinity : DateTime.toEpochMillis(thread.snoozeEndedAt),
   );
   return DateTime.toEpochMillis(thread.latestRunCompletedAt) <= snoozeEndedAtMs;
 }
@@ -405,19 +402,6 @@ export const make = Effect.gen(function* () {
   // Holds at most one pending wake, so a burst of requests costs one retry.
   const catchUpRequests = yield* Queue.dropping<void>(1);
   const publishedStateByThreadRef = yield* Ref.make(new Map<ThreadId, string>());
-  // When the user last ended each thread's snooze. The unsnooze clears the
-  // deadline that would otherwise date what the snooze hid, and a timestamp
-  // needs no shell read, so it is recorded the moment the event arrives, ahead
-  // of any publish that could read the cleared deadline.
-  const unsnoozedAtByThread = new Map<ThreadId, number>();
-  const rememberUnsnooze = (threadId: ThreadId, unsnoozedAt: DateTime.Utc) =>
-    Effect.sync(() => {
-      unsnoozedAtByThread.set(
-        threadId,
-        Math.max(unsnoozedAtByThread.get(threadId) ?? -Infinity, unsnoozedAt.epochMilliseconds),
-      );
-    });
-
   const readSecretString = (name: string) =>
     secrets
       .get(name)
@@ -585,13 +569,12 @@ export const make = Effect.gen(function* () {
       project,
       now: yield* DateTime.now,
     });
-    if (Option.isNone(thread)) unsnoozedAtByThread.delete(threadId);
     // An outcome a snooze hid is withdrawn like any other hidden state, so a
     // row published before the snooze cannot linger or turn into an alert.
     const outcomeIsHidden =
       (projected.state?.phase === "completed" || projected.state?.phase === "failed") &&
       Option.isSome(thread) &&
-      terminalEndedUnderSnooze(thread.value, unsnoozedAtByThread.get(threadId) ?? null);
+      terminalEndedUnderSnooze(thread.value);
     const snapshot = outcomeIsHidden ? { ...projected, state: null } : projected;
     const publishIdentity = agentAwarenessPublishIdentity(snapshot.state);
     const publishedStateByThread = yield* Ref.get(publishedStateByThreadRef);
@@ -883,14 +866,6 @@ export const make = Effect.gen(function* () {
       yield* forkParked(
         Stream.runForEach(threads.streamDomainEvents, (event) => {
           const threadId = eventThreadId(event);
-          if (event.type === "thread.unsnoozed") {
-            // An unsnooze of an awake thread leaves updatedAt untouched; it
-            // ended nothing, so it must not date any outcome.
-            return DateTime.toEpochMillis(event.payload.updatedAt) ===
-              event.occurredAt.epochMilliseconds
-              ? rememberUnsnooze(threadId, event.occurredAt)
-              : Effect.void;
-          }
           if (!shouldPublishAgentAwarenessEvent(event)) {
             return Effect.void;
           }

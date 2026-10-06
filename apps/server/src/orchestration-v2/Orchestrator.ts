@@ -339,6 +339,31 @@ function wakeWorkStartedAt(
 }
 
 /**
+ * The fields that end a snooze on the user's request. The moment it
+ * effectively ended (the earlier of its deadline and now) is kept after the
+ * deadline is cleared, so work finished by then stays hidden. A deadline that
+ * already passed keeps its own time, so work finished after it stays fresh,
+ * and an unsnooze with no snooze to end leaves the recorded moment alone.
+ */
+function endSnoozeEarly(
+  thread: Pick<OrchestrationV2AppThread, "snoozedUntil" | "snoozeEndedAt">,
+  now: DateTime.Utc,
+): Pick<OrchestrationV2AppThread, "snoozedUntil" | "snoozedAt" | "snoozeEndedAt"> {
+  const endedNow = thread.snoozedUntil == null ? null : DateTime.min(thread.snoozedUntil, now);
+  const previous = thread.snoozeEndedAt ?? null;
+  return {
+    snoozedUntil: null,
+    snoozedAt: null,
+    snoozeEndedAt:
+      endedNow === null
+        ? previous
+        : previous === null
+          ? endedNow
+          : DateTime.max(previous, endedNow),
+  };
+}
+
+/**
  * A message the agent's own background work sent to wake it: a provider
  * self-wake, a monitor notification, or a delegated task's result. It is not
  * the user re-engaging, so it never undoes the user's settle.
@@ -2697,8 +2722,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           const alreadyAwake = thread.snoozedUntil == null;
           return {
             ...thread,
-            snoozedUntil: null,
-            snoozedAt: null,
+            ...endSnoozeEarly(thread, now),
             updatedAt: alreadyAwake ? thread.updatedAt : now,
           };
         }
@@ -2794,12 +2818,14 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
                   // metadata timestamp from appearing as a fresh failure wake.
                   snoozedAt: now,
                 }
-              : command.limitRecovery !== undefined &&
+              : // Only the user's explicit "stop snoozing until reset" ends the
+                // recovery's snooze; other recovery updates leave it to its timer.
+                command.limitRecovery?.snooze === false &&
                   thread.limitRecovery?.snooze &&
                   thread.snoozedUntil != null &&
                   DateTime.toEpochMillis(thread.snoozedUntil) ===
                     Date.parse(thread.limitRecovery.resetAt)
-                ? { snoozedUntil: null, snoozedAt: null }
+                ? endSnoozeEarly(thread, now)
                 : {}),
             ...(command.branch === undefined ? {} : { branch: command.branch }),
             ...(command.worktreePath === undefined ? {} : { worktreePath: command.worktreePath }),

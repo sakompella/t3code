@@ -212,8 +212,15 @@ it.effect.each([
           snoozedAt: now,
         }),
       );
+      // However long ago it was snoozed, a thread stays parked until its timer ends.
+      yield* createRun(
+        yield* createThread("snoozed-long-ago", {
+          snoozedUntil: DateTime.add(now, { days: 1 }),
+          snoozedAt: DateTime.subtract(old, { days: 1 }),
+        }),
+      );
       const woke = yield* createThread("woke", {
-        snoozedUntil: DateTime.add(now, { days: 1 }),
+        snoozedUntil: DateTime.subtract(now, { hours: 1 }),
         snoozedAt: DateTime.subtract(old, { days: 1 }),
       });
       yield* createRun(woke);

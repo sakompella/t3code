@@ -409,6 +409,35 @@ it.effect.each([
     }).pipe(Effect.provide(testLayer)),
 );
 
+it.effect.each([
+  ["sql", ProjectionStore.layer.pipe(Layer.provideMerge(SqlitePersistenceMemory))],
+  ["memory", ProjectionStore.layerMemory],
+] as const)(
+  "%s: shells carry the recorded end of a snooze, and omit it for old threads",
+  ([, testLayer]) =>
+    Effect.gen(function* () {
+      const store = yield* ProjectionStore.ProjectionStoreV2;
+      const threadId = yield* addRolledBackRecoveryCandidate("snooze-ended");
+      const before = yield* store.getThreadShell(threadId);
+      // A thread written before the field existed reads as no recorded end.
+      assert.isNull(before?.snoozeEndedAt ?? null);
+
+      const endedAt = DateTime.makeUnsafe("2026-09-04T12:30:00.000Z");
+      const thread = (yield* store.getThreadProjection(threadId)).thread;
+      yield* store.apply({
+        id: EventId.make("event:snooze-ended:unsnoozed"),
+        type: "thread.unsnoozed",
+        threadId,
+        occurredAt: endedAt,
+        payload: { ...thread, snoozedUntil: null, snoozedAt: null, snoozeEndedAt: endedAt },
+      });
+      const shell = yield* store.getThreadShell(threadId);
+      assert.deepEqual(shell?.snoozeEndedAt, endedAt);
+      const listed = (yield* store.getShellSnapshot()).threads.find((row) => row.id === threadId);
+      assert.deepEqual(listed?.snoozeEndedAt, endedAt);
+    }).pipe(Effect.provide(testLayer)),
+);
+
 it.layer(TestLayer)("ProjectionStoreV2", (it) => {
   it.effect(
     "keeps restart-cancelled work through a stale run.updated",

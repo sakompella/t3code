@@ -2758,6 +2758,76 @@ it.layer(TestLayer)("OrchestrationV2LayerLive lifecycle", (it) => {
     }),
   );
 
+  it.effect("an unsnooze keeps the moment the snooze effectively ended", () =>
+    Effect.gen(function* () {
+      const orchestrator = yield* Orchestrator.OrchestratorV2;
+      const threadId = ThreadId.make("runtime-layer-snooze-ended-at");
+      yield* orchestrator.dispatch({
+        type: "thread.create",
+        createdBy: "user",
+        creationSource: "web",
+        commandId: CommandId.make("snooze-ended-create"),
+        threadId,
+        projectId: ProjectId.make("snooze-ended-project"),
+        title: "Snooze ended",
+        modelSelection,
+        runtimeMode: "full-access",
+        interactionMode: "default",
+        branch: null,
+        worktreePath: "/tmp/runtime-layer-snooze-ended",
+      });
+      const snooze = (name: string, until: DateTime.Utc) =>
+        orchestrator.dispatch({
+          type: "thread.snooze",
+          commandId: CommandId.make(`snooze-ended-${name}`),
+          threadId,
+          snoozedUntil: DateTime.formatIso(until),
+        });
+      const unsnooze = (name: string) =>
+        orchestrator
+          .dispatch({
+            type: "thread.unsnooze",
+            commandId: CommandId.make(`snooze-ended-${name}`),
+            threadId,
+            reason: "user",
+          })
+          .pipe(Effect.andThen(orchestrator.getThreadProjection(threadId)))
+          .pipe(Effect.map(({ thread }) => thread));
+      const iso = (value: DateTime.Utc | null | undefined) =>
+        value == null ? null : DateTime.formatIso(value);
+
+      assert.isUndefined((yield* orchestrator.getThreadProjection(threadId)).thread.snoozeEndedAt);
+
+      // An early unsnooze ends the snooze now, not at its deadline.
+      yield* snooze("early", DateTime.add(yield* DateTime.now, { hours: 6 }));
+      yield* TestClock.adjust("1 hour");
+      const early = yield* DateTime.now;
+      const afterEarly = yield* unsnooze("unsnooze-early");
+      assert.isNull(afterEarly.snoozedUntil);
+      assert.equal(iso(afterEarly.snoozeEndedAt), iso(early));
+
+      // Unsnoozing an awake thread changes nothing, even within the same millisecond.
+      const noop = yield* unsnooze("unsnooze-awake");
+      assert.equal(iso(noop.snoozeEndedAt), iso(early));
+      assert.deepEqual(noop.updatedAt, afterEarly.updatedAt);
+
+      // After the timer ran out, the deadline is when it ended; a run that
+      // finished after it and before this unsnooze stays fresh.
+      const expiredAt = DateTime.add(yield* DateTime.now, { hours: 1 });
+      yield* snooze("expired", expiredAt);
+      yield* TestClock.adjust("3 hours");
+      const afterExpired = yield* unsnooze("unsnooze-expired");
+      assert.equal(iso(afterExpired.snoozeEndedAt), iso(expiredAt));
+
+      // Recorded moments only move forward.
+      yield* snooze("late", DateTime.add(yield* DateTime.now, { hours: 6 }));
+      yield* TestClock.adjust("1 hour");
+      const lateAt = yield* DateTime.now;
+      const afterLate = yield* unsnooze("unsnooze-late");
+      assert.equal(iso(afterLate.snoozeEndedAt), iso(lateAt));
+    }),
+  );
+
   it.effect("rejects settling a thread while a run is active", () =>
     Effect.gen(function* () {
       const orchestrator = yield* Orchestrator.OrchestratorV2;
@@ -4773,6 +4843,8 @@ it.layer(TestLayer)("usage-limit recovery", (it) => {
         } else {
           assert.isNull(armedShell.snoozedUntil);
           assert.isNull(armedShell.snoozedAt);
+          // The explicit stop ended the snooze now, well before its reset time.
+          assert.isTrue(DateTime.toEpochMillis(armedShell.snoozeEndedAt!) < Date.parse(resetAt));
           assert.isTrue(armedShell.limitRecovery!.autoResume);
         }
       }

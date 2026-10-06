@@ -5,7 +5,6 @@ import {
   EventId,
   MessageId,
   NodeId,
-  type OrchestrationV2AppThread,
   type OrchestrationV2DomainEvent,
   type OrchestrationV2ThreadShell,
   type OrchestrationV2TurnItem,
@@ -89,45 +88,6 @@ function shell(overrides: Partial<OrchestrationV2ThreadShell> = {}): Orchestrati
     snoozedAt: null,
     pinnedAt: null,
     ...overrides,
-  };
-}
-
-function unsnoozedEvent(
-  occurredAt: DateTime.Utc,
-  updatedAt: DateTime.Utc,
-): OrchestrationV2DomainEvent {
-  return {
-    id: EventId.make("event:unsnoozed"),
-    type: "thread.unsnoozed",
-    threadId: THREAD_ID,
-    occurredAt,
-    payload: { ...appThread(), updatedAt },
-  };
-}
-
-function appThread(): OrchestrationV2AppThread {
-  return {
-    id: THREAD_ID,
-    projectId: PROJECT_ID,
-    title: "Thread",
-    providerInstanceId: ProviderInstanceId.make("codex"),
-    modelSelection: { instanceId: ProviderInstanceId.make("codex"), model: "test-model" },
-    runtimeMode: "full-access",
-    interactionMode: "default",
-    branch: null,
-    worktreePath: null,
-    activeProviderThreadId: null,
-    lineage: { rootThreadId: THREAD_ID, parentThreadId: null, relationshipToParent: null },
-    forkedFrom: null,
-    createdBy: "user",
-    creationSource: "web",
-    createdAt: DateTime.makeUnsafe(NOW),
-    updatedAt: DateTime.makeUnsafe(NOW),
-    archivedAt: null,
-    settledOverride: null,
-    settledAt: null,
-    lastVisitedAt: null,
-    deletedAt: null,
   };
 }
 
@@ -940,146 +900,112 @@ describe("AgentAwarenessRelay", () => {
   );
 
   it.effect.each(["completed", "failed"] as const)(
-    "does not announce a %s run that finished before the user ended the snooze",
+    "does not announce a %s run that finished before an unsnooze, whatever event ordering",
     (status) =>
       Effect.gen(function* () {
-        const events = yield* Queue.unbounded<OrchestrationV2DomainEvent>();
-        const { relay, currentShell, publications } = yield* makeTestRelay({
-          domainEvents: Stream.fromQueue(events),
-        });
-        yield* relay.start();
+        // The unsnooze already cleared the deadline and left snoozeEndedAt; no
+        // domain event is delivered at all, so only the shell read can tell.
+        const { relay, currentShell, publications } = yield* makeTestRelay();
+        yield* relay.publishThread(THREAD_ID);
+        assert.equal(publications.at(-1)?.state?.phase, "running");
         const settle = Effect.gen(function* () {
           yield* TestClock.adjust("5 seconds");
           yield* relay.drain;
         });
-        const finished = shell({
-          status,
-          latestRunId: RunId.make("run-before-unsnooze"),
-          latestRunCompletedAt: DateTime.makeUnsafe("1970-01-01T00:00:10.000Z"),
-        });
-        // The unsnooze clears the deadline, so only the event can date the outcome.
-        yield* Ref.set(currentShell, finished);
-        yield* TestClock.adjust("1 hour");
-        const unsnoozedAt = yield* DateTime.now;
-        yield* Queue.offer(events, unsnoozedEvent(unsnoozedAt, unsnoozedAt));
-        yield* settle;
-        yield* relay.publishThread(THREAD_ID);
-        yield* settle;
-        assert.equal(publications.length, 0);
-
+        const endedAt = DateTime.makeUnsafe("1970-01-01T00:01:00.000Z");
         yield* Ref.set(
           currentShell,
           shell({
             status,
-            latestRunId: RunId.make("run-after-unsnooze"),
-            latestRunCompletedAt: DateTime.makeUnsafe("1970-01-01T02:00:00.000Z"),
-          }),
-        );
-        yield* relay.publishThread(THREAD_ID);
-        yield* settle;
-        assert.equal(publications.length, 1);
-        assert.equal(publications.at(-1)?.state?.phase, status);
-      }),
-  );
-
-  it.effect("an unsnooze of an awake thread does not hide a fresh outcome", () =>
-    Effect.gen(function* () {
-      const events = yield* Queue.unbounded<OrchestrationV2DomainEvent>();
-      const pulls = yield* Queue.unbounded<void>();
-      const { relay, currentShell, publications } = yield* makeTestRelay({
-        domainEvents: Stream.fromEffectRepeat(
-          Queue.offer(pulls, undefined).pipe(Effect.andThen(Queue.take(events))),
-        ),
-      });
-      yield* relay.start();
-      yield* Queue.take(pulls);
-      yield* TestClock.adjust("1 hour");
-      const now = yield* DateTime.now;
-      yield* Ref.set(
-        currentShell,
-        shell({
-          status: "completed",
-          latestRunId: RunId.make("run-fresh"),
-          latestRunCompletedAt: DateTime.add(now, { seconds: -1 }),
-        }),
-      );
-      // The thread was never snoozed: the command left updatedAt alone.
-      yield* Queue.offer(events, unsnoozedEvent(now, DateTime.makeUnsafe(NOW)));
-      yield* Queue.take(pulls);
-      yield* relay.publishThread(THREAD_ID);
-      yield* TestClock.adjust("5 seconds");
-      yield* relay.drain;
-      assert.equal(publications.at(-1)?.state?.phase, "completed");
-    }),
-  );
-
-  it.effect.each(["completed", "failed"] as const)(
-    "an unsnooze is recorded ahead of a publish that reads the cleared deadline (%s)",
-    (status) =>
-      Effect.gen(function* () {
-        const events = yield* Queue.unbounded<OrchestrationV2DomainEvent>();
-        const pulls = yield* Queue.unbounded<void>();
-        const hold = yield* Ref.make(false);
-        const readStarted = yield* Deferred.make<void>();
-        const release = yield* Deferred.make<void>();
-        const shellRef = yield* Ref.make<OrchestrationV2ThreadShell | null>(shell());
-        const { relay, publications } = yield* makeTestRelay({
-          // While held, any shell read waits, as a slow observer read would.
-          readShell: () =>
-            Ref.get(hold).pipe(
-              Effect.flatMap((held) =>
-                held
-                  ? Deferred.succeed(readStarted, undefined).pipe(
-                      Effect.andThen(Deferred.await(release)),
-                    )
-                  : Effect.void,
-              ),
-              Effect.andThen(Ref.get(shellRef)),
-            ),
-          domainEvents: Stream.fromEffectRepeat(
-            Queue.offer(pulls, undefined).pipe(Effect.andThen(Queue.take(events))),
-          ),
-        });
-        yield* relay.start();
-        yield* Queue.take(pulls);
-        yield* Ref.set(
-          shellRef,
-          shell({
-            status,
+            snoozedUntil: null,
+            snoozeEndedAt: endedAt,
             latestRunId: RunId.make("run-before-unsnooze"),
             latestRunCompletedAt: DateTime.makeUnsafe("1970-01-01T00:00:10.000Z"),
           }),
         );
-        yield* TestClock.adjust("1 hour");
-        const unsnoozedAt = yield* DateTime.now;
+        yield* relay.publishThread(THREAD_ID);
+        yield* settle;
+        // The earlier running row is withdrawn; nothing announces the outcome.
+        assert.isNull(publications.at(-1)?.state);
+        assert.isTrue(publications.every((publication) => publication.state?.phase !== status));
+        const published = publications.length;
 
-        yield* Ref.set(hold, true);
-        yield* Queue.offer(events, unsnoozedEvent(unsnoozedAt, unsnoozedAt));
-        // Either the event is already handled (it needed no read) or its
-        // handler is stuck in a held read; both are the moment to publish.
-        yield* Effect.race(Deferred.await(readStarted), Queue.take(pulls));
-        yield* Ref.set(hold, false);
+        // A run that finishes after the unsnooze is genuinely new.
+        yield* Ref.set(
+          currentShell,
+          shell({
+            status,
+            snoozedUntil: null,
+            snoozeEndedAt: endedAt,
+            latestRunId: RunId.make("run-after-unsnooze"),
+            latestRunCompletedAt: DateTime.makeUnsafe("1970-01-01T00:02:00.000Z"),
+          }),
+        );
+        yield* relay.publishThread(THREAD_ID);
+        yield* settle;
+        assert.equal(publications.length, published + 1);
+        assert.equal(publications.at(-1)?.state?.phase, status);
+      }),
+  );
+
+  it.effect.each(["completed", "failed"] as const)(
+    "does not announce a %s run hidden by an unsnooze when publishing is turned on afterwards",
+    (status) =>
+      Effect.gen(function* () {
+        const { relay, secrets, currentShell, publications } = yield* makeTestRelay({
+          linked: false,
+        });
+        yield* Ref.set(
+          currentShell,
+          shell({
+            status,
+            snoozeEndedAt: DateTime.makeUnsafe("1970-01-01T00:01:00.000Z"),
+            latestRunId: RunId.make("run-before-unsnooze"),
+            latestRunCompletedAt: DateTime.makeUnsafe("1970-01-01T00:00:10.000Z"),
+          }),
+        );
+        yield* relay.publishThread(THREAD_ID);
+        for (const [name, value] of [
+          [PUBLISH_AGENT_ACTIVITY_SECRET, "true"],
+          [RELAY_URL_SECRET, "https://relay.example.test"],
+          [RELAY_ISSUER_SECRET, "https://relay.example.test"],
+          [RELAY_ENVIRONMENT_CREDENTIAL_SECRET, "credential-1"],
+        ] as const) {
+          yield* secrets.set(name, new TextEncoder().encode(value));
+        }
         yield* relay.publishThread(THREAD_ID);
         yield* TestClock.adjust("5 seconds");
         yield* relay.drain;
         assert.equal(publications.length, 0);
-        yield* Deferred.succeed(release, undefined);
-
-        yield* Ref.set(
-          shellRef,
-          shell({
-            status,
-            latestRunId: RunId.make("run-after-unsnooze"),
-            latestRunCompletedAt: DateTime.makeUnsafe("1970-01-01T02:00:00.000Z"),
-          }),
-        );
-        yield* relay.publishThread(THREAD_ID);
-        yield* TestClock.adjust("5 seconds");
-        yield* relay.drain;
-        assert.equal(publications.length, 1);
-        assert.equal(publications.at(-1)?.state?.phase, status);
       }),
   );
+
+  it("catch-up skips a run that finished by the time an unsnooze ended a snooze", () => {
+    const hidden = ThreadId.make("hidden-by-unsnooze");
+    const after = ThreadId.make("after-unsnooze");
+    const ended = DateTime.makeUnsafe("2026-09-04T13:00:00.000Z");
+    const ids = AgentAwarenessRelay.resolveAgentAwarenessRelayActiveThreadIds({
+      environmentId: EnvironmentId.make("relay-env"),
+      startedAt: DateTime.toEpochMillis(DateTime.makeUnsafe(NOW)),
+      now: DateTime.makeUnsafe("2026-09-04T14:00:00.000Z"),
+      projects: [{ id: PROJECT_ID, title: "Project" }],
+      threads: [
+        shell({
+          id: hidden,
+          status: "completed",
+          snoozeEndedAt: ended,
+          latestRunCompletedAt: DateTime.makeUnsafe("2026-09-04T12:30:00.000Z"),
+        }),
+        shell({
+          id: after,
+          status: "completed",
+          snoozeEndedAt: ended,
+          latestRunCompletedAt: DateTime.makeUnsafe("2026-09-04T13:30:00.000Z"),
+        }),
+      ],
+    });
+    assert.deepStrictEqual(ids, [after]);
+  });
 
   it.effect("confirms a first completed state and respects disabling during confirmation", () =>
     Effect.gen(function* () {
