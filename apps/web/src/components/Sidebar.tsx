@@ -188,6 +188,7 @@ import {
   isTrailingDoubleClick,
   orderItemsByPreferredIds,
   planSidebarThreadDrop,
+  sidebarDropHoldsPlacement,
   reduceSidebarProjectScopeMenuState,
   resolveAdjacentThreadId,
   resolveSidebarSweepKeys,
@@ -3971,7 +3972,7 @@ export default function Sidebar() {
         keysAtDrop: target.section === "active" ? activeKeysById : pinnedKeysById,
         assignedKeys: new Map(assignments.map(({ id, orderKey }) => [id, orderKey])),
       };
-      setOptimisticDrop(drop);
+      if (sidebarDropHoldsPlacement(activeSection, plan)) setOptimisticDrop(drop);
       void (async () => {
         const run = async (
           operation: Promise<AtomCommandResult<unknown, unknown>>,
