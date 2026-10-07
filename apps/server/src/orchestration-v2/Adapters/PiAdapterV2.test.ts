@@ -6284,6 +6284,613 @@ describe("PiAdapterV2 with the Prime Agent flavor", () => {
       assert.isFalse(fake.allRequests().some((request) => request["type"] === "fork"));
     }).pipe(Effect.scoped, Effect.provide(layerTest)),
   );
+
+  describe("prompt-cache miss notices", () => {
+    const MINUTE = 60_000;
+
+    interface CacheTurn {
+      readonly timestamp: number;
+      readonly input?: number;
+      readonly cacheRead?: number;
+      readonly cacheWrite?: number;
+      readonly output?: number;
+      readonly totalTokens?: number;
+      readonly model?: string;
+      readonly responseId?: string;
+      readonly stopReason?: string;
+    }
+
+    /** A parent reply as Prime Agent reports its usage, at Anthropic-like prices. */
+    const usageReply = (turn: CacheTurn) => {
+      const { input = 0, cacheRead = 0, cacheWrite = 0, output = 100 } = turn;
+      return {
+        ...assistantSnapshot(turn.timestamp, "A reply."),
+        stopReason: turn.stopReason ?? "stop",
+        provider: "anthropic",
+        model: turn.model ?? "claude",
+        ...(turn.responseId === undefined ? {} : { responseId: turn.responseId }),
+        usage: {
+          input,
+          output,
+          cacheRead,
+          cacheWrite,
+          totalTokens: turn.totalTokens ?? input + output + cacheRead + cacheWrite,
+          cost: {
+            input: input * 3e-6,
+            cacheRead: cacheRead * 0.3e-6,
+            cacheWrite: cacheWrite * 3.75e-6,
+          },
+        },
+      };
+    };
+
+    /** A prompt of 50k tokens written to the cache. */
+    const warm = usageReply({
+      timestamp: 1_000,
+      input: 10,
+      cacheWrite: 50_000,
+      responseId: "warm",
+    });
+    /** The same prompt re-billed in full ten minutes later. */
+    const missed = usageReply({
+      timestamp: 1_000 + 10 * MINUTE,
+      input: 10,
+      cacheWrite: 52_000,
+      responseId: "missed",
+    });
+    const healthy = (timestamp: number, responseId: string) =>
+      usageReply({ timestamp, input: 10, cacheRead: 50_000, cacheWrite: 2_000, responseId });
+    /** What Prime Agent stores once RLM children's usage is folded into the reply. */
+    const folded = (reply: ReturnType<typeof usageReply>) => ({
+      ...reply,
+      usage: {
+        ...reply.usage,
+        input: reply.usage.input + 9_000,
+        cacheRead: reply.usage.cacheRead + 9_000,
+      },
+    });
+
+    interface Notice {
+      readonly id: string;
+      readonly message: string;
+    }
+
+    /** The cache-miss notices of the turn that runs until it ends. */
+    const takeCacheNotices = (takeEvent: TakeEvent) =>
+      Effect.gen(function* () {
+        const notices: Array<Notice> = [];
+        for (;;) {
+          const event = yield* takeEvent(
+            (candidate) =>
+              candidate.type === "turn.terminal" ||
+              (candidate.type === "turn_item.updated" &&
+                candidate.turnItem.type === "system_notice" &&
+                candidate.turnItem.title === "Prompt cache miss"),
+          );
+          if (event.type !== "turn_item.updated" || event.turnItem.type !== "system_notice") {
+            return notices;
+          }
+          assert.equal(event.turnItem.tone, "warning");
+          notices.push({ id: event.turnItem.id, message: event.turnItem.message });
+        }
+      });
+
+    /**
+     * One turn. `live` are the replies whose `message_end` reached T3, and
+     * `stored` is the conversation Prime Agent holds when the turn settles.
+     */
+    const runCacheTurn = (
+      session: Effect.Success<ReturnType<typeof openPrimeThread>>,
+      fake: FakePi,
+      runOrdinal: number,
+      replies: { readonly live?: ReadonlyArray<unknown>; readonly stored: ReadonlyArray<unknown> },
+    ) =>
+      Effect.gen(function* () {
+        yield* startTurn(
+          session.runtime,
+          session.providerThread,
+          "default",
+          [],
+          `turn ${runOrdinal}`,
+          undefined,
+          runOrdinal,
+        );
+        yield* fake.takeRequest("prompt");
+        yield* fake.emit({ type: "agent_start" });
+        for (const message of replies.live ?? []) {
+          yield* fake.emit({ type: "message_end", message });
+        }
+        fake.setTranscript(replies.stored);
+        yield* fake.emit({ type: "agent_end", messages: [] });
+        return yield* takeCacheNotices(session.takeEvent);
+      });
+
+    it.effect("warns once when a live reply re-bills the prompt after an idle gap", () =>
+      Effect.gen(function* () {
+        const fake = yield* makeFakePi;
+        const session = yield* openPrimeThread(fake);
+        // Prime Agent has stored nothing yet, so only the live events speak.
+        assert.deepEqual(yield* runCacheTurn(session, fake, 1, { live: [warm], stored: [] }), []);
+        const notices = yield* runCacheTurn(session, fake, 2, { live: [missed], stored: [] });
+        assert.deepEqual(
+          notices.map((notice) => notice.message),
+          ["Cache miss after 10m idle: 50k tokens re-billed (~$0.19)"],
+        );
+      }).pipe(Effect.scoped, Effect.provide(layerTest)),
+    );
+
+    it.effect("names a model switch instead of an idle gap", () =>
+      Effect.gen(function* () {
+        const fake = yield* makeFakePi;
+        const session = yield* openPrimeThread(fake);
+        yield* runCacheTurn(session, fake, 1, { live: [warm], stored: [] });
+        const switched = usageReply({
+          timestamp: 2_000,
+          input: 52_010,
+          model: "other",
+          responseId: "s",
+        });
+        const notices = yield* runCacheTurn(session, fake, 2, { live: [switched], stored: [] });
+        assert.lengthOf(notices, 1);
+        assert.include(notices[0]?.message, "Cache miss after model switch: 50k tokens re-billed");
+      }).pipe(Effect.scoped, Effect.provide(layerTest)),
+    );
+
+    it.effect(
+      "stays quiet for a healthy session, a noise-sized miss, and an errored reply without usage",
+      () =>
+        Effect.gen(function* () {
+          const fake = yield* makeFakePi;
+          const session = yield* openPrimeThread(fake);
+          const noisy = usageReply({
+            timestamp: 3_000,
+            cacheRead: 49_500,
+            cacheWrite: 700,
+            responseId: "noise",
+          });
+          const errored = usageReply({
+            timestamp: 4_000,
+            output: 0,
+            stopReason: "error",
+            responseId: "err",
+          });
+          const all = [warm, healthy(2_000, "h"), noisy, errored];
+          const notices = yield* runCacheTurn(session, fake, 1, { live: all, stored: all });
+          assert.deepEqual(notices, []);
+
+          // The errored reply left the baseline alone, so a real miss after it still shows.
+          const later = usageReply({
+            timestamp: 5_000 + 10 * MINUTE,
+            input: 10,
+            cacheWrite: 52_000,
+            responseId: "later",
+          });
+          const next = yield* runCacheTurn(session, fake, 2, {
+            live: [later],
+            stored: [...all, later],
+          });
+          assert.lengthOf(next, 1);
+        }).pipe(Effect.scoped, Effect.provide(layerTest)),
+    );
+
+    it.effect("compares the first reply after a reopen with the session's last stored reply", () =>
+      Effect.gen(function* () {
+        const fake = yield* makeFakePi;
+        fake.setTranscript([storedPrompt(900), warm]);
+        const session = yield* openPrimeThread(fake);
+        const notices = yield* runCacheTurn(session, fake, 1, {
+          live: [missed],
+          stored: [storedPrompt(900), warm, missed],
+        });
+        assert.lengthOf(notices, 1);
+        assert.include(notices[0]?.message, "Cache miss after 10m idle");
+      }).pipe(Effect.scoped, Effect.provide(layerTest)),
+    );
+
+    it.effect("does not report misses already in the history of a reopened session", () =>
+      Effect.gen(function* () {
+        const fake = yield* makeFakePi;
+        const history = [warm, missed, healthy(1_000 + 11 * MINUTE, "h")];
+        fake.setTranscript(history);
+        const session = yield* openPrimeThread(fake);
+        const next = healthy(1_000 + 12 * MINUTE, "next");
+        const notices = yield* runCacheTurn(session, fake, 1, {
+          live: [next],
+          stored: [...history, next],
+        });
+        assert.deepEqual(notices, []);
+      }).pipe(Effect.scoped, Effect.provide(layerTest)),
+    );
+
+    it.effect("starts without a baseline after a stored history that ends in a folded reply", () =>
+      Effect.gen(function* () {
+        const fake = yield* makeFakePi;
+        const childRun = folded(healthy(2_000, "child-run"));
+        const history = [warm, { ...childRun, usage: { ...childRun.usage, totalTokens: 52_200 } }];
+        fake.setTranscript(history);
+        const session = yield* openPrimeThread(fake);
+        const notices = yield* runCacheTurn(session, fake, 1, {
+          live: [missed],
+          stored: [...history, missed],
+        });
+        assert.deepEqual(notices, []);
+      }).pipe(Effect.scoped, Effect.provide(layerTest)),
+    );
+
+    it.effect(
+      "counts a reply once when its live event and its stored, folded copy both arrive",
+      () =>
+        Effect.gen(function* () {
+          const fake = yield* makeFakePi;
+          const session = yield* openPrimeThread(fake);
+          const storedWarm = {
+            ...folded(warm),
+            usage: { ...folded(warm).usage, totalTokens: 50_110 },
+          };
+          assert.deepEqual(
+            yield* runCacheTurn(session, fake, 1, { live: [warm], stored: [storedWarm] }),
+            [],
+          );
+          const storedMissed = {
+            ...folded(missed),
+            usage: { ...folded(missed).usage, totalTokens: 52_110 },
+          };
+          const notices = yield* runCacheTurn(session, fake, 2, {
+            live: [missed],
+            stored: [storedWarm, storedMissed],
+          });
+          assert.lengthOf(
+            notices,
+            1,
+            "the stored copies neither reset the baseline nor warn again",
+          );
+        }).pipe(Effect.scoped, Effect.provide(layerTest)),
+    );
+
+    it.effect("takes a reply whose events were all dropped from the stored conversation once", () =>
+      Effect.gen(function* () {
+        const fake = yield* makeFakePi;
+        const session = yield* openPrimeThread(fake);
+        yield* runCacheTurn(session, fake, 1, { live: [warm], stored: [warm] });
+        const notices = yield* runCacheTurn(session, fake, 2, { stored: [warm, missed] });
+        assert.lengthOf(notices, 1);
+        const next = healthy(1_000 + 11 * MINUTE, "next");
+        const later = yield* runCacheTurn(session, fake, 3, {
+          live: [next],
+          stored: [warm, missed, next],
+        });
+        assert.deepEqual(later, []);
+      }).pipe(Effect.scoped, Effect.provide(layerTest)),
+    );
+
+    it.effect("counts distinct replies that share a timestamp, each with its own notice", () =>
+      Effect.gen(function* () {
+        const fake = yield* makeFakePi;
+        const session = yield* openPrimeThread(fake);
+        yield* runCacheTurn(session, fake, 1, { live: [warm], stored: [warm] });
+        const at = 1_000 + 10 * MINUTE;
+        const first = usageReply({ timestamp: at, input: 10, cacheWrite: 52_000, responseId: "a" });
+        const second = usageReply({
+          timestamp: at,
+          input: 10,
+          cacheWrite: 60_000,
+          model: "other",
+          responseId: "b",
+        });
+        const notices = yield* runCacheTurn(session, fake, 2, {
+          live: [first, second],
+          stored: [warm, first, second],
+        });
+        assert.lengthOf(notices, 2);
+        assert.notEqual(notices[0]?.id, notices[1]?.id);
+      }).pipe(Effect.scoped, Effect.provide(layerTest)),
+    );
+
+    it.effect("does not warn about the first reply after a compaction", () =>
+      Effect.gen(function* () {
+        const fake = yield* makeFakePi;
+        const session = yield* openPrimeThread(fake);
+        yield* runCacheTurn(session, fake, 1, { live: [warm], stored: [warm] });
+        yield* startTurn(
+          session.runtime,
+          session.providerThread,
+          "default",
+          [],
+          "turn 2",
+          undefined,
+          2,
+        );
+        yield* fake.takeRequest("prompt");
+        yield* fake.emit({ type: "agent_start" });
+        yield* fake.emit({ type: "compaction_start", reason: "threshold" });
+        yield* fake.emit({
+          type: "compaction_end",
+          result: { summary: "s", tokensBefore: 50_000, estimatedTokensAfter: 30_000 },
+        });
+        const afterCompaction = usageReply({
+          timestamp: 1_000 + 10 * MINUTE,
+          input: 10,
+          cacheWrite: 30_000,
+          responseId: "c",
+        });
+        yield* fake.emit({ type: "message_end", message: afterCompaction });
+        fake.setTranscript([warm, afterCompaction]);
+        yield* fake.emit({ type: "agent_end", messages: [] });
+        assert.deepEqual(yield* takeCacheNotices(session.takeEvent), []);
+      }).pipe(Effect.scoped, Effect.provide(layerTest)),
+    );
+
+    it.effect.each(["forking the session", "moving the branch in place"] as const)(
+      "does not warn about the first reply after a rollback by %s",
+      (rollback) =>
+        Effect.gen(function* () {
+          const fake = yield* makeFakePi;
+          if (rollback === "moving the branch in place") fake.queueCommands(T3_COMMANDS);
+          fake.queueForkMessages({ messages: [] });
+          const session = yield* openPrimeThread(fake);
+          const turns = [];
+          for (const [ordinal, reply] of [warm, healthy(2_000, "h")].entries()) {
+            fake.queueForkMessages({
+              messages: Array.from({ length: ordinal + 1 }, (_, index) => ({
+                entryId: `u${index + 1}`,
+              })),
+            });
+            yield* startTurn(
+              session.runtime,
+              session.providerThread,
+              "default",
+              [],
+              `turn ${ordinal + 1}`,
+              undefined,
+              ordinal + 1,
+            );
+            yield* fake.takeRequest("prompt");
+            yield* fake.emit({ type: "agent_start" });
+            yield* fake.emit({ type: "message_end", message: reply });
+            yield* fake.emit({ type: "agent_end", messages: [] });
+            // Both the completed provider turn and the terminal event, so neither is left to a later wait.
+            let providerTurn: OrchestrationV2ProviderTurn | undefined;
+            let terminal = false;
+            while (providerTurn === undefined || !terminal) {
+              const event = yield* session.takeEvent(
+                (candidate) =>
+                  candidate.type === "turn.terminal" ||
+                  (candidate.type === "provider_turn.updated" &&
+                    candidate.providerTurn.status === "completed"),
+              );
+              if (event.type === "turn.terminal") terminal = true;
+              if (event.type === "provider_turn.updated") providerTurn = event.providerTurn;
+            }
+            turns.push(providerTurn);
+          }
+          if (rollback === "forking the session") {
+            yield* rollBackToFirstTurn(session, turns);
+          } else {
+            const rolledBack = yield* rollBackToFirstTurn(session, turns).pipe(Effect.forkChild);
+            yield* reportNavigation(fake, { outcome: "ok" });
+            yield* Fiber.join(rolledBack);
+          }
+
+          const afterRollback = usageReply({
+            timestamp: 1_000 + 10 * MINUTE,
+            input: 10,
+            cacheWrite: 52_000,
+            responseId: "r",
+          });
+          const notices = yield* runCacheTurn(session, fake, 3, {
+            live: [afterRollback],
+            stored: [warm, afterRollback],
+          });
+          assert.deepEqual(notices, []);
+        }).pipe(Effect.scoped, Effect.provide(layerTest)),
+    );
+
+    describe("replies that share a timestamp with an earlier stored reply", () => {
+      /** Same timestamp as `warm`, another response, and a different model, so it re-bills the prompt. */
+      const sibling = usageReply({
+        timestamp: 1_000,
+        input: 52_010,
+        model: "other",
+        responseId: "sibling",
+      });
+
+      it.effect(
+        "warns once for a live reply after a reopen, despite its twin and a later catch-up",
+        () =>
+          Effect.gen(function* () {
+            const fake = yield* makeFakePi;
+            fake.setTranscript([storedPrompt(900), warm]);
+            const session = yield* openPrimeThread(fake);
+            const notices = yield* runCacheTurn(session, fake, 1, {
+              // The old reply is delivered again, then the new one.
+              live: [warm, sibling],
+              stored: [storedPrompt(900), warm, sibling],
+            });
+            assert.lengthOf(notices, 1);
+            assert.include(
+              notices[0]?.message,
+              "Cache miss after model switch: 50k tokens re-billed",
+            );
+
+            const quiet = yield* runCacheTurn(session, fake, 2, {
+              stored: [storedPrompt(900), warm, sibling],
+            });
+            assert.deepEqual(quiet, []);
+          }).pipe(Effect.scoped, Effect.provide(layerTest)),
+      );
+
+      it.effect("warns for a sibling in a later turn, once A's turn has closed", () =>
+        Effect.gen(function* () {
+          const fake = yield* makeFakePi;
+          const session = yield* openPrimeThread(fake);
+          yield* runCacheTurn(session, fake, 1, { live: [warm], stored: [warm] });
+          const live = yield* runCacheTurn(session, fake, 2, {
+            live: [sibling],
+            stored: [warm, sibling],
+          });
+          assert.lengthOf(live, 1);
+          assert.include(live[0]?.message, "Cache miss after model switch");
+          assert.deepEqual(yield* runCacheTurn(session, fake, 3, { stored: [warm, sibling] }), []);
+        }).pipe(Effect.scoped, Effect.provide(layerTest)),
+      );
+
+      it.effect("warns for a sibling that only a later turn's stored read shows", () =>
+        Effect.gen(function* () {
+          const fake = yield* makeFakePi;
+          const session = yield* openPrimeThread(fake);
+          yield* runCacheTurn(session, fake, 1, { live: [warm], stored: [warm] });
+          const notices = yield* runCacheTurn(session, fake, 2, { stored: [warm, sibling] });
+          assert.lengthOf(notices, 1);
+          assert.deepEqual(yield* runCacheTurn(session, fake, 3, { stored: [warm, sibling] }), []);
+        }).pipe(Effect.scoped, Effect.provide(layerTest)),
+      );
+
+      it.effect("warns for a reply that only the stored conversation shows", () =>
+        Effect.gen(function* () {
+          const fake = yield* makeFakePi;
+          fake.setTranscript([storedPrompt(900), warm]);
+          const session = yield* openPrimeThread(fake);
+          const notices = yield* runCacheTurn(session, fake, 1, {
+            stored: [storedPrompt(900), warm, sibling],
+          });
+          assert.lengthOf(notices, 1);
+          assert.include(notices[0]?.message, "Cache miss after model switch");
+        }).pipe(Effect.scoped, Effect.provide(layerTest)),
+      );
+
+      it.effect("stays quiet when only the reopened session's own reply arrives again", () =>
+        Effect.gen(function* () {
+          const fake = yield* makeFakePi;
+          fake.setTranscript([storedPrompt(900), warm]);
+          const session = yield* openPrimeThread(fake);
+          const notices = yield* runCacheTurn(session, fake, 1, {
+            live: [warm],
+            stored: [storedPrompt(900), warm],
+          });
+          assert.deepEqual(notices, []);
+        }).pipe(Effect.scoped, Effect.provide(layerTest)),
+      );
+    });
+
+    it.effect(
+      "keeps a stored compaction summary from resetting the baseline on every catch-up",
+      () =>
+        Effect.gen(function* () {
+          const fake = yield* makeFakePi;
+          const summary = { role: "compactionSummary", summary: "s", timestamp: 1_500 };
+          const afterCompaction = usageReply({
+            timestamp: 2_000,
+            input: 10,
+            cacheWrite: 30_000,
+            responseId: "post",
+          });
+          const history = [summary, warm, afterCompaction];
+          fake.setTranscript(history);
+          const session = yield* openPrimeThread(fake);
+          const next = usageReply({
+            timestamp: 3_000,
+            input: 10,
+            cacheRead: 30_000,
+            cacheWrite: 1_000,
+            responseId: "next",
+          });
+          assert.deepEqual(
+            yield* runCacheTurn(session, fake, 1, { live: [next], stored: [...history, next] }),
+            [],
+          );
+          // The settle read listed the summary again; it must not have cleared what `next` set.
+          const later = usageReply({
+            timestamp: 3_000 + 10 * MINUTE,
+            input: 10,
+            cacheWrite: 32_000,
+            responseId: "later",
+          });
+          const notices = yield* runCacheTurn(session, fake, 2, {
+            live: [later],
+            stored: [...history, next, later],
+          });
+          assert.lengthOf(notices, 1);
+        }).pipe(Effect.scoped, Effect.provide(layerTest)),
+    );
+
+    describe.each(["compactionSummary", "branchSummary"] as const)(
+      "a first-seen %s with the timestamp of a counted reply",
+      (role) => {
+        const summary = { role, summary: "s", timestamp: 1_000 };
+        const afterSummary = usageReply({
+          timestamp: 1_000,
+          input: 10,
+          cacheWrite: 30_000,
+          responseId: "post",
+        });
+
+        it.effect("resets the baseline, so the next cold request is not a miss", () =>
+          Effect.gen(function* () {
+            const fake = yield* makeFakePi;
+            const session = yield* openPrimeThread(fake);
+            assert.deepEqual(
+              yield* runCacheTurn(session, fake, 1, { live: [warm], stored: [warm, summary] }),
+              [],
+            );
+            const cold = usageReply({
+              timestamp: 1_000 + 10 * MINUTE,
+              input: 10,
+              cacheWrite: 52_000,
+              responseId: "cold",
+            });
+            const notices = yield* runCacheTurn(session, fake, 2, {
+              live: [cold],
+              stored: [warm, summary, cold],
+            });
+            assert.deepEqual(notices, []);
+          }).pipe(Effect.scoped, Effect.provide(layerTest)),
+        );
+
+        it.effect("is not counted again when read later, so a real miss still warns", () =>
+          Effect.gen(function* () {
+            const fake = yield* makeFakePi;
+            const session = yield* openPrimeThread(fake);
+            yield* runCacheTurn(session, fake, 1, { live: [warm], stored: [warm, summary] });
+            yield* runCacheTurn(session, fake, 2, {
+              live: [afterSummary],
+              stored: [warm, summary, afterSummary],
+            });
+            const miss = usageReply({
+              timestamp: 1_000 + 10 * MINUTE,
+              input: 10,
+              cacheWrite: 32_000,
+              responseId: "miss",
+            });
+            const notices = yield* runCacheTurn(session, fake, 3, {
+              live: [miss],
+              stored: [warm, summary, afterSummary, miss],
+            });
+            assert.lengthOf(notices, 1);
+          }).pipe(Effect.scoped, Effect.provide(layerTest)),
+        );
+      },
+    );
+
+    it.effect("shows nothing for plain Pi", () =>
+      Effect.gen(function* () {
+        const fake = yield* makeFakePi;
+        const { runtime, takeEvent } = yield* openRuntime(fake);
+        const providerThread = yield* runtime.ensureThread({
+          threadId: THREAD_ID,
+          modelSelection: modelSelection("default"),
+          runtimePolicy,
+        });
+        yield* startTurn(runtime, providerThread);
+        yield* fake.takeRequest("prompt");
+        yield* fake.emit({ type: "agent_start" });
+        yield* fake.emit({ type: "message_end", message: warm });
+        yield* fake.emit({ type: "message_end", message: missed });
+        yield* fake.emit({ type: "agent_end", messages: [] });
+        yield* fake.emit({ type: "agent_settled" });
+        assert.deepEqual(yield* takeCacheNotices(takeEvent), []);
+      }).pipe(Effect.scoped, Effect.provide(layerTest)),
+    );
+  });
 });
 
 describe("PiAdapterV2 subagent capabilities", () => {
