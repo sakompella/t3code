@@ -269,16 +269,29 @@ describe("observeCacheMiss", () => {
       expect(next.miss).toMatchObject({ missedTokens: 8_010 });
     });
 
-    it("do not reset the baseline when stamped at the floor, as a stored summary re-read later is", () => {
-      let state = observeCacheMiss(emptyCacheMissState, warm, "live").state;
-      state = observeCacheMiss(state, compaction(0), "stored").state;
-      const next = observeCacheMiss(
-        state,
-        reply({ input: 10, cacheWrite: 52_000, responseId: "m" }, 10 * MINUTE),
-        "live",
-      );
-      expect(next.miss).toMatchObject({ missedTokens: 50_010 });
-    });
+    describe.each(["compactionSummary", "branchSummary"] as const)(
+      "a %s stamped at the floor",
+      (role) => {
+        const summary = { role, summary: "s", timestamp: 0 };
+        const afterSummary = reply({ input: 10, cacheWrite: 30_000, responseId: "post" }, 0);
+
+        it("resets the baseline the first time it is seen", () => {
+          const cold = reply({ input: 10, cacheWrite: 52_000, responseId: "cold" }, 10 * MINUTE);
+          expect(missesOf([warm, summary, cold], "stored")).toEqual([]);
+        });
+
+        it("does not wipe a newer baseline when it is read again", () => {
+          let state = observeCacheMiss(emptyCacheMissState, warm, "live").state;
+          state = observeCacheMiss(state, summary, "stored").state;
+          state = observeCacheMiss(state, afterSummary, "live").state;
+          state = observeCacheMiss(state, summary, "stored").state;
+          const later = reply({ input: 10, cacheWrite: 32_000, responseId: "later" }, 10 * MINUTE);
+          expect(observeCacheMiss(state, later, "live").miss).toMatchObject({
+            missedTokens: 30_010,
+          });
+        });
+      },
+    );
 
     it("reset on a branch summary", () => {
       const branch = { role: "branchSummary", summary: "s", timestamp: MINUTE };
