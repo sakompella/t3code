@@ -6813,6 +6813,64 @@ describe("PiAdapterV2 with the Prime Agent flavor", () => {
         }).pipe(Effect.scoped, Effect.provide(layerTest)),
     );
 
+    describe.each(["compactionSummary", "branchSummary"] as const)(
+      "a first-seen %s with the timestamp of a counted reply",
+      (role) => {
+        const summary = { role, summary: "s", timestamp: 1_000 };
+        const afterSummary = usageReply({
+          timestamp: 1_000,
+          input: 10,
+          cacheWrite: 30_000,
+          responseId: "post",
+        });
+
+        it.effect("resets the baseline, so the next cold request is not a miss", () =>
+          Effect.gen(function* () {
+            const fake = yield* makeFakePi;
+            const session = yield* openPrimeThread(fake);
+            assert.deepEqual(
+              yield* runCacheTurn(session, fake, 1, { live: [warm], stored: [warm, summary] }),
+              [],
+            );
+            const cold = usageReply({
+              timestamp: 1_000 + 10 * MINUTE,
+              input: 10,
+              cacheWrite: 52_000,
+              responseId: "cold",
+            });
+            const notices = yield* runCacheTurn(session, fake, 2, {
+              live: [cold],
+              stored: [warm, summary, cold],
+            });
+            assert.deepEqual(notices, []);
+          }).pipe(Effect.scoped, Effect.provide(layerTest)),
+        );
+
+        it.effect("is not counted again when read later, so a real miss still warns", () =>
+          Effect.gen(function* () {
+            const fake = yield* makeFakePi;
+            const session = yield* openPrimeThread(fake);
+            yield* runCacheTurn(session, fake, 1, { live: [warm], stored: [warm, summary] });
+            yield* runCacheTurn(session, fake, 2, {
+              live: [afterSummary],
+              stored: [warm, summary, afterSummary],
+            });
+            const miss = usageReply({
+              timestamp: 1_000 + 10 * MINUTE,
+              input: 10,
+              cacheWrite: 32_000,
+              responseId: "miss",
+            });
+            const notices = yield* runCacheTurn(session, fake, 3, {
+              live: [miss],
+              stored: [warm, summary, afterSummary, miss],
+            });
+            assert.lengthOf(notices, 1);
+          }).pipe(Effect.scoped, Effect.provide(layerTest)),
+        );
+      },
+    );
+
     it.effect("shows nothing for plain Pi", () =>
       Effect.gen(function* () {
         const fake = yield* makeFakePi;
