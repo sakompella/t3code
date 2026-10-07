@@ -188,11 +188,14 @@ export function observeCacheMiss(
   const entry = decoded.value;
 
   if (entry.role !== "assistant") {
-    // A summary at or before the floor is history behind a reset already taken.
+    // A summary can share a timestamp with a reply already counted, and be
+    // new, so it is told from a re-read of a reset already taken by identity.
     const { timestamp } = entry;
     if (timestamp === undefined) return unchanged(resetCacheBaseline(state));
-    if (timestamp <= state.floor) return unchanged(state);
-    return unchanged(advanced(state, undefined, timestamp, undefined));
+    const identity = JSON.stringify([entry.role, timestamp]);
+    if (timestamp < state.floor) return unchanged(state);
+    if (timestamp === state.floor && state.atFloor.has(identity)) return unchanged(state);
+    return unchanged(advanced(state, undefined, timestamp, identity));
   }
 
   const identity = identityOf(entry);
