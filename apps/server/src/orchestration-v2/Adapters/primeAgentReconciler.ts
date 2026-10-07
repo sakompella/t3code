@@ -158,10 +158,10 @@ export function makePrimeAgentReconciler<E>(input: {
     readonly endTool: (turn: ActivePiTurn, toolResult: unknown) => Effect.Effect<void, E>;
     /** Handles a stored message other than a reply as if its `message_start` had arrived. */
     readonly replayMessageStart: (message: unknown) => Effect.Effect<void, E>;
-    /** Counts a stored message toward the prompt-cache notices of the turn that projects it. */
+    /** Counts a stored message toward the prompt-cache notices, which warn in the turn that reads it. */
     readonly observeCache: (turn: ActivePiTurn, message: unknown) => Effect.Effect<void>;
   };
-  /** Takes the history of a session T3 just attached to as the prompt-cache state; none when unreadable. */
+  /** Takes the history of a session T3 just attached to as the prompt-cache state; empty when unreadable. */
   readonly seedCache: (messages: ReadonlyArray<unknown>) => void;
   /** Applies what stored messages that woke an idle agent say, and offers their wake. */
   readonly recoverWake: (wakeMessages: ReadonlyArray<unknown>) => Effect.Effect<void, E>;
@@ -296,7 +296,13 @@ export function makePrimeAgentReconciler<E>(input: {
           }
         }
       }
-      yield* items.observeCache(turn, message);
+    }
+    // Cache usage has its own identity, finer than the ledger's, so it reads
+    // every reply since attach in order, not only the unaccounted ones.
+    for (const message of messages) {
+      if (ledger !== null && (recordNumber(message, "timestamp") ?? 0) >= ledger.storedBefore) {
+        yield* items.observeCache(turn, message);
+      }
     }
   });
 
