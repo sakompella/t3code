@@ -2281,6 +2281,15 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
       });
 
       const handleSessionEvent = Effect.fnUntraced(function* (event: PiRpcRecord) {
+        // Cache usage has its own identity, finer than the reconciler's: a
+        // reply can share a timestamp with an earlier one and still be new.
+        const liveTurn = threadState?.activeTurn ?? null;
+        if (liveTurn !== null && event["type"] === "message_end") {
+          if (recordString(event["message"], "role") === "assistant") {
+            // The live event carries the parent's own usage, before any child's is folded in.
+            yield* noteCacheUsage(liveTurn, event["message"], "live");
+          }
+        }
         // An event about a message an earlier turn already showed.
         if (reconciler.isLate(event)) return;
         // Model-selection hooks can await a dialog before startTurn can claim
@@ -2442,8 +2451,6 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
             adoptMessageIdentity(turn, message);
             if (flavor.lossyStream) yield* adoptSnapshot(turn, message, true);
             yield* completeOpenStreamItems(turn);
-            // The live event carries the parent's own usage, before any child's is folded in.
-            yield* noteCacheUsage(turn, message, "live");
             if (recordString(message, "stopReason") === "error" && turn.failure === null) {
               turn.failure = makeProviderFailure({
                 message: recordString(message, "errorMessage") ?? `${name} reported a model error.`,

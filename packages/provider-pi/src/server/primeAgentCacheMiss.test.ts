@@ -269,6 +269,17 @@ describe("observeCacheMiss", () => {
       expect(next.miss).toMatchObject({ missedTokens: 8_010 });
     });
 
+    it("do not reset the baseline when stamped at the floor, as a stored summary re-read later is", () => {
+      let state = observeCacheMiss(emptyCacheMissState, warm, "live").state;
+      state = observeCacheMiss(state, compaction(0), "stored").state;
+      const next = observeCacheMiss(
+        state,
+        reply({ input: 10, cacheWrite: 52_000, responseId: "m" }, 10 * MINUTE),
+        "live",
+      );
+      expect(next.miss).toMatchObject({ missedTokens: 50_010 });
+    });
+
     it("reset on a branch summary", () => {
       const branch = { role: "branchSummary", summary: "s", timestamp: MINUTE };
       expect(missesOf([warm, branch, reply({ input: 10, cacheWrite: 8_000 }, 2 * MINUTE)])).toEqual(
