@@ -188,10 +188,10 @@ export function observeCacheMiss(
   const entry = decoded.value;
 
   if (entry.role !== "assistant") {
-    // A summary older than the floor is history behind a reset already taken.
+    // A summary at or before the floor is history behind a reset already taken.
     const { timestamp } = entry;
     if (timestamp === undefined) return unchanged(resetCacheBaseline(state));
-    if (timestamp < state.floor) return unchanged(state);
+    if (timestamp <= state.floor) return unchanged(state);
     return unchanged(advanced(state, undefined, timestamp, undefined));
   }
 
