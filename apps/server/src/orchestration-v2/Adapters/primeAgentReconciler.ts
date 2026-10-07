@@ -158,7 +158,11 @@ export function makePrimeAgentReconciler<E>(input: {
     readonly endTool: (turn: ActivePiTurn, toolResult: unknown) => Effect.Effect<void, E>;
     /** Handles a stored message other than a reply as if its `message_start` had arrived. */
     readonly replayMessageStart: (message: unknown) => Effect.Effect<void, E>;
+    /** Counts a stored message toward the prompt-cache notices of the turn that projects it. */
+    readonly observeCache: (turn: ActivePiTurn, message: unknown) => Effect.Effect<void>;
   };
+  /** Takes the history of a session T3 just attached to as the prompt-cache state; none when unreadable. */
+  readonly seedCache: (messages: ReadonlyArray<unknown>) => void;
   /** Applies what stored messages that woke an idle agent say, and offers their wake. */
   readonly recoverWake: (wakeMessages: ReadonlyArray<unknown>) => Effect.Effect<void, E>;
 }) {
@@ -211,6 +215,7 @@ export function makePrimeAgentReconciler<E>(input: {
       storedBefore: messages === undefined ? readAt : 0,
     };
     if (messages !== undefined) commit(messages);
+    input.seedCache(messages ?? []);
   });
 
   /** A live event about a message or tool an earlier turn already accounted for. */
@@ -291,6 +296,7 @@ export function makePrimeAgentReconciler<E>(input: {
           }
         }
       }
+      yield* items.observeCache(turn, message);
     }
   });
 

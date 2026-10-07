@@ -66,6 +66,13 @@ export interface PiFlavor {
    */
   readonly lossyStream: boolean;
   /**
+   * Whether the adapter warns when a request re-bills a prompt the previous
+   * one cached (see `primeAgentCacheMiss.ts`). Prime Agent only; plain Pi
+   * keeps its behavior. It seeds from the stored conversation that only the
+   * reconciler reads, so it needs `lossyStream`.
+   */
+  readonly cacheMissNotices: boolean;
+  /**
    * Whether `rlm_child_update` children get their own T3 thread. The RPC lets
    * a client `observe` a child's session, which streams the same events as the
    * main one. Pi has no child sessions to observe.
@@ -136,6 +143,7 @@ export const PI_FLAVOR: PiFlavor = {
   selfWakes: "stop",
   rollback: "fork",
   lossyStream: false,
+  cacheMissNotices: false,
   childThreads: false,
   kernelMcp: null,
   heartbeats: false,
@@ -160,6 +168,7 @@ export const PRIME_AGENT_FLAVOR: PiFlavor = {
   selfWakes: "continuation",
   rollback: "tree",
   lossyStream: true,
+  cacheMissNotices: true,
   childThreads: true,
   kernelMcp: primeAgentDir,
   heartbeats: true,

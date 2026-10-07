@@ -130,6 +130,14 @@ import {
   makePrimeAgentChildDialogs,
   materializePrimeAgentDialogExtension,
 } from "./primeAgentChildDialogs.ts";
+import {
+  type MessageSource,
+  describeCacheMiss,
+  emptyCacheMissState,
+  observeCacheMiss,
+  resetCacheBaseline,
+  seedCacheMissState,
+} from "./primeAgentCacheMiss.ts";
 import { makePrimeAgentReconciler, transcriptMessageKey } from "./primeAgentReconciler.ts";
 import { primeAgentHeartbeats } from "./primeAgentHeartbeats.ts";
 import { makePrimeAgentStream, snapshotBlock } from "./primeAgentStream.ts";
@@ -602,6 +610,12 @@ export function makePiAdapterV2(
       // dialog's own resolution updates.
       const sessionEventPermit = yield* Semaphore.make(1);
       let threadState: PiThreadState | null = null;
+      /**
+       * What the cache-miss notices know about the hosted thread's prompt
+       * cache. It outlives `threadState`, which a reload on the same session
+       * replaces; a new session seeds it again (see `seedCacheMiss`).
+       */
+      let cacheMissState = emptyCacheMissState;
       let registrationAttempted = false;
       let lastNativeThreadId: string | null = null;
       /** Prime Agent's id for the open session; it keys the session's heartbeats. */
@@ -1601,6 +1615,44 @@ export function makePiAdapterV2(
         });
       });
 
+      /**
+       * Counts a parent reply toward the thread's prompt cache and warns in
+       * `turn` when it re-billed what the previous request cached. A live
+       * `message_end` and the stored copy a catch-up read brings are one
+       * reply, so it warns once.
+       */
+      const noteCacheUsage = Effect.fnUntraced(function* (
+        turn: ActivePiTurn,
+        message: unknown,
+        source: MessageSource,
+      ) {
+        if (!flavor.cacheMissNotices) return;
+        const step = observeCacheMiss(cacheMissState, message, source);
+        cacheMissState = step.state;
+        const text = step.miss === undefined ? undefined : describeCacheMiss(step.miss);
+        if (text === undefined || step.identity === undefined) return;
+        const emittedAt = yield* DateTime.now;
+        const nativeItemId = `${turn.providerTurn.id}:cache-miss:${step.identity}`;
+        yield* emitItemNode(turn, nativeItemId, "system", "completed", emittedAt, emittedAt);
+        yield* emit({
+          type: "turn_item.updated",
+          driver,
+          turnItem: {
+            ...baseItemFields(turn, nativeItemId, emittedAt, emittedAt),
+            status: "completed",
+            title: "Prompt cache miss",
+            completedAt: emittedAt,
+            type: "system_notice",
+            message: text,
+            tone: "warning",
+          },
+        });
+      });
+
+      const seedCacheMiss = (messages: ReadonlyArray<unknown>) => {
+        if (flavor.cacheMissNotices) cacheMissState = seedCacheMissState(messages);
+      };
+
       const emitExtensionError = Effect.fnUntraced(function* (event: PiRpcRecord) {
         const state = threadState;
         const turn = state?.activeTurn ?? null;
@@ -2058,7 +2110,9 @@ export function makePiAdapterV2(
           options.continuationRequests !== undefined,
         probeQuietTurn: (turn) => scheduleSettleProbe(turn, true, 1, 0, true).pipe(Effect.asVoid),
         enqueue: (record) => Queue.offer(connection.events, record).pipe(Effect.asVoid),
+        seedCache: seedCacheMiss,
         items: {
+          observeCache: (turn, message) => noteCacheUsage(turn, message, "stored"),
           upsertAssistantMessage: upsertRecordedMessage,
           startTool: (turn, toolCall) =>
             emitToolItem(
@@ -2231,6 +2285,8 @@ export function makePiAdapterV2(
             adoptMessageIdentity(turn, message);
             if (flavor.lossyStream) yield* adoptSnapshot(turn, message, true);
             yield* completeOpenStreamItems(turn);
+            // The live event carries the parent's own usage, before any child's is folded in.
+            yield* noteCacheUsage(turn, message, "live");
             if (recordString(message, "stopReason") === "error" && turn.failure === null) {
               turn.failure = makeProviderFailure({
                 message: recordString(message, "errorMessage") ?? `${name} reported a model error.`,
@@ -2269,6 +2325,10 @@ export function makePiAdapterV2(
             return;
           }
           case "compaction_end": {
+            // The next prompt is a new context, not a re-billed one.
+            if (event["result"] !== null && event["result"] !== undefined) {
+              cacheMissState = resetCacheBaseline(cacheMissState);
+            }
             if (turn === null) return;
             const observedAt = yield* DateTime.now;
             const compaction = turn.activeCompaction ?? {
@@ -3517,6 +3577,7 @@ export function makePiAdapterV2(
                 yield* navigateTreeInPlace(forkEntryId);
                 // Same session file and model; only the branch head moved.
                 yield* baselineSessionTree();
+                cacheMissState = resetCacheBaseline(cacheMissState);
                 yield* updateProviderThread(state, { nativeConversationHeadRef: null });
                 return piThreadSnapshot(state.providerThread);
               }
@@ -3546,6 +3607,7 @@ export function makePiAdapterV2(
             appliedThinking = null;
             appliedSessionName = null;
             yield* updateProviderThread(state, { nativeThreadRef: providerRef(forkSessionFile) });
+            cacheMissState = resetCacheBaseline(cacheMissState);
             // The fork re-baselined the tree, so the cursor is trustworthy
             // again unless this listing itself failed.
             const leafId = yield* baselineSessionTree();
