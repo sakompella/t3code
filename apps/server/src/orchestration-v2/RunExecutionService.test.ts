@@ -400,13 +400,19 @@ describe("subagent shells that arrive after the launching run's root turn ended"
     identity: RunExecutionService.ProviderEventRouteIdentity,
     initial: RunExecutionService.ProviderEventRoutingState,
     events: ReadonlyArray<ProviderAdapterV2Event>,
+    claims?: RunExecutionService.SubagentThreadClaims,
   ) =>
     events.reduce<{
       readonly accepted: ReadonlyArray<boolean>;
       readonly state: RunExecutionService.ProviderEventRoutingState;
     }>(
       ({ accepted, state }, event) => {
-        const [isAccepted, next] = RunExecutionService.routeProviderEvent(event, identity, state);
+        const [isAccepted, next] = RunExecutionService.routeProviderEvent(
+          event,
+          identity,
+          state,
+          claims,
+        );
         return { accepted: [...accepted, isAccepted], state: next };
       },
       { accepted: [], state: initial },
@@ -430,8 +436,12 @@ describe("subagent shells that arrive after the launching run's root turn ended"
     assert.isTrue(state.ownedThreadIds.has(childThreadId));
   });
 
-  it("a live run leaves a shell forked from another run's subagent node to that run", () => {
-    const { accepted, state } = route(live, liveState(), [subagentNode, childShell]);
+  it("a live run leaves a shell forked from another listening run's subagent node to that run", () => {
+    const bothListening = [launching, live].reduce(
+      (claims, run) => RunExecutionService.startListening(claims, run.runId),
+      RunExecutionService.noSubagentThreadClaims,
+    );
+    const { accepted, state } = route(live, liveState(), [subagentNode, childShell], bothListening);
     assert.deepEqual(accepted, [false, false]);
     assert.isFalse(state.ownedThreadIds.has(childThreadId));
   });
@@ -632,7 +642,7 @@ describe("a late subagent shell across a session's subscribers", () => {
     const drained = new Map(
       [launching, live].map((run) => [run.runId, Deferred.makeUnsafe<void>()]),
     );
-    const childEventOwners = yield* Ref.make<ReadonlyArray<RunId>>([]);
+    const childEventOwners = yield* Ref.make<ReadonlyArray<RunId | undefined>>([]);
     const layerTest = RunExecutionService.layer.pipe(
       Layer.provide(
         Layer.mergeAll(
@@ -646,21 +656,15 @@ describe("a late subagent shell across a session's subscribers", () => {
           Layer.mock(ProviderEventIngestor.ProviderEventIngestorV2)({
             ingestNormalized: (input) =>
               Effect.gen(function* () {
-                const runId = RunId.make(input.runId);
-                if (touchesChildThread(input.event)) {
+                const { event, runId } = input;
+                if (touchesChildThread(event)) {
                   yield* Ref.update(childEventOwners, (owners) => [...owners, runId]);
                 }
-                if (
-                  input.event.type === "node.updated" &&
-                  input.event.node.id === drainMarker(launching).node.id
-                ) {
-                  yield* Deferred.succeed(drained.get(launching.runId)!, undefined);
-                }
-                if (
-                  input.event.type === "node.updated" &&
-                  input.event.node.id === drainMarker(live).node.id
-                ) {
-                  yield* Deferred.succeed(drained.get(live.runId)!, undefined);
+                const drainedRun = [launching, live].find(
+                  (run) => event.type === "node.updated" && event.node.id === run.rootNodeId,
+                );
+                if (drainedRun !== undefined) {
+                  yield* Deferred.succeed(drained.get(drainedRun.runId)!, undefined);
                 }
                 return [];
               }),
