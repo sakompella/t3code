@@ -1,4 +1,4 @@
-import { assert, it, vi } from "@effect/vitest";
+import { assert, describe, it, vi } from "@effect/vitest";
 import {
   CheckpointScopeId,
   ChatAttachmentId,
@@ -228,6 +228,135 @@ it("leaves a child thread created after the root turn ended to the run that is l
   );
   assert.isFalse(lateAccepted);
   assert.isFalse(afterLate.ownedThreadIds.has(lateChild));
+});
+
+describe("subagent shells that arrive after the launching run's root turn ended", () => {
+  const threadId = ThreadId.make("thread:late-shell");
+  const launching: RunExecutionService.ProviderEventRouteIdentity = {
+    threadId,
+    runId: RunId.make("run:late-shell:launching"),
+    attemptId: RunAttemptId.make("attempt:late-shell:launching"),
+    providerThreadId: ProviderThreadId.make("provider-thread:late-shell"),
+  };
+  const live: RunExecutionService.ProviderEventRouteIdentity = {
+    ...launching,
+    runId: RunId.make("run:late-shell:live"),
+    attemptId: RunAttemptId.make("attempt:late-shell:live"),
+  };
+  const launchingTurnId = ProviderTurnId.make("provider-turn:late-shell:launching");
+  const subagentNodeId = NodeId.make("node:late-shell:subagent");
+  const childThreadId = ThreadId.make("thread:late-shell:child");
+
+  const subagentNode = {
+    type: "node.updated",
+    driver,
+    node: {
+      id: subagentNodeId,
+      threadId,
+      runId: launching.runId,
+      parentNodeId: null,
+      rootNodeId: NodeId.make("node:late-shell:root"),
+      kind: "subagent",
+      status: "running",
+      countsForRun: false,
+      providerThreadId: launching.providerThreadId,
+      providerTurnId: launchingTurnId,
+      nativeItemRef: null,
+      runtimeRequestId: null,
+      checkpointScopeId: null,
+      startedAt: null,
+      completedAt: null,
+    },
+  } satisfies ProviderAdapterV2Event;
+  const childShell = {
+    type: "app_thread.created",
+    driver,
+    appThread: {
+      id: childThreadId,
+      lineage: {
+        parentThreadId: threadId,
+        relationshipToParent: "subagent",
+        rootThreadId: threadId,
+      },
+      forkedFrom: { type: "node", nodeId: subagentNodeId },
+    },
+  } as ProviderAdapterV2Event;
+  const childRootNode = {
+    type: "node.updated",
+    driver,
+    node: {
+      ...subagentNode.node,
+      id: NodeId.make("node:late-shell:child-root"),
+      threadId: childThreadId,
+      runId: null,
+      kind: "root_turn",
+    },
+  } satisfies ProviderAdapterV2Event;
+  const launchingTerminal = {
+    type: "turn.terminal",
+    driver,
+    providerThreadId: launching.providerThreadId,
+    providerTurnId: launchingTurnId,
+    runOrdinal: 1,
+    status: "completed",
+    failure: null,
+    threadDisposition: "reusable",
+  } satisfies ProviderAdapterV2Event;
+
+  const route = (
+    identity: RunExecutionService.ProviderEventRouteIdentity,
+    initial: RunExecutionService.ProviderEventRoutingState,
+    events: ReadonlyArray<ProviderAdapterV2Event>,
+  ) =>
+    events.reduce<{
+      readonly accepted: ReadonlyArray<boolean>;
+      readonly state: RunExecutionService.ProviderEventRoutingState;
+    }>(
+      ({ accepted, state }, event) => {
+        const [isAccepted, next] = RunExecutionService.routeProviderEvent(event, identity, state);
+        return { accepted: [...accepted, isAccepted], state: next };
+      },
+      { accepted: [], state: initial },
+    );
+  const launchingState = () =>
+    RunExecutionService.makeProviderEventRoutingState({
+      identity: launching,
+      providerTurnId: launchingTurnId,
+    });
+  const liveState = () =>
+    RunExecutionService.makeProviderEventRoutingState({ identity: live, providerTurnId: null });
+
+  it("the launching run adopts a shell forked from its own subagent node (Prime Agent order)", () => {
+    const { accepted, state } = route(launching, launchingState(), [
+      launchingTerminal,
+      subagentNode,
+      childShell,
+      childRootNode,
+    ]);
+    assert.deepEqual(accepted, [true, true, true, true]);
+    assert.isTrue(state.ownedThreadIds.has(childThreadId));
+  });
+
+  it("a live run leaves a shell forked from another run's subagent node to that run", () => {
+    const { accepted, state } = route(live, liveState(), [subagentNode, childShell]);
+    assert.deepEqual(accepted, [false, false]);
+    assert.isFalse(state.ownedThreadIds.has(childThreadId));
+  });
+
+  it("a shell that precedes its subagent node (Claude and Codex order) still follows the live root turn", () => {
+    const duringRoot = route(launching, launchingState(), [childShell, subagentNode]);
+    assert.deepEqual(duringRoot.accepted, [true, true]);
+    const afterRoot = route(launching, launchingState(), [
+      launchingTerminal,
+      childShell,
+      subagentNode,
+    ]);
+    assert.deepEqual(afterRoot.accepted, [true, false, true]);
+    assert.isFalse(afterRoot.state.ownedThreadIds.has(childThreadId));
+    const liveRun = route(live, liveState(), [childShell, subagentNode]);
+    assert.deepEqual(liveRun.accepted, [true, false]);
+    assert.isTrue(liveRun.state.ownedThreadIds.has(childThreadId));
+  });
 });
 
 it("does not route a superseded attempt through a reused provider thread", () => {
