@@ -51,7 +51,8 @@ import {
   RunId,
   ThreadLinkedPullRequest,
   ThreadId,
-  TurnItemId,
+  htmlRenderTurnItemId,
+  type TurnItemId,
 } from "@t3tools/contracts";
 import { HTML_RENDER_TOOL_NAME } from "@t3tools/shared/htmlRender";
 import { modelSelectionsEqual } from "@t3tools/shared/model";
@@ -7021,6 +7022,16 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
             (cause) => new OrchestratorProjectionError({ threadId: command.threadId, cause }),
           ),
         );
+      // Deletion already listed the pages it removes, so a page recorded after
+      // it would outlive the thread. A run that ended meanwhile still takes the
+      // page, like any late tool result.
+      if (projection.thread.deletedAt !== null) {
+        return yield* new OrchestratorDispatchError({
+          commandId: command.commandId,
+          commandType: command.type,
+          cause: `Thread ${command.threadId} was deleted.`,
+        });
+      }
       const run = projection.runs.find((candidate) => candidate.id === command.runId);
       if (run === undefined || run.rootNodeId === null) {
         return yield* new OrchestratorDispatchError({
@@ -7041,7 +7052,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         providerInstanceId: run.providerInstanceId,
         occurredAt: now,
         payload: {
-          id: TurnItemId.make(`turn-item:html-render:${command.htmlRender.attachmentId}`),
+          id: htmlRenderTurnItemId(command.htmlRender.attachmentId),
           threadId: command.threadId,
           runId: run.id,
           nodeId: run.rootNodeId,

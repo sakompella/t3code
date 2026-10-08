@@ -1,4 +1,11 @@
-import { CommandId, OrchestratorMcpFailure, type ProviderInstanceId } from "@t3tools/contracts";
+import {
+  CommandId,
+  htmlRenderTurnItemId,
+  OrchestratorMcpFailure,
+  type ProviderInstanceId,
+  type RunId,
+  type ThreadId,
+} from "@t3tools/contracts";
 import type { HtmlRenderReference } from "@t3tools/shared/htmlRender";
 import * as Effect from "effect/Effect";
 
@@ -6,7 +13,7 @@ import * as HtmlRender from "../../../htmlRender/HtmlRender.ts";
 import { callsT3ToolsFromKernel } from "../../../orchestration-v2/Adapters/PiFlavor.ts";
 import * as ProviderAdapterRegistry from "../../../orchestration-v2/ProviderAdapterRegistry.ts";
 import * as McpInvocationContext from "../../McpInvocationContext.ts";
-import { dispatchFailure, readMutationCaller } from "../../threadAccess.ts";
+import { type Caller, dispatchFailure, readMutationCaller } from "../../threadAccess.ts";
 import { HtmlPreviewToolkit, HtmlRenderToolkit, type HtmlToolkit } from "./tools.ts";
 
 const INVALID_PAGE_ERRORS = new Set([
@@ -30,8 +37,45 @@ const needsOwnTimelineItem = (providerInstanceId: ProviderInstanceId) =>
   ProviderAdapterRegistry.ProviderAdapterRegistryV2.pipe(
     Effect.flatMap((adapters) => adapters.get(providerInstanceId)),
     Effect.map((adapter) => callsT3ToolsFromKernel(adapter.driver)),
-    Effect.orElseSucceed(() => false),
+    Effect.mapError(
+      () =>
+        new OrchestratorMcpFailure({
+          code: "orchestration_error",
+          message: "The calling provider is no longer available.",
+        }),
+    ),
   );
+
+/**
+ * Records a page as its own `html_render` item in the run. A record that
+ * committed but lost its reply still owns the page, so the stored item decides.
+ */
+const recordPage =
+  (threads: Caller["threads"], threadId: ThreadId, runId: RunId) =>
+  (published: HtmlRenderReference) => {
+    const stored = threads
+      .getTurnItem({ threadId, itemId: htmlRenderTurnItemId(published.attachmentId) })
+      .pipe(
+        Effect.map(({ item }) => item !== null),
+        Effect.orElseSucceed(() => false),
+      );
+    return threads
+      .dispatch({
+        type: "html_render.record",
+        commandId: CommandId.make(`mcp:html-render:${published.attachmentId}`),
+        threadId,
+        runId,
+        htmlRender: published,
+      })
+      .pipe(
+        Effect.asVoid,
+        Effect.catch((error) =>
+          stored.pipe(
+            Effect.flatMap((kept) => (kept ? Effect.void : Effect.fail(dispatchFailure(error)))),
+          ),
+        ),
+      );
+  };
 
 const handlers = {
   html_preview: (input) =>
@@ -63,16 +107,7 @@ const handlers = {
       const runId = caller?.activeRunId ?? null;
       const record =
         runId !== null && (yield* needsOwnTimelineItem(thread.providerInstanceId))
-          ? (published: HtmlRenderReference) =>
-              threads
-                .dispatch({
-                  type: "html_render.record",
-                  commandId: CommandId.make(`mcp:html-render:${published.attachmentId}`),
-                  threadId: thread.threadId,
-                  runId,
-                  htmlRender: published,
-                })
-                .pipe(Effect.asVoid, Effect.mapError(dispatchFailure))
+          ? recordPage(threads, thread.threadId, runId)
           : undefined;
       const htmlRender = yield* HtmlRender.HtmlRender;
       const reference = yield* htmlRender

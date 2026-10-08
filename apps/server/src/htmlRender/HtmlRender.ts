@@ -109,8 +109,8 @@ export class HtmlRender extends Context.Service<
     /**
      * Stores a prepared page as a thread attachment for clients to show inline,
      * measuring its height at each client width when the preview browser is
-     * already installed. `record` runs before the page counts as published, so
-     * a failed record removes the page too.
+     * already installed. `record` runs uninterruptibly before the page counts
+     * as published, so a failed record removes the page too.
      */
     readonly publish: <E = never>(
       input: HtmlRenderPublishInput<E>,
@@ -436,19 +436,25 @@ const make = Effect.gen(function* () {
       return yield* new HtmlRenderStoreError({ cause: new Error("Invalid thread id.") });
     }
     const { record } = input;
-    return yield* fileSystem.writeFileString(filePath, html).pipe(
-      Effect.mapError((cause) => new HtmlRenderStoreError({ cause })),
-      Effect.andThen(measure(html)),
-      Effect.map((heights): HtmlRenderReference => ({
-        attachmentId,
-        title: input.title.trim().slice(0, HTML_RENDER_MAX_TITLE_LENGTH) || "HTML",
-        height: clampHtmlRenderHeight(input.height),
-        ...(heights === undefined ? {} : { heights }),
-      })),
-      Effect.tap((reference) => (record === undefined ? Effect.void : record(reference))),
-      // Only a reference the thread keeps lets thread deletion find the page,
-      // so a publish that fails or is interrupted before then removes it.
-      Effect.onError(() => fileSystem.remove(filePath, { force: true }).pipe(Effect.ignore)),
+    // Only a reference the thread keeps lets thread deletion find the page, so
+    // a publish that fails or is interrupted before then removes it. Once the
+    // record starts it cannot be interrupted, so its own outcome decides.
+    return yield* Effect.uninterruptibleMask((restore) =>
+      restore(
+        fileSystem.writeFileString(filePath, html).pipe(
+          Effect.mapError((cause) => new HtmlRenderStoreError({ cause })),
+          Effect.andThen(measure(html)),
+          Effect.map((heights): HtmlRenderReference => ({
+            attachmentId,
+            title: input.title.trim().slice(0, HTML_RENDER_MAX_TITLE_LENGTH) || "HTML",
+            height: clampHtmlRenderHeight(input.height),
+            ...(heights === undefined ? {} : { heights }),
+          })),
+        ),
+      ).pipe(
+        Effect.tap((reference) => (record === undefined ? Effect.void : record(reference))),
+        Effect.onError(() => fileSystem.remove(filePath, { force: true }).pipe(Effect.ignore)),
+      ),
     );
   });
 
