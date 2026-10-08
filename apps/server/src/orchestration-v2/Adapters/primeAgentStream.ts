@@ -55,13 +55,15 @@ export function makePrimeAgentStream(input: {
    * Lossy streams (see `PiFlavor.lossyStream`) can drop `message_start`, so
    * counting starts would give a later message the id of an earlier,
    * completed one. Their messages are keyed by the snapshot's own
-   * timestamp instead, on every event. Returns whether the snapshot had one.
+   * timestamp instead, on every event, or by the reply an aborted copy
+   * replaced. Returns whether the snapshot had one.
    */
   const adoptMessageIdentity = (turn: PiItemSink, message: unknown) => {
     if (!lossyStream) return false;
     const timestamp = recordNumber(message, "timestamp");
     if (timestamp === undefined) return false;
-    turn.messageOrdinal = timestamp;
+    const replaced = "replacedReplies" in turn ? turn.replacedReplies.get(timestamp) : undefined;
+    turn.messageOrdinal = replaced ?? timestamp;
     return true;
   };
 
