@@ -3290,9 +3290,10 @@ describe("PiAdapterV2 with the Prime Agent flavor", () => {
 
   /**
    * What the turn shows, in the order items first show it: each reply once
-   * complete, tool states, and notices. Read until the turn ends.
+   * complete, tool states, and notices. Read until the turn ends, or until
+   * it shows `until`.
    */
-  const takeShownTimeline = (takeEvent: TakeEvent) =>
+  const takeShownTimeline = (takeEvent: TakeEvent, until?: string) =>
     Effect.gen(function* () {
       const shown: Array<string> = [];
       for (;;) {
@@ -3314,6 +3315,7 @@ describe("PiAdapterV2 with the Prime Agent flavor", () => {
               ? "notice"
               : `tool:${item.status}`;
         if (shown.at(-1) !== entry) shown.push(entry);
+        if (entry === until) return shown;
       }
     });
 
@@ -3406,6 +3408,35 @@ describe("PiAdapterV2 with the Prime Agent flavor", () => {
         "tool:completed",
         "Removed.",
       ]);
+    }).pipe(Effect.scoped, Effect.provide(layerTest)),
+  );
+
+  it.effect("keeps a cut reply open until its stored version can be read", () =>
+    Effect.gen(function* () {
+      const fake = yield* makeFakePi;
+      const { runtime, takeEvent, providerThread } = yield* openPrimeThread(fake);
+      yield* startTurn(runtime, providerThread);
+      yield* fake.takeRequest("prompt");
+
+      fake.setTranscript([storedPrompt(900)]);
+      yield* streamRemovalReplyUntil(fake, removalReply.indexOf("nu1"));
+      yield* fake.emit(removalToolStart);
+      yield* fake.emit(removalToolEnd);
+      yield* fake.emit({ type: "message_start", message: { ...removedReply, content: [] } });
+      yield* fake.emit({ type: "message_end", message: removedReply });
+      const shownUnread = yield* takeShownTimeline(takeEvent, "Removed.");
+      fake.setTranscript([
+        storedPrompt(900),
+        storedRemovalReply,
+        storedRemovalResult,
+        removedReply,
+      ]);
+      yield* fake.emit({ type: "agent_end", messages: [] });
+
+      assert.deepEqual(
+        [...shownUnread, ...(yield* takeShownTimeline(takeEvent))],
+        ["tool:running", "tool:completed", "Removed.", removalReply],
+      );
     }).pipe(Effect.scoped, Effect.provide(layerTest)),
   );
 
