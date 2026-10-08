@@ -544,6 +544,13 @@ export interface ProviderAdapterV2SessionRuntime {
    * Adapter runtimes may omit this and expose only their single-consumer event stream.
    */
   readonly subscribeEvents?: Effect.Effect<ProviderAdapterV2EventSubscription>;
+  /**
+   * `"session"`: the session manager stores this runtime's subagent child
+   * threads (the thread and its runless events) once, and never hands them to
+   * runs. For a provider whose children can start and work while no run of
+   * the parent thread is live or listening (Prime Agent).
+   */
+  readonly childThreadScope?: "session";
   readonly hasPendingBackgroundWork?: Effect.Effect<boolean>;
   /**
    * When present, RunExecutionService uses only this probe (never the
