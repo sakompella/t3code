@@ -3288,6 +3288,184 @@ describe("PiAdapterV2 with the Prime Agent flavor", () => {
     }).pipe(Effect.scoped, Effect.provide(layerTest)),
   );
 
+  /**
+   * What the turn shows, in the order items first show it: each reply once
+   * complete, tool states, and notices. Read until the turn ends.
+   */
+  const takeShownTimeline = (takeEvent: TakeEvent) =>
+    Effect.gen(function* () {
+      const shown: Array<string> = [];
+      for (;;) {
+        const event = yield* takeEvent(
+          (candidate) =>
+            candidate.type === "turn.terminal" ||
+            (candidate.type === "turn_item.updated" &&
+              (candidate.turnItem.type === "dynamic_tool" ||
+                candidate.turnItem.type === "system_notice" ||
+                (candidate.turnItem.type === "assistant_message" &&
+                  candidate.turnItem.status === "completed"))),
+        );
+        if (event.type !== "turn_item.updated") return shown;
+        const item = event.turnItem;
+        const entry =
+          item.type === "assistant_message"
+            ? item.text
+            : item.type === "system_notice"
+              ? "notice"
+              : `tool:${item.status}`;
+        if (shown.at(-1) !== entry) shown.push(entry);
+      }
+    });
+
+  const removalThinking = { type: "thinking", thinking: "Remove it everywhere." };
+  const removalReply =
+    "I'll remove The Simpsons everywhere: Sonarr, the `nu1` library, qBittorrent, and the local files.";
+  const removalToolCall = {
+    type: "toolCall",
+    id: "toolu_01M9ZHmB7NfmoEamSRU4fqzW",
+    name: "ipython",
+    arguments: { code: "print(jobs)" },
+  };
+  const storedRemovalReply = {
+    role: "assistant",
+    content: [removalThinking, { type: "text", text: removalReply }, removalToolCall],
+    stopReason: "toolUse",
+    timestamp: 1000,
+  };
+  const storedRemovalResult = {
+    role: "toolResult",
+    toolCallId: removalToolCall.id,
+    toolName: "ipython",
+    content: [{ type: "text", text: "[]" }],
+    isError: false,
+    timestamp: 1500,
+  };
+  const removalToolStart = {
+    type: "tool_execution_start",
+    toolCallId: removalToolCall.id,
+    toolName: removalToolCall.name,
+    args: removalToolCall.arguments,
+  };
+  const removalToolEnd = {
+    type: "tool_execution_end",
+    toolCallId: removalToolCall.id,
+    toolName: removalToolCall.name,
+    result: { content: storedRemovalResult.content },
+    isError: false,
+  };
+  const removedReply = storedReply(2000, "Removed.");
+
+  /** Streams `removalReply` up to `cutAt`, as the daemon sent it before backing up. */
+  const streamRemovalReplyUntil = (fake: FakePi, cutAt: number) =>
+    Effect.gen(function* () {
+      yield* fake.emit({ type: "agent_start" });
+      yield* fake.emit({
+        type: "message_start",
+        message: { role: "assistant", content: [], timestamp: 1000 },
+      });
+      const text = removalReply.slice(0, cutAt);
+      yield* fake.emit({
+        type: "message_update",
+        message: {
+          role: "assistant",
+          content: [removalThinking, { type: "text", text }],
+          timestamp: 1000,
+        },
+        assistantMessageEvent: { type: "text_delta", contentIndex: 1, delta: text },
+      });
+    });
+
+  // Thread 87b755f3 (2026-10-08): the daemon backed up mid-reply, so the
+  // stream lost the rest of the reply and its message_end, then carried on
+  // with the tool call. The cut reply was shown complete until the run ended.
+  it.effect("repairs a reply whose message_end was dropped before its tool starts", () =>
+    Effect.gen(function* () {
+      const fake = yield* makeFakePi;
+      const { runtime, takeEvent, providerThread } = yield* openPrimeThread(fake);
+      yield* startTurn(runtime, providerThread);
+      yield* fake.takeRequest("prompt");
+
+      yield* streamRemovalReplyUntil(fake, removalReply.indexOf("nu1"));
+      // Prime Agent stores the reply at its message_end, before the tool runs.
+      fake.setTranscript([storedPrompt(900), storedRemovalReply]);
+      yield* fake.emit(removalToolStart);
+      yield* fake.emit(removalToolEnd);
+      fake.setTranscript([
+        storedPrompt(900),
+        storedRemovalReply,
+        storedRemovalResult,
+        removedReply,
+      ]);
+      yield* fake.emit({ type: "message_start", message: { ...removedReply, content: [] } });
+      yield* fake.emit({ type: "message_end", message: removedReply });
+      yield* fake.emit({ type: "agent_end", messages: [] });
+
+      assert.deepEqual(yield* takeShownTimeline(takeEvent), [
+        removalReply,
+        "tool:running",
+        "tool:completed",
+        "Removed.",
+      ]);
+    }).pipe(Effect.scoped, Effect.provide(layerTest)),
+  );
+
+  it.effect("ends a tool whose tool_execution_end was dropped once the next reply starts", () =>
+    Effect.gen(function* () {
+      const fake = yield* makeFakePi;
+      const { runtime, takeEvent, providerThread } = yield* openPrimeThread(fake);
+      yield* startTurn(runtime, providerThread);
+      yield* fake.takeRequest("prompt");
+
+      yield* streamRemovalReplyUntil(fake, removalReply.length);
+      yield* fake.emit({ type: "message_end", message: storedRemovalReply });
+      yield* fake.emit(removalToolStart);
+      fake.setTranscript([
+        storedPrompt(900),
+        storedRemovalReply,
+        storedRemovalResult,
+        removedReply,
+      ]);
+      yield* fake.emit({ type: "message_start", message: { ...removedReply, content: [] } });
+      yield* fake.emit({ type: "message_end", message: removedReply });
+      yield* fake.emit({ type: "agent_end", messages: [] });
+
+      assert.deepEqual(yield* takeShownTimeline(takeEvent), [
+        removalReply,
+        "tool:running",
+        "tool:completed",
+        "Removed.",
+      ]);
+    }).pipe(Effect.scoped, Effect.provide(layerTest)),
+  );
+
+  // The same run lost its final reply's message_end too. Its turn_end came,
+  // but Prime Agent then refined its harness for half a minute before idling.
+  it.effect("repairs a final reply whose message_end was dropped once its turn ends", () =>
+    Effect.gen(function* () {
+      const fake = yield* makeFakePi;
+      const { runtime, takeEvent, providerThread } = yield* openPrimeThread(fake);
+      yield* startTurn(runtime, providerThread);
+      yield* fake.takeRequest("prompt");
+
+      yield* fake.emit({ type: "agent_start" });
+      yield* fake.emit({ type: "message_start", message: { ...removedReply, content: [] } });
+      yield* fake.emit({
+        type: "message_update",
+        message: storedReply(2000, "Remo"),
+        assistantMessageEvent: { type: "text_delta", contentIndex: 0, delta: "Remo" },
+      });
+      fake.setTranscript([storedPrompt(900), removedReply]);
+      yield* fake.emit({ type: "turn_end", message: removedReply, toolResults: [] });
+      yield* fake.emit({
+        type: "refine_complete",
+        result: { id: "refine_1", summary: "Nothing to keep.", appliedEdits: [] },
+      });
+      yield* fake.emit({ type: "agent_end", messages: [] });
+
+      assert.deepEqual(yield* takeShownTimeline(takeEvent), ["Removed.", "notice"]);
+    }).pipe(Effect.scoped, Effect.provide(layerTest)),
+  );
+
   it.effect("completes a cut-off reply when Stop aborts the run", () =>
     Effect.gen(function* () {
       const fake = yield* makeFakePi;
