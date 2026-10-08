@@ -26,8 +26,8 @@ const MAX_SETTLE_READS = 3;
 const STATE_READ_TIMEOUT_MS = 2_000;
 /** A long session's history is large, and the agent is idle while it is read. */
 const HISTORY_READ_TIMEOUT_MS = 10_000;
-/** Stop waits on this read, so it gives up sooner. */
-const ENDING_HISTORY_READ_TIMEOUT_MS = 2_000;
+/** Stop waits on this read, and a mid-run repair holds the event stream for it, so it gives up sooner. */
+const SHORT_HISTORY_READ_TIMEOUT_MS = 2_000;
 
 /**
  * The identity of a stored message, as Prime Agent itself keys kept messages
@@ -45,6 +45,16 @@ export function transcriptMessageKey(message: unknown): string | undefined {
   ]);
 }
 
+function isReplyKey(key: string): boolean {
+  const [role]: ReadonlyArray<unknown> = JSON.parse(key);
+  return role === "assistant";
+}
+
+function keyTimestamp(key: string): number {
+  const [, timestamp]: ReadonlyArray<unknown> = JSON.parse(key);
+  return Number(timestamp);
+}
+
 /** The message a session event is about, for the events that carry one. */
 function eventMessage(event: PiRpcRecord): unknown {
   switch (event["type"]) {
@@ -55,6 +65,121 @@ function eventMessage(event: PiRpcRecord): unknown {
     default:
       return undefined;
   }
+}
+
+function isAbortedReply(message: unknown): boolean {
+  return (
+    recordString(message, "role") === "assistant" &&
+    recordString(message, "stopReason") === "aborted"
+  );
+}
+
+/** A message the agent loop did not write: a prompt, a wake, a notice. Each run starts with one. */
+function startsRun(message: unknown): boolean {
+  const role = recordString(message, "role");
+  return role !== "assistant" && role !== "toolResult";
+}
+
+/**
+ * Which stored aborted copy replaced which reply a turn streamed. Stock ends
+ * a reply Stop cut off with a copy of what it streamed, stamped at abort time
+ * and announced by no message_start of its own (agent-loop.js
+ * `finishAbortedMessage`), as the next message end after the reply's last
+ * update. A reply the turn streamed with no end, that the history does not
+ * hold, and that no compaction or retry may have dropped, was replaced by
+ * such a copy, which:
+ * - holds all the text the turn showed of the reply;
+ * - is stored after the last stored message the turn saw before the reply,
+ *   or, when the turn saw none, in a run this turn started (one whose first
+ *   message no earlier turn accounted for);
+ * - is stored before anything the turn saw after the reply;
+ * - did not arrive live before the reply started.
+ * Delivered events keep their order and the history only appends, so when
+ * the earliest stored copy that fits arrived live after the reply, no copy
+ * stored before it can be the reply's: it is the reply's. Otherwise a reply
+ * matches only the one copy that fits it, and a copy two replies would take
+ * goes to neither. Both rest on the reply having a copy at all, which a lost
+ * retry or compaction breaks, so a completed or failed reply, or a summary,
+ * stored between the reply's anchor and its copy leaves the reply unmatched. Anything else is left apart: a reply that shows its cut
+ * text is a miss, one that shows another reply's text would be wrong.
+ * Returns each copy's key with the timestamp of the reply it replaced.
+ */
+export function matchStoppedCopies(input: {
+  readonly history: ReadonlyArray<unknown>;
+  /** Keys of the messages the turn streamed, in first-arrival order. */
+  readonly streamed: ReadonlyArray<string>;
+  /** For each copy that arrived live, how many of `streamed` had arrived before it. */
+  readonly arrivals: ReadonlyMap<string, number>;
+  /** The streamed replies T3 does not show in full. */
+  readonly unended: ReadonlySet<string>;
+  /** Unended replies a compaction or a retry may have dropped from the history. */
+  readonly removed: ReadonlySet<string>;
+  /** Stored messages an earlier read or turn already placed. */
+  readonly accounted: ReadonlySet<string>;
+  /** Whether `copy` holds all the text T3 shows of the reply `replyKey`. */
+  readonly holdsShown: (copy: unknown, replyKey: string) => boolean;
+}): ReadonlyMap<string, number> {
+  const { history, arrivals } = input;
+  const keys = history.map(transcriptMessageKey);
+  const position = new Map<string, number>();
+  keys.forEach((key, index) => key !== undefined && position.set(key, index));
+  const streamed = new Set(input.streamed);
+  const copies = keys.flatMap((key, index) =>
+    key !== undefined &&
+    isAbortedReply(history[index]) &&
+    !streamed.has(key) &&
+    !input.accounted.has(key)
+      ? [{ key, index }]
+      : [],
+  );
+  const runStarts = history.flatMap((message, index) => (startsRun(message) ? [index] : []));
+  const startedThisTurn = (index: number) => {
+    const runStart = runStarts.findLast((start) => start < index);
+    return runStart !== undefined && !input.accounted.has(keys[runStart] ?? "");
+  };
+  const storedPositions = (streamedKeys: ReadonlyArray<string>) =>
+    streamedKeys.flatMap((key) => position.get(key) ?? []);
+  /**
+   * A stored message no earlier turn accounted for that can stand for a reply
+   * dropped without a copy: the reply a retry stored after it, or a
+   * compaction's summary.
+   */
+  const mayHaveDropped = (message: unknown) => {
+    const key = transcriptMessageKey(message);
+    if (key === undefined || input.accounted.has(key)) return false;
+    const role = recordString(message, "role");
+    return role === "compactionSummary" || (role === "assistant" && !isAbortedReply(message));
+  };
+
+  const chosen = input.streamed.flatMap((key, index) => {
+    if (position.has(key) || !input.unended.has(key) || input.removed.has(key)) return [];
+    if (!isReplyKey(key)) return [];
+    const seenBefore = storedPositions(input.streamed.slice(0, index));
+    const anchor = seenBefore.length === 0 ? undefined : Math.max(...seenBefore);
+    const end = Math.min(history.length, ...storedPositions(input.streamed.slice(index + 1)));
+    const fits = copies.filter((copy) => {
+      const arrivedAfter = arrivals.get(copy.key);
+      return (
+        copy.index > (anchor ?? -1) &&
+        copy.index < end &&
+        (anchor !== undefined || startedThisTurn(copy.index)) &&
+        (arrivedAfter === undefined || arrivedAfter > index) &&
+        input.holdsShown(history[copy.index], key)
+      );
+    });
+    const [earliest] = fits;
+    if (earliest === undefined || (!arrivals.has(earliest.key) && fits.length > 1)) return [];
+    const between = history.slice((anchor ?? -1) + 1, earliest.index);
+    if (between.some(mayHaveDropped)) return [];
+    return [{ key, copy: earliest.key }];
+  });
+  const claims = new Map<string, number>();
+  for (const { copy } of chosen) claims.set(copy, (claims.get(copy) ?? 0) + 1);
+  const matches = new Map<string, number>();
+  for (const { key, copy } of chosen) {
+    if (claims.get(copy) === 1) matches.set(copy, keyTimestamp(key));
+  }
+  return matches;
 }
 
 type TranscriptRead =
@@ -125,12 +250,16 @@ function toolCallIdsOf(messages: ReadonlyArray<unknown>): Array<string> {
  * The stored conversation (`get_messages`) is the authority. Its messages are
  * matched to T3's items by native identity: an assistant message by its
  * timestamp, which the live stream keys its items by too, and a tool by its
- * call id. Text is never matched by prefix. The reconciler runs inside the
+ * call id. The one exception is a reply Stop cut off, which stock stores only
+ * as an aborted copy under a new timestamp. The copy shows nothing until a
+ * history read places it by its position (see `matchStoppedCopies`), or the
+ * turn ends without one (`placeHeldCopies`). The reconciler runs inside the
  * event pump, so it never interleaves with live events, and every run is
  * idempotent: a message is projected into the turn that stored it, then
  * accounted for, and later reads or late live events for it change nothing.
  *
- * It runs when a turn settles, when Stop ends one, and on a backed-off quiet
+ * It runs when a turn settles, when Stop ends one, as soon as a running
+ * turn's stream skips past a reply's or tool's end, and on a backed-off quiet
  * check while an idle session has background work, which is where wakes are
  * lost whole. What the history cannot show stays unknown: a child's outcome
  * comes only from the notice Prime Agent stores for its parent.
@@ -153,7 +282,11 @@ export function makePrimeAgentReconciler<E>(input: {
     readonly upsertAssistantMessage: (
       turn: ActivePiTurn,
       message: unknown,
+      /** The timestamp of the reply a stopped copy replaced, whose items it takes. */
+      replaced?: number,
     ) => Effect.Effect<void, E>;
+    /** Whether `copy` holds all the text T3 shows of the reply stamped `replaced`. */
+    readonly holdsShownText: (turn: ActivePiTurn, copy: unknown, replaced: number) => boolean;
     readonly startTool: (turn: ActivePiTurn, toolCall: unknown) => Effect.Effect<void, E>;
     readonly endTool: (turn: ActivePiTurn, toolResult: unknown) => Effect.Effect<void, E>;
     /** Handles a stored message other than a reply as if its `message_start` had arrived. */
@@ -235,13 +368,49 @@ export function makePrimeAgentReconciler<E>(input: {
     return false;
   };
 
-  /** Remembers which stored messages the turn's own events already showed, and which in full. */
+  /** Replies the turn showed in part whose message_end has not arrived. */
+  const unendedReplyKeys = (turn: ActivePiTurn) =>
+    [...turn.seenMessageKeys].filter((key) => !turn.shownMessageKeys.has(key) && isReplyKey(key));
+
+  /**
+   * An aborted reply end whose message the turn never streamed: stock's copy
+   * of a reply Stop cut off. Which reply it replaced is left to the history.
+   */
+  const isStoppedCopy = (turn: ActivePiTurn, event: PiRpcRecord) => {
+    if (!enabled || event["type"] !== "message_end") return false;
+    const message = eventMessage(event);
+    const key = transcriptMessageKey(message);
+    return key !== undefined && isAbortedReply(message) && !turn.seenMessageKeys.has(key);
+  };
+
+  /**
+   * Remembers which stored messages the turn's own events already showed,
+   * and which in full. A stopped copy is held for a history read to place,
+   * and the abort brings that read, so the ends it leaves in doubt wait for
+   * it.
+   */
   const noteSeen = (turn: ActivePiTurn, event: PiRpcRecord) => {
+    const type = event["type"];
+    // Compaction and retry drop messages from the history without a copy.
+    if (type === "compaction_start" || type === "auto_retry_start") {
+      for (const end of unendedReplyKeys(turn)) turn.removedReplies.add(end);
+    }
     const message = eventMessage(event);
     const key = transcriptMessageKey(message);
     if (key === undefined) return;
+    if (isStoppedCopy(turn, event)) {
+      turn.heldCopies.set(key, { message, arrivedAfter: turn.seenMessageKeys.size });
+      for (const end of unendedReplyKeys(turn)) turn.soughtEnds.add(end);
+      return;
+    }
     turn.seenMessageKeys.add(key);
-    if (showsInFull(turn, event["type"], message)) turn.shownMessageKeys.add(key);
+    if (showsInFull(turn, type, message)) turn.shownMessageKeys.add(key);
+  };
+
+  /** Whether `message` is a stopped copy the turn holds unshown. */
+  const holdsCopy = (turn: ActivePiTurn, message: unknown) => {
+    const key = transcriptMessageKey(message);
+    return key !== undefined && turn.heldCopies.has(key);
   };
 
   /** Whether an event about `message` leaves T3 showing all of it. */
@@ -263,15 +432,21 @@ export function makePrimeAgentReconciler<E>(input: {
     }
   };
 
-  /** Projects the stored messages T3 has not accounted for into `turn`. */
+  /**
+   * Projects the stored messages T3 has not accounted for into `turn`. A
+   * stopped copy in `replacements` lands on the items of the reply it
+   * replaced.
+   */
   const project = Effect.fnUntraced(function* (
     turn: ActivePiTurn,
     messages: ReadonlyArray<unknown>,
+    replacements: ReadonlyMap<string, number> = new Map(),
   ) {
     for (const message of unaccounted(messages)) {
       switch (recordString(message, "role")) {
         case "assistant": {
-          yield* items.upsertAssistantMessage(turn, message);
+          const replaced = replacements.get(transcriptMessageKey(message) ?? "");
+          yield* items.upsertAssistantMessage(turn, message, replaced);
           const content = recordField(message, "content");
           for (const block of Array.isArray(content) ? content : []) {
             const toolCallId = recordString(block, "id");
@@ -306,12 +481,130 @@ export function makePrimeAgentReconciler<E>(input: {
     }
   });
 
+  /** Projects a whole stored history into `turn`, placing every copy it holds. */
+  const projectHistory = Effect.fnUntraced(function* (
+    turn: ActivePiTurn,
+    messages: ReadonlyArray<unknown>,
+  ) {
+    if (ledger === null) return;
+    yield* project(
+      turn,
+      messages,
+      matchStoppedCopies({
+        history: messages,
+        streamed: [...turn.seenMessageKeys],
+        arrivals: new Map(
+          [...turn.heldCopies].map(([key, held]) => [key, held.arrivedAfter] as const),
+        ),
+        unended: new Set(unendedReplyKeys(turn)),
+        removed: turn.removedReplies,
+        accounted: ledger.keys,
+        holdsShown: (copy, replyKey) => items.holdsShownText(turn, copy, keyTimestamp(replyKey)),
+      }),
+    );
+    for (const message of messages) turn.heldCopies.delete(transcriptMessageKey(message) ?? "");
+  });
+
+  /**
+   * Places, once, the stopped copies no history read placed by the time the
+   * turn ends: the history could not be read, or did not hold them. A copy
+   * that holds all T3 shows of the turn's latest unended reply finishes it;
+   * any other copy is a reply of its own. The reply stays unaccounted, so a
+   * later read still projects it if the history holds it under its own key.
+   */
+  const placeHeldCopies = Effect.fnUntraced(function* (turn: ActivePiTurn) {
+    const open = unendedReplyKeys(turn).filter((key) => !turn.removedReplies.has(key));
+    for (const [key, { message: copy }] of turn.heldCopies) {
+      const latest = open.at(-1);
+      const replaced =
+        latest !== undefined && items.holdsShownText(turn, copy, keyTimestamp(latest))
+          ? open.pop()
+          : undefined;
+      yield* items.upsertAssistantMessage(
+        turn,
+        copy,
+        replaced === undefined ? undefined : keyTimestamp(replaced),
+      );
+      turn.seenMessageKeys.add(key);
+      turn.shownMessageKeys.add(key);
+    }
+    turn.heldCopies.clear();
+  });
+
   const logOutcome = (turn: ActivePiTurn | null, outcome: string) =>
     Effect.logInfo("orchestration-v2.prime-agent-transcript-reconciled", {
       driver: input.driver,
       providerTurnId: turn?.providerTurn.id ?? null,
       outcome,
     }).pipe(Effect.withSpan("PrimeAgentReconciler.reconcile"));
+
+  /**
+   * The ends `event` shows the stream moved past without delivering, as
+   * reply keys and tool call ids, minus those a gap read already looked for.
+   * Prime Agent ends a reply before it runs the reply's tools or ends the
+   * turn, and runs every tool to its end before the next reply.
+   */
+  const provenLostEnds = (turn: ActivePiTurn, event: PiRpcRecord): ReadonlyArray<string> => {
+    const message = eventMessage(event);
+    const key = transcriptMessageKey(message);
+    const startsReply =
+      recordString(message, "role") === "assistant" &&
+      key !== undefined &&
+      !turn.seenMessageKeys.has(key) &&
+      !isStoppedCopy(turn, event);
+    const type = event["type"];
+    const endsWork =
+      startsReply || type === "tool_execution_start" || type === "turn_end" || type === "agent_end";
+    if (!endsWork) return [];
+    // Parallel tools start while others run, so a tool start proves no tool's end lost.
+    const openTools = type === "tool_execution_start" ? [] : [...turn.openTools.keys()];
+    return [...unendedReplyKeys(turn), ...openTools].filter((end) => !turn.soughtEnds.has(end));
+  };
+
+  /**
+   * Projects the stored versions of the replies and tools a gap in the
+   * turn's stream left without an end. Each lost end gets one such read;
+   * if it cannot repair one, the settle read does.
+   */
+  const repairGap = Effect.fnUntraced(function* (
+    turn: ActivePiTurn,
+    lostEnds: ReadonlyArray<string>,
+  ) {
+    for (const end of lostEnds) turn.soughtEnds.add(end);
+    const messages = yield* readHistory(request, SHORT_HISTORY_READ_TIMEOUT_MS);
+    if (messages === undefined) return yield* logOutcome(turn, "gap-unreadable");
+    const unended = new Set(unendedReplyKeys(turn));
+    const lost = messages.filter((message) => {
+      switch (recordString(message, "role")) {
+        case "assistant":
+          return unended.has(transcriptMessageKey(message) ?? "");
+        case "toolResult":
+          return turn.openTools.has(recordString(message, "toolCallId") ?? "");
+        default:
+          return false;
+      }
+    });
+    yield* project(turn, lost);
+    for (const message of lost) {
+      const key = transcriptMessageKey(message);
+      if (key !== undefined) turn.shownMessageKeys.add(key);
+    }
+    yield* logOutcome(turn, lost.length > 0 ? "gap-repaired" : "gap-not-stored");
+  });
+
+  /**
+   * Repairs what a gap in a running turn's stream lost, before the event
+   * that proves it is applied: replies cut off before their message_end,
+   * and tools whose end never came. Their stored versions replace them, so
+   * a cut reply never shows as final and keeps its place before what
+   * followed it. A failed read leaves them open for the settle read.
+   * Nothing is committed; the settle read still runs.
+   */
+  const repairLostEnds = (turn: ActivePiTurn, event: PiRpcRecord) => {
+    if (!enabled || ledger === null || turn.transcript !== "streaming") return Effect.void;
+    const lostEnds = provenLostEnds(turn, event);
+    return lostEnds.length > 0 ? repairGap(turn, lostEnds) : Effect.void;
+  };
 
   /**
    * Reconciles a turn whose settle probe found the agent idle. Returns
@@ -333,7 +626,7 @@ export function makePrimeAgentReconciler<E>(input: {
       yield* logOutcome(turn, "unconfirmed");
       return true;
     }
-    yield* project(turn, read.messages);
+    yield* projectHistory(turn, read.messages);
     commit(read.messages);
     turn.transcript = "reconciled";
     return true;
@@ -347,9 +640,9 @@ export function makePrimeAgentReconciler<E>(input: {
   const reconcileEndingTurn = Effect.fnUntraced(function* (turn: ActivePiTurn) {
     if (!enabled || turn.transcript !== "streaming" || ledger === null) return;
     turn.transcript = "unreconciled";
-    const messages = yield* readHistory(request, ENDING_HISTORY_READ_TIMEOUT_MS);
+    const messages = yield* readHistory(request, SHORT_HISTORY_READ_TIMEOUT_MS);
     if (messages === undefined) return yield* logOutcome(turn, "unreadable");
-    yield* project(turn, messages);
+    yield* projectHistory(turn, messages);
     commit(messages);
     turn.transcript = "reconciled";
   });
@@ -443,6 +736,9 @@ export function makePrimeAgentReconciler<E>(input: {
     baseline,
     isLate,
     noteSeen,
+    holdsCopy,
+    placeHeldCopies,
+    repairLostEnds,
     reconcileSettlingTurn,
     reconcileEndingTurn,
     closeTurn,
