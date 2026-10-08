@@ -11,3 +11,4 @@ export {
   PrimeAgentAdapterV2Driver,
   type PiAdapterV2DriverEnv,
 } from "./server/adapter.ts";
+export { callsT3ToolsFromKernel } from "./server/flavor.ts";
