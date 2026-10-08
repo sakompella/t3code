@@ -18,6 +18,7 @@ import {
   ProviderThreadId,
   ProviderTurnId,
   RuntimeRequestId,
+  OrchestrationV2RunStatus,
   RunAttemptId,
   RunId,
   ThreadId,
@@ -6452,6 +6453,100 @@ it.layer(layerTest)("ProjectionStoreV2", (it) => {
         (yield* store.getRuntimeRecoveryProjection(threadId)).runs.map((run) => run.id),
         [runId, newerRunId],
       );
+    }),
+  );
+});
+
+it.layer(layerTest)("run state", (it) => {
+  it.effect("answers run guards exactly as the recovery projection did", () =>
+    Effect.gen(function* () {
+      const store = yield* ProjectionStore.ProjectionStoreV2;
+      const now = yield* DateTime.now;
+      const threadId = ThreadId.make("thread:run-state");
+      yield* store.apply({
+        id: EventId.make("event:run-state:thread-created"),
+        type: "thread.created",
+        threadId,
+        occurredAt: now,
+        payload: {
+          createdBy: "user",
+          creationSource: "web",
+          id: threadId,
+          projectId: ProjectId.make("project:run-state"),
+          title: "Run state",
+          providerInstanceId,
+          modelSelection,
+          runtimeMode: "full-access",
+          interactionMode: "default",
+          branch: null,
+          worktreePath: null,
+          activeProviderThreadId: null,
+          lineage: { parentThreadId: null, relationshipToParent: null, rootThreadId: threadId },
+          forkedFrom: null,
+          createdAt: now,
+          updatedAt: now,
+          archivedAt: null,
+          settledOverride: null,
+          settledAt: null,
+          lastVisitedAt: null,
+          deletedAt: null,
+        },
+      });
+      const current = RunAttemptId.make("attempt:run-state:current");
+      const superseded = RunAttemptId.make("attempt:run-state:superseded");
+      // Every status a run can be in, with no attempt, the current one, or one a
+      // retry replaced, so ended, cancelled, rolled-back and recovered runs count.
+      const runs = OrchestrationV2RunStatus.literals.flatMap((status) =>
+        [null, current, superseded].map((activeAttemptId) => ({ status, activeAttemptId })),
+      );
+      for (const [index, state] of runs.entries()) {
+        const runId = RunId.make(`run:run-state:${index}`);
+        yield* store.apply({
+          id: EventId.make(`event:run-state:run-${index}`),
+          type: "run.created",
+          threadId,
+          runId,
+          driver,
+          providerInstanceId,
+          occurredAt: now,
+          payload: {
+            id: runId,
+            threadId,
+            ordinal: index + 1,
+            providerInstanceId,
+            modelSelection,
+            providerThreadId: null,
+            userMessageId: MessageId.make(`message:run-state:${index}`),
+            rootNodeId: null,
+            activeAttemptId: state.activeAttemptId,
+            status: state.status,
+            requestedAt: now,
+            startedAt: now,
+            completedAt: null,
+            checkpointId: null,
+            contextHandoffId: null,
+          },
+        });
+      }
+
+      const recovery = yield* store.getRuntimeRecoveryProjection(threadId);
+      const guards = (run: ProjectionStore.ProjectionRunState | undefined) =>
+        (["starting", "running"] as const).map(
+          (status) => run?.activeAttemptId === current && run.status === status,
+        );
+      const runIds = [...runs.keys()].map((index) => RunId.make(`run:run-state:${index}`));
+      for (const runId of [...runIds, RunId.make("run:run-state:missing")]) {
+        assert.deepEqual(
+          guards(yield* store.getRunState(threadId, runId)),
+          guards(recovery.runs.find((run) => run.id === runId)),
+          runId,
+        );
+      }
+
+      const missingThread = ThreadId.make("thread:run-state:missing");
+      const recoveryError = yield* Effect.flip(store.getRuntimeRecoveryProjection(missingThread));
+      const stateError = yield* Effect.flip(store.getRunState(missingThread, runIds[0]!));
+      assert.equal(stateError._tag, recoveryError._tag);
     }),
   );
 });
