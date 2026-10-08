@@ -54,8 +54,8 @@ export interface ProviderEventRoutingState {
   readonly ownedThreadIds: ReadonlySet<ThreadId>;
   // Set once this run's root turn ended. A child thread created after that
   // belongs to the run that is live then, so this one no longer adopts it,
-  // unless the adapter says it launched the subagent under this run, or it
-  // is a workflow member enrolled below (its coordinator keeps this run open).
+  // except a workflow member enrolled below: its coordinator keeps this run
+  // open, so the member is this run's to follow.
   readonly rootTurnEnded: boolean;
   readonly workflowMemberParents: ReadonlyMap<ThreadId, ThreadId>;
   readonly ownedProviderThreadIds: ReadonlySet<ProviderThreadId>;
@@ -408,17 +408,13 @@ export function routeProviderEvent(
       if (event.appThread.id === input.threadId) {
         return [true, state];
       }
-      const launchedHere =
-        event.launchingRunId === undefined
-          ? !state.rootTurnEnded ||
-            state.workflowMemberParents.get(event.appThread.id) ===
-              event.appThread.lineage.parentThreadId
-          : ownsRun(event.launchingRunId);
       const isOwnedSubagent =
-        launchedHere &&
         event.appThread.lineage.relationshipToParent === "subagent" &&
         event.appThread.lineage.parentThreadId !== null &&
-        ownsThread(event.appThread.lineage.parentThreadId);
+        ownsThread(event.appThread.lineage.parentThreadId) &&
+        (!state.rootTurnEnded ||
+          state.workflowMemberParents.get(event.appThread.id) ===
+            event.appThread.lineage.parentThreadId);
       if (!isOwnedSubagent) {
         return [false, state];
       }

@@ -396,9 +396,6 @@ describe("subagent shells that arrive after the launching run's root turn ended"
     threadDisposition: "reusable",
   } satisfies ProviderAdapterV2Event;
 
-  // Prime Agent names the run it launched the subagent under.
-  const stampedShell = { ...childShell, launchingRunId: launching.runId } as ProviderAdapterV2Event;
-
   const route = (
     identity: RunExecutionService.ProviderEventRouteIdentity,
     initial: RunExecutionService.ProviderEventRoutingState,
@@ -422,21 +419,28 @@ describe("subagent shells that arrive after the launching run's root turn ended"
   const liveState = () =>
     RunExecutionService.makeProviderEventRoutingState({ identity: live, providerTurnId: null });
 
-  it("the run a shell names adopts it after its root turn ended (Prime Agent)", () => {
+  // Known limit (gap B): a late subagent thread goes to the run whose root
+  // turn is live, never to the run that launched it. A Prime Agent nested
+  // child started while no run is live therefore gets no thread.
+  it("known limit: the launching run does not adopt a shell after its root turn ended (Prime Agent order)", () => {
     const { accepted, state } = route(launching, launchingState(), [
       launchingTerminal,
       subagentNode,
-      stampedShell,
+      childShell,
       childRootNode,
     ]);
-    assert.deepEqual(accepted, [true, true, true, true]);
-    assert.isTrue(state.ownedThreadIds.has(childThreadId));
+    assert.deepEqual(
+      accepted,
+      [true, true, false, false],
+      "Known limit (gap B): routing gives a late subagent thread to the run whose root turn is live, not to the run that launched it.",
+    );
+    assert.isFalse(state.ownedThreadIds.has(childThreadId));
   });
 
-  it("a live run leaves a shell that names another run to that run", () => {
-    const { accepted, state } = route(live, liveState(), [subagentNode, stampedShell]);
-    assert.deepEqual(accepted, [false, false]);
-    assert.isFalse(state.ownedThreadIds.has(childThreadId));
+  it("a live run adopts a late shell forked from another run's subagent node", () => {
+    const { accepted, state } = route(live, liveState(), [subagentNode, childShell]);
+    assert.deepEqual(accepted, [false, true]);
+    assert.isTrue(state.ownedThreadIds.has(childThreadId));
   });
 
   it("a shell that precedes its subagent node (Claude and Codex order) still follows the live root turn", () => {
@@ -530,8 +534,6 @@ describe("a late subagent shell across a session's subscribers", () => {
       },
     }) as ProviderAdapterV2Event;
   const childShell = childShellFrom(subagentNodeId);
-  // Prime Agent names the run it launched the subagent under; OpenCode and OpenCode2 do not.
-  const primeShell = { ...childShell, launchingRunId: launching.runId } as ProviderAdapterV2Event;
   const childProviderThread = {
     type: "provider_thread.updated",
     driver,
@@ -587,14 +589,17 @@ describe("a late subagent shell across a session's subscribers", () => {
     childRoot(status, NodeId.make("node:shell-owner:child-root:second-call"));
 
   // Each adapter that reports a subagent's node before its child thread, in
-  // the order it emits them around the shell.
-  const openCodeShapes = [
+  // the order it emits them around the shell. None of them is still in its
+  // launching run's root turn here, so the live run takes the thread.
+  const nodeFirstShapes = [
+    {
+      adapter: "Prime Agent",
+      beforeShell: [subagentNode("running", providerThreadId)],
+      afterShell: [childRootNode],
+    },
     {
       adapter: "OpenCode",
       beforeShell: [subagentNode("running", providerThreadId), subagentRow(null)],
-      shell: childShell,
-      // Neither names a run, so the thread follows the live root turn.
-      owner: live.runId,
       afterShell: [
         childProviderThread,
         subagentNode("running", childProviderThreadId),
@@ -605,8 +610,6 @@ describe("a late subagent shell across a session's subscribers", () => {
     {
       adapter: "OpenCode2",
       beforeShell: [subagentNode("pending", providerThreadId), subagentRow(null)],
-      shell: childShell,
-      owner: live.runId,
       afterShell: [
         childProviderThread,
         subagentNode("running", childProviderThreadId),
@@ -614,16 +617,6 @@ describe("a late subagent shell across a session's subscribers", () => {
         childRootNode,
       ],
     },
-  ] as const;
-  const nodeFirstShapes = [
-    {
-      adapter: "Prime Agent",
-      beforeShell: [subagentNode("running", providerThreadId)],
-      shell: primeShell,
-      owner: launching.runId,
-      afterShell: [childRootNode],
-    },
-    ...openCodeShapes,
   ] as const;
 
   const touchesChildThread = (event: ProviderAdapterV2Event): boolean =>
@@ -826,9 +819,9 @@ describe("a late subagent shell across a session's subscribers", () => {
             ...shape.beforeShell,
           ]);
           yield* session.start(live);
-          const childEvents = [shape.shell, ...shape.afterShell].filter(touchesChildThread);
+          const childEvents = [childShell, ...shape.afterShell].filter(touchesChildThread);
           yield* session.publish([
-            shape.shell,
+            childShell,
             ...shape.afterShell,
             drainMarker(launching),
             drainMarker(live),
@@ -837,14 +830,14 @@ describe("a late subagent shell across a session's subscribers", () => {
           yield* session.awaitDrained(live);
           assert.deepEqual(
             yield* session.childEventOwners,
-            childEvents.map(() => shape.owner),
+            childEvents.map(() => live.runId),
           );
           yield* session.endAll;
         }),
       ),
   );
 
-  it.effect.each(openCodeShapes)(
+  it.effect.each(nodeFirstShapes)(
     "$adapter: the live run adopts a shell whose launching run stopped listening",
     (shape) =>
       Effect.scoped(
@@ -871,37 +864,40 @@ describe("a late subagent shell across a session's subscribers", () => {
       ),
   );
 
-  it.effect("Prime Agent: a lagging live run does not adopt a shell its launching run took", () =>
-    Effect.scoped(
-      Effect.gen(function* () {
-        const session = yield* sharedSessionScenario;
-        yield* session.start(launching);
-        yield* session.publish([
-          otherChild("running"),
-          rootTerminal(launching),
-          subagentNode("running", providerThreadId),
-          drainMarker(launching),
-        ]);
-        yield* session.awaitDrained(launching);
-        yield* session.start(live);
-        const releaseLiveRun = yield* session.holdAtShell(live);
-        const childEvents = [primeShell, childRootNode, childRoot("completed")];
-        yield* session.publish([...childEvents, otherChild("completed")]);
-        yield* session.awaitClosed(launching);
-        assert.deepEqual(
-          yield* session.childEventOwners,
-          childEvents.map(() => launching.runId),
-        );
-        yield* releaseLiveRun;
-        yield* session.publish([drainMarker(live)]);
-        yield* session.awaitDrained(live);
-        assert.deepEqual(
-          yield* session.childEventOwners,
-          childEvents.map(() => launching.runId),
-        );
-        yield* session.endAll;
-      }),
-    ),
+  it.effect(
+    "known limit: a late Prime Agent shell goes once to the lagging live run, not to its launching run",
+    () =>
+      Effect.scoped(
+        Effect.gen(function* () {
+          const session = yield* sharedSessionScenario;
+          yield* session.start(launching);
+          yield* session.publish([
+            otherChild("running"),
+            rootTerminal(launching),
+            subagentNode("running", providerThreadId),
+            drainMarker(launching),
+          ]);
+          yield* session.awaitDrained(launching);
+          yield* session.start(live);
+          const releaseLiveRun = yield* session.holdAtShell(live);
+          const childEvents = [childShell, childRootNode, childRoot("completed")];
+          yield* session.publish([...childEvents, otherChild("completed")]);
+          yield* session.awaitClosed(launching);
+          assert.deepEqual(
+            yield* session.childEventOwners,
+            [],
+            "Known limit (gap B): routing gives a late subagent thread to the run whose root turn is live, not to the run that launched it.",
+          );
+          yield* releaseLiveRun;
+          yield* session.publish([drainMarker(live)]);
+          yield* session.awaitDrained(live);
+          assert.deepEqual(
+            yield* session.childEventOwners,
+            childEvents.map(() => live.runId),
+          );
+          yield* session.endAll;
+        }),
+      ),
   );
 
   it.effect("the live run adopts a subagent called again after its owner stopped", () =>
