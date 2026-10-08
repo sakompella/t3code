@@ -436,6 +436,22 @@ describe("subagent shells that arrive after the launching run's root turn ended"
     assert.isFalse(state.ownedThreadIds.has(childThreadId));
   });
 
+  it("forgets a subagent node once it finishes, so a long-lived run does not keep every task", () => {
+    const finishedTasks = Array.from({ length: 128 }, (_, index) => {
+      const node = {
+        ...subagentNode.node,
+        id: NodeId.make(`node:late-shell:finished-${index}`),
+        runId: RunId.make(`run:late-shell:other-${index}`),
+      };
+      return [
+        { ...subagentNode, node },
+        { ...subagentNode, node: { ...node, status: "completed" } },
+      ] satisfies ReadonlyArray<ProviderAdapterV2Event>;
+    }).flat();
+    const { state } = route(live, liveState(), finishedTasks);
+    assert.strictEqual(state.subagentNodeRunIds.size, 0);
+  });
+
   it("a shell that precedes its subagent node (Claude and Codex order) still follows the live root turn", () => {
     const duringRoot = route(launching, launchingState(), [childShell, subagentNode]);
     assert.deepEqual(duringRoot.accepted, [true, true]);
