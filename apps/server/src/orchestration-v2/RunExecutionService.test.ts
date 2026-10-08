@@ -28,12 +28,14 @@ import {
   TurnItemId,
 } from "@t3tools/contracts";
 import * as Cause from "effect/Cause";
+import * as Context from "effect/Context";
 import * as Exit from "effect/Exit";
 import * as DateTime from "effect/DateTime";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
+import * as Queue from "effect/Queue";
 import * as Ref from "effect/Ref";
 import * as Stream from "effect/Stream";
 
@@ -357,6 +359,355 @@ describe("subagent shells that arrive after the launching run's root turn ended"
     assert.deepEqual(liveRun.accepted, [true, false]);
     assert.isTrue(liveRun.state.ownedThreadIds.has(childThreadId));
   });
+});
+
+describe("a late subagent shell across a session's subscribers", () => {
+  const threadId = ThreadId.make("thread:shell-owner");
+  const providerThreadId = ProviderThreadId.make("provider-thread:shell-owner");
+  const providerInstanceId = ProviderInstanceId.make("codex");
+  const subagentNodeId = NodeId.make("node:shell-owner:subagent");
+  const childThreadId = ThreadId.make("thread:shell-owner:child");
+  const childProviderThreadId = ProviderThreadId.make("provider-thread:shell-owner:child");
+
+  interface ScenarioRun {
+    readonly runId: RunId;
+    readonly attemptId: RunAttemptId;
+    readonly rootNodeId: NodeId;
+    readonly providerTurnId: ProviderTurnId;
+  }
+  const scenarioRun = (name: string): ScenarioRun => ({
+    runId: RunId.make(`run:shell-owner:${name}`),
+    attemptId: RunAttemptId.make(`attempt:shell-owner:${name}`),
+    rootNodeId: NodeId.make(`node:shell-owner:${name}:root`),
+    providerTurnId: ProviderTurnId.make(`provider-turn:shell-owner:${name}`),
+  });
+  const launching = scenarioRun("launching");
+  const live = scenarioRun("live");
+
+  const subagentNode = (
+    status: OrchestrationV2ExecutionNode["status"],
+    nodeProviderThreadId: ProviderThreadId,
+  ) =>
+    ({
+      type: "node.updated",
+      driver,
+      node: {
+        id: subagentNodeId,
+        threadId,
+        runId: launching.runId,
+        parentNodeId: launching.rootNodeId,
+        rootNodeId: launching.rootNodeId,
+        kind: "subagent",
+        status,
+        countsForRun: false,
+        providerThreadId: nodeProviderThreadId,
+        providerTurnId: launching.providerTurnId,
+        nativeItemRef: null,
+        runtimeRequestId: null,
+        checkpointScopeId: null,
+        startedAt: null,
+        completedAt: null,
+      },
+    }) as ProviderAdapterV2Event;
+  const subagentRow = (childThread: ThreadId | null) =>
+    ({
+      type: "subagent.updated",
+      driver,
+      subagent: {
+        id: subagentNodeId,
+        threadId,
+        runId: launching.runId,
+        childThreadId: childThread,
+        status: "running",
+      },
+    }) as ProviderAdapterV2Event;
+  const childShell = {
+    type: "app_thread.created",
+    driver,
+    appThread: {
+      id: childThreadId,
+      lineage: {
+        parentThreadId: threadId,
+        relationshipToParent: "subagent",
+        rootThreadId: threadId,
+      },
+      forkedFrom: { type: "node", nodeId: subagentNodeId },
+    },
+  } as ProviderAdapterV2Event;
+  const childProviderThread = {
+    type: "provider_thread.updated",
+    driver,
+    providerThread: { id: childProviderThreadId, appThreadId: childThreadId },
+  } as ProviderAdapterV2Event;
+  const childRootNode = {
+    type: "node.updated",
+    driver,
+    node: {
+      id: NodeId.make("node:shell-owner:child-root"),
+      threadId: childThreadId,
+      runId: null,
+      kind: "root_turn",
+      status: "running",
+      providerThreadId: null,
+    },
+  } as ProviderAdapterV2Event;
+
+  // Each adapter that reports a subagent's node before its child thread, in
+  // the order it emits them around the shell.
+  const nodeFirstShapes = [
+    {
+      adapter: "Prime Agent",
+      beforeShell: [subagentNode("running", providerThreadId)],
+      afterShell: [childRootNode],
+    },
+    {
+      adapter: "OpenCode",
+      beforeShell: [subagentNode("running", providerThreadId), subagentRow(null)],
+      afterShell: [
+        childProviderThread,
+        subagentNode("running", childProviderThreadId),
+        subagentRow(childThreadId),
+        childRootNode,
+      ],
+    },
+    {
+      adapter: "OpenCode2",
+      beforeShell: [subagentNode("pending", providerThreadId), subagentRow(null)],
+      afterShell: [
+        childProviderThread,
+        subagentNode("running", childProviderThreadId),
+        subagentRow(childThreadId),
+        childRootNode,
+      ],
+    },
+  ] as const;
+
+  const touchesChildThread = (event: ProviderAdapterV2Event): boolean =>
+    (event.type === "app_thread.created" && event.appThread.id === childThreadId) ||
+    (event.type === "provider_thread.updated" &&
+      event.providerThread.appThreadId === childThreadId) ||
+    (event.type === "node.updated" && event.node.threadId === childThreadId);
+  const rootTerminal = (run: ScenarioRun) =>
+    ({
+      type: "turn.terminal",
+      driver,
+      providerThreadId,
+      providerTurnId: run.providerTurnId,
+      runOrdinal: 1,
+      status: "completed",
+      failure: null,
+      threadDisposition: "reusable",
+    }) as ProviderAdapterV2Event;
+  // A run ingests its own root node update, so seeing it ingested proves the
+  // run processed every event published before it.
+  const drainMarker = (run: ScenarioRun) =>
+    ({
+      type: "node.updated",
+      driver,
+      node: {
+        id: run.rootNodeId,
+        threadId,
+        runId: run.runId,
+        kind: "root_turn",
+        status: "running",
+        providerThreadId: null,
+      },
+    }) as ProviderAdapterV2Event;
+
+  /** One provider session that several runs subscribe to, as ProviderSessionManager does. */
+  const sharedSessionScenario = Effect.gen(function* () {
+    const subscribers = yield* Ref.make<
+      ReadonlyMap<RunId, Queue.Queue<ProviderAdapterV2Event, Cause.Done>>
+    >(new Map());
+    const closed = new Map(
+      [launching, live].map((run) => [run.runId, Deferred.makeUnsafe<void>()]),
+    );
+    const drained = new Map(
+      [launching, live].map((run) => [run.runId, Deferred.makeUnsafe<void>()]),
+    );
+    const childEventOwners = yield* Ref.make<ReadonlyArray<RunId>>([]);
+    const layerTest = RunExecutionService.layer.pipe(
+      Layer.provide(
+        Layer.mergeAll(
+          Layer.mock(CheckpointService.CheckpointServiceV2)({ captureBaseline: () => Effect.void }),
+          Layer.mock(EventSink.EventSinkV2)({
+            write: () => Effect.succeed([]),
+            writeWithEffects: () => Effect.succeed([]),
+            writeIfRunCurrent: () => Effect.succeed({ committed: true, storedEvents: [] }),
+          }),
+          IdAllocator.layer,
+          Layer.mock(ProviderEventIngestor.ProviderEventIngestorV2)({
+            ingestNormalized: (input) =>
+              Effect.gen(function* () {
+                const runId = RunId.make(input.runId);
+                if (touchesChildThread(input.event)) {
+                  yield* Ref.update(childEventOwners, (owners) => [...owners, runId]);
+                }
+                if (
+                  input.event.type === "node.updated" &&
+                  input.event.node.id === drainMarker(launching).node.id
+                ) {
+                  yield* Deferred.succeed(drained.get(launching.runId)!, undefined);
+                }
+                if (
+                  input.event.type === "node.updated" &&
+                  input.event.node.id === drainMarker(live).node.id
+                ) {
+                  yield* Deferred.succeed(drained.get(live.runId)!, undefined);
+                }
+                return [];
+              }),
+          }),
+          ServerSettings.layerTest(),
+        ),
+      ),
+    );
+    const runtime = yield* Layer.build(layerTest);
+    const runExecution = Context.get(runtime, RunExecutionService.RunExecutionServiceV2);
+    const publish = (events: ReadonlyArray<ProviderAdapterV2Event>) =>
+      Effect.gen(function* () {
+        for (const queue of (yield* Ref.get(subscribers)).values()) {
+          yield* Queue.offerAll(queue, events);
+        }
+      });
+    const start = (run: ScenarioRun) =>
+      runExecution.startRootRun({
+        commandId: CommandId.make(`command:${run.runId}`),
+        appThread: { id: threadId } as OrchestrationV2AppThread,
+        providerSessionId: ProviderSessionId.make("session:shell-owner"),
+        session: {
+          events: Stream.empty,
+          subscribeEvents: Effect.gen(function* () {
+            const queue = yield* Queue.unbounded<ProviderAdapterV2Event, Cause.Done>();
+            yield* Ref.update(subscribers, (current) => new Map(current).set(run.runId, queue));
+            const close = Ref.update(subscribers, (current) => {
+              const next = new Map(current);
+              next.delete(run.runId);
+              return next;
+            }).pipe(
+              Effect.andThen(Queue.end(queue)),
+              Effect.andThen(Deferred.succeed(closed.get(run.runId)!, undefined)),
+              Effect.asVoid,
+            );
+            return { events: Stream.fromQueue(queue), close };
+          }),
+          startTurn: () => Effect.void,
+        } as unknown as ProviderAdapterV2SessionRuntime,
+        run: { id: run.runId, threadId, ordinal: 1, providerInstanceId } as OrchestrationV2Run,
+        rootNode: { id: run.rootNodeId } as OrchestrationV2ExecutionNode,
+        checkpointScope: {
+          id: CheckpointScopeId.make(`checkpoint-scope:${run.runId}`),
+        } as OrchestrationV2CheckpointScope,
+        providerThread: { id: providerThreadId, driver } as OrchestrationV2ProviderThread,
+        attempt: {
+          id: run.attemptId,
+          providerTurnId: run.providerTurnId,
+        } as OrchestrationV2RunAttempt,
+        attemptId: run.attemptId,
+        providerTurnOrdinal: 1,
+        message: {
+          messageId: MessageId.make(`message:${run.runId}`),
+          text: "Delegate.",
+          attachments: [],
+          createdBy: "user",
+          creationSource: "web",
+        },
+        modelSelection: { instanceId: providerInstanceId, model: "gpt-5.4" },
+        runtimePolicy: {
+          runtimeMode: "full-access",
+          interactionMode: "default",
+          cwd: process.cwd(),
+          approvalPolicy: "never",
+          sandboxPolicy: { type: "readOnly", access: { type: "fullAccess" }, networkAccess: false },
+        },
+      });
+    const awaitWithin = (deferred: Deferred.Deferred<void>, what: string) =>
+      Deferred.await(deferred).pipe(
+        Effect.timeoutOption("2 seconds"),
+        Effect.map((done) => assert.isTrue(Option.isSome(done), what)),
+      );
+    return {
+      start,
+      publish,
+      awaitDrained: (run: ScenarioRun) =>
+        awaitWithin(drained.get(run.runId)!, `${run.runId} did not drain`),
+      awaitClosed: (run: ScenarioRun) =>
+        awaitWithin(closed.get(run.runId)!, `${run.runId} still subscribed`),
+      childEventOwners: Ref.get(childEventOwners),
+      endAll: Effect.gen(function* () {
+        for (const queue of (yield* Ref.get(subscribers)).values()) yield* Queue.end(queue);
+      }),
+    };
+  });
+
+  for (const shape of nodeFirstShapes) {
+    it.effect(
+      `${shape.adapter}: one run adopts a shell when a run subscribes between its node and its shell`,
+      () =>
+        Effect.scoped(
+          Effect.gen(function* () {
+            const session = yield* sharedSessionScenario;
+            yield* session.start(launching);
+            // Another child keeps the launching run ingesting after its root turn.
+            yield* session.publish([
+              {
+                type: "subagent.updated",
+                driver,
+                subagent: {
+                  id: NodeId.make("node:shell-owner:other-child"),
+                  threadId,
+                  runId: launching.runId,
+                  status: "running",
+                },
+              } as ProviderAdapterV2Event,
+              rootTerminal(launching),
+              ...shape.beforeShell,
+            ]);
+            yield* session.start(live);
+            const childEvents = [childShell, ...shape.afterShell].filter(touchesChildThread);
+            yield* session.publish([
+              childShell,
+              ...shape.afterShell,
+              drainMarker(launching),
+              drainMarker(live),
+            ]);
+            yield* session.awaitDrained(launching);
+            yield* session.awaitDrained(live);
+            const owners = yield* session.childEventOwners;
+            assert.strictEqual(owners.length, childEvents.length);
+            assert.strictEqual(new Set(owners).size, 1);
+            yield* session.endAll;
+          }),
+        ),
+    );
+
+    it.effect(
+      `${shape.adapter}: the live run adopts a shell whose launching run stopped listening`,
+      () =>
+        Effect.scoped(
+          Effect.gen(function* () {
+            const session = yield* sharedSessionScenario;
+            yield* session.start(launching);
+            yield* session.publish([rootTerminal(launching)]);
+            yield* session.awaitClosed(launching);
+            yield* session.start(live);
+            const childEvents = [childShell, ...shape.afterShell].filter(touchesChildThread);
+            yield* session.publish([
+              ...shape.beforeShell,
+              childShell,
+              ...shape.afterShell,
+              drainMarker(live),
+            ]);
+            yield* session.awaitDrained(live);
+            assert.deepEqual(
+              yield* session.childEventOwners,
+              childEvents.map(() => live.runId),
+            );
+            yield* session.endAll;
+          }),
+        ),
+    );
+  }
 });
 
 it("does not route a superseded attempt through a reused provider thread", () => {
