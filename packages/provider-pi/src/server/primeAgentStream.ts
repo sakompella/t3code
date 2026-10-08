@@ -34,6 +34,15 @@ export function makePrimeAgentStream(input: {
   ) => Effect.Effect<PiStreamItemState>;
   /** Reserves the place of the sink's current message's block, for an item made later. */
   readonly reserveStreamItem: (turn: PiItemSink, contentIndex: number) => void;
+  /**
+   * Gives the current message's block, if it has no place yet, the place
+   * reserved for the same block of message `messageOrdinal`.
+   */
+  readonly inheritStreamItemPlace: (
+    turn: PiItemSink,
+    messageOrdinal: number,
+    contentIndex: number,
+  ) => void;
   readonly completeStreamItem: (
     turn: PiItemSink,
     item: PiStreamItemState,
@@ -50,6 +59,7 @@ export function makePrimeAgentStream(input: {
     lossyStream,
     streamItemFor,
     reserveStreamItem,
+    inheritStreamItemPlace,
     completeStreamItem,
     scheduleStreamFlush,
     emitCompletedStreamItem,
@@ -112,7 +122,8 @@ export function makePrimeAgentStream(input: {
    * message is matched by the timestamp identity `adoptMessageIdentity`
    * derives, never by its text, so an item that already shows the recorded
    * text is left alone. A stopped copy takes the identity of the reply it
-   * `replaced`.
+   * `replaced`, and a block that reply never showed keeps the place the copy
+   * arrived in.
    */
   const upsertRecordedMessage = Effect.fnUntraced(function* (
     turn: PiItemSink,
@@ -121,12 +132,14 @@ export function makePrimeAgentStream(input: {
   ) {
     const liveMessageOrdinal = turn.messageOrdinal;
     if (!adoptMessageIdentity(turn, message)) return;
+    const ownMessageOrdinal = turn.messageOrdinal;
     if (replaced !== undefined) turn.messageOrdinal = replaced;
     const content = recordField(message, "content");
     const blockCount = Array.isArray(content) ? content.length : 0;
     for (let contentIndex = 0; contentIndex < blockCount; contentIndex += 1) {
       const block = snapshotBlock(message, contentIndex);
       if (block === undefined) continue;
+      if (replaced !== undefined) inheritStreamItemPlace(turn, ownMessageOrdinal, contentIndex);
       const item = yield* streamItemFor(turn, block.kind, contentIndex);
       if (item.completed && item.text === block.text) continue;
       item.text = block.text;
@@ -137,32 +150,21 @@ export function makePrimeAgentStream(input: {
   });
 
   /**
-   * Shows a stopped copy that no history read placed. It finishes `replaced`
-   * when it holds every block T3 shows of it, as stock's copy of a cut reply
-   * does; otherwise it is a reply of its own. Returns whether it finished
-   * `replaced`.
+   * Whether `copy` holds every block T3 shows of the reply stamped
+   * `replaced`, as stock's copy of a cut reply does.
    */
-  const finishStoppedCopy = Effect.fnUntraced(function* (
-    turn: PiItemSink,
-    copy: unknown,
-    replaced: number | undefined,
-  ) {
-    const finishes =
-      replaced !== undefined &&
-      [...turn.streamItems.values()].every((item) => {
-        if (item.messageOrdinal !== replaced) return true;
-        const block = snapshotBlock(copy, item.contentIndex);
-        return block?.kind === item.kind && block.text.startsWith(item.text);
-      });
-    yield* upsertRecordedMessage(turn, copy, finishes ? replaced : undefined);
-    return finishes;
-  });
+  const holdsShownText = (turn: PiItemSink, copy: unknown, replaced: number) =>
+    [...turn.streamItems.values()].every((item) => {
+      if (item.messageOrdinal !== replaced) return true;
+      const block = snapshotBlock(copy, item.contentIndex);
+      return block?.kind === item.kind && block.text.startsWith(item.text);
+    });
 
   return {
     adoptMessageIdentity,
     adoptSnapshot,
     reserveMessage,
     upsertRecordedMessage,
-    finishStoppedCopy,
+    holdsShownText,
   };
 }

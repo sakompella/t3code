@@ -1123,8 +1123,11 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
           );
         });
 
-      const streamItemId = (turn: PiItemSink, contentIndex: number) =>
-        `${itemScope(turn).idPrefix}:m${turn.messageOrdinal}:c${contentIndex}`;
+      const streamItemId = (
+        turn: PiItemSink,
+        contentIndex: number,
+        messageOrdinal = turn.messageOrdinal,
+      ) => `${itemScope(turn).idPrefix}:m${messageOrdinal}:c${contentIndex}`;
 
       const streamItemFor = Effect.fnUntraced(function* (
         turn: PiItemSink,
@@ -1175,12 +1178,19 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
         adoptSnapshot,
         reserveMessage,
         upsertRecordedMessage,
-        finishStoppedCopy,
+        holdsShownText,
       } = makePrimeAgentStream({
         lossyStream: flavor.lossyStream,
         streamItemFor,
         reserveStreamItem: (turn, contentIndex) => {
           itemOrdinal(turn, streamItemId(turn, contentIndex));
+        },
+        inheritStreamItemPlace: (turn, messageOrdinal, contentIndex) => {
+          const reserved = turn.itemOrdinals.get(streamItemId(turn, contentIndex, messageOrdinal));
+          const nativeItemId = streamItemId(turn, contentIndex);
+          if (reserved !== undefined && !turn.itemOrdinals.has(nativeItemId)) {
+            turn.itemOrdinals.set(nativeItemId, reserved);
+          }
         },
         completeStreamItem,
         scheduleStreamFlush,
@@ -2258,7 +2268,7 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
         items: {
           observeCache: (turn, message) => noteCacheUsage(turn, message, "stored"),
           upsertAssistantMessage: upsertRecordedMessage,
-          finishStoppedCopy,
+          holdsShownText,
           startTool: (turn, toolCall) =>
             emitToolItem(
               turn,
@@ -3375,7 +3385,7 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
               seenMessageKeys: new Set(),
               shownMessageKeys: new Set(),
               heldCopies: new Map(),
-              streamedBeforeCompaction: 0,
+              removedReplies: new Set(),
               soughtEnds: new Set(),
               transcript: "streaming",
               settleReads: 0,
