@@ -4695,6 +4695,12 @@ describe("PiAdapterV2 with the Prime Agent flavor", () => {
           sessionDir: "/fake/.prime/agent/session-artifacts/s/sub-2",
         },
       });
+      const shell = yield* session.takeEvent(
+        (event) =>
+          event.type === "app_thread.created" &&
+          event.appThread.forkedFrom?.type === "node" &&
+          event.appThread.forkedFrom.nodeId !== parent?.id,
+      );
       const nested = yield* session.takeEvent(
         (event) => event.type === "subagent.updated" && event.subagent.title === "gamma",
       );
@@ -4702,6 +4708,13 @@ describe("PiAdapterV2 with the Prime Agent flavor", () => {
         nested.type === "subagent.updated" &&
           nested.subagent.parentNodeId === parent?.id &&
           nested.subagent.runId === parent.runId,
+      );
+      // No turn is live, so routing learns the child's run from its thread.
+      assert.isTrue(
+        shell.type === "app_thread.created" &&
+          nested.type === "subagent.updated" &&
+          shell.appThread.id === nested.subagent.childThreadId &&
+          shell.launchingRunId === nested.subagent.runId,
       );
     }).pipe(Effect.scoped, Effect.provide(layerTest)),
   );
