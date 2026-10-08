@@ -8,8 +8,10 @@ import {
   OrchestrationV2ProviderSession,
   type OrchestrationV2ProviderThread,
   OrchestrationV2RuntimeRequest,
+  type ProjectId,
   ProviderInstanceId,
   ProviderSessionId,
+  type ResponseStreamingMode,
   ThreadId,
   type ProviderThreadId,
 } from "@t3tools/contracts";
@@ -45,6 +47,7 @@ import * as ProjectService from "../project/ProjectService.ts";
 import * as McpProviderSessions from "@t3tools/provider-core/server/McpProviderSessions";
 import * as ServerSettings from "../serverSettings.ts";
 import * as McpSessionRegistry from "../mcp/McpSessionRegistry.ts";
+import { makeAssistantStreamingFilter } from "./assistantStreaming.ts";
 import * as EventSink from "./EventSink.ts";
 import * as CommandOutputHub from "./CommandOutputHub.ts";
 import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
@@ -263,6 +266,22 @@ function sessionScopedRuntimeRequestThreadId(
         (event.turnItem.type === "approval_request" || event.turnItem.type === "user_input_request")
         ? event.turnItem.threadId
         : undefined;
+    default:
+      return undefined;
+  }
+}
+
+/** The thread of a runless event; an event that names a run stays with that run. */
+function runlessEventThreadId(event: ProviderAdapterV2Event): ThreadId | undefined {
+  switch (event.type) {
+    case "node.updated":
+      return event.node.runId === null ? event.node.threadId : undefined;
+    case "message.updated":
+      return event.message.runId === null ? event.message.threadId : undefined;
+    case "turn_item.updated":
+      return event.turnItem.runId === null ? event.turnItem.threadId : undefined;
+    case "plan.updated":
+      return event.plan.runId === null ? event.plan.threadId : undefined;
     default:
       return undefined;
   }
@@ -1909,8 +1928,106 @@ export const layerWithOptions = (
           ),
         );
 
+      // The settings default, for compositions without a settings service.
+      const responseStreamingMode = (projectId: ProjectId) =>
+        Option.isNone(serverSettings)
+          ? Effect.succeed<ResponseStreamingMode>("paragraph")
+          : serverSettings.value.getSettings.pipe(
+              Effect.map(
+                (settings) =>
+                  resolveProjectSettings(settings, projectId).settings.responseStreamingMode,
+              ),
+              Effect.orElseSucceed((): ResponseStreamingMode => "paragraph"),
+            );
+
+      /**
+       * Stores one event of a session-scoped child thread. A failed write is
+       * retried briefly, then logged and dropped: a child transcript must not
+       * end its parent's session. The release permit covers the live check,
+       * the write and its retries, so a released session's pump never writes
+       * after release removed it, over what its replacement stored.
+       */
+      const storeSessionChildThreadEvent = (
+        entry: LiveSessionEntry,
+        threadId: ThreadId,
+        event: ProviderAdapterV2Event,
+      ) =>
+        Effect.gen(function* () {
+          const current = (yield* Ref.get(sessions)).get(
+            sessionKey(entry.runtime.providerSessionId),
+          );
+          if (current?.runtime !== entry.runtime) return;
+          yield* providerEventIngestor
+            .ingestNormalized({
+              providerSessionId: entry.runtime.providerSessionId,
+              providerInstanceId: entry.runtime.instanceId,
+              threadId,
+              event,
+            })
+            .pipe(
+              // A failed SQL commit surfaces as a defect.
+              Effect.catchDefect((defect) =>
+                Effect.fail(
+                  new ProviderEventIngestor.ProviderEventPublishError({
+                    providerSessionId: entry.runtime.providerSessionId,
+                    eventCount: 1,
+                    cause: defect,
+                  }),
+                ),
+              ),
+              // A malformed event fails the same way every time.
+              Effect.retry({
+                schedule: Schedule.exponential("20 millis"),
+                times: 3,
+                while: (error) => error._tag === "ProviderEventPublishError",
+              }),
+              Effect.catchCause((cause) =>
+                Cause.hasInterruptsOnly(cause)
+                  ? Effect.interrupt
+                  : Effect.logError("orchestration-v2.session-child-thread.store-failed", {
+                      providerSessionId: entry.runtime.providerSessionId,
+                      threadId,
+                      eventType: event.type,
+                      error: String(Cause.squash(cause)),
+                    }),
+              ),
+            );
+        }).pipe(entry.requestEventPermit.withPermits(1));
+
       const startEventPump = (entry: LiveSessionEntry) => {
         let stoppedByProvider = false;
+        // A runtime with session-scoped child threads (Prime Agent) has them
+        // stored here instead of by its runs. Runs come and go and read at
+        // their own pace, so no rule a run applies alone can give such a
+        // thread exactly one writer. This pump is the adapter stream's only
+        // reader, so it can. Each thread keeps the streaming filter a run
+        // would apply to its replies.
+        const sessionChildThreads = new Map<
+          ThreadId,
+          ReturnType<typeof makeAssistantStreamingFilter>
+        >();
+        const sessionChildThreadOf = (event: ProviderAdapterV2Event) =>
+          Effect.gen(function* () {
+            if (entry.runtime.childThreadScope !== "session") return undefined;
+            if (
+              event.type === "app_thread.created" &&
+              event.appThread.lineage.relationshipToParent === "subagent"
+            ) {
+              const threadId = event.appThread.id;
+              const filter =
+                sessionChildThreads.get(threadId) ??
+                makeAssistantStreamingFilter(
+                  yield* responseStreamingMode(event.appThread.projectId),
+                );
+              sessionChildThreads.set(threadId, filter);
+              return { threadId, filter };
+            }
+            const threadId = runlessEventThreadId(event);
+            const filter = threadId === undefined ? undefined : sessionChildThreads.get(threadId);
+            return threadId === undefined || filter === undefined
+              ? undefined
+              : { threadId, filter };
+          });
         return entry.runtime.events.pipe(
           Stream.runForEach((event) => {
             if (shutdownSignal.received) return Effect.void;
@@ -1952,6 +2069,17 @@ export const layerWithOptions = (
               ),
               Effect.andThen(
                 Effect.gen(function* () {
+                  const childThread = yield* sessionChildThreadOf(event);
+                  if (childThread !== undefined) {
+                    const delivered = childThread.filter(
+                      event,
+                      DateTime.toEpochMillis(yield* DateTime.now),
+                    );
+                    if (delivered !== null) {
+                      yield* storeSessionChildThreadEvent(entry, childThread.threadId, delivered);
+                    }
+                    return;
+                  }
                   // Some providers can block before a run subscriber exists
                   // (project trust, login, or session-switch hooks). Persist
                   // their runless request artifacts directly so the normal T3
