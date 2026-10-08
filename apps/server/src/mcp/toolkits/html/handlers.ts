@@ -49,17 +49,12 @@ const needsOwnTimelineItem = (providerInstanceId: ProviderInstanceId) =>
 /**
  * Records a page as its own `html_render` item in the run. A record that
  * committed but lost its reply still owns the page, so the stored item decides.
+ * When that can't be read either, the page's owner is unknown and it stays.
  */
 const recordPage =
   (threads: Caller["threads"], threadId: ThreadId, runId: RunId) =>
-  (published: HtmlRenderReference) => {
-    const stored = threads
-      .getTurnItem({ threadId, itemId: htmlRenderTurnItemId(published.attachmentId) })
-      .pipe(
-        Effect.map(({ item }) => item !== null),
-        Effect.orElseSucceed(() => false),
-      );
-    return threads
+  (published: HtmlRenderReference) =>
+    threads
       .dispatch({
         type: "html_render.record",
         commandId: CommandId.make(`mcp:html-render:${published.attachmentId}`),
@@ -70,12 +65,16 @@ const recordPage =
       .pipe(
         Effect.asVoid,
         Effect.catch((error) =>
-          stored.pipe(
-            Effect.flatMap((kept) => (kept ? Effect.void : Effect.fail(dispatchFailure(error)))),
-          ),
+          threads
+            .getTurnItem({ threadId, itemId: htmlRenderTurnItemId(published.attachmentId) })
+            .pipe(
+              Effect.mapError((cause) => new HtmlRender.HtmlRenderOwnershipUnknownError({ cause })),
+              Effect.flatMap(({ item }) =>
+                item === null ? Effect.fail(dispatchFailure(error)) : Effect.void,
+              ),
+            ),
         ),
       );
-  };
 
 const handlers = {
   // The headless browser runs on the host and can open local files, so only
