@@ -26,8 +26,8 @@ const MAX_SETTLE_READS = 3;
 const STATE_READ_TIMEOUT_MS = 2_000;
 /** A long session's history is large, and the agent is idle while it is read. */
 const HISTORY_READ_TIMEOUT_MS = 10_000;
-/** Stop waits on this read, so it gives up sooner. */
-const ENDING_HISTORY_READ_TIMEOUT_MS = 2_000;
+/** Stop waits on this read, and a mid-run repair holds the event stream for it, so it gives up sooner. */
+const SHORT_HISTORY_READ_TIMEOUT_MS = 2_000;
 
 /**
  * The identity of a stored message, as Prime Agent itself keys kept messages
@@ -43,6 +43,11 @@ export function transcriptMessageKey(message: unknown): string | undefined {
     timestamp,
     recordString(message, "toolCallId") ?? recordString(message, "customType") ?? null,
   ]);
+}
+
+function isReplyKey(key: string): boolean {
+  const [role]: ReadonlyArray<unknown> = JSON.parse(key);
+  return role === "assistant";
 }
 
 /** The message a session event is about, for the events that carry one. */
@@ -130,7 +135,8 @@ function toolCallIdsOf(messages: ReadonlyArray<unknown>): Array<string> {
  * idempotent: a message is projected into the turn that stored it, then
  * accounted for, and later reads or late live events for it change nothing.
  *
- * It runs when a turn settles, when Stop ends one, and on a backed-off quiet
+ * It runs when a turn settles, when Stop ends one, as soon as a running
+ * turn's stream skips past a reply's or tool's end, and on a backed-off quiet
  * check while an idle session has background work, which is where wakes are
  * lost whole. What the history cannot show stays unknown: a child's outcome
  * comes only from the notice Prime Agent stores for its parent.
@@ -313,6 +319,68 @@ export function makePrimeAgentReconciler<E>(input: {
       outcome,
     }).pipe(Effect.withSpan("PrimeAgentReconciler.reconcile"));
 
+  /** Replies the turn showed in part whose message_end has not arrived. */
+  const unendedReplyKeys = (turn: ActivePiTurn) =>
+    [...turn.seenMessageKeys].filter((key) => !turn.shownMessageKeys.has(key) && isReplyKey(key));
+
+  /**
+   * Whether `event` shows the stream moved past an end it never delivered.
+   * Prime Agent ends a reply before it runs the reply's tools or ends the
+   * turn, and runs every tool to its end before the next reply.
+   */
+  const passesLostEnd = (turn: ActivePiTurn, event: PiRpcRecord) => {
+    const message = eventMessage(event);
+    const key = transcriptMessageKey(message);
+    const startsReply =
+      recordString(message, "role") === "assistant" &&
+      key !== undefined &&
+      !turn.seenMessageKeys.has(key);
+    const type = event["type"];
+    const endsWork =
+      startsReply || type === "tool_execution_start" || type === "turn_end" || type === "agent_end";
+    if (!endsWork) return false;
+    return (
+      unendedReplyKeys(turn).length > 0 ||
+      (type !== "tool_execution_start" && turn.openTools.size > 0)
+    );
+  };
+
+  /** Projects the stored versions of the replies and tools a gap in the turn's stream left without an end. */
+  const repairGap = Effect.fnUntraced(function* (turn: ActivePiTurn) {
+    const messages = yield* readHistory(request, SHORT_HISTORY_READ_TIMEOUT_MS);
+    if (messages === undefined) return yield* logOutcome(turn, "gap-unreadable");
+    const unended = new Set(unendedReplyKeys(turn));
+    const lost = messages.filter((message) => {
+      switch (recordString(message, "role")) {
+        case "assistant":
+          return unended.has(transcriptMessageKey(message) ?? "");
+        case "toolResult":
+          return turn.openTools.has(recordString(message, "toolCallId") ?? "");
+        default:
+          return false;
+      }
+    });
+    yield* project(turn, lost);
+    for (const message of lost) {
+      const key = transcriptMessageKey(message);
+      if (key !== undefined) turn.shownMessageKeys.add(key);
+    }
+    yield* logOutcome(turn, lost.length > 0 ? "gap-repaired" : "gap-not-stored");
+  });
+
+  /**
+   * Repairs what a gap in a running turn's stream lost, before the event
+   * that proves it is applied: replies cut off before their message_end,
+   * and tools whose end never came. Their stored versions replace them, so
+   * a cut reply never shows as final and keeps its place before what
+   * followed it. A failed read leaves them open for the next proof or the
+   * settle read. Nothing is committed; the settle read still runs.
+   */
+  const repairLostEnds = (turn: ActivePiTurn, event: PiRpcRecord) =>
+    enabled && ledger !== null && turn.transcript === "streaming" && passesLostEnd(turn, event)
+      ? repairGap(turn)
+      : Effect.void;
+
   /**
    * Reconciles a turn whose settle probe found the agent idle. Returns
    * whether the turn may settle now; otherwise the caller probes again.
@@ -347,7 +415,7 @@ export function makePrimeAgentReconciler<E>(input: {
   const reconcileEndingTurn = Effect.fnUntraced(function* (turn: ActivePiTurn) {
     if (!enabled || turn.transcript !== "streaming" || ledger === null) return;
     turn.transcript = "unreconciled";
-    const messages = yield* readHistory(request, ENDING_HISTORY_READ_TIMEOUT_MS);
+    const messages = yield* readHistory(request, SHORT_HISTORY_READ_TIMEOUT_MS);
     if (messages === undefined) return yield* logOutcome(turn, "unreadable");
     yield* project(turn, messages);
     commit(messages);
@@ -443,6 +511,7 @@ export function makePrimeAgentReconciler<E>(input: {
     baseline,
     isLate,
     noteSeen,
+    repairLostEnds,
     reconcileSettlingTurn,
     reconcileEndingTurn,
     closeTurn,
