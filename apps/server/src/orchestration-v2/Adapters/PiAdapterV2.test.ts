@@ -4046,7 +4046,7 @@ describe("PiAdapterV2 with the Prime Agent flavor", () => {
       });
       fake.setTranscript([
         storedPrompt(900),
-        { ...assistantSnapshot(3000, "Reply full"), stopReason: "aborted" },
+        { ...assistantSnapshot(3000, "Reply cut, then full"), stopReason: "aborted" },
         {
           role: "custom",
           customType: "agent-message",
@@ -4062,7 +4062,7 @@ describe("PiAdapterV2 with the Prime Agent flavor", () => {
       });
       yield* fake.closeStdout;
 
-      assert.deepEqual(yield* takeFinalReplyTexts(takeEvent), ["Reply full"]);
+      assert.deepEqual(yield* takeFinalReplyTexts(takeEvent), ["Reply cut, then full"]);
     }).pipe(Effect.scoped, Effect.provide(layerTest)),
   );
 
