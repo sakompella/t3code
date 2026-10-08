@@ -75,17 +75,19 @@ function isAbortedReply(message: unknown): boolean {
 }
 
 /**
- * Which stored aborted copy replaced which reply a turn streamed, by their
- * places in the history. Stock ends a reply Stop cut off with a copy stamped
- * at abort time and announced by no message_start of its own, and the copy
- * takes the streamed partial's slot in the history (agent-loop.js
- * `finishAbortedMessage`). So a streamed reply with no end that the history
- * no longer holds was replaced by an aborted reply the turn never streamed,
- * stored after everything the turn saw before that reply. Matching runs
- * from the latest reply back, so an earlier turn's unaccounted copy, stored
- * before the latest one, stays a reply of its own. Replies streamed before a
- * compaction are left out: the compaction may have removed them instead.
- * Returns each copy's key with the timestamp of the reply it replaced.
+ * Which stored aborted copy replaced which reply a turn streamed. Stock ends
+ * a reply Stop cut off with a copy of what it streamed, stamped at abort time
+ * and announced by no message_start of its own (agent-loop.js
+ * `finishAbortedMessage`), and stores the copy where the reply would have
+ * been. A reply the turn streamed with no end, that the history does not
+ * hold, and that no compaction or retry may have dropped, can only have been
+ * replaced by an aborted reply the turn never streamed, stored after what
+ * the turn saw before that reply and before what it saw after it, and
+ * holding all the text the turn showed of it. Several such copies make the
+ * match ambiguous, so the reply keeps none, unless the turn saw nothing
+ * stored after the reply: then the latest copy wins, because the abort ends
+ * the run the turn was streaming. Returns each copy's key with the timestamp
+ * of the reply it replaced.
  */
 export function matchStoppedCopies(input: {
   readonly history: ReadonlyArray<unknown>;
@@ -93,10 +95,12 @@ export function matchStoppedCopies(input: {
   readonly streamed: ReadonlyArray<string>;
   /** The streamed replies T3 does not show in full. */
   readonly unended: ReadonlySet<string>;
-  /** How many of `streamed` arrived before the turn's last compaction. */
-  readonly streamedBeforeCompaction: number;
+  /** Unended replies a compaction or a retry may have dropped from the history. */
+  readonly removed: ReadonlySet<string>;
   /** Stored messages an earlier read or turn already placed. */
   readonly accounted: ReadonlySet<string>;
+  /** Whether `copy` holds all the text T3 shows of the reply `replyKey`. */
+  readonly holdsShown: (copy: unknown, replyKey: string) => boolean;
 }): ReadonlyMap<string, number> {
   const keys = input.history.map(transcriptMessageKey);
   const position = new Map<string, number>();
@@ -110,28 +114,25 @@ export function matchStoppedCopies(input: {
       ? [{ key, index }]
       : [],
   );
-  const replaced: Array<{ readonly key: string; readonly storedAfter: number }> = [];
-  let lastStored = -1;
-  input.streamed.forEach((key, index) => {
-    const stored = position.get(key);
-    if (stored !== undefined) {
-      lastStored = Math.max(lastStored, stored);
-    } else if (
-      index >= input.streamedBeforeCompaction &&
-      input.unended.has(key) &&
-      isReplyKey(key)
-    ) {
-      replaced.push({ key, storedAfter: lastStored });
-    }
-  });
+  const storedPositions = (streamedKeys: ReadonlyArray<string>) =>
+    streamedKeys.flatMap((key) => position.get(key) ?? []);
   const matches = new Map<string, number>();
-  let storedBefore = input.history.length;
-  for (const { key, storedAfter } of replaced.toReversed()) {
-    const copy = copies.findLast(({ index }) => index > storedAfter && index < storedBefore);
-    if (copy === undefined) continue;
-    matches.set(copy.key, keyTimestamp(key));
-    storedBefore = copy.index;
-  }
+  input.streamed.forEach((key, index) => {
+    if (position.has(key) || !input.unended.has(key) || input.removed.has(key)) return;
+    if (!isReplyKey(key)) return;
+    const storedAfter = Math.max(-1, ...storedPositions(input.streamed.slice(0, index)));
+    const storedNext = storedPositions(input.streamed.slice(index + 1));
+    const storedBefore = storedNext.length === 0 ? keys.length : Math.min(...storedNext);
+    const fits = copies.filter(
+      (copy) =>
+        copy.index > storedAfter &&
+        copy.index < storedBefore &&
+        !matches.has(copy.key) &&
+        input.holdsShown(input.history[copy.index], key),
+    );
+    const copy = storedNext.length === 0 ? fits.at(-1) : fits.length === 1 ? fits[0] : undefined;
+    if (copy !== undefined) matches.set(copy.key, keyTimestamp(key));
+  });
   return matches;
 }
 
@@ -238,15 +239,8 @@ export function makePrimeAgentReconciler<E>(input: {
       /** The timestamp of the reply a stopped copy replaced, whose items it takes. */
       replaced?: number,
     ) => Effect.Effect<void, E>;
-    /**
-     * Shows a stopped copy no read placed: on `replaced`'s items if it holds
-     * all their text, else on its own. Returns whether it finished `replaced`.
-     */
-    readonly finishStoppedCopy: (
-      turn: ActivePiTurn,
-      copy: unknown,
-      replaced: number | undefined,
-    ) => Effect.Effect<boolean, E>;
+    /** Whether `copy` holds all the text T3 shows of the reply stamped `replaced`. */
+    readonly holdsShownText: (turn: ActivePiTurn, copy: unknown, replaced: number) => boolean;
     readonly startTool: (turn: ActivePiTurn, toolCall: unknown) => Effect.Effect<void, E>;
     readonly endTool: (turn: ActivePiTurn, toolResult: unknown) => Effect.Effect<void, E>;
     /** Handles a stored message other than a reply as if its `message_start` had arrived. */
@@ -351,7 +345,10 @@ export function makePrimeAgentReconciler<E>(input: {
    */
   const noteSeen = (turn: ActivePiTurn, event: PiRpcRecord) => {
     const type = event["type"];
-    if (type === "compaction_start") turn.streamedBeforeCompaction = turn.seenMessageKeys.size;
+    // Compaction and retry drop messages from the history without a copy.
+    if (type === "compaction_start" || type === "auto_retry_start") {
+      for (const end of unendedReplyKeys(turn)) turn.removedReplies.add(end);
+    }
     const message = eventMessage(event);
     const key = transcriptMessageKey(message);
     if (key === undefined) return;
@@ -451,8 +448,9 @@ export function makePrimeAgentReconciler<E>(input: {
         history: messages,
         streamed: [...turn.seenMessageKeys],
         unended: new Set(unendedReplyKeys(turn)),
-        streamedBeforeCompaction: turn.streamedBeforeCompaction,
+        removed: turn.removedReplies,
         accounted: ledger.keys,
+        holdsShown: (copy, replyKey) => items.holdsShownText(turn, copy, keyTimestamp(replyKey)),
       }),
     );
     for (const message of messages) turn.heldCopies.delete(transcriptMessageKey(message) ?? "");
@@ -466,15 +464,18 @@ export function makePrimeAgentReconciler<E>(input: {
    * later read still projects it if the history holds it under its own key.
    */
   const placeHeldCopies = Effect.fnUntraced(function* (turn: ActivePiTurn) {
-    const open = unendedReplyKeys(turn);
+    const open = unendedReplyKeys(turn).filter((key) => !turn.removedReplies.has(key));
     for (const [key, copy] of turn.heldCopies) {
       const latest = open.at(-1);
-      const finished = yield* items.finishStoppedCopy(
+      const replaced =
+        latest !== undefined && items.holdsShownText(turn, copy, keyTimestamp(latest))
+          ? open.pop()
+          : undefined;
+      yield* items.upsertAssistantMessage(
         turn,
         copy,
-        latest === undefined ? undefined : keyTimestamp(latest),
+        replaced === undefined ? undefined : keyTimestamp(replaced),
       );
-      if (finished) open.pop();
       turn.seenMessageKeys.add(key);
       turn.shownMessageKeys.add(key);
     }
