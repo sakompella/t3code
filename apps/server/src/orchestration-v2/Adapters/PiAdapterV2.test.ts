@@ -3823,6 +3823,47 @@ describe("PiAdapterV2 with the Prime Agent flavor", () => {
     }).pipe(Effect.scoped, Effect.provide(layerTest)),
   );
 
+  // Stop reads the history before any of the later reply's events arrive, so
+  // the stream is still in the earlier reply, which the history holds whole.
+  it.effect("keeps an earlier cut reply when Stop restarts Prime Agent during a later reply", () =>
+    Effect.gen(function* () {
+      const fake = yield* makeFakePi;
+      const { runtime, takeEvent, providerThread } = yield* openPrimeThread(fake);
+      yield* startTurn(runtime, providerThread);
+      yield* fake.takeRequest("prompt");
+      const turnId = yield* takeRunningTurnId(takeEvent);
+      if (turnId === undefined) return;
+      yield* fake.emit({ type: "agent_start" });
+      yield* fake.emit({ type: "message_start", message: assistantSnapshot(1000, "") });
+      yield* fake.emit({
+        type: "message_update",
+        message: assistantSnapshot(1000, "I'll check"),
+        assistantMessageEvent: { type: "text_delta", contentIndex: 0, delta: "I'll check" },
+      });
+      fake.setTranscript([
+        storedPrompt(900),
+        {
+          ...assistantSnapshot(1000, "I'll check the first config."),
+          stopReason: "toolUse",
+          content: [{ type: "text", text: "I'll check the first config." }, removalToolCall],
+        },
+        storedRemovalResult,
+        { ...assistantSnapshot(5000, "I'll check the other config."), stopReason: "aborted" },
+      ]);
+      yield* runtime.interruptTurn({
+        providerThread,
+        providerTurnId: turnId,
+        requestRuntimeRestart: true,
+      });
+      yield* fake.closeStdout;
+
+      assert.deepEqual(yield* takeFinalReplyTexts(takeEvent), [
+        "I'll check the first config.",
+        "I'll check the other config.",
+      ]);
+    }).pipe(Effect.scoped, Effect.provide(layerTest)),
+  );
+
   // The wall clock moved back between the turns, so the first turn's copy is
   // stamped after the reply the second turn was streaming.
   it.effect(
