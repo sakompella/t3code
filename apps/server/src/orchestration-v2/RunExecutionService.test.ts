@@ -751,74 +751,72 @@ describe("a late subagent shell across a session's subscribers", () => {
     };
   });
 
-  for (const shape of nodeFirstShapes) {
-    it.effect(
-      `${shape.adapter}: one run adopts a shell when a run subscribes between its node and its shell`,
-      () =>
-        Effect.scoped(
-          Effect.gen(function* () {
-            const session = yield* sharedSessionScenario;
-            yield* session.start(launching);
-            // Another child keeps the launching run ingesting after its root turn.
-            yield* session.publish([
-              {
-                type: "subagent.updated",
-                driver,
-                subagent: {
-                  id: NodeId.make("node:shell-owner:other-child"),
-                  threadId,
-                  runId: launching.runId,
-                  status: "running",
-                },
-              } as ProviderAdapterV2Event,
-              rootTerminal(launching),
-              ...shape.beforeShell,
-            ]);
-            yield* session.start(live);
-            const childEvents = [childShell, ...shape.afterShell].filter(touchesChildThread);
-            yield* session.publish([
-              childShell,
-              ...shape.afterShell,
-              drainMarker(launching),
-              drainMarker(live),
-            ]);
-            yield* session.awaitDrained(launching);
-            yield* session.awaitDrained(live);
-            const owners = yield* session.childEventOwners;
-            assert.strictEqual(owners.length, childEvents.length);
-            assert.strictEqual(new Set(owners).size, 1);
-            yield* session.endAll;
-          }),
-        ),
-    );
+  it.effect.each(nodeFirstShapes)(
+    "$adapter: one run adopts a shell when a run subscribes between its node and its shell",
+    (shape) =>
+      Effect.scoped(
+        Effect.gen(function* () {
+          const session = yield* sharedSessionScenario;
+          yield* session.start(launching);
+          // Another child keeps the launching run ingesting after its root turn.
+          yield* session.publish([
+            {
+              type: "subagent.updated",
+              driver,
+              subagent: {
+                id: NodeId.make("node:shell-owner:other-child"),
+                threadId,
+                runId: launching.runId,
+                status: "running",
+              },
+            } as ProviderAdapterV2Event,
+            rootTerminal(launching),
+            ...shape.beforeShell,
+          ]);
+          yield* session.start(live);
+          const childEvents = [childShell, ...shape.afterShell].filter(touchesChildThread);
+          yield* session.publish([
+            childShell,
+            ...shape.afterShell,
+            drainMarker(launching),
+            drainMarker(live),
+          ]);
+          yield* session.awaitDrained(launching);
+          yield* session.awaitDrained(live);
+          const owners = yield* session.childEventOwners;
+          assert.strictEqual(owners.length, childEvents.length);
+          assert.strictEqual(new Set(owners).size, 1);
+          yield* session.endAll;
+        }),
+      ),
+  );
 
-    it.effect(
-      `${shape.adapter}: the live run adopts a shell whose launching run stopped listening`,
-      () =>
-        Effect.scoped(
-          Effect.gen(function* () {
-            const session = yield* sharedSessionScenario;
-            yield* session.start(launching);
-            yield* session.publish([rootTerminal(launching)]);
-            yield* session.awaitClosed(launching);
-            yield* session.start(live);
-            const childEvents = [childShell, ...shape.afterShell].filter(touchesChildThread);
-            yield* session.publish([
-              ...shape.beforeShell,
-              childShell,
-              ...shape.afterShell,
-              drainMarker(live),
-            ]);
-            yield* session.awaitDrained(live);
-            assert.deepEqual(
-              yield* session.childEventOwners,
-              childEvents.map(() => live.runId),
-            );
-            yield* session.endAll;
-          }),
-        ),
-    );
-  }
+  it.effect.each(nodeFirstShapes)(
+    "$adapter: the live run adopts a shell whose launching run stopped listening",
+    (shape) =>
+      Effect.scoped(
+        Effect.gen(function* () {
+          const session = yield* sharedSessionScenario;
+          yield* session.start(launching);
+          yield* session.publish([rootTerminal(launching)]);
+          yield* session.awaitClosed(launching);
+          yield* session.start(live);
+          const childEvents = [childShell, ...shape.afterShell].filter(touchesChildThread);
+          yield* session.publish([
+            ...shape.beforeShell,
+            childShell,
+            ...shape.afterShell,
+            drainMarker(live),
+          ]);
+          yield* session.awaitDrained(live);
+          assert.deepEqual(
+            yield* session.childEventOwners,
+            childEvents.map(() => live.runId),
+          );
+          yield* session.endAll;
+        }),
+      ),
+  );
 });
 
 it("does not route a superseded attempt through a reused provider thread", () => {
