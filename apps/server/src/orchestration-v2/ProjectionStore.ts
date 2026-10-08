@@ -55,6 +55,8 @@ import {
   OrchestrationV2ProviderTurnJson as OrchestrationV2ProviderTurnJsonSchema,
   OrchestrationV2RunAttemptJson as OrchestrationV2RunAttemptJsonSchema,
   OrchestrationV2RunJson as OrchestrationV2RunJsonSchema,
+  OrchestrationV2RunStatus as OrchestrationV2RunStatusSchema,
+  RunAttemptId as RunAttemptIdSchema,
   OrchestrationV2RuntimeRequestJson as OrchestrationV2RuntimeRequestJsonSchema,
   OrchestrationV2SubagentJson as OrchestrationV2SubagentJsonSchema,
   OrchestrationV2TurnItemJson as OrchestrationV2TurnItemJsonSchema,
@@ -277,6 +279,8 @@ export type ProjectionRuntimeRecoveryState = Pick<
   | "turnItems"
 >;
 
+export type ProjectionRunState = Pick<OrchestrationV2Run, "status" | "activeAttemptId">;
+
 export type ProjectionPendingUserInputs = Pick<
   OrchestrationV2ThreadProjection,
   "runtimeRequests" | "nodes" | "turnItems"
@@ -464,6 +468,11 @@ export interface ProjectionStoreV2Shape {
   readonly getRuntimeRecoveryProjection: (
     threadId: ThreadId,
   ) => Effect.Effect<ProjectionRuntimeRecoveryState, ProjectionStoreV2Error>;
+  /** One run's status and attempt, or undefined when the thread has no such run. */
+  readonly getRunState: (
+    threadId: ThreadId,
+    runId: RunId,
+  ) => Effect.Effect<ProjectionRunState | undefined, ProjectionStoreV2Error>;
   readonly getPendingNativeUserInputs: (
     threadId: ThreadId,
     providerTurnId: ProviderTurnId,
@@ -1136,6 +1145,19 @@ const decodeThreadPayload = Schema.decodeUnknownEffect(
 const decodeRunPayload = Schema.decodeUnknownEffect(
   Schema.fromJsonString(OrchestrationV2RunJsonSchema),
 );
+const decodeRunStateColumns = Schema.decodeUnknownEffect(
+  Schema.Struct({
+    status: OrchestrationV2RunStatusSchema,
+    active_attempt_id: Schema.NullOr(RunAttemptIdSchema),
+  }),
+);
+const decodeRunStateRow = (row: unknown) =>
+  decodeRunStateColumns(row).pipe(
+    Effect.map((decoded): ProjectionRunState => ({
+      status: decoded.status,
+      activeAttemptId: decoded.active_attempt_id,
+    })),
+  );
 const decodeRunAttemptPayload = Schema.decodeUnknownEffect(
   Schema.fromJsonString(OrchestrationV2RunAttemptJsonSchema),
 );
@@ -4850,6 +4872,24 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
         )
         .pipe(Effect.mapError(controlReadError(threadId)));
 
+    const getRunState: ProjectionStoreV2Shape["getRunState"] = (threadId, runId) =>
+      sql
+        .withTransaction(
+          Effect.gen(function* () {
+            yield* requireThread(threadId);
+            const rows = yield* sql<{
+              readonly status: string;
+              readonly active_attempt_id: string | null;
+            }>`
+          SELECT status, json_extract(payload_json, '$.activeAttemptId') AS active_attempt_id
+          FROM orchestration_v2_projection_runs
+          WHERE run_id = ${runId} AND thread_id = ${threadId}
+          LIMIT 1`;
+            return rows[0] === undefined ? undefined : yield* decodeRunStateRow(rows[0]);
+          }),
+        )
+        .pipe(Effect.mapError(controlReadError(threadId)));
+
     const canStartQueuedRun: ProjectionStoreV2Shape["canStartQueuedRun"] = (threadId) =>
       sql
         .withTransaction(
@@ -6219,6 +6259,7 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
       getCheckpointContext,
       getCheckpointCaptureContext,
       getRunMessage,
+      getRunState,
       canStartQueuedRun,
       getPendingNativeUserInputs,
       hasUnpairedRunInterruptRequest,
@@ -6831,6 +6872,15 @@ export const layerMemory: Layer.Layer<ProjectionStoreV2> = Layer.effect(
             ),
           ),
       getRuntimeRecoveryProjection: (threadId) => service.getThreadProjection(threadId),
+      getRunState: (threadId, runId) =>
+        service.getThreadProjection(threadId).pipe(
+          Effect.map((projection) => {
+            const run = projection.runs.find((candidate) => candidate.id === runId);
+            return run === undefined
+              ? undefined
+              : { status: run.status, activeAttemptId: run.activeAttemptId };
+          }),
+        ),
       getThreadSnapshot: (threadId) =>
         service.getThreadProjection(threadId).pipe(
           Effect.flatMap((projection) =>
