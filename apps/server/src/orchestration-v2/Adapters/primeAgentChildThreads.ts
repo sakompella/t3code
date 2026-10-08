@@ -3,7 +3,6 @@ import type {
   ProviderDriverKind,
   ProviderInstanceId,
   ProviderThreadId,
-  RunId,
   ThreadId,
   OrchestrationV2ExecutionNode,
 } from "@t3tools/contracts";
@@ -193,7 +192,6 @@ export function makePrimeAgentChildThreads(input: {
   const observedTranscripts = new Map<string, PiChildTranscript>();
   const openChildTranscript = Effect.fnUntraced(function* (input: {
     readonly turn: ActivePiTurn;
-    readonly launchingRunId: RunId | undefined;
     readonly childId: string;
     readonly subagentId: NodeId;
     readonly snapshot: unknown;
@@ -239,9 +237,6 @@ export function makePrimeAgentChildThreads(input: {
     yield* emit({
       type: "app_thread.created",
       driver,
-      // A child can start after its run's root turn ended, so routing cannot
-      // infer its run from the live turn.
-      ...(input.launchingRunId === undefined ? {} : { launchingRunId: input.launchingRunId }),
       appThread: makeSubagentChildThread({
         parentThread: turnInput.appThread,
         childThreadId,
@@ -620,19 +615,15 @@ export function makePrimeAgentChildThreads(input: {
     // child's id. Their first update can arrive after the root turn settled.
     const parentChildId = recordString(snapshot, "parentId");
     const parentChild = parentChildId === undefined ? undefined : rlmChildren.get(parentChildId);
-    // RunExecutionService keeps a run listening while its root turn is live,
-    // and after a completed root turn while any subagent of that run is still
-    // running. A failed or interrupted root turn ends its listener at once.
-    // Prime Agent does not stop children for a failed turn, so they can
-    // outlive their run's listener.
-    const runListens = (candidate: ActivePiTurn) =>
-      candidate === currentTurn || (!candidate.interrupted && candidate.failure === null);
     // A child outlives the run that spawned it; its card stays on that run.
-    // A nested child goes to its parent child's run only while that parent is
-    // still on its task and the run still listens. Otherwise it goes to the
-    // live run, as a resumed Claude task does.
+    // A nested child's card goes to its parent child's run while the parent is
+    // still on its task and that run's turn did not fail or get interrupted
+    // (either ends the run's listener at once). Otherwise it goes to the live
+    // turn, as a resumed Claude task does, so the card has a run to land on.
+    const parentRunEnded = (candidate: ActivePiTurn) =>
+      candidate !== currentTurn && (candidate.interrupted || candidate.failure !== null);
     const launchingTurn =
-      parentChild !== undefined && !parentChild.terminal && runListens(parentChild.turn)
+      parentChild !== undefined && !parentChild.terminal && !parentRunEnded(parentChild.turn)
         ? parentChild.turn
         : (currentTurn ?? parentChild?.turn ?? null);
     const turn = previous?.turn ?? launchingTurn;
@@ -727,10 +718,6 @@ export function makePrimeAgentChildThreads(input: {
       ? (rlmTranscripts.get(childId) ??
         (yield* openChildTranscript({
           turn,
-          // A run named here is still listening, so it can take the thread.
-          // With no such run, the thread names none and goes to the live
-          // root turn, if any.
-          launchingRunId: runListens(turn) ? turn.turnInput.runId : undefined,
           childId,
           subagentId,
           snapshot,

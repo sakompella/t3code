@@ -4695,12 +4695,6 @@ describe("PiAdapterV2 with the Prime Agent flavor", () => {
           sessionDir: "/fake/.prime/agent/session-artifacts/s/sub-2",
         },
       });
-      const shell = yield* session.takeEvent(
-        (event) =>
-          event.type === "app_thread.created" &&
-          event.appThread.forkedFrom?.type === "node" &&
-          event.appThread.forkedFrom.nodeId !== parent?.id,
-      );
       const nested = yield* session.takeEvent(
         (event) => event.type === "subagent.updated" && event.subagent.title === "gamma",
       );
@@ -4708,13 +4702,6 @@ describe("PiAdapterV2 with the Prime Agent flavor", () => {
         nested.type === "subagent.updated" &&
           nested.subagent.parentNodeId === parent?.id &&
           nested.subagent.runId === parent.runId,
-      );
-      // No turn is live, so routing learns the child's run from its thread.
-      assert.isTrue(
-        shell.type === "app_thread.created" &&
-          nested.type === "subagent.updated" &&
-          shell.appThread.id === nested.subagent.childThreadId &&
-          shell.launchingRunId === nested.subagent.runId,
       );
     }).pipe(Effect.scoped, Effect.provide(layerTest)),
   );
@@ -4842,7 +4829,7 @@ describe("PiAdapterV2 with the Prime Agent flavor", () => {
       );
 
       // A later run messages the finished child, whose follow-up starts a child.
-      // The first run no longer listens for the finished task.
+      // The first run no longer listens for the finished task, so the card goes to the live run.
       yield* startTurn(
         session.runtime,
         session.providerThread,
@@ -4865,12 +4852,6 @@ describe("PiAdapterV2 with the Prime Agent flavor", () => {
           sessionDir: "/fake/.prime/agent/session-artifacts/s/sub-2",
         },
       });
-      const shell = yield* session.takeEvent(
-        (event) =>
-          event.type === "app_thread.created" &&
-          event.appThread.forkedFrom?.type === "node" &&
-          event.appThread.forkedFrom.nodeId !== finished?.id,
-      );
       const nested = yield* session.takeEvent(
         (event) => event.type === "subagent.updated" && event.subagent.title === "gamma",
       );
@@ -4880,11 +4861,10 @@ describe("PiAdapterV2 with the Prime Agent flavor", () => {
           nested.subagent.parentNodeId === finished?.id &&
           nested.subagent.runId === liveRunId,
       );
-      assert.isTrue(shell.type === "app_thread.created" && shell.launchingRunId === liveRunId);
     }).pipe(Effect.scoped, Effect.provide(layerTest)),
   );
 
-  it.effect("never stamps a child's thread with a run whose failed turn stopped its listener", () =>
+  it.effect("puts the card of a child started under a failed run's child on the live run", () =>
     Effect.gen(function* () {
       const fake = yield* makeFakePi;
       const session = yield* openPrimeThread(fake);
@@ -4895,7 +4875,7 @@ describe("PiAdapterV2 with the Prime Agent flavor", () => {
       const running = yield* session.takeEvent(
         (event) => event.type === "subagent.updated" && event.subagent.status === "running",
       );
-      const parent = running.type === "subagent.updated" ? running.subagent : undefined;
+      assert.isTrue(running.type === "subagent.updated");
       // Retries run out, so the run fails while its child keeps working.
       yield* fake.emit({
         type: "auto_retry_start",
@@ -4926,23 +4906,7 @@ describe("PiAdapterV2 with the Prime Agent flavor", () => {
           sessionDir: `/fake/.prime/agent/session-artifacts/s/${id}`,
         },
       });
-      const nestedShell = (id: string) =>
-        session.takeEvent(
-          (event) =>
-            event.type === "app_thread.created" &&
-            event.appThread.forkedFrom?.type === "node" &&
-            event.appThread.forkedFrom.nodeId !== parent?.id &&
-            event.appThread.title.includes(id),
-        );
-
-      // No turn is live, so the thread names no run and the shared rule decides.
-      yield* fake.emit(nestedChild("idle-nested"));
-      const unstamped = yield* nestedShell("idle-nested");
-      assert.isTrue(
-        unstamped.type === "app_thread.created" && unstamped.launchingRunId === undefined,
-      );
-
-      // A later live run takes a child started while it runs.
+      // The failed run stopped listening, so a later live run takes the card.
       yield* startTurn(
         session.runtime,
         session.providerThread,
@@ -4955,12 +4919,10 @@ describe("PiAdapterV2 with the Prime Agent flavor", () => {
       yield* fake.takeRequest("prompt");
       yield* fake.emit({ type: "agent_start" });
       yield* fake.emit(nestedChild("live-nested"));
-      const stamped = yield* nestedShell("live-nested");
       const card = yield* session.takeEvent(
         (event) => event.type === "subagent.updated" && event.subagent.title === "live-nested",
       );
       const liveRunId = RunId.make(`run:${THREAD_ID}:2`);
-      assert.isTrue(stamped.type === "app_thread.created" && stamped.launchingRunId === liveRunId);
       assert.isTrue(card.type === "subagent.updated" && card.subagent.runId === liveRunId);
     }).pipe(Effect.scoped, Effect.provide(layerTest)),
   );

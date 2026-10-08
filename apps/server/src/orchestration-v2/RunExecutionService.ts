@@ -55,8 +55,7 @@ import * as RunFinalizationService from "./RunFinalizationService.ts";
 export interface ProviderEventRoutingState {
   readonly ownedThreadIds: ReadonlySet<ThreadId>;
   // Set once this run's root turn ended. A child thread created after that
-  // belongs to the run that is live then, so this one no longer adopts it,
-  // unless the adapter says it launched the subagent under this run.
+  // belongs to the run that is live then, so this one no longer adopts it.
   readonly rootTurnEnded: boolean;
   readonly ownedProviderThreadIds: ReadonlySet<ProviderThreadId>;
   readonly ownedProviderTurnIds: ReadonlySet<ProviderTurnId>;
@@ -416,10 +415,8 @@ export function routeProviderEvent(
       if (event.appThread.id === input.threadId) {
         return [true, state];
       }
-      const launchedHere =
-        event.launchingRunId === undefined ? !state.rootTurnEnded : ownsRun(event.launchingRunId);
       const isOwnedSubagent =
-        launchedHere &&
+        !state.rootTurnEnded &&
         event.appThread.lineage.relationshipToParent === "subagent" &&
         event.appThread.lineage.parentThreadId !== null &&
         ownsThread(event.appThread.lineage.parentThreadId);
