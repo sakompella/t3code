@@ -93,6 +93,14 @@ export interface ActivePiTurn {
   readonly seenMessageKeys: Set<string>;
   /** The seen messages T3 shows in full: a reply's final text, a tool result's outcome. */
   readonly shownMessageKeys: Set<string>;
+  /**
+   * The timestamp of each reply Stop cut off, by the timestamp of the aborted
+   * copy that ended it. Its items keep the reply's identity, live and when
+   * the history, which holds only the copy, is read.
+   */
+  readonly replacedReplies: Map<number, number>;
+  /** Lost ends a gap read already looked for: reply keys and tool call ids. */
+  readonly soughtEnds: Set<string>;
   /** Whether a history read was reconciled into the turn, or the turn ended without one. */
   transcript: "streaming" | "reconciled" | "unreconciled";
   /** History reads that did not match the idle state at settle. */
