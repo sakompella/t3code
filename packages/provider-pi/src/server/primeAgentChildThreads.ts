@@ -237,6 +237,9 @@ export function makePrimeAgentChildThreads(input: {
     yield* emit({
       type: "app_thread.created",
       driver,
+      // A child can start after its run's root turn ended, so routing cannot
+      // infer its run from the live turn.
+      launchingRunId: turnInput.runId,
       appThread: makeSubagentChildThread({
         parentThread: turnInput.appThread,
         childThreadId,
@@ -680,8 +683,7 @@ export function makePrimeAgentChildThreads(input: {
       previous === undefined
         ? undefined
         : rlmChildStatus(recordString(previous.snapshot, "status"));
-    // The task's node in the parent run, as Claude and Codex give theirs. It
-    // comes before the child thread, so routing knows which run owns that thread.
+    // The task's node in the parent run, as Claude and Codex give theirs.
     if (previousStatus !== status) {
       yield* emit({
         type: "node.updated",

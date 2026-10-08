@@ -81,6 +81,12 @@ export const ProviderAdapterV2Event = Schema.Union([
     type: Schema.Literal("app_thread.created"),
     driver: ProviderDriverKind,
     appThread: OrchestrationV2AppThread,
+    /**
+     * For a subagent thread, the run the adapter launched the subagent under.
+     * Routing only; it is not persisted. Without it, the run whose root turn
+     * is live takes the thread.
+     */
+    launchingRunId: Schema.optional(RunId),
   }),
   Schema.Struct({
     type: Schema.Literal("provider_session.updated"),
