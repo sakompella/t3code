@@ -6480,6 +6480,59 @@ describe("PiAdapterV2 with the Prime Agent flavor", () => {
       }).pipe(Effect.scoped, Effect.provide(layerTest)),
   );
 
+  it.effect("gives a child started by a finished child's follow-up to the live run", () =>
+    Effect.gen(function* () {
+      const fake = yield* makeFakePi;
+      const session = yield* openPrimeThread(fake);
+      const finished = yield* settleWithRunningChild(fake, session);
+      yield* fake.emit(rlmChild("done", { answerPreview: "child-ok" }));
+      yield* session.takeEvent(
+        (event) => event.type === "subagent.updated" && event.subagent.status === "completed",
+      );
+
+      // A later run messages the finished child, whose follow-up starts a child.
+      // The first run no longer listens for the finished task.
+      yield* startTurn(
+        session.runtime,
+        session.providerThread,
+        "default",
+        [],
+        "Ask the worker again",
+        undefined,
+        2,
+      );
+      yield* fake.takeRequest("prompt");
+      yield* fake.emit({ type: "agent_start" });
+      yield* fake.emit({
+        type: "rlm_child_update",
+        child: {
+          id: "sub-2",
+          parentId: "sub-1",
+          sessionName: "gamma",
+          label: "Run sleep 20",
+          status: "running",
+          sessionDir: "/fake/.prime/agent/session-artifacts/s/sub-2",
+        },
+      });
+      const shell = yield* session.takeEvent(
+        (event) =>
+          event.type === "app_thread.created" &&
+          event.appThread.forkedFrom?.type === "node" &&
+          event.appThread.forkedFrom.nodeId !== finished?.id,
+      );
+      const nested = yield* session.takeEvent(
+        (event) => event.type === "subagent.updated" && event.subagent.title === "gamma",
+      );
+      const liveRunId = RunId.make(`run:${THREAD_ID}:2`);
+      assert.isTrue(
+        nested.type === "subagent.updated" &&
+          nested.subagent.parentNodeId === finished?.id &&
+          nested.subagent.runId === liveRunId,
+      );
+      assert.isTrue(shell.type === "app_thread.created" && shell.launchingRunId === liveRunId);
+    }).pipe(Effect.scoped, Effect.provide(layerTest)),
+  );
+
   it.effect("logs what became of every child update, with the reason for a drop", () =>
     Effect.gen(function* () {
       const traced = yield* Queue.unbounded<Record<string, unknown>>();
