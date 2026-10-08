@@ -6091,6 +6091,55 @@ describe("PiAdapterV2 with the Prime Agent flavor", () => {
     }).pipe(Effect.scoped, Effect.provide(layerTest)),
   );
 
+  it.effect("puts the child's whole final reply on its card, not Prime Agent's preview", () =>
+    Effect.gen(function* () {
+      const fake = yield* makeFakePi;
+      const session = yield* openPrimeThread(fake);
+      const finalReply = `child-ok sent.${" The full report goes on past the preview.".repeat(8)}`;
+      const preview = finalReply.slice(0, 159);
+      yield* startTurn(session.runtime, session.providerThread);
+      yield* fake.takeRequest("prompt");
+      yield* fake.emit({ type: "agent_start" });
+      yield* fake.emit(rlmChild("running", { activeSessionId: "active-1" }));
+      yield* fake.takeRequest("observe");
+      yield* fake.emit({
+        type: "observed_session_event",
+        activeSessionId: "active-1",
+        event: { type: "message_end", message: assistantSnapshot(1001, "Working on it.") },
+      });
+      fake.queueObserved([
+        assistantSnapshot(1001, "Working on it."),
+        {
+          ...assistantSnapshot(1002, finalReply),
+          content: [
+            { type: "thinking", thinking: "Done." },
+            { type: "text", text: finalReply },
+          ],
+        },
+        // A later reply with no text leaves the answer as it was.
+        { ...assistantSnapshot(1003, ""), content: [{ type: "toolCall", id: "t", name: "x" }] },
+      ]);
+      yield* fake.emit(rlmChild("done", { activeSessionId: "active-1", answerPreview: preview }));
+
+      const done = yield* session.takeEvent(
+        (event) => event.type === "subagent.updated" && event.subagent.status === "completed",
+      );
+      assert.equal(done.type === "subagent.updated" ? done.subagent.result : null, finalReply);
+      const card = yield* session.takeEvent(
+        (event) =>
+          event.type === "turn_item.updated" &&
+          event.turnItem.type === "subagent" &&
+          event.turnItem.status === "completed",
+      );
+      assert.equal(
+        card.type === "turn_item.updated" && card.turnItem.type === "subagent"
+          ? card.turnItem.result
+          : null,
+        finalReply,
+      );
+    }).pipe(Effect.scoped, Effect.provide(layerTest)),
+  );
+
   /** Starts a child with an observed session, and leaves it with a running tool and an open reply. */
   const startChildWithOpenWork = (
     fake: FakePi,
