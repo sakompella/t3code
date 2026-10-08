@@ -90,16 +90,27 @@ export interface HtmlPreview {
   readonly missingImages?: ReadonlyArray<string>;
 }
 
+export interface HtmlRenderPublishInput<E> {
+  readonly threadId: ThreadId;
+  readonly html: string;
+  readonly title: string;
+  readonly height: number;
+  readonly record?: (reference: HtmlRenderReference) => Effect.Effect<void, E>;
+}
+
 export class HtmlRender extends Context.Service<
   HtmlRender,
   {
     readonly prepare: (html: string) => Effect.Effect<string, HtmlRenderPrepareError>;
-    readonly publish: (input: {
-      readonly threadId: ThreadId;
-      readonly html: string;
-      readonly title: string;
-      readonly height: number;
-    }) => Effect.Effect<HtmlRenderReference, HtmlRenderPrepareError | HtmlRenderStoreError>;
+    /**
+     * Stores a prepared page as a thread attachment for clients to show inline,
+     * measuring its height at each client width when the preview browser is
+     * already installed. `record` runs before the page counts as published, so
+     * a failed record removes the page too.
+     */
+    readonly publish: <E = never>(
+      input: HtmlRenderPublishInput<E>,
+    ) => Effect.Effect<HtmlRenderReference, HtmlRenderPrepareError | HtmlRenderStoreError | E>;
     readonly preview: (input: {
       readonly html: string;
       readonly width?: number | undefined;
@@ -386,12 +397,9 @@ const make = Effect.gen(function* () {
     return inlined.html;
   });
 
-  const publish = Effect.fn("HtmlRender.publish")(function* (input: {
-    readonly threadId: ThreadId;
-    readonly html: string;
-    readonly title: string;
-    readonly height: number;
-  }) {
+  const publish = Effect.fn("HtmlRender.publish")(function* <E = never>(
+    input: HtmlRenderPublishInput<E>,
+  ) {
     const html = yield* prepare(input.html);
     // The `-html` id suffix makes the asset route serve it as a sandboxed text/html document.
     const attachmentId = createAttachmentId(input.threadId, "html");
@@ -405,20 +413,22 @@ const make = Effect.gen(function* () {
     if (attachmentId === null || filePath === null) {
       return yield* new HtmlRenderStoreError({ cause: new Error("Invalid thread id.") });
     }
-    const measured = yield* fileSystem.writeFileString(filePath, html).pipe(
+    const { record } = input;
+    return yield* fileSystem.writeFileString(filePath, html).pipe(
       Effect.mapError((cause) => new HtmlRenderStoreError({ cause })),
       Effect.andThen(measure(html)),
-      // Only the returned reference lets thread deletion find the page, so a
-      // publish that fails or is interrupted before returning removes it.
+      Effect.map((measured): HtmlRenderReference => ({
+        attachmentId,
+        title: input.title.trim().slice(0, HTML_RENDER_MAX_TITLE_LENGTH) || "HTML",
+        height: clampHtmlRenderHeight(input.height),
+        ...(measured === undefined ? {} : { heights: measured.heights }),
+        ...(measured?.outline === undefined ? {} : { outline: measured.outline }),
+      })),
+      Effect.tap((reference) => (record === undefined ? Effect.void : record(reference))),
+      // Only a reference the thread keeps lets thread deletion find the page,
+      // so a publish that fails or is interrupted before then removes it.
       Effect.onError(() => fileSystem.remove(filePath, { force: true }).pipe(Effect.ignore)),
     );
-    return {
-      attachmentId,
-      title: input.title.trim().slice(0, HTML_RENDER_MAX_TITLE_LENGTH) || "HTML",
-      height: clampHtmlRenderHeight(input.height),
-      ...(measured === undefined ? {} : { heights: measured.heights }),
-      ...(measured?.outline === undefined ? {} : { outline: measured.outline }),
-    } satisfies HtmlRenderReference;
   });
 
   const preview = Effect.fn("HtmlRender.preview")(function* (input: {

@@ -1,9 +1,13 @@
-import { OrchestratorMcpFailure } from "@t3tools/contracts";
+import { CommandId, OrchestratorMcpFailure, type ProviderInstanceId } from "@t3tools/contracts";
+import type { HtmlRenderReference } from "@t3tools/shared/htmlRender";
 import * as Effect from "effect/Effect";
 
 import * as HtmlRender from "../../../htmlRender/HtmlRender.ts";
+import { callsT3ToolsFromKernel } from "@t3tools/provider-pi/server";
+import * as ProviderAdapterRegistry from "../../../orchestration-v2/ProviderAdapterRegistry.ts";
 import * as McpInvocationContext from "../../McpInvocationContext.ts";
 import * as McpToolAccess from "../../McpToolAccess.ts";
+import { dispatchFailure, loadCaller } from "../../threadAccess.ts";
 import { HtmlPreviewToolkit, HtmlRenderToolkit, type HtmlToolkit } from "./tools.ts";
 
 const INVALID_PAGE_ERRORS = new Set([
@@ -17,6 +21,17 @@ const toFailure = (error: { readonly _tag: string; readonly message: string }) =
     code: INVALID_PAGE_ERRORS.has(error._tag) ? "invalid_request" : "orchestration_error",
     message: error.message,
   });
+
+/**
+ * A kernel caller's own tool item shows only its code, so the page needs an
+ * item of its own. Other providers' `html_render` items already carry it.
+ */
+const needsOwnTimelineItem = (providerInstanceId: ProviderInstanceId) =>
+  ProviderAdapterRegistry.ProviderAdapterRegistryV2.pipe(
+    Effect.flatMap((adapters) => adapters.get(providerInstanceId)),
+    Effect.map((adapter) => callsT3ToolsFromKernel(adapter.driver)),
+    Effect.orElseSucceed(() => false),
+  );
 
 const handlers = {
   // The headless browser runs on the host and can open local files, so only
@@ -38,12 +53,35 @@ const handlers = {
   ),
   html_render: McpToolAccess.actsAsCaller((input) =>
     Effect.gen(function* () {
-      const scope = yield* McpInvocationContext.McpInvocationContext;
+      // A kernel caller's page goes into its live run, which loadCaller reads.
+      const { scope, caller, threads } = yield* loadCaller();
       const { thread } = yield* McpInvocationContext.requireThreadScope(scope, "html_render");
+      const runId = caller?.activeRunId ?? null;
+      const record =
+        runId !== null && (yield* needsOwnTimelineItem(thread.providerInstanceId))
+          ? (published: HtmlRenderReference) =>
+              threads
+                .dispatch({
+                  type: "html_render.record",
+                  commandId: CommandId.make(`mcp:html-render:${published.attachmentId}`),
+                  threadId: thread.threadId,
+                  runId,
+                  htmlRender: published,
+                })
+                .pipe(Effect.asVoid, Effect.mapError(dispatchFailure))
+          : undefined;
       const htmlRender = yield* HtmlRender.HtmlRender;
       const reference = yield* htmlRender
-        .publish({ threadId: thread.threadId, ...input })
-        .pipe(Effect.mapError(toFailure));
+        .publish({
+          threadId: thread.threadId,
+          ...input,
+          ...(record === undefined ? {} : { record }),
+        })
+        .pipe(
+          Effect.mapError((error) =>
+            error._tag === "OrchestratorMcpFailure" ? error : toFailure(error),
+          ),
+        );
       return {
         htmlRender: reference,
         message:
