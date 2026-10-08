@@ -6064,6 +6064,49 @@ describe("PiAdapterV2 with the Prime Agent flavor", () => {
       }).pipe(Effect.scoped, Effect.provide(layerTest)),
   );
 
+  it.effect("gives a subagent its parent execution node before its child thread", () =>
+    Effect.gen(function* () {
+      const fake = yield* makeFakePi;
+      const session = yield* openPrimeThread(fake);
+      yield* startTurn(session.runtime, session.providerThread);
+      yield* fake.takeRequest("prompt");
+      yield* fake.emit({ type: "agent_start" });
+      yield* fake.emit(rlmChild("running"));
+      const events: Array<ProviderAdapterV2Event> = [];
+      while (events.at(-1)?.type !== "subagent.updated") {
+        events.push(yield* session.takeEvent(() => true));
+      }
+      const subagent = events.at(-1);
+      assert.isTrue(subagent?.type === "subagent.updated");
+      if (subagent?.type !== "subagent.updated") return;
+      const nodeIndex = events.findIndex(
+        (event) => event.type === "node.updated" && event.node.id === subagent.subagent.id,
+      );
+      const shellIndex = events.findIndex((event) => event.type === "app_thread.created");
+      assert.isAtLeast(nodeIndex, 0);
+      assert.isBelow(nodeIndex, shellIndex);
+      const node = events[nodeIndex];
+      assert.isTrue(
+        node?.type === "node.updated" &&
+          node.node.kind === "subagent" &&
+          node.node.status === "running" &&
+          node.node.threadId === subagent.subagent.threadId &&
+          node.node.runId === subagent.subagent.runId &&
+          node.node.parentNodeId === subagent.subagent.parentNodeId &&
+          node.node.completedAt === null,
+      );
+
+      yield* fake.emit(rlmChild("done", { answerPreview: "child-ok" }));
+      const done = yield* session.takeEvent(
+        (event) =>
+          event.type === "node.updated" &&
+          event.node.id === subagent.subagent.id &&
+          event.node.status === "completed",
+      );
+      assert.isTrue(done.type === "node.updated" && done.node.completedAt !== null);
+    }).pipe(Effect.scoped, Effect.provide(layerTest)),
+  );
+
   it.effect("streams a running child's session into its own thread", () =>
     Effect.gen(function* () {
       const fake = yield* makeFakePi;
@@ -6112,6 +6155,55 @@ describe("PiAdapterV2 with the Prime Agent flavor", () => {
 
       yield* fake.emit(rlmChild("done", { activeSessionId: "active-1" }));
       assert.equal((yield* fake.takeRequest("unobserve"))["activeSessionId"], "active-1");
+    }).pipe(Effect.scoped, Effect.provide(layerTest)),
+  );
+
+  it.effect("puts the child's whole final reply on its card, not Prime Agent's preview", () =>
+    Effect.gen(function* () {
+      const fake = yield* makeFakePi;
+      const session = yield* openPrimeThread(fake);
+      const finalReply = `child-ok sent.${" The full report goes on past the preview.".repeat(8)}`;
+      const preview = finalReply.slice(0, 159);
+      yield* startTurn(session.runtime, session.providerThread);
+      yield* fake.takeRequest("prompt");
+      yield* fake.emit({ type: "agent_start" });
+      yield* fake.emit(rlmChild("running", { activeSessionId: "active-1" }));
+      yield* fake.takeRequest("observe");
+      yield* fake.emit({
+        type: "observed_session_event",
+        activeSessionId: "active-1",
+        event: { type: "message_end", message: assistantSnapshot(1001, "Working on it.") },
+      });
+      fake.queueObserved([
+        assistantSnapshot(1001, "Working on it."),
+        {
+          ...assistantSnapshot(1002, finalReply),
+          content: [
+            { type: "thinking", thinking: "Done." },
+            { type: "text", text: finalReply },
+          ],
+        },
+        // A later reply with no text leaves the answer as it was.
+        { ...assistantSnapshot(1003, ""), content: [{ type: "toolCall", id: "t", name: "x" }] },
+      ]);
+      yield* fake.emit(rlmChild("done", { activeSessionId: "active-1", answerPreview: preview }));
+
+      const done = yield* session.takeEvent(
+        (event) => event.type === "subagent.updated" && event.subagent.status === "completed",
+      );
+      assert.equal(done.type === "subagent.updated" ? done.subagent.result : null, finalReply);
+      const card = yield* session.takeEvent(
+        (event) =>
+          event.type === "turn_item.updated" &&
+          event.turnItem.type === "subagent" &&
+          event.turnItem.status === "completed",
+      );
+      assert.equal(
+        card.type === "turn_item.updated" && card.turnItem.type === "subagent"
+          ? card.turnItem.result
+          : null,
+        finalReply,
+      );
     }).pipe(Effect.scoped, Effect.provide(layerTest)),
   );
 
@@ -6331,7 +6423,7 @@ describe("PiAdapterV2 with the Prime Agent flavor", () => {
   );
 
   it.effect(
-    "keeps a finished child's thread live for follow-up work and routes its nested children",
+    "reopens a finished child's thread for follow-up work and routes its nested children",
     () =>
       Effect.gen(function* () {
         const fake = yield* makeFakePi;
@@ -6421,16 +6513,134 @@ describe("PiAdapterV2 with the Prime Agent flavor", () => {
           (event) => event.type === "subagent.updated" && event.subagent.title === "marker",
         );
 
-        // None of it rewrote the original task's card or its root node.
-        const rewrites = [...followUp, ...nesting, ...ending].filter(
-          (event) =>
-            (event.type === "subagent.updated" && event.subagent.id === child?.id) ||
-            (event.type === "node.updated" &&
-              event.node.kind === "root_turn" &&
-              event.node.threadId === child?.childThreadId),
+        // The child thread works again while the follow-up runs, as a resumed
+        // Claude subagent does, and settles when it ends.
+        const childRootStates = (events: ReadonlyArray<ProviderAdapterV2Event>) =>
+          events.flatMap((event) =>
+            event.type === "node.updated" &&
+            event.node.kind === "root_turn" &&
+            event.node.threadId === child?.childThreadId
+              ? [{ status: event.node.status, completed: event.node.completedAt !== null }]
+              : [],
+          );
+        assert.deepEqual(childRootStates(followUp), [{ status: "running", completed: false }]);
+        assert.deepEqual(childRootStates(nesting), []);
+        assert.deepEqual(childRootStates(ending), [{ status: "completed", completed: true }]);
+        // The card keeps the original task's outcome.
+        const cardRewrites = [...followUp, ...nesting, ...ending].filter(
+          (event) => event.type === "subagent.updated" && event.subagent.id === child?.id,
         );
-        assert.deepEqual(rewrites, []);
+        assert.deepEqual(cardRewrites, []);
       }).pipe(Effect.scoped, Effect.provide(layerTest)),
+  );
+
+  it.effect("gives a child started by a finished child's follow-up to the live run", () =>
+    Effect.gen(function* () {
+      const fake = yield* makeFakePi;
+      const session = yield* openPrimeThread(fake);
+      const finished = yield* settleWithRunningChild(fake, session);
+      yield* fake.emit(rlmChild("done", { answerPreview: "child-ok" }));
+      yield* session.takeEvent(
+        (event) => event.type === "subagent.updated" && event.subagent.status === "completed",
+      );
+
+      // A later run messages the finished child, whose follow-up starts a child.
+      // The first run no longer listens for the finished task, so the card goes to the live run.
+      yield* startTurn(
+        session.runtime,
+        session.providerThread,
+        "default",
+        [],
+        "Ask the worker again",
+        undefined,
+        2,
+      );
+      yield* fake.takeRequest("prompt");
+      yield* fake.emit({ type: "agent_start" });
+      yield* fake.emit({
+        type: "rlm_child_update",
+        child: {
+          id: "sub-2",
+          parentId: "sub-1",
+          sessionName: "gamma",
+          label: "Run sleep 20",
+          status: "running",
+          sessionDir: "/fake/.prime/agent/session-artifacts/s/sub-2",
+        },
+      });
+      const nested = yield* session.takeEvent(
+        (event) => event.type === "subagent.updated" && event.subagent.title === "gamma",
+      );
+      const liveRunId = RunId.make(`run:${THREAD_ID}:2`);
+      assert.isTrue(
+        nested.type === "subagent.updated" &&
+          nested.subagent.parentNodeId === finished?.id &&
+          nested.subagent.runId === liveRunId,
+      );
+    }).pipe(Effect.scoped, Effect.provide(layerTest)),
+  );
+
+  it.effect("puts the card of a child started under a failed run's child on the live run", () =>
+    Effect.gen(function* () {
+      const fake = yield* makeFakePi;
+      const session = yield* openPrimeThread(fake);
+      yield* startTurn(session.runtime, session.providerThread);
+      yield* fake.takeRequest("prompt");
+      yield* fake.emit({ type: "agent_start" });
+      yield* fake.emit(rlmChild("running"));
+      const running = yield* session.takeEvent(
+        (event) => event.type === "subagent.updated" && event.subagent.status === "running",
+      );
+      assert.isTrue(running.type === "subagent.updated");
+      // Retries run out, so the run fails while its child keeps working.
+      yield* fake.emit({
+        type: "auto_retry_start",
+        attempt: 1,
+        maxAttempts: 1,
+        delayMs: 0,
+        errorMessage: "overloaded",
+      });
+      yield* fake.emit({
+        type: "auto_retry_end",
+        success: false,
+        attempt: 1,
+        finalError: "overloaded",
+      });
+      yield* fake.emit({ type: "agent_end", messages: [] });
+      yield* fake.takeRequest("get_state");
+      const terminal = yield* session.takeEvent((event) => event.type === "turn.terminal");
+      assert.isTrue(terminal.type === "turn.terminal" && terminal.status === "failed");
+
+      const nestedChild = (id: string) => ({
+        type: "rlm_child_update",
+        child: {
+          id,
+          parentId: "sub-1",
+          sessionName: id,
+          label: id,
+          status: "running",
+          sessionDir: `/fake/.prime/agent/session-artifacts/s/${id}`,
+        },
+      });
+      // The failed run stopped listening, so a later live run takes the card.
+      yield* startTurn(
+        session.runtime,
+        session.providerThread,
+        "default",
+        [],
+        "Continue",
+        undefined,
+        2,
+      );
+      yield* fake.takeRequest("prompt");
+      yield* fake.emit({ type: "agent_start" });
+      yield* fake.emit(nestedChild("live-nested"));
+      const card = yield* session.takeEvent(
+        (event) => event.type === "subagent.updated" && event.subagent.title === "live-nested",
+      );
+      const liveRunId = RunId.make(`run:${THREAD_ID}:2`);
+      assert.isTrue(card.type === "subagent.updated" && card.subagent.runId === liveRunId);
+    }).pipe(Effect.scoped, Effect.provide(layerTest)),
   );
 
   it.effect("logs what became of every child update, with the reason for a drop", () =>

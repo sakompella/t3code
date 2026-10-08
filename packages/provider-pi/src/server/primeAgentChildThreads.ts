@@ -35,8 +35,8 @@ interface PiRlmChildState {
   readonly startedAt: DateTime.Utc;
   /** The task is over and its outcome is on the card. */
   readonly terminal: boolean;
-  /** A finished child is working again on a follow-up message, outside its task card. */
-  readonly followUp: boolean;
+  /** When a finished child started working again on a follow-up message, outside its task card. */
+  readonly followUpStartedAt: DateTime.Utc | null;
   readonly turn: ActivePiTurn;
 }
 
@@ -230,6 +230,7 @@ export function makePrimeAgentChildThreads(input: {
       status: null,
       observedSessionId: null,
       failedSessionIds: new Set(),
+      finalReply: null,
     };
     rlmTranscripts.set(input.childId, transcript);
     const model = recordString(input.snapshot, "model");
@@ -345,7 +346,11 @@ export function makePrimeAgentChildThreads(input: {
             recordNumber(message, "timestamp") ?? transcript.messageOrdinal + 1;
           const final = event["type"] === "message_end";
           yield* adoptSnapshot(transcript, message, final);
-          if (final) yield* completeOpenStreamItems(transcript);
+          if (final) {
+            yield* completeOpenStreamItems(transcript);
+            const text = contentText(recordField(message, "content")).trim();
+            if (text.length > 0) transcript.finalReply = text;
+          }
           return;
         }
         if (event["type"] === "message_end" && role !== "toolResult") {
@@ -529,8 +534,8 @@ export function makePrimeAgentChildThreads(input: {
   };
 
   /**
-   * Ends a finished child's follow-up observation. Its card and root node
-   * keep the outcome of the original task; only the transcript is closed.
+   * Ends a finished child's follow-up. Its card keeps the outcome of the
+   * original task; the transcript closes and the thread's root turn settles.
    */
   const endChildFollowUp = Effect.fnUntraced(function* (
     childId: string,
@@ -538,9 +543,17 @@ export function makePrimeAgentChildThreads(input: {
     status: OrchestrationV2ExecutionNode["status"],
     sessionIsAlive: boolean,
   ) {
-    rlmChildren.set(childId, { ...child, followUp: false });
+    rlmChildren.set(childId, { ...child, followUpStartedAt: null });
     const transcript = rlmTranscripts.get(childId);
-    if (transcript !== undefined) yield* finishChildObservation(transcript, status, sessionIsAlive);
+    if (transcript === undefined) return;
+    yield* finishChildObservation(transcript, status, sessionIsAlive);
+    yield* emitChildRootNode(
+      transcript,
+      status,
+      `rlm:${childId}`,
+      child.followUpStartedAt ?? child.startedAt,
+      yield* DateTime.now,
+    );
   });
 
   /**
@@ -557,7 +570,7 @@ export function makePrimeAgentChildThreads(input: {
     source: RlmChildUpdateSource,
   ) {
     const working = status === "completed" && rlmChildIsWorking(snapshot);
-    if (!working && !previous.followUp) {
+    if (!working && previous.followUpStartedAt === null) {
       yield* traceRlmChildUpdate(snapshot, currentTurn, source, {
         outcome: "dropped",
         reason: "terminal-already-settled",
@@ -572,9 +585,13 @@ export function makePrimeAgentChildThreads(input: {
       yield* endChildFollowUp(childId, { ...previous, snapshot }, status, true);
       return;
     }
-    rlmChildren.set(childId, { ...previous, snapshot, followUp: true });
+    const followUpStartedAt = previous.followUpStartedAt ?? (yield* DateTime.now);
+    rlmChildren.set(childId, { ...previous, snapshot, followUpStartedAt });
     const transcript = rlmTranscripts.get(childId);
-    if (transcript !== undefined) yield* syncChildObservation(transcript, snapshot);
+    if (transcript === undefined) return;
+    // The child thread shows it working again, as a resumed Claude subagent's does.
+    yield* emitChildRootNode(transcript, "running", `rlm:${childId}`, followUpStartedAt, null);
+    yield* syncChildObservation(transcript, snapshot);
   });
 
   /** Mirrors one `rlm_child_update` roster snapshot onto T3's subagent surfaces. */
@@ -599,7 +616,17 @@ export function makePrimeAgentChildThreads(input: {
     const parentChildId = recordString(snapshot, "parentId");
     const parentChild = parentChildId === undefined ? undefined : rlmChildren.get(parentChildId);
     // A child outlives the run that spawned it; its card stays on that run.
-    const turn = previous?.turn ?? parentChild?.turn ?? currentTurn;
+    // A nested child's card goes to its parent child's run while the parent is
+    // still on its task and that run's turn did not fail or get interrupted
+    // (either ends the run's listener at once). Otherwise it goes to the live
+    // turn, as a resumed Claude task does, so the card has a run to land on.
+    const parentRunEnded = (candidate: ActivePiTurn) =>
+      candidate !== currentTurn && (candidate.interrupted || candidate.failure !== null);
+    const launchingTurn =
+      parentChild !== undefined && !parentChild.terminal && !parentRunEnded(parentChild.turn)
+        ? parentChild.turn
+        : (currentTurn ?? parentChild?.turn ?? null);
+    const turn = previous?.turn ?? launchingTurn;
     if (turn === null) {
       yield* traceRlmChildUpdate(snapshot, currentTurn, source, {
         outcome: "dropped",
@@ -629,7 +656,7 @@ export function makePrimeAgentChildThreads(input: {
       routedVia:
         previous !== undefined
           ? "known-child"
-          : parentChild !== undefined
+          : turn === parentChild?.turn
             ? "parent-child"
             : "current-turn",
     });
@@ -637,7 +664,7 @@ export function makePrimeAgentChildThreads(input: {
       snapshot,
       startedAt: previous?.startedAt ?? emittedAt,
       terminal,
-      followUp: false,
+      followUpStartedAt: null,
       turn,
     };
     rlmChildren.set(childId, state);
@@ -649,10 +676,44 @@ export function makePrimeAgentChildThreads(input: {
     const title = recordString(snapshot, "sessionName") ?? null;
     const prompt = recordString(snapshot, "label") ?? title ?? "child agent";
     const progress = terminal ? undefined : rlmChildProgress(snapshot);
-    const result = terminal
-      ? (recordString(snapshot, "error") ?? recordString(snapshot, "answerPreview") ?? null)
-      : null;
     const completedAt = terminal ? emittedAt : null;
+    // Nesting under the parent subagent's node is what lets clients
+    // draw Prime Agent's subagent tree.
+    const parentNodeId =
+      parentChildId === undefined
+        ? turn.turnInput.rootNodeId
+        : idAllocator.derive.nodeFromProviderItem({
+            driver,
+            nativeItemId: `rlm:${parentChildId}`,
+          });
+    const previousStatus =
+      previous === undefined
+        ? undefined
+        : rlmChildStatus(recordString(previous.snapshot, "status"));
+    // The task's node in the parent run, as Claude and Codex give theirs.
+    if (previousStatus !== status) {
+      yield* emit({
+        type: "node.updated",
+        driver,
+        node: {
+          id: subagentId,
+          threadId: turn.turnInput.threadId,
+          runId: turn.turnInput.runId,
+          parentNodeId,
+          rootNodeId: turn.turnInput.rootNodeId,
+          kind: "subagent",
+          status,
+          countsForRun: false,
+          providerThreadId: turn.turnInput.providerThread.id,
+          providerTurnId: turn.providerTurn.id,
+          nativeItemRef: providerRef(nativeTaskId),
+          runtimeRequestId: null,
+          checkpointScopeId: null,
+          startedAt: state.startedAt,
+          completedAt,
+        },
+      });
+    }
     const transcript = childThreads
       ? (rlmTranscripts.get(childId) ??
         (yield* openChildTranscript({
@@ -670,6 +731,13 @@ export function makePrimeAgentChildThreads(input: {
       if (terminal) yield* finishChildObservation(transcript, status, statusOverride === undefined);
       yield* emitChildRootNode(transcript, status, nativeTaskId, state.startedAt, completedAt);
     }
+    // Prime Agent clips its answer preview; the reply T3 observed is whole.
+    const result = terminal
+      ? (recordString(snapshot, "error") ??
+        transcript?.finalReply ??
+        recordString(snapshot, "answerPreview") ??
+        null)
+      : null;
     yield* emit({
       type: "subagent.updated",
       driver,
@@ -677,15 +745,7 @@ export function makePrimeAgentChildThreads(input: {
         id: subagentId,
         threadId: turn.turnInput.threadId,
         runId: turn.turnInput.runId,
-        // Nesting under the parent subagent's node is what lets clients
-        // draw Prime Agent's subagent tree.
-        parentNodeId:
-          parentChildId === undefined
-            ? turn.turnInput.rootNodeId
-            : idAllocator.derive.nodeFromProviderItem({
-                driver,
-                nativeItemId: `rlm:${parentChildId}`,
-              }),
+        parentNodeId,
         origin: "provider_native",
         createdBy: "agent",
         driver,
@@ -778,7 +838,8 @@ export function makePrimeAgentChildThreads(input: {
     Effect.forEach(
       Array.from(rlmChildren).filter(
         ([, child]) =>
-          (!child.terminal || child.followUp) && (turn === undefined || child.turn === turn),
+          (!child.terminal || child.followUpStartedAt !== null) &&
+          (turn === undefined || child.turn === turn),
       ),
       ([childId, child]) =>
         child.terminal
@@ -791,6 +852,8 @@ export function makePrimeAgentChildThreads(input: {
     settleFromNotice,
     interrupt,
     hasLiveChildren: () =>
-      Array.from(rlmChildren.values()).some((child) => !child.terminal || child.followUp),
+      Array.from(rlmChildren.values()).some(
+        (child) => !child.terminal || child.followUpStartedAt !== null,
+      ),
   };
 }
