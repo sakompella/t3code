@@ -84,24 +84,30 @@ function startsRun(message: unknown): boolean {
  * Which stored aborted copy replaced which reply a turn streamed. Stock ends
  * a reply Stop cut off with a copy of what it streamed, stamped at abort time
  * and announced by no message_start of its own (agent-loop.js
- * `finishAbortedMessage`), and the abort ends that run. So a run holds at
- * most one copy, and the next run starts with a stored message the agent did
- * not write. A reply the turn streamed with no end, that the history does
- * not hold, and that no compaction or retry may have dropped, was replaced
- * by an aborted reply the turn never streamed that holds all the text the
- * turn showed of it, stored in that reply's run: after the last stored
- * message the turn saw before the reply, before the next run starts and
- * before anything the turn saw after the reply. When the turn saw nothing
- * stored before the reply, its run is one this turn started: a run whose
- * first message no earlier turn accounted for. A reply matches only when
- * exactly one copy fits it and that copy fits no other reply; anything else
- * leaves both apart. Returns each copy's key with the timestamp of the reply
- * it replaced.
+ * `finishAbortedMessage`), as the next message end after the reply's last
+ * update. A reply the turn streamed with no end, that the history does not
+ * hold, and that no compaction or retry may have dropped, was replaced by
+ * such a copy, which:
+ * - holds all the text the turn showed of the reply;
+ * - is stored after the last stored message the turn saw before the reply,
+ *   or, when the turn saw none, in a run this turn started (one whose first
+ *   message no earlier turn accounted for);
+ * - is stored before anything the turn saw after the reply;
+ * - did not arrive live before the reply started.
+ * Delivered events keep their order and the history only appends, so when
+ * the earliest stored copy that fits arrived live after the reply, no copy
+ * stored before it can be the reply's: it is the reply's. Otherwise a reply
+ * matches only the one copy that fits it, and a copy two replies would take
+ * goes to neither. Anything else is left apart: a reply that shows its cut
+ * text is a miss, one that shows another reply's text would be wrong.
+ * Returns each copy's key with the timestamp of the reply it replaced.
  */
 export function matchStoppedCopies(input: {
   readonly history: ReadonlyArray<unknown>;
   /** Keys of the messages the turn streamed, in first-arrival order. */
   readonly streamed: ReadonlyArray<string>;
+  /** For each copy that arrived live, how many of `streamed` had arrived before it. */
+  readonly arrivals: ReadonlyMap<string, number>;
   /** The streamed replies T3 does not show in full. */
   readonly unended: ReadonlySet<string>;
   /** Unended replies a compaction or a retry may have dropped from the history. */
@@ -111,7 +117,7 @@ export function matchStoppedCopies(input: {
   /** Whether `copy` holds all the text T3 shows of the reply `replyKey`. */
   readonly holdsShown: (copy: unknown, replyKey: string) => boolean;
 }): ReadonlyMap<string, number> {
-  const { history } = input;
+  const { history, arrivals } = input;
   const keys = history.map(transcriptMessageKey);
   const position = new Map<string, number>();
   keys.forEach((key, index) => key !== undefined && position.set(key, index));
@@ -125,8 +131,6 @@ export function matchStoppedCopies(input: {
       : [],
   );
   const runStarts = history.flatMap((message, index) => (startsRun(message) ? [index] : []));
-  const nextRunStart = (after: number) =>
-    runStarts.find((index) => index > after) ?? history.length;
   const startedThisTurn = (index: number) => {
     const runStart = runStarts.findLast((start) => start < index);
     return runStart !== undefined && !input.accounted.has(keys[runStart] ?? "");
@@ -134,34 +138,31 @@ export function matchStoppedCopies(input: {
   const storedPositions = (streamedKeys: ReadonlyArray<string>) =>
     streamedKeys.flatMap((key) => position.get(key) ?? []);
 
-  const fitsByReply = input.streamed.flatMap((key, index) => {
+  const chosen = input.streamed.flatMap((key, index) => {
     if (position.has(key) || !input.unended.has(key) || input.removed.has(key)) return [];
     if (!isReplyKey(key)) return [];
     const seenBefore = storedPositions(input.streamed.slice(0, index));
     const anchor = seenBefore.length === 0 ? undefined : Math.max(...seenBefore);
-    const end = Math.min(
-      anchor === undefined ? history.length : nextRunStart(anchor),
-      ...storedPositions(input.streamed.slice(index + 1)),
-    );
-    const fits = copies.filter(
-      (copy) =>
+    const end = Math.min(history.length, ...storedPositions(input.streamed.slice(index + 1)));
+    const fits = copies.filter((copy) => {
+      const arrivedAfter = arrivals.get(copy.key);
+      return (
         copy.index > (anchor ?? -1) &&
         copy.index < end &&
         (anchor !== undefined || startedThisTurn(copy.index)) &&
-        input.holdsShown(history[copy.index], key),
-    );
-    return [{ key, fits }];
+        (arrivedAfter === undefined || arrivedAfter > index) &&
+        input.holdsShown(history[copy.index], key)
+      );
+    });
+    const [earliest] = fits;
+    if (earliest === undefined || (!arrivals.has(earliest.key) && fits.length > 1)) return [];
+    return [{ key, copy: earliest.key }];
   });
   const claims = new Map<string, number>();
-  for (const { fits } of fitsByReply) {
-    for (const copy of fits) claims.set(copy.key, (claims.get(copy.key) ?? 0) + 1);
-  }
+  for (const { copy } of chosen) claims.set(copy, (claims.get(copy) ?? 0) + 1);
   const matches = new Map<string, number>();
-  for (const { key, fits } of fitsByReply) {
-    const [copy, ...others] = fits;
-    if (copy !== undefined && others.length === 0 && claims.get(copy.key) === 1) {
-      matches.set(copy.key, keyTimestamp(key));
-    }
+  for (const { key, copy } of chosen) {
+    if (claims.get(copy) === 1) matches.set(copy, keyTimestamp(key));
   }
   return matches;
 }
@@ -383,7 +384,7 @@ export function makePrimeAgentReconciler<E>(input: {
     const key = transcriptMessageKey(message);
     if (key === undefined) return;
     if (isStoppedCopy(turn, event)) {
-      turn.heldCopies.set(key, message);
+      turn.heldCopies.set(key, { message, arrivedAfter: turn.seenMessageKeys.size });
       for (const end of unendedReplyKeys(turn)) turn.soughtEnds.add(end);
       return;
     }
@@ -477,6 +478,9 @@ export function makePrimeAgentReconciler<E>(input: {
       matchStoppedCopies({
         history: messages,
         streamed: [...turn.seenMessageKeys],
+        arrivals: new Map(
+          [...turn.heldCopies].map(([key, held]) => [key, held.arrivedAfter] as const),
+        ),
         unended: new Set(unendedReplyKeys(turn)),
         removed: turn.removedReplies,
         accounted: ledger.keys,
@@ -495,7 +499,7 @@ export function makePrimeAgentReconciler<E>(input: {
    */
   const placeHeldCopies = Effect.fnUntraced(function* (turn: ActivePiTurn) {
     const open = unendedReplyKeys(turn).filter((key) => !turn.removedReplies.has(key));
-    for (const [key, copy] of turn.heldCopies) {
+    for (const [key, { message: copy }] of turn.heldCopies) {
       const latest = open.at(-1);
       const replaced =
         latest !== undefined && items.holdsShownText(turn, copy, keyTimestamp(latest))

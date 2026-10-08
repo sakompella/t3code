@@ -28,6 +28,8 @@ interface Shape {
   readonly streamed: ReadonlyArray<unknown>;
   /** Streamed replies whose end T3 has not shown. */
   readonly unended: ReadonlyArray<unknown>;
+  /** Copies that arrived live, with how many streamed messages arrived before each. */
+  readonly arrivals?: ReadonlyArray<readonly [unknown, number]>;
   readonly removed?: ReadonlyArray<unknown>;
   readonly accounted?: ReadonlyArray<unknown>;
   /** Each matched copy with the timestamp of the reply it replaced. */
@@ -121,25 +123,77 @@ const shapes: ReadonlyArray<Shape> = [
     matches: [],
   },
   {
-    name: "a stored prompt closes the reply's run before a later run's copy",
+    name: "the earliest fitting copy that arrived after the reply is its copy",
     history: [prompt(900), copy(3000, "Check first"), prompt(6000), copy(8000, "Check later")],
     streamed: [prompt(900), reply(1000, "Check")],
+    arrivals: [
+      [copy(3000), 2],
+      [copy(8000), 2],
+    ],
     unended: [reply(1000)],
     matches: [[copy(3000), 1000]],
   },
   {
-    name: "a copy that fits two replies goes to neither",
+    name: "fitting copies known only from the history are ambiguous",
+    history: [prompt(900), copy(3000, "Check first"), prompt(6000), copy(8000, "Check later")],
+    streamed: [prompt(900), reply(1000, "Check")],
+    unended: [reply(1000)],
+    matches: [],
+  },
+  {
+    name: "an earlier copy known only from the history makes a later live one ambiguous",
     history: [prompt(900), copy(3000, "Check first"), prompt(4000), copy(6000, "Check later")],
+    streamed: [prompt(900), reply(5000, "Check")],
+    arrivals: [[copy(6000), 2]],
+    unended: [reply(5000)],
+    matches: [],
+  },
+  {
+    name: "a later run's copy arriving right after a reply is not proof",
+    history: [prompt(900), copy(3000, "Check first"), prompt(4000), copy(6000, "Check later")],
+    streamed: [prompt(900), reply(1000, "Check")],
+    arrivals: [[copy(6000), 2]],
+    unended: [reply(1000)],
+    matches: [],
+  },
+  {
+    name: "a copy that arrived before the reply started is not its copy",
+    history: [prompt(900), copy(3000, "Check first"), prompt(4000), copy(6000, "Check later")],
+    streamed: [prompt(900), reply(5000, "Check")],
+    arrivals: [
+      [copy(3000), 1],
+      [copy(6000), 2],
+    ],
+    unended: [reply(5000)],
+    matches: [[copy(6000), 5000]],
+  },
+  {
+    name: "two stopped replies each take the copy that arrived after them",
+    history: [prompt(900), copy(3000, "Check first"), prompt(4000), copy(6000, "Check later")],
+    streamed: [prompt(900), reply(1000, "Check"), reply(5000, "Check")],
+    arrivals: [
+      [copy(3000), 2],
+      [copy(6000), 3],
+    ],
+    unended: [reply(1000), reply(5000)],
+    matches: [
+      [copy(3000), 1000],
+      [copy(6000), 5000],
+    ],
+  },
+  {
+    name: "a copy known only from the history that fits two replies goes to neither",
+    history: [prompt(900), copy(3000, "Check first")],
     streamed: [prompt(900), reply(1000, "Check"), reply(5000, "Check")],
     unended: [reply(1000), reply(5000)],
     matches: [],
   },
   {
-    name: "a lost steer before the copy leaves the reply unmatched",
+    name: "a lost steer before the copy does not hide it",
     history: [prompt(900), prompt(1500), copy(3000, "Cut, then whole")],
     streamed: [prompt(900), reply(2000, "Cut")],
     unended: [reply(2000)],
-    matches: [],
+    matches: [[copy(3000), 2000]],
   },
   {
     name: "a copy stored before what the turn saw first belongs to an earlier turn",
@@ -196,6 +250,7 @@ describe("matchStoppedCopies", () => {
     const matches = matchStoppedCopies({
       history: shape.history,
       streamed: shape.streamed.map(key),
+      arrivals: new Map((shape.arrivals ?? []).map(([message, after]) => [key(message), after])),
       unended: new Set(shape.unended.map(key)),
       removed: new Set((shape.removed ?? []).map(key)),
       accounted: new Set((shape.accounted ?? []).map(key)),
