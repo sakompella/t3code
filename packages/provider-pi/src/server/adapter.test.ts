@@ -5991,6 +5991,51 @@ describe("PiAdapterV2 with the Prime Agent flavor", () => {
     }).pipe(Effect.scoped, Effect.provide(layerTest)),
   );
 
+  // The copy holds a block the stream never showed, and a later run's reply
+  // streams before the turn settles. That block keeps the copy's place.
+  it.effect("keeps a block only a stopped copy holds before a later run's reply", () =>
+    Effect.gen(function* () {
+      const fake = yield* makeFakePi;
+      const { runtime, takeEvent, providerThread } = yield* openPrimeThread(fake);
+      yield* startTurn(runtime, providerThread);
+      yield* fake.takeRequest("prompt");
+      yield* fake.emit({ type: "agent_start" });
+      yield* fake.emit({
+        type: "message_update",
+        message: assistantSnapshot(1000, "First cut"),
+        assistantMessageEvent: { type: "text_delta", contentIndex: 0, delta: "First cut" },
+      });
+      const copy = {
+        ...assistantSnapshot(5000, ""),
+        content: [
+          { type: "text", text: "First cut, then whole" },
+          { type: "text", text: "Extra block" },
+        ],
+        stopReason: "aborted",
+      };
+      yield* fake.emit({ type: "message_end", message: copy });
+      yield* fake.emit({ type: "turn_end", message: copy, toolResults: [] });
+      yield* fake.emit({ type: "agent_end", messages: [copy] });
+      yield* fake.emit({ type: "agent_start" });
+      const later = assistantSnapshot(7000, "Later reply");
+      fake.setTranscript([storedPrompt(900), copy, storedPrompt(6000, "Background notice"), later]);
+      yield* fake.emit({ type: "message_start", message: assistantSnapshot(7000, "") });
+      yield* fake.emit({
+        type: "message_update",
+        message: later,
+        assistantMessageEvent: { type: "text_delta", contentIndex: 0, delta: "Later reply" },
+      });
+      yield* fake.emit({ type: "message_end", message: later });
+      yield* fake.emit({ type: "agent_end", messages: [later] });
+
+      assert.deepEqual(yield* takeCompletedReplyTexts(takeEvent), [
+        ["First cut, then whole"],
+        ["Extra block"],
+        ["Later reply"],
+      ]);
+    }).pipe(Effect.scoped, Effect.provide(layerTest)),
+  );
+
   // The wall clock moved back between the turns, so the first turn's copy is
   // stamped after the reply the second turn was streaming.
   it.effect(
