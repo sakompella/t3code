@@ -1120,6 +1120,8 @@ export function makePiAdapterV2(
       const { adoptMessageIdentity, adoptSnapshot, upsertRecordedMessage } = makePrimeAgentStream({
         lossyStream: flavor.lossyStream,
         streamItemFor,
+        existingStreamItem: (turn, contentIndex) =>
+          turn.streamItems.get(streamItemId(turn, contentIndex)),
         completeStreamItem,
         scheduleStreamFlush,
         emitCompletedStreamItem: (turn, item) => emitStreamItem(turn, item, false),

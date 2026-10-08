@@ -32,6 +32,11 @@ export function makePrimeAgentStream(input: {
     kind: PiStreamItemState["kind"],
     contentIndex: number,
   ) => Effect.Effect<PiStreamItemState>;
+  /** The item of the sink's current message at `contentIndex`, if the stream made one. */
+  readonly existingStreamItem: (
+    turn: PiItemSink,
+    contentIndex: number,
+  ) => PiStreamItemState | undefined;
   readonly completeStreamItem: (
     turn: PiItemSink,
     item: PiStreamItemState,
@@ -47,6 +52,7 @@ export function makePrimeAgentStream(input: {
   const {
     lossyStream,
     streamItemFor,
+    existingStreamItem,
     completeStreamItem,
     scheduleStreamFlush,
     emitCompletedStreamItem,
@@ -71,7 +77,9 @@ export function makePrimeAgentStream(input: {
    * Take the text of every block in a message snapshot as the truth. The
    * lossy streams (see `PiFlavor.lossyStream`) skip deltas, block ends, and
    * whole blocks, but a snapshot is cumulative. A running snapshot keeps
-   * its items open; the final message completes them.
+   * its items open; the final message completes them. An aborted copy the
+   * stream only guessed the reply of fills that reply's shown blocks; the
+   * history read places its other blocks, on whichever reply it confirms.
    */
   const adoptSnapshot = Effect.fnUntraced(function* (
     turn: PiItemSink,
@@ -80,9 +88,13 @@ export function makePrimeAgentStream(input: {
   ) {
     const content = recordField(message, "content");
     if (!Array.isArray(content)) return;
+    const timestamp = recordNumber(message, "timestamp");
+    const guessedCopy =
+      "replacedReplies" in turn && timestamp !== undefined && turn.replacedReplies.has(timestamp);
     for (let contentIndex = 0; contentIndex < content.length; contentIndex += 1) {
       const block = snapshotBlock(message, contentIndex);
       if (block === undefined) continue;
+      if (guessedCopy && existingStreamItem(turn, contentIndex) === undefined) continue;
       const item = yield* streamItemFor(turn, block.kind, contentIndex);
       if (item.completed) continue;
       item.text = block.text;
