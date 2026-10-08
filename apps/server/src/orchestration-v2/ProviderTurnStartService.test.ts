@@ -171,7 +171,11 @@ function makeLocalCommandHarness(input: {
   readonly writeFailure?: unknown;
   /** Loads the thread and starts the run, then fails every later state read. */
   readonly failReadsAfterRunning?: boolean;
+  /** Loads the thread and starts the run. */
+  readonly startsNativeTurn?: boolean;
 }) {
+  const startsNativeTurn = input.failReadsAfterRunning === true || input.startsNativeTurn === true;
+  let recoveryProjectionReads = 0;
   const now = DateTime.makeUnsafe("2026-09-04T12:00:00Z");
   const threadId = ThreadId.make("thread-native-account-command");
   const runId = RunId.make("run-native-account-command");
@@ -414,7 +418,7 @@ function makeLocalCommandHarness(input: {
                   ),
                 ),
               )
-            : input.failReadsAfterRunning === true
+            : startsNativeTurn
               ? Effect.succeed({
                   driver: providerThread.driver,
                   providerSession: {
@@ -436,9 +440,7 @@ function makeLocalCommandHarness(input: {
   const startRootRun = vi.fn<
     (input: RunExecutionService.RunExecutionServiceV2StartRootRunInput) => Effect.Effect<void>
   >(() =>
-    input.failReadsAfterRunning === true
-      ? Effect.void
-      : Effect.die("A local command must not start a native turn."),
+    startsNativeTurn ? Effect.void : Effect.die("A local command must not start a native turn."),
   );
   const failReadIfRunning = Effect.suspend(() =>
     input.failReadsAfterRunning === true &&
@@ -505,13 +507,31 @@ function makeLocalCommandHarness(input: {
               ),
             }),
           getRuntimeRecoveryProjection: () =>
-            Effect.as(failReadIfRunning, {
-              ...projection,
-              hasConversation: projection.messages.some(
-                (m) =>
-                  m.role === "user" &&
-                  (m.text.trim().toLowerCase() !== "/compact" || m.attachments.length > 0),
+            Effect.as(
+              Effect.andThen(
+                Effect.sync(() => {
+                  recoveryProjectionReads += 1;
+                }),
+                failReadIfRunning,
               ),
+              {
+                ...projection,
+                hasConversation: projection.messages.some(
+                  (m) =>
+                    m.role === "user" &&
+                    (m.text.trim().toLowerCase() !== "/compact" || m.attachments.length > 0),
+                ),
+              },
+            ),
+          getRunState: (_threadId, runId) =>
+            Effect.suspend(() => {
+              const current = projection.runs.find((candidate) => candidate.id === runId);
+              return Effect.as(
+                failReadIfRunning,
+                current === undefined
+                  ? undefined
+                  : { status: current.status, activeAttemptId: current.activeAttemptId },
+              );
             }),
           getTurnStartHistory: () =>
             Effect.fail(
@@ -540,6 +560,7 @@ function makeLocalCommandHarness(input: {
     newInstanceId,
     attemptId,
     projection: () => projection,
+    recoveryProjectionReads: () => recoveryProjectionReads,
     start: Effect.gen(function* () {
       yield* (yield* ProviderTurnStart.ProviderTurnStartServiceV2).start({ threadId, runId });
     }).pipe(Effect.provide(layer)),
@@ -735,6 +756,24 @@ effectIt.effect(
       expect(harness.projection().runs.at(-1)?.status).toBe("starting");
       expect(harness.events).toEqual([]);
     }),
+);
+
+effectIt.effect("checks a run's attempt without reading the thread's recovery projection", () =>
+  Effect.gen(function* () {
+    const harness = makeLocalCommandHarness({ text: "Continue", startsNativeTurn: true });
+
+    yield* harness.start;
+
+    const controls = harness.startRootRun.mock.calls[0]?.[0];
+    expect(controls).toBeDefined();
+    if (controls === undefined) return;
+    expect(yield* controls.shouldStartProviderTurn!()).toBe(true);
+    expect(yield* controls.shouldFinalizeRun!()).toBe(true);
+    // Only the inherited background routing needs the recovery projection. The
+    // guards run several times per start and wake, and on a large thread each
+    // recovery read blocks the event loop for tens of milliseconds.
+    expect(harness.recoveryProjectionReads()).toBe(1);
+  }),
 );
 
 effectIt.effect("does not mistake a failed state read for a superseded run", () =>
