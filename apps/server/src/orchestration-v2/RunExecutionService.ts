@@ -718,6 +718,12 @@ export const layer: Layer.Layer<
     const mcpAppModelContext = yield* McpAppModelContext.McpAppModelContext;
     const finalizationObserver = yield* RunFinalizationService.RunFinalizationObserver;
     const subagentThreadClaims = yield* Ref.make(noSubagentThreadClaims);
+    // A run releases its claims when it stops, so a subagent called again later
+    // can go to the live run. Another run may still have the shell the owner
+    // took queued behind that release. The session hands every subscriber the
+    // same event object, so remembering the object keeps that copy from being
+    // adopted twice. An entry lasts only while some queue still holds the event.
+    const shellsTakenByOwner = new WeakSet<ProviderAdapterV2Event>();
 
     const writeFinalRunEvents = (input: {
       readonly run: OrchestrationV2Run;
@@ -1353,12 +1359,21 @@ export const layer: Layer.Layer<
                 // Only this fiber writes its routing state; the claims are shared.
                 const state = yield* Ref.get(eventRouting);
                 const [accepted, next] = yield* Ref.modify(subagentThreadClaims, (claims) => {
+                  if (shellsTakenByOwner.has(event)) {
+                    return [[false, state] as const, claims];
+                  }
                   const [accepted, next, nextClaims] = routeProviderEvent(
                     event,
                     routeIdentity,
                     state,
                     claims,
                   );
+                  if (
+                    event.type === "app_thread.created" &&
+                    nextClaims.owners.get(event.appThread.id) === routeIdentity.runId
+                  ) {
+                    shellsTakenByOwner.add(event);
+                  }
                   return [[accepted, next] as const, nextClaims];
                 });
                 yield* Ref.set(eventRouting, next);
