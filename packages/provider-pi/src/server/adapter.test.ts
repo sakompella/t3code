@@ -6275,6 +6275,39 @@ describe("PiAdapterV2 with the Prime Agent flavor", () => {
     }).pipe(Effect.scoped, Effect.provide(layerTest)),
   );
 
+  // One dropped range, from the first reply's start to the next prompt's end.
+  // The later reply is stopped at once, so its copy is exactly what it showed.
+  // The older copy also holds that text, and the RPC stream carries no event
+  // sequence, so this looks the same as the mirror case (the reply's own copy
+  // lost, a later run's copy arriving right after it). Both stay misses.
+  it.effect("keeps a reply apart when its live copy and an older unseen copy both fit", () =>
+    Effect.gen(function* () {
+      const fake = yield* makeFakePi;
+      const { runtime, takeEvent, providerThread } = yield* openPrimeThread(fake);
+      yield* startTurn(runtime, providerThread);
+      yield* fake.takeRequest("prompt");
+      yield* fake.emit({ type: "agent_start" });
+      const olderCopy = { ...assistantSnapshot(3000, "Check first"), stopReason: "aborted" };
+      const ownCopy = { ...assistantSnapshot(6000, "Check"), stopReason: "aborted" };
+      yield* fake.emit({ type: "message_start", message: storedPrompt(900) });
+      yield* fake.emit({
+        type: "message_update",
+        message: assistantSnapshot(5000, "Check"),
+        assistantMessageEvent: { type: "text_delta", contentIndex: 0, delta: "Check" },
+      });
+      yield* fake.emit({ type: "message_end", message: ownCopy });
+      fake.setTranscript([storedPrompt(900), olderCopy, storedPrompt(4000, "Continue"), ownCopy]);
+      yield* fake.emit({ type: "turn_end", message: ownCopy, toolResults: [] });
+      yield* fake.emit({ type: "agent_end", messages: [ownCopy] });
+
+      assert.deepEqual(yield* takeCompletedReplyTexts(takeEvent), [
+        ["Check"],
+        ["Check"],
+        ["Check first"],
+      ]);
+    }).pipe(Effect.scoped, Effect.provide(layerTest)),
+  );
+
   // The wall clock moved back between the turns, so the first turn's copy is
   // stamped after the reply the second turn was streaming.
   it.effect(
