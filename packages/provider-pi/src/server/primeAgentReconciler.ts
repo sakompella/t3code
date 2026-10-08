@@ -251,19 +251,25 @@ export function makePrimeAgentReconciler<E>(input: {
     [...turn.seenMessageKeys].filter((key) => !turn.shownMessageKeys.has(key) && isReplyKey(key));
 
   /**
-   * The reply `event` ends under another identity. Stop cuts a reply off, and
-   * stock Prime Agent ends it with a copy stamped at abort time, announced by
-   * no message_start of its own (agent-loop.js `finishAbortedMessage`). The
-   * copy replaces the reply in its history too.
+   * The reply an ended `message` replaces under another identity. Stop cuts
+   * a reply off, and stock Prime Agent ends it with a copy stamped at abort
+   * time, announced by no message_start of its own (agent-loop.js
+   * `finishAbortedMessage`). The copy replaces the reply in its history too.
    */
-  const replacedReplyKey = (turn: ActivePiTurn, event: PiRpcRecord) => {
-    const message = eventMessage(event);
-    if (event["type"] !== "message_end" || recordString(message, "stopReason") !== "aborted") {
-      return undefined;
-    }
+  const replacedReplyKey = (turn: ActivePiTurn, message: unknown) => {
+    if (recordString(message, "stopReason") !== "aborted") return undefined;
     const key = transcriptMessageKey(message);
     if (key === undefined || !isReplyKey(key) || turn.seenMessageKeys.has(key)) return undefined;
     return unendedReplyKeys(turn).at(-1);
+  };
+
+  /** Ends the reply an aborted copy replaces, and gives the copy that reply's identity. */
+  const adoptReplacement = (turn: ActivePiTurn, message: unknown) => {
+    const key = transcriptMessageKey(message);
+    const replaced = replacedReplyKey(turn, message);
+    if (key === undefined || replaced === undefined) return;
+    turn.shownMessageKeys.add(replaced);
+    turn.replacedReplies.set(keyTimestamp(key), keyTimestamp(replaced));
   };
 
   /** Remembers which stored messages the turn's own events already showed, and which in full. */
@@ -271,11 +277,7 @@ export function makePrimeAgentReconciler<E>(input: {
     const message = eventMessage(event);
     const key = transcriptMessageKey(message);
     if (key === undefined) return;
-    const replaced = replacedReplyKey(turn, event);
-    if (replaced !== undefined) {
-      turn.shownMessageKeys.add(replaced);
-      turn.replacedReplies.set(keyTimestamp(key), keyTimestamp(replaced));
-    }
+    if (event["type"] === "message_end") adoptReplacement(turn, message);
     turn.seenMessageKeys.add(key);
     if (showsInFull(turn, event["type"], message)) turn.shownMessageKeys.add(key);
   };
@@ -307,6 +309,8 @@ export function makePrimeAgentReconciler<E>(input: {
     for (const message of unaccounted(messages)) {
       switch (recordString(message, "role")) {
         case "assistant": {
+          // Stop can read the history before the copy's live end arrives.
+          adoptReplacement(turn, message);
           yield* items.upsertAssistantMessage(turn, message);
           const content = recordField(message, "content");
           for (const block of Array.isArray(content) ? content : []) {
@@ -362,7 +366,7 @@ export function makePrimeAgentReconciler<E>(input: {
       recordString(message, "role") === "assistant" &&
       key !== undefined &&
       !turn.seenMessageKeys.has(key) &&
-      replacedReplyKey(turn, event) === undefined;
+      !(event["type"] === "message_end" && replacedReplyKey(turn, message) !== undefined);
     const type = event["type"];
     const endsWork =
       startsReply || type === "tool_execution_start" || type === "turn_end" || type === "agent_end";
