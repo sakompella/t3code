@@ -343,6 +343,14 @@ export default async function t3McpExtension(pi: ExtensionAPI) {
     }
     let approved: boolean;
     try {
+      // Prime Agent drops a subagent's dialog on its way to T3, so the prompt
+      // would wait forever. Block instead, as a parent with no UI would.
+      if ((ctx.sessionManager.getHeader()?.rlmDepth ?? 0) > 0) {
+        return {
+          block: true,
+          reason: \`\${event.toolName} was blocked: T3 Code cannot show a subagent's approval prompt. Run the thread with full access to let subagents use it.\`,
+        };
+      }
       approved = await ctx.ui.confirm(
         \`Allow \${event.toolName}?\`,
         toolInputSummary(event.input),
