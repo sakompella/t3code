@@ -99,7 +99,14 @@ export interface ActivePiTurn {
    * streamed. They show nothing until a history read places them, or the
    * turn ends.
    */
-  readonly heldCopies: Map<string, unknown>;
+  readonly heldCopies: Map<
+    string,
+    {
+      readonly message: unknown;
+      /** How many of `seenMessageKeys` had arrived before the copy. */
+      readonly arrivedAfter: number;
+    }
+  >;
   /** Unended replies a compaction or a retry may have dropped from the history, not a copy. */
   readonly removedReplies: Set<string>;
   /** Lost ends a gap read already looked for: reply keys and tool call ids. */
