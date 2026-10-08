@@ -25,6 +25,7 @@ export interface PiStreamItemState {
   readonly kind: "assistant_message" | "reasoning";
   /** The sink's `messageOrdinal` for the message this block belongs to. */
   readonly messageOrdinal: number;
+  readonly contentIndex: number;
   text: string;
   completed: boolean;
   flushScheduled: boolean;
@@ -94,17 +95,13 @@ export interface ActivePiTurn {
   /** The seen messages T3 shows in full: a reply's final text, a tool result's outcome. */
   readonly shownMessageKeys: Set<string>;
   /**
-   * The key of the reply the stream is in: the last message or tool the
-   * turn's events were about, while that is a reply with no end yet. Only
-   * this reply can be replaced by an aborted copy.
+   * Stopped copies by key: aborted reply ends whose message the turn never
+   * streamed. They show nothing until a history read places them, or the
+   * turn ends.
    */
-  streamingReply: string | null;
-  /**
-   * The timestamp of each reply Stop cut off, by the timestamp of the aborted
-   * copy that ended it, so the copy lands on the reply's items. The stream
-   * only guesses it; a history read that still holds the reply undoes it.
-   */
-  readonly replacedReplies: Map<number, number>;
+  readonly heldCopies: Map<string, unknown>;
+  /** How many of `seenMessageKeys` arrived before the turn's last compaction. */
+  streamedBeforeCompaction: number;
   /** Lost ends a gap read already looked for: reply keys and tool call ids. */
   readonly soughtEnds: Set<string>;
   /** Whether a history read was reconciled into the turn, or the turn ended without one. */
