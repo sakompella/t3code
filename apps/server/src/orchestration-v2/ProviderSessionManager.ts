@@ -1943,7 +1943,9 @@ export const layerWithOptions = (
       /**
        * Stores one event of a session-scoped child thread. A failed write is
        * retried briefly, then logged and dropped: a child transcript must not
-       * end its parent's session.
+       * end its parent's session. The release permit covers the live check,
+       * the write and its retries, so a released session's pump never writes
+       * after release removed it, over what its replacement stored.
        */
       const storeSessionChildThreadEvent = (
         entry: LiveSessionEntry,
@@ -1990,7 +1992,7 @@ export const layerWithOptions = (
                     }),
               ),
             );
-        });
+        }).pipe(entry.requestEventPermit.withPermits(1));
 
       const startEventPump = (entry: LiveSessionEntry) => {
         let stoppedByProvider = false;
