@@ -4572,6 +4572,60 @@ describe("PiAdapterV2 with the Prime Agent flavor", () => {
     }).pipe(Effect.scoped, Effect.provide(layerTest)),
   );
 
+  // The first reply's start and updates were lost, but its copy arrived live
+  // and took its place, before an extension notice and the later reply. A
+  // copy that arrived before a reply started cannot be that reply's.
+  it.effect("keeps a copy that arrived before a later reply in its own place", () =>
+    Effect.gen(function* () {
+      const fake = yield* makeFakePi;
+      const { runtime, takeEvent, providerThread } = yield* openPrimeThread(fake);
+      yield* startTurn(runtime, providerThread);
+      yield* fake.takeRequest("prompt");
+      yield* fake.emit({ type: "agent_start" });
+      yield* fake.emit({ type: "message_start", message: storedPrompt(900) });
+      const firstCopy = { ...assistantSnapshot(3000, "Check first"), stopReason: "aborted" };
+      const laterCopy = { ...assistantSnapshot(6000, "Check later"), stopReason: "aborted" };
+      yield* fake.emit({ type: "message_end", message: firstCopy });
+      yield* fake.emit({
+        type: "extension_ui_request",
+        method: "notify",
+        message: "Between runs",
+        notifyType: "info",
+      });
+      yield* fake.emit({
+        type: "message_update",
+        message: assistantSnapshot(5000, "Check"),
+        assistantMessageEvent: { type: "text_delta", contentIndex: 0, delta: "Check" },
+      });
+      fake.setTranscript([storedPrompt(900), firstCopy, storedPrompt(4000, "Continue"), laterCopy]);
+      yield* fake.emit({ type: "message_end", message: laterCopy });
+      yield* fake.emit({ type: "turn_end", message: laterCopy, toolResults: [] });
+      yield* fake.emit({ type: "agent_end", messages: [laterCopy] });
+
+      const timeline = new Map<string, { readonly ordinal: number; readonly text: string }>();
+      for (;;) {
+        const event = yield* takeEvent(
+          (candidate) =>
+            candidate.type === "turn.terminal" ||
+            (candidate.type === "turn_item.updated" && candidate.turnItem.status === "completed"),
+        );
+        if (event.type !== "turn_item.updated") break;
+        const item = event.turnItem;
+        if (item.type === "assistant_message") {
+          timeline.set(item.id, { ordinal: item.ordinal, text: item.text });
+        } else if (item.type === "dynamic_tool" && item.toolName === "notify") {
+          timeline.set(item.id, { ordinal: item.ordinal, text: "Between runs" });
+        }
+      }
+      assert.deepEqual(
+        [...timeline.values()]
+          .sort((left, right) => left.ordinal - right.ordinal)
+          .map((item) => item.text),
+        ["Check first", "Between runs", "Check later"],
+      );
+    }).pipe(Effect.scoped, Effect.provide(layerTest)),
+  );
+
   // The wall clock moved back between the turns, so the first turn's copy is
   // stamped after the reply the second turn was streaming.
   it.effect(
