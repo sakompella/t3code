@@ -467,12 +467,15 @@ describe("a late subagent shell across a session's subscribers", () => {
     driver,
     providerThread: { id: childProviderThreadId, appThreadId: childThreadId },
   } as ProviderAdapterV2Event;
-  const childRoot = (status: OrchestrationV2ExecutionNode["status"]) =>
+  const childRoot = (
+    status: OrchestrationV2ExecutionNode["status"],
+    nodeId = NodeId.make("node:shell-owner:child-root"),
+  ) =>
     ({
       type: "node.updated",
       driver,
       node: {
-        id: NodeId.make("node:shell-owner:child-root"),
+        id: nodeId,
         threadId: childThreadId,
         runId: null,
         kind: "root_turn",
@@ -481,6 +484,37 @@ describe("a late subagent shell across a session's subscribers", () => {
       },
     }) as ProviderAdapterV2Event;
   const childRootNode = childRoot("running");
+  // Another child of the launching run, which keeps it ingesting after its root turn.
+  const otherChild = (status: OrchestrationV2Subagent["status"]) =>
+    ({
+      type: "subagent.updated",
+      driver,
+      subagent: {
+        id: NodeId.make("node:shell-owner:other-child"),
+        threadId,
+        runId: launching.runId,
+        status,
+      },
+    }) as ProviderAdapterV2Event;
+  // OpenCode2 reports a subagent called again under a new node, with its thread again.
+  const secondCallNodeId = NodeId.make("node:shell-owner:subagent:second-call");
+  const secondCallNode = (status: OrchestrationV2ExecutionNode["status"]) =>
+    ({
+      type: "node.updated",
+      driver,
+      node: {
+        id: secondCallNodeId,
+        threadId,
+        runId: live.runId,
+        parentNodeId: live.rootNodeId,
+        rootNodeId: live.rootNodeId,
+        kind: "subagent",
+        status,
+        providerThreadId,
+      },
+    }) as ProviderAdapterV2Event;
+  const secondCallRoot = (status: OrchestrationV2ExecutionNode["status"]) =>
+    childRoot(status, NodeId.make("node:shell-owner:child-root:second-call"));
 
   // Each adapter that reports a subagent's node before its child thread, in
   // the order it emits them around the shell.
@@ -556,7 +590,10 @@ describe("a late subagent shell across a session's subscribers", () => {
       [launching, live].map((run) => [run.runId, Deferred.makeUnsafe<void>()]),
     );
     const childEventOwners = yield* Ref.make<ReadonlyArray<RunId | undefined>>([]);
-    const liveShellGate = yield* Ref.make<Deferred.Deferred<void> | null>(null);
+    const shellGate = yield* Ref.make<{
+      readonly runId: RunId;
+      readonly gate: Deferred.Deferred<void>;
+    } | null>(null);
     const layerTest = RunExecutionService.layer.pipe(
       Layer.provide(
         Layer.mergeAll(
@@ -616,10 +653,12 @@ describe("a late subagent shell across a session's subscribers", () => {
             );
             const events = Stream.fromQueue(queue).pipe(
               Stream.mapEffect((event) =>
-                run.runId === live.runId && event.type === "app_thread.created"
-                  ? Ref.get(liveShellGate).pipe(
-                      Effect.flatMap((gate) =>
-                        gate === null ? Effect.void : Deferred.await(gate),
+                event.type === "app_thread.created"
+                  ? Ref.get(shellGate).pipe(
+                      Effect.flatMap((held) =>
+                        held === null || held.runId !== run.runId
+                          ? Effect.void
+                          : Deferred.await(held.gate),
                       ),
                       Effect.as(event),
                     )
@@ -671,12 +710,13 @@ describe("a late subagent shell across a session's subscribers", () => {
       awaitClosed: (run: ScenarioRun) =>
         awaitWithin(closed.get(run.runId)!, `${run.runId} still subscribed`),
       childEventOwners: Ref.get(childEventOwners),
-      /** Holds the live run before it reads a shell; the returned effect lets it go on. */
-      holdLiveRunAtShell: Effect.gen(function* () {
-        const gate = yield* Deferred.make<void>();
-        yield* Ref.set(liveShellGate, gate);
-        return Deferred.succeed(gate, undefined);
-      }),
+      /** Holds a run before it reads a shell; the returned effect lets it go on. */
+      holdAtShell: (run: ScenarioRun) =>
+        Effect.gen(function* () {
+          const gate = yield* Deferred.make<void>();
+          yield* Ref.set(shellGate, { runId: run.runId, gate });
+          return Deferred.succeed(gate, undefined);
+        }),
       endAll: Effect.gen(function* () {
         for (const queue of (yield* Ref.get(subscribers)).values()) yield* Queue.end(queue);
       }),
@@ -754,17 +794,6 @@ describe("a late subagent shell across a session's subscribers", () => {
     Effect.scoped(
       Effect.gen(function* () {
         const session = yield* sharedSessionScenario;
-        const otherChild = (status: OrchestrationV2Subagent["status"]) =>
-          ({
-            type: "subagent.updated",
-            driver,
-            subagent: {
-              id: NodeId.make("node:shell-owner:other-child"),
-              threadId,
-              runId: launching.runId,
-              status,
-            },
-          }) as ProviderAdapterV2Event;
         yield* session.start(launching);
         yield* session.publish([
           otherChild("running"),
@@ -774,7 +803,7 @@ describe("a late subagent shell across a session's subscribers", () => {
         ]);
         yield* session.awaitDrained(launching);
         yield* session.start(live);
-        const releaseLiveRun = yield* session.holdLiveRunAtShell;
+        const releaseLiveRun = yield* session.holdAtShell(live);
         const childEvents = [childShell, childRootNode, childRoot("completed")];
         yield* session.publish([...childEvents, otherChild("completed")]);
         yield* session.awaitClosed(launching);
@@ -808,25 +837,9 @@ describe("a late subagent shell across a session's subscribers", () => {
           rootTerminal(launching),
         ]);
         yield* session.awaitClosed(launching);
-        // OpenCode2 reports a subagent called again under a new node, with its thread again.
-        const secondCallNodeId = NodeId.make("node:shell-owner:subagent:second-call");
-        const secondCallNode = {
-          type: "node.updated",
-          driver,
-          node: {
-            id: secondCallNodeId,
-            threadId,
-            runId: live.runId,
-            parentNodeId: live.rootNodeId,
-            rootNodeId: live.rootNodeId,
-            kind: "subagent",
-            status: "running",
-            providerThreadId,
-          },
-        } as ProviderAdapterV2Event;
         yield* session.start(live);
         yield* session.publish([
-          secondCallNode,
+          secondCallNode("running"),
           childShellFrom(secondCallNodeId),
           childRootNode,
           drainMarker(live),
@@ -842,6 +855,96 @@ describe("a late subagent shell across a session's subscribers", () => {
         yield* session.endAll;
       }),
     ),
+  );
+
+  it.effect(
+    "OpenCode2: the live run adopts a re-called subagent's shell its old owner refused",
+    () =>
+      Effect.scoped(
+        Effect.gen(function* () {
+          const session = yield* sharedSessionScenario;
+          yield* session.start(launching);
+          yield* session.publish([
+            otherChild("running"),
+            subagentNode("running", providerThreadId),
+            childShell,
+            childRootNode,
+            rootTerminal(launching),
+            drainMarker(launching),
+          ]);
+          yield* session.awaitDrained(launching);
+          yield* session.start(live);
+          yield* session.publish([
+            childRoot("completed"),
+            subagentNode("completed", providerThreadId),
+            drainMarker(live),
+          ]);
+          yield* session.awaitDrained(live);
+          const releaseLiveRun = yield* session.holdAtShell(live);
+          yield* session.publish([
+            secondCallNode("running"),
+            childShellFrom(secondCallNodeId),
+            otherChild("completed"),
+          ]);
+          yield* session.awaitClosed(launching);
+          yield* releaseLiveRun;
+          yield* session.publish([
+            secondCallRoot("running"),
+            secondCallRoot("completed"),
+            rootTerminal(live),
+          ]);
+          yield* session.awaitClosed(live);
+          assert.deepEqual(yield* session.childEventOwners, [
+            launching.runId,
+            launching.runId,
+            launching.runId,
+            live.runId,
+            live.runId,
+            live.runId,
+          ]);
+        }),
+      ),
+  );
+
+  it.effect(
+    "OpenCode2: a run lagging across another run's re-call adopts neither shell, as before shells carried a run",
+    () =>
+      Effect.scoped(
+        Effect.gen(function* () {
+          const session = yield* sharedSessionScenario;
+          yield* session.start(launching);
+          yield* session.publish([
+            otherChild("running"),
+            subagentNode("running", providerThreadId),
+            rootTerminal(launching),
+            drainMarker(launching),
+          ]);
+          yield* session.awaitDrained(launching);
+          const releaseLaunching = yield* session.holdAtShell(launching);
+          yield* session.publish([childShell, childRootNode, childRoot("completed")]);
+          yield* session.start(live);
+          const secondCallEvents = [
+            childShellFrom(secondCallNodeId),
+            secondCallRoot("running"),
+            secondCallRoot("completed"),
+          ];
+          yield* session.publish([
+            secondCallNode("running"),
+            ...secondCallEvents,
+            secondCallNode("completed"),
+            rootTerminal(live),
+          ]);
+          yield* session.awaitClosed(live);
+          yield* releaseLaunching;
+          yield* session.publish([otherChild("completed")]);
+          yield* session.awaitClosed(launching);
+          assert.deepEqual(
+            yield* session.childEventOwners,
+            secondCallEvents.map(() => live.runId),
+            "an unstamped shell that arrives after its run's root turn ended is not adopted (pre-series base), and the newer call's events are delivered once",
+          );
+        }),
+      ),
   );
 });
 
