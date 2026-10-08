@@ -3111,6 +3111,10 @@ export const PublishedHtmlRender = Schema.Struct({
 });
 export type PublishedHtmlRender = typeof PublishedHtmlRender.Type;
 
+/** The tool item `html_render.record` adds for a page; one per page. */
+export const htmlRenderTurnItemId = (attachmentId: string) =>
+  TurnItemId.make(`turn-item:html-render:${attachmentId}`);
+
 /**
  * Commands only the server dispatches. They stay out of
  * `OrchestrationV2Command`, the `dispatchCommand` payload, so no client can
