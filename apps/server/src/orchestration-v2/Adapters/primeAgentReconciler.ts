@@ -12,6 +12,7 @@ import {
   type PiRpcRecord,
 } from "./PiRpc.ts";
 import type { ActivePiTurn } from "./PiAdapterV2State.ts";
+import { snapshotBlock } from "./primeAgentStream.ts";
 
 /**
  * How often the reconciler looks at a session that may have lost events: a
@@ -65,6 +66,41 @@ function eventMessage(event: PiRpcRecord): unknown {
     default:
       return undefined;
   }
+}
+
+/** Events that show the stream moved on from the reply it was in. */
+const LEAVES_REPLY = new Set([
+  "agent_start",
+  "turn_start",
+  "message_start",
+  "message_update",
+  "message_end",
+  "tool_execution_start",
+  "tool_execution_update",
+  "tool_execution_end",
+]);
+
+/** The non-empty text and thinking blocks of a reply snapshot, by content index. */
+function textBlocks(message: unknown) {
+  const content = recordField(message, "content");
+  return (Array.isArray(content) ? content : []).flatMap((_, index) => {
+    const block = snapshotBlock(message, index);
+    return block === undefined ? [] : [{ index, ...block }];
+  });
+}
+
+/**
+ * Whether `copy` holds all the text T3 saw of `partial`, as a stock abort
+ * copy holds the partial reply it clones. A partial that showed no text
+ * proves nothing, so only a copy without text can continue it.
+ */
+function continuesSnapshot(partial: unknown, copy: unknown): boolean {
+  const seen = textBlocks(partial);
+  if (seen.length === 0) return textBlocks(copy).length === 0;
+  return seen.every(({ index, kind, text }) => {
+    const copied = snapshotBlock(copy, index);
+    return copied?.kind === kind && copied.text.startsWith(text);
+  });
 }
 
 type TranscriptRead =
@@ -251,16 +287,22 @@ export function makePrimeAgentReconciler<E>(input: {
     [...turn.seenMessageKeys].filter((key) => !turn.shownMessageKeys.has(key) && isReplyKey(key));
 
   /**
-   * The reply an ended `message` replaces under another identity. Stop cuts
-   * a reply off, and stock Prime Agent ends it with a copy stamped at abort
-   * time, announced by no message_start of its own (agent-loop.js
-   * `finishAbortedMessage`). The copy replaces the reply in its history too.
+   * The reply an aborted `message` replaces under another identity. Stop cuts
+   * a reply off, and stock Prime Agent ends it with a copy of what it
+   * streamed, stamped at abort time and announced by no message_start of its
+   * own (agent-loop.js `finishAbortedMessage`). The copy replaces the reply
+   * in its history too. The stream is lossy, so only the reply it is still
+   * in can be replaced, by a copy stamped after that reply started that
+   * holds all of it T3 saw. Any other aborted end is a reply of its own.
    */
   const replacedReplyKey = (turn: ActivePiTurn, message: unknown) => {
+    const streaming = turn.streamingReply;
+    if (streaming === null || turn.shownMessageKeys.has(streaming.key)) return undefined;
     if (recordString(message, "stopReason") !== "aborted") return undefined;
     const key = transcriptMessageKey(message);
     if (key === undefined || !isReplyKey(key) || turn.seenMessageKeys.has(key)) return undefined;
-    return unendedReplyKeys(turn).at(-1);
+    if (keyTimestamp(key) < keyTimestamp(streaming.key)) return undefined;
+    return continuesSnapshot(streaming.snapshot, message) ? streaming.key : undefined;
   };
 
   /** Ends the reply an aborted copy replaces, and gives the copy that reply's identity. */
@@ -272,14 +314,24 @@ export function makePrimeAgentReconciler<E>(input: {
     turn.replacedReplies.set(keyTimestamp(key), keyTimestamp(replaced));
   };
 
-  /** Remembers which stored messages the turn's own events already showed, and which in full. */
+  /**
+   * Remembers which stored messages the turn's own events already showed,
+   * and which in full, and which reply the stream is in.
+   */
   const noteSeen = (turn: ActivePiTurn, event: PiRpcRecord) => {
+    const type = event["type"];
     const message = eventMessage(event);
     const key = transcriptMessageKey(message);
-    if (key === undefined) return;
-    if (event["type"] === "message_end") adoptReplacement(turn, message);
-    turn.seenMessageKeys.add(key);
-    if (showsInFull(turn, event["type"], message)) turn.shownMessageKeys.add(key);
+    if (key !== undefined) {
+      if (type === "message_end") adoptReplacement(turn, message);
+      turn.seenMessageKeys.add(key);
+      if (showsInFull(turn, type, message)) turn.shownMessageKeys.add(key);
+    }
+    if (key !== undefined && isReplyKey(key) && type !== "message_end") {
+      turn.streamingReply = { key, snapshot: message };
+    } else if (typeof type === "string" && LEAVES_REPLY.has(type)) {
+      turn.streamingReply = null;
+    }
   };
 
   /** Whether an event about `message` leaves T3 showing all of it. */
@@ -332,7 +384,10 @@ export function makePrimeAgentReconciler<E>(input: {
         default: {
           const key = transcriptMessageKey(message);
           if (key !== undefined && !turn.seenMessageKeys.has(key)) {
+            // A stored message is history, so its replay leaves the stream where it was.
+            const streaming = turn.streamingReply;
             yield* items.replayMessageStart(message);
+            turn.streamingReply = streaming;
           }
         }
       }
