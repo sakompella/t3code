@@ -619,7 +619,13 @@ export function makePrimeAgentChildThreads(input: {
     const parentChildId = recordString(snapshot, "parentId");
     const parentChild = parentChildId === undefined ? undefined : rlmChildren.get(parentChildId);
     // A child outlives the run that spawned it; its card stays on that run.
-    const turn = previous?.turn ?? parentChild?.turn ?? currentTurn;
+    // A finished parent child no longer keeps its run listening, so a child
+    // its follow-up starts goes to the live run, as a resumed Claude task does.
+    const launchingTurn =
+      parentChild !== undefined && !parentChild.terminal
+        ? parentChild.turn
+        : (currentTurn ?? parentChild?.turn ?? null);
+    const turn = previous?.turn ?? launchingTurn;
     if (turn === null) {
       yield* traceRlmChildUpdate(snapshot, currentTurn, source, {
         outcome: "dropped",
@@ -649,7 +655,7 @@ export function makePrimeAgentChildThreads(input: {
       routedVia:
         previous !== undefined
           ? "known-child"
-          : parentChild !== undefined
+          : turn === parentChild?.turn
             ? "parent-child"
             : "current-turn",
     });
