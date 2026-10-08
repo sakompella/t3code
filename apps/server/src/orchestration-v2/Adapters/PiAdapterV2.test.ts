@@ -4707,7 +4707,7 @@ describe("PiAdapterV2 with the Prime Agent flavor", () => {
   );
 
   it.effect(
-    "keeps a finished child's thread live for follow-up work and routes its nested children",
+    "reopens a finished child's thread for follow-up work and routes its nested children",
     () =>
       Effect.gen(function* () {
         const fake = yield* makeFakePi;
@@ -4797,15 +4797,24 @@ describe("PiAdapterV2 with the Prime Agent flavor", () => {
           (event) => event.type === "subagent.updated" && event.subagent.title === "marker",
         );
 
-        // None of it rewrote the original task's card or its root node.
-        const rewrites = [...followUp, ...nesting, ...ending].filter(
-          (event) =>
-            (event.type === "subagent.updated" && event.subagent.id === child?.id) ||
-            (event.type === "node.updated" &&
-              event.node.kind === "root_turn" &&
-              event.node.threadId === child?.childThreadId),
+        // The child thread works again while the follow-up runs, as a resumed
+        // Claude subagent does, and settles when it ends.
+        const childRootStates = (events: ReadonlyArray<ProviderAdapterV2Event>) =>
+          events.flatMap((event) =>
+            event.type === "node.updated" &&
+            event.node.kind === "root_turn" &&
+            event.node.threadId === child?.childThreadId
+              ? [{ status: event.node.status, completed: event.node.completedAt !== null }]
+              : [],
+          );
+        assert.deepEqual(childRootStates(followUp), [{ status: "running", completed: false }]);
+        assert.deepEqual(childRootStates(nesting), []);
+        assert.deepEqual(childRootStates(ending), [{ status: "completed", completed: true }]);
+        // The card keeps the original task's outcome.
+        const cardRewrites = [...followUp, ...nesting, ...ending].filter(
+          (event) => event.type === "subagent.updated" && event.subagent.id === child?.id,
         );
-        assert.deepEqual(rewrites, []);
+        assert.deepEqual(cardRewrites, []);
       }).pipe(Effect.scoped, Effect.provide(layerTest)),
   );
 
