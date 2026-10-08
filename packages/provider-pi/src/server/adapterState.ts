@@ -94,15 +94,15 @@ export interface ActivePiTurn {
   /** The seen messages T3 shows in full: a reply's final text, a tool result's outcome. */
   readonly shownMessageKeys: Set<string>;
   /**
-   * The reply the stream is in: the last message or tool the turn's events
-   * were about, while that is a reply with no end yet, and its latest
-   * snapshot. Only this reply can be replaced by an aborted copy.
+   * The key of the reply the stream is in: the last message or tool the
+   * turn's events were about, while that is a reply with no end yet. Only
+   * this reply can be replaced by an aborted copy.
    */
-  streamingReply: { readonly key: string; readonly snapshot: unknown } | null;
+  streamingReply: string | null;
   /**
    * The timestamp of each reply Stop cut off, by the timestamp of the aborted
-   * copy that ended it. Its items keep the reply's identity, live and when
-   * the history, which holds only the copy, is read.
+   * copy that ended it, so the copy lands on the reply's items. The stream
+   * only guesses it; a history read that still holds the reply undoes it.
    */
   readonly replacedReplies: Map<number, number>;
   /** Lost ends a gap read already looked for: reply keys and tool call ids. */
