@@ -276,6 +276,21 @@ describe("T3 extension handlers on a stale ctx", () => {
       });
     });
 
+    it("blocks a subagent's tool without asking, since no T3 prompt can reach a subagent", async () => {
+      const toolCall = await loadToolCall();
+      const subagent = {
+        sessionManager: { getHeader: () => ({ type: "session", rlmDepth: 1 }) },
+        ui: {
+          confirm: async () => {
+            throw new Error("a subagent's approval prompt has no recipient");
+          },
+        },
+      };
+      const result = await toolCall(bash, subagent);
+      assert.isTrue(result?.block);
+      assert.match(result?.reason ?? "", /bash was blocked.*subagent/);
+    });
+
     it("rejects, rather than approving, when the prompt fails for another reason", async () => {
       const toolCall = await loadToolCall();
       let failure: unknown;
