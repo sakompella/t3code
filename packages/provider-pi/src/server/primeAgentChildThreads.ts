@@ -230,6 +230,7 @@ export function makePrimeAgentChildThreads(input: {
       status: null,
       observedSessionId: null,
       failedSessionIds: new Set(),
+      finalReply: null,
     };
     rlmTranscripts.set(input.childId, transcript);
     const model = recordString(input.snapshot, "model");
@@ -345,7 +346,11 @@ export function makePrimeAgentChildThreads(input: {
             recordNumber(message, "timestamp") ?? transcript.messageOrdinal + 1;
           const final = event["type"] === "message_end";
           yield* adoptSnapshot(transcript, message, final);
-          if (final) yield* completeOpenStreamItems(transcript);
+          if (final) {
+            yield* completeOpenStreamItems(transcript);
+            const text = contentText(recordField(message, "content")).trim();
+            if (text.length > 0) transcript.finalReply = text;
+          }
           return;
         }
         if (event["type"] === "message_end" && role !== "toolResult") {
@@ -649,9 +654,6 @@ export function makePrimeAgentChildThreads(input: {
     const title = recordString(snapshot, "sessionName") ?? null;
     const prompt = recordString(snapshot, "label") ?? title ?? "child agent";
     const progress = terminal ? undefined : rlmChildProgress(snapshot);
-    const result = terminal
-      ? (recordString(snapshot, "error") ?? recordString(snapshot, "answerPreview") ?? null)
-      : null;
     const completedAt = terminal ? emittedAt : null;
     // Nesting under the parent subagent's node is what lets clients
     // draw Prime Agent's subagent tree.
@@ -708,6 +710,13 @@ export function makePrimeAgentChildThreads(input: {
       if (terminal) yield* finishChildObservation(transcript, status, statusOverride === undefined);
       yield* emitChildRootNode(transcript, status, nativeTaskId, state.startedAt, completedAt);
     }
+    // Prime Agent clips its answer preview; the reply T3 observed is whole.
+    const result = terminal
+      ? (recordString(snapshot, "error") ??
+        transcript?.finalReply ??
+        recordString(snapshot, "answerPreview") ??
+        null)
+      : null;
     yield* emit({
       type: "subagent.updated",
       driver,
