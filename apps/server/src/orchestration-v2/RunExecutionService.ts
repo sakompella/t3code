@@ -1443,9 +1443,9 @@ export const layer: Layer.Layer<
               }),
             ),
             Stream.takeUntilEffect(() => shouldStopProviderEventIngestion),
-            // Once this run stops reading, a shell it launched goes to the live run.
-            Stream.ensuring(stopListeningForShells),
             Stream.runDrain,
+            // Once this run stops reading, a shell it launched goes to the live run.
+            Effect.ensuring(stopListeningForShells),
             Effect.mapError((cause) => new RunExecutionIngestError({ runId: input.run.id, cause })),
             Effect.flatMap(() =>
               Effect.gen(function* () {
