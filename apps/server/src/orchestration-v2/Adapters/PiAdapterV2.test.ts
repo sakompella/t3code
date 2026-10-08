@@ -4394,6 +4394,59 @@ describe("PiAdapterV2 with the Prime Agent flavor", () => {
     }).pipe(Effect.scoped, Effect.provide(layerTest)),
   );
 
+  it.effect(
+    "streams a child's session into its thread when Prime Agent refuses the dialog route",
+    () =>
+      Effect.gen(function* () {
+        const fake = yield* makeFakePi;
+        const session = yield* openPrimeThread(fake);
+        fake.queueObserved([
+          { role: "user", content: "Reply to your parent with child-ok", timestamp: 1000 },
+          { role: "assistant", content: [{ type: "text", text: "On it." }], timestamp: 1001 },
+        ]);
+        yield* startTurn(session.runtime, session.providerThread);
+        yield* fake.takeRequest("prompt");
+        yield* fake.emit({ type: "agent_start" });
+        fake.deferNextDialogRoute();
+        yield* fake.emit(rlmChild("running", { activeSessionId: "active-1" }));
+        const running = yield* session.takeEvent(
+          (event) => event.type === "subagent.updated" && event.subagent.childThreadId !== null,
+        );
+        const childThreadId =
+          running.type === "subagent.updated" ? running.subagent.childThreadId : null;
+        const setup = yield* fake.takeRequest("prompt");
+        const route = decodeDialogRoute(
+          String(setup["message"]).slice("/t3-route-child-dialogs ".length),
+        );
+        // Stock Prime Agent 0.9.8's daemon hides a T3-owned session's children from
+        // any other client, so the extension's own DaemonClient cannot attach.
+        yield* fake.emit({
+          type: "extension_ui_request",
+          method: "notify",
+          message: `t3-child-dialog-route:${encodeJsonLine({ requestId: route.requestId, ok: false, error: "Error: Unknown active session: active-1" })}`,
+        });
+        yield* fake.emit(sentinelChild("running"));
+        yield* session.takeEvent(
+          (event) => event.type === "subagent.updated" && event.subagent.title === "sentinel",
+        );
+        assert.isTrue(
+          fake
+            .allRequests()
+            .some(
+              (request) =>
+                request["type"] === "observe" && request["activeSessionId"] === "active-1",
+            ),
+        );
+        const reply = yield* session.takeEvent(
+          (event) =>
+            event.type === "message.updated" &&
+            event.message.threadId === childThreadId &&
+            event.message.text === "On it.",
+        );
+        assert.equal(reply.type, "message.updated");
+      }).pipe(Effect.scoped, Effect.provide(layerTest)),
+  );
+
   it.effect("streams a running child's session into its own thread", () =>
     Effect.gen(function* () {
       const fake = yield* makeFakePi;
