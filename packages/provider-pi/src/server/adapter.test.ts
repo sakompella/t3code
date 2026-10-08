@@ -6308,6 +6308,45 @@ describe("PiAdapterV2 with the Prime Agent flavor", () => {
     }).pipe(Effect.scoped, Effect.provide(layerTest)),
   );
 
+  // One dropped range, from the first reply's failed end through a retry that
+  // succeeded and a later run's prompt and updates. The retry dropped the
+  // failed reply from the history, so no copy replaced it. Only the later
+  // run's aborted end arrives, and it starts the way the failed reply did.
+  it.effect("keeps a reply a lost retry replaced apart from a later run's copy", () =>
+    Effect.gen(function* () {
+      const fake = yield* makeFakePi;
+      const { runtime, takeEvent, providerThread } = yield* openPrimeThread(fake);
+      yield* startTurn(runtime, providerThread);
+      yield* fake.takeRequest("prompt");
+      yield* fake.emit({ type: "agent_start" });
+      yield* fake.emit({ type: "turn_start" });
+      yield* fake.emit({ type: "message_start", message: storedPrompt(900) });
+      yield* fake.emit({ type: "message_end", message: storedPrompt(900) });
+      yield* fake.emit({ type: "message_start", message: assistantSnapshot(1000, "") });
+      yield* fake.emit({
+        type: "message_update",
+        message: assistantSnapshot(1000, "Check"),
+        assistantMessageEvent: { type: "text_delta", contentIndex: 0, delta: "Check" },
+      });
+      const laterCopy = { ...assistantSnapshot(11000, "Check later"), stopReason: "aborted" };
+      fake.setTranscript([
+        storedPrompt(900),
+        { ...assistantSnapshot(5000, "Check recovered"), stopReason: "stop" },
+        storedPrompt(8900, "Continue"),
+        laterCopy,
+      ]);
+      yield* fake.emit({ type: "message_end", message: laterCopy });
+      yield* fake.emit({ type: "turn_end", message: laterCopy, toolResults: [] });
+      yield* fake.emit({ type: "agent_end", messages: [laterCopy] });
+
+      assert.deepEqual(yield* takeCompletedReplyTexts(takeEvent), [
+        ["Check"],
+        ["Check later"],
+        ["Check recovered"],
+      ]);
+    }).pipe(Effect.scoped, Effect.provide(layerTest)),
+  );
+
   // The wall clock moved back between the turns, so the first turn's copy is
   // stamped after the reply the second turn was streaming.
   it.effect(
