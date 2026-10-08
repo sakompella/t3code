@@ -3696,6 +3696,40 @@ describe("PiAdapterV2 with the Prime Agent flavor", () => {
     }).pipe(Effect.scoped, Effect.provide(layerTest)),
   );
 
+  // The daemon drops one unbroken run of events while it is backed up, here
+  // from the first reply's end to the second reply's last update.
+  it.effect("keeps an earlier cut reply when everything up to a later aborted end was lost", () =>
+    Effect.gen(function* () {
+      const fake = yield* makeFakePi;
+      const { runtime, takeEvent, providerThread } = yield* openPrimeThread(fake);
+      yield* startTurn(runtime, providerThread);
+      yield* fake.takeRequest("prompt");
+      yield* fake.emit({ type: "agent_start" });
+      yield* fake.emit({ type: "message_start", message: assistantSnapshot(1000, "") });
+      yield* fake.emit({
+        type: "message_update",
+        message: assistantSnapshot(1000, "First reply"),
+        assistantMessageEvent: { type: "text_delta", contentIndex: 0, delta: "First reply" },
+      });
+      const secondCopy = { ...assistantSnapshot(5000, "Second reply"), stopReason: "aborted" };
+      fake.setTranscript([
+        storedPrompt(900),
+        {
+          ...assistantSnapshot(1000, "First reply"),
+          stopReason: "toolUse",
+          content: [{ type: "text", text: "First reply" }, removalToolCall],
+        },
+        storedRemovalResult,
+        secondCopy,
+      ]);
+      yield* fake.emit({ type: "message_end", message: secondCopy });
+      yield* fake.emit({ type: "turn_end", message: secondCopy, toolResults: [] });
+      yield* fake.emit({ type: "agent_end", messages: [secondCopy] });
+
+      assert.deepEqual(yield* takeFinalReplyTexts(takeEvent), ["First reply", "Second reply"]);
+    }).pipe(Effect.scoped, Effect.provide(layerTest)),
+  );
+
   // Stop read the first turn's history before its aborted copy was stored, so
   // the copy is still unaccounted when a later Stop reads the history again.
   it.effect("keeps an earlier turn's aborted copy off the reply a later Stop cut off", () =>
