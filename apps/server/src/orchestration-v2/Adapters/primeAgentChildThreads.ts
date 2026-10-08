@@ -35,8 +35,8 @@ interface PiRlmChildState {
   readonly startedAt: DateTime.Utc;
   /** The task is over and its outcome is on the card. */
   readonly terminal: boolean;
-  /** A finished child is working again on a follow-up message, outside its task card. */
-  readonly followUp: boolean;
+  /** When a finished child started working again on a follow-up message, outside its task card. */
+  readonly followUpStartedAt: DateTime.Utc | null;
   readonly turn: ActivePiTurn;
 }
 
@@ -534,8 +534,8 @@ export function makePrimeAgentChildThreads(input: {
   };
 
   /**
-   * Ends a finished child's follow-up observation. Its card and root node
-   * keep the outcome of the original task; only the transcript is closed.
+   * Ends a finished child's follow-up. Its card keeps the outcome of the
+   * original task; the transcript closes and the thread's root turn settles.
    */
   const endChildFollowUp = Effect.fnUntraced(function* (
     childId: string,
@@ -543,9 +543,17 @@ export function makePrimeAgentChildThreads(input: {
     status: OrchestrationV2ExecutionNode["status"],
     sessionIsAlive: boolean,
   ) {
-    rlmChildren.set(childId, { ...child, followUp: false });
+    rlmChildren.set(childId, { ...child, followUpStartedAt: null });
     const transcript = rlmTranscripts.get(childId);
-    if (transcript !== undefined) yield* finishChildObservation(transcript, status, sessionIsAlive);
+    if (transcript === undefined) return;
+    yield* finishChildObservation(transcript, status, sessionIsAlive);
+    yield* emitChildRootNode(
+      transcript,
+      status,
+      `rlm:${childId}`,
+      child.followUpStartedAt ?? child.startedAt,
+      yield* DateTime.now,
+    );
   });
 
   /**
@@ -562,7 +570,7 @@ export function makePrimeAgentChildThreads(input: {
     source: RlmChildUpdateSource,
   ) {
     const working = status === "completed" && rlmChildIsWorking(snapshot);
-    if (!working && !previous.followUp) {
+    if (!working && previous.followUpStartedAt === null) {
       yield* traceRlmChildUpdate(snapshot, currentTurn, source, {
         outcome: "dropped",
         reason: "terminal-already-settled",
@@ -577,9 +585,13 @@ export function makePrimeAgentChildThreads(input: {
       yield* endChildFollowUp(childId, { ...previous, snapshot }, status, true);
       return;
     }
-    rlmChildren.set(childId, { ...previous, snapshot, followUp: true });
+    const followUpStartedAt = previous.followUpStartedAt ?? (yield* DateTime.now);
+    rlmChildren.set(childId, { ...previous, snapshot, followUpStartedAt });
     const transcript = rlmTranscripts.get(childId);
-    if (transcript !== undefined) yield* syncChildObservation(transcript, snapshot);
+    if (transcript === undefined) return;
+    // The child thread shows it working again, as a resumed Claude subagent's does.
+    yield* emitChildRootNode(transcript, "running", `rlm:${childId}`, followUpStartedAt, null);
+    yield* syncChildObservation(transcript, snapshot);
   });
 
   /** Mirrors one `rlm_child_update` roster snapshot onto T3's subagent surfaces. */
@@ -642,7 +654,7 @@ export function makePrimeAgentChildThreads(input: {
       snapshot,
       startedAt: previous?.startedAt ?? emittedAt,
       terminal,
-      followUp: false,
+      followUpStartedAt: null,
       turn,
     };
     rlmChildren.set(childId, state);
@@ -817,7 +829,8 @@ export function makePrimeAgentChildThreads(input: {
     Effect.forEach(
       Array.from(rlmChildren).filter(
         ([, child]) =>
-          (!child.terminal || child.followUp) && (turn === undefined || child.turn === turn),
+          (!child.terminal || child.followUpStartedAt !== null) &&
+          (turn === undefined || child.turn === turn),
       ),
       ([childId, child]) =>
         child.terminal
@@ -830,6 +843,8 @@ export function makePrimeAgentChildThreads(input: {
     settleFromNotice,
     interrupt,
     hasLiveChildren: () =>
-      Array.from(rlmChildren.values()).some((child) => !child.terminal || child.followUp),
+      Array.from(rlmChildren.values()).some(
+        (child) => !child.terminal || child.followUpStartedAt !== null,
+      ),
   };
 }
