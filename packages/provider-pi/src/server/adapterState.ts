@@ -199,6 +199,8 @@ export interface PiChildTranscript {
   observedSessionId: string | null;
   /** Sessions `observe` already failed for, so a busy roster does not retry in a loop. */
   readonly failedSessionIds: Set<string>;
+  /** The text of the child's latest finished reply that had any, for its card's result. */
+  finalReply: string | null;
 }
 
 export type PiItemSink = ActivePiTurn | PiChildTranscript;
