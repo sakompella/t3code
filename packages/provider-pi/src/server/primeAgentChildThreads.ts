@@ -653,6 +653,44 @@ export function makePrimeAgentChildThreads(input: {
       ? (recordString(snapshot, "error") ?? recordString(snapshot, "answerPreview") ?? null)
       : null;
     const completedAt = terminal ? emittedAt : null;
+    // Nesting under the parent subagent's node is what lets clients
+    // draw Prime Agent's subagent tree.
+    const parentNodeId =
+      parentChildId === undefined
+        ? turn.turnInput.rootNodeId
+        : idAllocator.derive.nodeFromProviderItem({
+            driver,
+            nativeItemId: `rlm:${parentChildId}`,
+          });
+    const previousStatus =
+      previous === undefined
+        ? undefined
+        : rlmChildStatus(recordString(previous.snapshot, "status"));
+    // The task's node in the parent run, as Claude and Codex give theirs. It
+    // comes before the child thread, so routing knows which run owns that thread.
+    if (previousStatus !== status) {
+      yield* emit({
+        type: "node.updated",
+        driver,
+        node: {
+          id: subagentId,
+          threadId: turn.turnInput.threadId,
+          runId: turn.turnInput.runId,
+          parentNodeId,
+          rootNodeId: turn.turnInput.rootNodeId,
+          kind: "subagent",
+          status,
+          countsForRun: false,
+          providerThreadId: turn.turnInput.providerThread.id,
+          providerTurnId: turn.providerTurn.id,
+          nativeItemRef: providerRef(nativeTaskId),
+          runtimeRequestId: null,
+          checkpointScopeId: null,
+          startedAt: state.startedAt,
+          completedAt,
+        },
+      });
+    }
     const transcript = childThreads
       ? (rlmTranscripts.get(childId) ??
         (yield* openChildTranscript({
@@ -677,15 +715,7 @@ export function makePrimeAgentChildThreads(input: {
         id: subagentId,
         threadId: turn.turnInput.threadId,
         runId: turn.turnInput.runId,
-        // Nesting under the parent subagent's node is what lets clients
-        // draw Prime Agent's subagent tree.
-        parentNodeId:
-          parentChildId === undefined
-            ? turn.turnInput.rootNodeId
-            : idAllocator.derive.nodeFromProviderItem({
-                driver,
-                nativeItemId: `rlm:${parentChildId}`,
-              }),
+        parentNodeId,
         origin: "provider_native",
         createdBy: "agent",
         driver,
