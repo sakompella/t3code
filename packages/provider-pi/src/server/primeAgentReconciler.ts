@@ -12,7 +12,6 @@ import {
   type PiRpcRecord,
 } from "./rpc.ts";
 import type { ActivePiTurn } from "./adapterState.ts";
-import { snapshotBlock } from "./primeAgentStream.ts";
 
 /**
  * How often the reconciler looks at a session that may have lost events: a
@@ -79,29 +78,6 @@ const LEAVES_REPLY = new Set([
   "tool_execution_update",
   "tool_execution_end",
 ]);
-
-/** The non-empty text and thinking blocks of a reply snapshot, by content index. */
-function textBlocks(message: unknown) {
-  const content = recordField(message, "content");
-  return (Array.isArray(content) ? content : []).flatMap((_, index) => {
-    const block = snapshotBlock(message, index);
-    return block === undefined ? [] : [{ index, ...block }];
-  });
-}
-
-/**
- * Whether `copy` holds all the text T3 saw of `partial`, as a stock abort
- * copy holds the partial reply it clones. A partial that showed no text
- * proves nothing, so only a copy without text can continue it.
- */
-function continuesSnapshot(partial: unknown, copy: unknown): boolean {
-  const seen = textBlocks(partial);
-  if (seen.length === 0) return textBlocks(copy).length === 0;
-  return seen.every(({ index, kind, text }) => {
-    const copied = snapshotBlock(copy, index);
-    return copied?.kind === kind && copied.text.startsWith(text);
-  });
-}
 
 type TranscriptRead =
   | { readonly _tag: "read"; readonly messages: ReadonlyArray<unknown> }
@@ -171,10 +147,13 @@ function toolCallIdsOf(messages: ReadonlyArray<unknown>): Array<string> {
  * The stored conversation (`get_messages`) is the authority. Its messages are
  * matched to T3's items by native identity: an assistant message by its
  * timestamp, which the live stream keys its items by too, and a tool by its
- * call id. Text is never matched by prefix. The reconciler runs inside the
- * event pump, so it never interleaves with live events, and every run is
- * idempotent: a message is projected into the turn that stored it, then
- * accounted for, and later reads or late live events for it change nothing.
+ * call id. The one exception is a reply Stop cut off, which stock stores only
+ * as an aborted copy under a new timestamp: the stream guesses which reply a
+ * copy replaced, and a history read confirms or undoes it (see
+ * `settleReplacements`). The reconciler runs inside the event pump, so it
+ * never interleaves with live events, and every run is idempotent: a message
+ * is projected into the turn that stored it, then accounted for, and later
+ * reads or late live events for it change nothing.
  *
  * It runs when a turn settles, when Stop ends one, as soon as a running
  * turn's stream skips past a reply's or tool's end, and on a backed-off quiet
@@ -287,22 +266,21 @@ export function makePrimeAgentReconciler<E>(input: {
     [...turn.seenMessageKeys].filter((key) => !turn.shownMessageKeys.has(key) && isReplyKey(key));
 
   /**
-   * The reply an aborted `message` replaces under another identity. Stop cuts
-   * a reply off, and stock Prime Agent ends it with a copy of what it
-   * streamed, stamped at abort time and announced by no message_start of its
-   * own (agent-loop.js `finishAbortedMessage`). The copy replaces the reply
-   * in its history too. The stream is lossy, so only the reply it is still
-   * in can be replaced, by a copy stamped after that reply started that
-   * holds all of it T3 saw. Any other aborted end is a reply of its own.
+   * The reply an aborted `message` seems to replace under another identity.
+   * Stop cuts a reply off, and stock Prime Agent ends it with a copy of what
+   * it streamed, stamped at abort time and announced by no message_start of
+   * its own (agent-loop.js `finishAbortedMessage`). The copy replaces the
+   * reply in its history too, so only the reply this turn's stream is still
+   * in can be replaced. On a lossy stream that is a guess, which the next
+   * history read settles: every event of a later reply can be lost.
    */
   const replacedReplyKey = (turn: ActivePiTurn, message: unknown) => {
     const streaming = turn.streamingReply;
-    if (streaming === null || turn.shownMessageKeys.has(streaming.key)) return undefined;
+    if (streaming === null || turn.shownMessageKeys.has(streaming)) return undefined;
     if (recordString(message, "stopReason") !== "aborted") return undefined;
     const key = transcriptMessageKey(message);
     if (key === undefined || !isReplyKey(key) || turn.seenMessageKeys.has(key)) return undefined;
-    if (keyTimestamp(key) < keyTimestamp(streaming.key)) return undefined;
-    return continuesSnapshot(streaming.snapshot, message) ? streaming.key : undefined;
+    return streaming;
   };
 
   /** Ends the reply an aborted copy replaces, and gives the copy that reply's identity. */
@@ -312,6 +290,31 @@ export function makePrimeAgentReconciler<E>(input: {
     if (key === undefined || replaced === undefined) return;
     turn.shownMessageKeys.add(replaced);
     turn.replacedReplies.set(keyTimestamp(key), keyTimestamp(replaced));
+  };
+
+  /**
+   * Lets a whole stored history decide which reply each aborted copy
+   * replaced, before it is projected. A reply still stored under its own
+   * timestamp was not replaced, so a copy the stream bound to it gets items
+   * of its own, after the reply's. Stop can read the history before the
+   * copy's live end arrives; the abort ends the run, so the copy of the
+   * reply the turn was streaming is the last message stored.
+   */
+  const settleReplacements = (turn: ActivePiTurn, messages: ReadonlyArray<unknown>) => {
+    const storedReplies = new Set(
+      messages.flatMap((message) =>
+        recordString(message, "role") === "assistant"
+          ? (recordNumber(message, "timestamp") ?? [])
+          : [],
+      ),
+    );
+    for (const [copy, replaced] of turn.replacedReplies) {
+      if (storedReplies.has(replaced)) turn.replacedReplies.delete(copy);
+    }
+    const streaming = turn.streamingReply;
+    if (streaming !== null && !storedReplies.has(keyTimestamp(streaming))) {
+      adoptReplacement(turn, messages.at(-1));
+    }
   };
 
   /**
@@ -328,7 +331,7 @@ export function makePrimeAgentReconciler<E>(input: {
       if (showsInFull(turn, type, message)) turn.shownMessageKeys.add(key);
     }
     if (key !== undefined && isReplyKey(key) && type !== "message_end") {
-      turn.streamingReply = { key, snapshot: message };
+      turn.streamingReply = key;
     } else if (typeof type === "string" && LEAVES_REPLY.has(type)) {
       turn.streamingReply = null;
     }
@@ -361,8 +364,6 @@ export function makePrimeAgentReconciler<E>(input: {
     for (const message of unaccounted(messages)) {
       switch (recordString(message, "role")) {
         case "assistant": {
-          // Stop can read the history before the copy's live end arrives.
-          adoptReplacement(turn, message);
           yield* items.upsertAssistantMessage(turn, message);
           const content = recordField(message, "content");
           for (const block of Array.isArray(content) ? content : []) {
@@ -384,10 +385,7 @@ export function makePrimeAgentReconciler<E>(input: {
         default: {
           const key = transcriptMessageKey(message);
           if (key !== undefined && !turn.seenMessageKeys.has(key)) {
-            // A stored message is history, so its replay leaves the stream where it was.
-            const streaming = turn.streamingReply;
             yield* items.replayMessageStart(message);
-            turn.streamingReply = streaming;
           }
         }
       }
@@ -496,6 +494,7 @@ export function makePrimeAgentReconciler<E>(input: {
       yield* logOutcome(turn, "unconfirmed");
       return true;
     }
+    settleReplacements(turn, read.messages);
     yield* project(turn, read.messages);
     commit(read.messages);
     turn.transcript = "reconciled";
@@ -512,6 +511,7 @@ export function makePrimeAgentReconciler<E>(input: {
     turn.transcript = "unreconciled";
     const messages = yield* readHistory(request, SHORT_HISTORY_READ_TIMEOUT_MS);
     if (messages === undefined) return yield* logOutcome(turn, "unreadable");
+    settleReplacements(turn, messages);
     yield* project(turn, messages);
     commit(messages);
     turn.transcript = "reconciled";
