@@ -1138,6 +1138,7 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
         const item: PiStreamItemState = {
           nativeItemId,
           kind,
+          messageOrdinal: turn.messageOrdinal,
           text: "",
           completed: false,
           flushScheduled: false,
@@ -1156,9 +1157,14 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
           return item.text.length === 0 ? Effect.void : emitStreamItem(turn, item, false);
         });
 
-      const completeOpenStreamItems = (turn: PiItemSink) =>
+      /** Completes the open blocks of one message, or of every message when none is named. */
+      const completeOpenStreamItems = (turn: PiItemSink, messageOrdinal?: number) =>
         Effect.forEach(
-          Array.from(turn.streamItems.values()).filter((item) => !item.completed),
+          Array.from(turn.streamItems.values()).filter(
+            (item) =>
+              !item.completed &&
+              (messageOrdinal === undefined || item.messageOrdinal === messageOrdinal),
+          ),
           (item) => completeStreamItem(turn, item),
           { discard: true },
         );
@@ -2328,7 +2334,10 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
         }
         const state = threadState;
         const turn = state?.activeTurn ?? null;
-        if (turn !== null) reconciler.noteSeen(turn, event);
+        if (turn !== null) {
+          yield* reconciler.repairLostEnds(turn, event);
+          reconciler.noteSeen(turn, event);
+        }
         switch (event["type"]) {
           case "agent_start": {
             if (
@@ -2450,7 +2459,9 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
             if (recordString(message, "role") !== "assistant") return;
             adoptMessageIdentity(turn, message);
             if (flavor.lossyStream) yield* adoptSnapshot(turn, message, true);
-            yield* completeOpenStreamItems(turn);
+            // Only this message ended. An earlier one still open lost its end,
+            // and its partial text must not be shown as final.
+            yield* completeOpenStreamItems(turn, turn.messageOrdinal);
             if (recordString(message, "stopReason") === "error" && turn.failure === null) {
               turn.failure = makeProviderFailure({
                 message: recordString(message, "errorMessage") ?? `${name} reported a model error.`,
