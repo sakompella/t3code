@@ -49,7 +49,12 @@ import * as Schema from "effect/Schema";
 import * as Fiber from "effect/Fiber";
 import * as Stream from "effect/Stream";
 import { McpSchema, McpServer } from "effect/ai";
+import { FetchHttpClient } from "effect/http";
+import { HTML_RENDER_TOOL_NAME } from "@t3tools/shared/htmlRender";
+import { htmlRenderFromToolItem } from "@t3tools/shared/toolOutput";
 
+import { threadHtmlRenderAttachmentIds } from "../attachmentStore.ts";
+import * as ServerConfig from "../config.ts";
 import { ClaudeProviderCapabilitiesV2 } from "../orchestration-v2/Adapters/ClaudeAdapterV2.ts";
 import { CodexProviderCapabilitiesV2 } from "../orchestration-v2/Adapters/CodexAdapterV2.ts";
 import { CodexOrchestratorReplayHarness } from "../orchestration-v2/Adapters/CodexAdapterV2.testkit.ts";
@@ -72,6 +77,7 @@ import {
   materializeReplayTranscriptWorkspace,
 } from "../orchestration-v2/testkit/ReplayTranscriptNdjson.ts";
 import * as ProviderRegistryMock from "../provider/testUtils/providerRegistryMock.ts";
+import * as PreviewBrowser from "../preview/PreviewBrowser.ts";
 import * as ProjectService from "../project/ProjectService.ts";
 import * as ScheduledTaskService from "../scheduledTasks/ScheduledTaskService.ts";
 import * as SecretRequests from "../secrets/SecretRequests.ts";
@@ -4052,6 +4058,141 @@ describe("orchestrator MCP toolkit", () => {
             latestTerminalSummary: queuedFollowupResult,
             latestTerminalResultContextTransferId: null,
           });
+        }).pipe(Effect.provide(layerTest));
+      }),
+    ),
+  );
+});
+
+describe("html_render", () => {
+  const primeInstanceId = ProviderInstanceId.make("primeAgent");
+
+  it.live("shows a page published from Prime Agent's kernel inline, once", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const cwd = yield* checkpointWorkspace("html-render-kernel");
+        const capturedTurns = yield* Ref.make<ReadonlyArray<CapturedTurn>>([]);
+        const layerRegistry = ProviderAdapterRegistry.layerFromAdapters(
+          [
+            { instanceId: primeInstanceId, driver: ProviderDriverKind.make("primeAgent") },
+            { instanceId: claudeInstanceId, driver: ProviderDriverKind.make("claudeAgent") },
+          ].map((provider) =>
+            makeDeterministicAdapter({
+              ...provider,
+              capabilities: ClaudeProviderCapabilitiesV2,
+              capturedTurns,
+              shouldComplete: () => false,
+              response: () => "",
+            }),
+          ),
+        );
+        const layerOrchestrator = ProviderReplayHarness.layerWithRegistry(
+          { name: "html-render-kernel", runtimePolicyOverride: { cwd } },
+          layerRegistry,
+        );
+        const layerOrchestration = Layer.merge(
+          layerOrchestrator,
+          ThreadManagementService.layer.pipe(Layer.provide(layerOrchestrator)),
+        );
+        const layerTest = McpHttpServer.layerHtmlToolkit.pipe(
+          Layer.provideMerge(McpServer.McpServer.layer),
+          Layer.provideMerge(layerOrchestration),
+          Layer.provide(layerRegistry),
+          Layer.provide(PreviewBrowser.layer),
+          Layer.provide(ServerConfig.layerTest(cwd, { prefix: "t3-mcp-html-render-kernel-" })),
+          Layer.provide(NodeServices.layer),
+          // The preview browser is not installed in a fresh home, so nothing downloads.
+          Layer.provide(FetchHttpClient.layer),
+        );
+
+        yield* Effect.gen(function* () {
+          const orchestrator = yield* Orchestrator.OrchestratorV2;
+          const server = yield* McpServer.McpServer;
+          const renderFrom = (threadId: ThreadId, selection: ModelSelection) =>
+            Effect.gen(function* () {
+              yield* orchestrator.dispatch({
+                type: "thread.create",
+                createdBy: "user",
+                creationSource: "web",
+                commandId: CommandId.make(`command:${threadId}:create`),
+                threadId,
+                projectId,
+                title: "HTML render",
+                modelSelection: selection,
+                runtimeMode: "full-access",
+                interactionMode: "default",
+                branch: null,
+                worktreePath: cwd,
+              });
+              yield* orchestrator.dispatch({
+                type: "message.dispatch",
+                createdBy: "user",
+                creationSource: "web",
+                commandId: CommandId.make(`command:${threadId}:start`),
+                threadId,
+                messageId: MessageId.make(`message:${threadId}:start`),
+                text: "Chart the release.",
+                attachments: [],
+                modelSelection: selection,
+                dispatchMode: { type: "start_immediately" },
+              });
+              yield* waitForProjection(orchestrator, threadId, (projection) =>
+                projection.providerTurns.some((turn) => turn.status === "running"),
+              );
+              const result = yield* server
+                .callTool({
+                  name: "html_render",
+                  arguments: { html: "<p>Release</p>", title: "Release", height: 240 },
+                })
+                .pipe(
+                  Effect.provideService(McpInvocationContext.McpInvocationContext, {
+                    environmentId: EnvironmentId.make("environment:mcp-html-render"),
+                    requestNamespace: `mcp-provider-session:${threadId}`,
+                    thread: {
+                      threadId,
+                      providerSessionId: `mcp-provider-session:${threadId}`,
+                      providerInstanceId: selection.instanceId,
+                    },
+                    client: undefined,
+                    capabilities: new Set<McpInvocationContext.McpCapability>(["orchestration"]),
+                    issuedAt: 1,
+                  }),
+                  Effect.provideService(McpSchema.McpServerClient, client),
+                );
+              expect(result.isError).toBe(false);
+              const published = htmlRenderFromToolItem({
+                toolName: HTML_RENDER_TOOL_NAME,
+                output: result.structuredContent,
+              });
+              const toolItems = (yield* orchestrator.getThreadProjection(
+                threadId,
+              )).turnItems.filter((item) => item.type === "dynamic_tool");
+              return {
+                published,
+                inline: toolItems.flatMap((item) => {
+                  const render =
+                    item.status === "completed" ? htmlRenderFromToolItem(item) : undefined;
+                  return render === undefined ? [] : [render];
+                }),
+                attachmentIds: threadHtmlRenderAttachmentIds(threadId, toolItems),
+              };
+            });
+
+          const prime = yield* renderFrom(ThreadId.make("thread-html-render-prime"), {
+            instanceId: primeInstanceId,
+            model: "prime-test",
+          });
+          expect(prime.published).toBeDefined();
+          expect(prime.inline).toEqual([prime.published]);
+          expect(prime.attachmentIds).toEqual([prime.published?.attachmentId]);
+
+          // Claude's own mcp__t3-code__html_render row carries the page, so T3 adds none.
+          const claude = yield* renderFrom(
+            ThreadId.make("thread-html-render-claude"),
+            claudeSelection,
+          );
+          expect(claude.published).toBeDefined();
+          expect(claude.inline).toEqual([]);
         }).pipe(Effect.provide(layerTest));
       }),
     ),
