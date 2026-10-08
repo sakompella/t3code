@@ -6119,8 +6119,8 @@ describe("PiAdapterV2 with the Prime Agent flavor", () => {
   );
 
   // Two stopped replies start the same way, and the prompt between their runs
-  // was lost. The first copy fits either reply, so neither takes it: a missed
-  // match shows the cut text, a wrong one shows another reply's text.
+  // was lost. Each copy arrived right after the reply it ends, and a copy that
+  // arrived before a reply started cannot be that reply's.
   it.effect("never swaps two stopped replies when the prompt between them was lost", () =>
     Effect.gen(function* () {
       const fake = yield* makeFakePi;
@@ -6148,11 +6148,76 @@ describe("PiAdapterV2 with the Prime Agent flavor", () => {
       yield* fake.emit({ type: "agent_end", messages: [laterCopy] });
 
       assert.deepEqual(yield* takeCompletedReplyTexts(takeEvent), [
-        ["Check"],
         ["Check first"],
-        ["Check"],
         ["Check later"],
       ]);
+    }).pipe(Effect.scoped, Effect.provide(layerTest)),
+  );
+
+  // An earlier reply's events were all lost, and so was the prompt after it.
+  // Its copy starts the way the later stopped reply did. Two copies fit the
+  // later reply and the earlier one is known only from the history, so the
+  // reply keeps its cut text rather than risk another reply's.
+  it.effect("keeps an earlier run's unseen copy off a later stopped reply", () =>
+    Effect.gen(function* () {
+      const fake = yield* makeFakePi;
+      const { runtime, takeEvent, providerThread } = yield* openPrimeThread(fake);
+      yield* startTurn(runtime, providerThread);
+      yield* fake.takeRequest("prompt");
+      yield* fake.emit({ type: "agent_start" });
+      const firstCopy = { ...assistantSnapshot(3000, "Check first"), stopReason: "aborted" };
+      const laterCopy = { ...assistantSnapshot(6000, "Check later"), stopReason: "aborted" };
+      yield* fake.emit({ type: "message_start", message: storedPrompt(900) });
+      yield* fake.emit({
+        type: "message_update",
+        message: assistantSnapshot(5000, "Check"),
+        assistantMessageEvent: { type: "text_delta", contentIndex: 0, delta: "Check" },
+      });
+      yield* fake.emit({ type: "message_end", message: laterCopy });
+      fake.setTranscript([storedPrompt(900), firstCopy, storedPrompt(4000, "Continue"), laterCopy]);
+      yield* fake.emit({ type: "turn_end", message: laterCopy, toolResults: [] });
+      yield* fake.emit({ type: "agent_end", messages: [laterCopy] });
+
+      assert.deepEqual(yield* takeCompletedReplyTexts(takeEvent), [
+        ["Check"],
+        ["Check later"],
+        ["Check first"],
+      ]);
+    }).pipe(Effect.scoped, Effect.provide(layerTest)),
+  );
+
+  // The mirror of the case above, the same to T3: the stopped reply's own copy
+  // was lost live, and a later run's copy arrived right after it. Whichever
+  // way the history is read, no reply shows another reply's text.
+  it.effect("never puts a later run's copy on a stopped reply whose own copy was lost live", () =>
+    Effect.gen(function* () {
+      const fake = yield* makeFakePi;
+      const { runtime, takeEvent, providerThread } = yield* openPrimeThread(fake);
+      yield* startTurn(runtime, providerThread);
+      yield* fake.takeRequest("prompt");
+      yield* fake.emit({ type: "agent_start" });
+      const firstCopy = { ...assistantSnapshot(3000, "Check first"), stopReason: "aborted" };
+      const laterCopy = { ...assistantSnapshot(6000, "Check later"), stopReason: "aborted" };
+      yield* fake.emit({ type: "message_start", message: storedPrompt(900) });
+      yield* fake.emit({
+        type: "message_update",
+        message: assistantSnapshot(1000, "Check"),
+        assistantMessageEvent: { type: "text_delta", contentIndex: 0, delta: "Check" },
+      });
+      yield* fake.emit({ type: "message_end", message: laterCopy });
+      fake.setTranscript([storedPrompt(900), firstCopy, storedPrompt(4000, "Continue"), laterCopy]);
+      yield* fake.emit({ type: "turn_end", message: laterCopy, toolResults: [] });
+      yield* fake.emit({ type: "agent_end", messages: [laterCopy] });
+
+      const [cutReply, ...others] = yield* takeCompletedReplyTexts(takeEvent);
+      assert.notInclude(cutReply ?? [], "Check later");
+      assert.deepEqual(
+        [cutReply ?? [], ...others]
+          .flat()
+          .filter((text) => text !== "Check")
+          .toSorted(),
+        ["Check first", "Check later"],
+      );
     }).pipe(Effect.scoped, Effect.provide(layerTest)),
   );
 
