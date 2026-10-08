@@ -76,6 +76,21 @@ export class HtmlRenderStoreError extends Schema.TaggedError<HtmlRenderStoreErro
   }
 }
 
+/**
+ * A `record` that cannot tell whether it stored the page. Publishing keeps the
+ * page, since a stored item may point at it.
+ */
+export class HtmlRenderOwnershipUnknownError extends Schema.TaggedError<HtmlRenderOwnershipUnknownError>()(
+  "HtmlRenderOwnershipUnknownError",
+  { cause: Schema.Defect() },
+) {
+  override get message(): string {
+    return "T3 could not confirm whether the page was shown. Read this thread before publishing it again.";
+  }
+}
+
+const isOwnershipUnknown = Schema.is(HtmlRenderOwnershipUnknownError);
+
 export type HtmlRenderPrepareError =
   | HtmlRenderImagesNotFoundError
   | HtmlRenderImageTooLargeError
@@ -110,7 +125,8 @@ export class HtmlRender extends Context.Service<
      * Stores a prepared page as a thread attachment for clients to show inline,
      * measuring its height at each client width when the preview browser is
      * already installed. `record` runs uninterruptibly before the page counts
-     * as published, so a failed record removes the page too.
+     * as published. Its failure removes the page, unless it fails with
+     * `HtmlRenderOwnershipUnknownError`.
      */
     readonly publish: <E = never>(
       input: HtmlRenderPublishInput<E>,
@@ -439,6 +455,7 @@ const make = Effect.gen(function* () {
     // Only a reference the thread keeps lets thread deletion find the page, so
     // a publish that fails or is interrupted before then removes it. Once the
     // record starts it cannot be interrupted, so its own outcome decides.
+    const removePage = fileSystem.remove(filePath, { force: true }).pipe(Effect.ignore);
     return yield* Effect.uninterruptibleMask((restore) =>
       restore(
         fileSystem.writeFileString(filePath, html).pipe(
@@ -452,8 +469,14 @@ const make = Effect.gen(function* () {
           })),
         ),
       ).pipe(
-        Effect.tap((reference) => (record === undefined ? Effect.void : record(reference))),
-        Effect.onError(() => fileSystem.remove(filePath, { force: true }).pipe(Effect.ignore)),
+        Effect.onError(() => removePage),
+        Effect.tap((reference) =>
+          record === undefined
+            ? Effect.void
+            : record(reference).pipe(
+                Effect.tapError((error) => (isOwnershipUnknown(error) ? Effect.void : removePage)),
+              ),
+        ),
       ),
     );
   });
