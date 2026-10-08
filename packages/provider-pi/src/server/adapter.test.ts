@@ -1768,6 +1768,72 @@ describe("PiAdapterV2", () => {
         assert.deepEqual(replacementRequests(fake), []);
       }).pipe(Effect.scoped, Effect.provide(layerTest)),
     );
+
+    /** Rolls `providerThread` back to its first of two turns, as the checkpoint executor asks. */
+    const rollBackSavedThread = (
+      runtime: ProviderAdapterV2SessionRuntime,
+      providerThread: OrchestrationV2ProviderThread,
+    ) => {
+      const turn = (ordinal: number): OrchestrationV2ProviderTurn => ({
+        id: ProviderTurnId.make(`turn-${ordinal}`),
+        providerThreadId: providerThread.id,
+        nodeId: NodeId.make(`node-${ordinal}`),
+        runAttemptId: null,
+        nativeTurnRef: {
+          driver: PRIME_AGENT_FLAVOR.driverKind,
+          nativeId: `u${ordinal}`,
+          strength: "strong",
+        },
+        ordinal,
+        status: "completed",
+        startedAt: null,
+        completedAt: null,
+      });
+      return runtime.rollbackThread({
+        providerThread,
+        target: {
+          type: "provider_turn",
+          checkpointId: CheckpointId.make("checkpoint-1"),
+          appRunOrdinal: 1,
+          providerTurn: turn(1),
+        },
+        providerThreadTurns: [turn(1), turn(2)],
+      });
+    };
+
+    it.effect("rolls back the saved thread before any turn has loaded it", () =>
+      Effect.gen(function* () {
+        const providerThread = yield* savedThread;
+        const fake = yield* makeFakePi;
+        const runtime = yield* openOnSavedSession(fake);
+
+        const snapshot = yield* rollBackSavedThread(runtime, providerThread);
+
+        const fork = fake.allRequests().find((request) => request.type === "fork");
+        assert.equal(fork?.["entryId"], "u2");
+        assert.equal(snapshot.providerThread.id, providerThread.id);
+        assert.deepEqual(replacementRequests(fake), []);
+      }).pipe(Effect.scoped, Effect.provide(layerTest)),
+    );
+
+    it.effect("fails the rollback when the process could not start on the saved session", () =>
+      Effect.gen(function* () {
+        const providerThread = yield* savedThread;
+        const fake = yield* makeFakePi;
+        const launches = refusingLaunches(
+          fake,
+          "Error: Session file is corrupt\n",
+          (_, launchCount) => launchCount === 1,
+        );
+        const runtime = yield* waitOutLaunch(openOnSavedSession(launches.fake));
+
+        const failed = yield* rollBackSavedThread(runtime, providerThread).pipe(Effect.flip);
+
+        assert.equal(failed._tag, "ProviderAdapterRollbackThreadError");
+        assert.isFalse(fake.allRequests().some((request) => request.type === "fork"));
+        assert.deepEqual(replacementRequests(fake), []);
+      }).pipe(Effect.scoped, Effect.provide(layerTest)),
+    );
   });
 
   describe("resume while the previous owner still holds the session lease", () => {
