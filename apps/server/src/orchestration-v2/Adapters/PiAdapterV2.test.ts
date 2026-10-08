@@ -3613,6 +3613,141 @@ describe("PiAdapterV2 with the Prime Agent flavor", () => {
     }).pipe(Effect.scoped, Effect.provide(layerTest)),
   );
 
+  /** The final text of each reply item the turn shows, in the order the turn placed them. */
+  const takeFinalReplyTexts = (takeEvent: TakeEvent) =>
+    Effect.gen(function* () {
+      const items = new Map<string, { readonly ordinal: number; readonly text: string }>();
+      for (;;) {
+        const event = yield* takeEvent(
+          (candidate) =>
+            candidate.type === "turn.terminal" ||
+            (candidate.type === "turn_item.updated" &&
+              candidate.turnItem.type === "assistant_message"),
+        );
+        if (event.type !== "turn_item.updated" || event.turnItem.type !== "assistant_message") {
+          return [...items.values()]
+            .sort((left, right) => left.ordinal - right.ordinal)
+            .map((item) => item.text);
+        }
+        items.set(event.turnItem.id, {
+          ordinal: event.turnItem.ordinal,
+          text: event.turnItem.text,
+        });
+      }
+    });
+
+  const takeRunningTurnId = (takeEvent: TakeEvent) =>
+    Effect.gen(function* () {
+      const running = yield* takeEvent(
+        (event) =>
+          event.type === "provider_turn.updated" && event.providerTurn.status === "running",
+      );
+      assert.isTrue(running.type === "provider_turn.updated");
+      return running.type === "provider_turn.updated" ? running.providerTurn.id : undefined;
+    });
+
+  // An aborted copy carries no message_start, so a lost start leaves nothing
+  // that ties it to an earlier reply whose end was lost too.
+  it.effect("keeps an earlier cut reply when a later reply whose start was lost is stopped", () =>
+    Effect.gen(function* () {
+      const fake = yield* makeFakePi;
+      const { runtime, takeEvent, providerThread } = yield* openPrimeThread(fake);
+      yield* startTurn(runtime, providerThread);
+      yield* fake.takeRequest("prompt");
+      yield* fake.emit({ type: "agent_start" });
+      yield* fake.emit({ type: "message_start", message: assistantSnapshot(1000, "") });
+      yield* fake.emit({
+        type: "message_update",
+        message: assistantSnapshot(1000, "First reply"),
+        assistantMessageEvent: { type: "text_delta", contentIndex: 0, delta: "First reply" },
+      });
+      fake.setTranscript([storedPrompt(900)]);
+      yield* fake.emit(removalToolStart);
+      yield* takeEvent(
+        (event) =>
+          event.type === "turn_item.updated" &&
+          event.turnItem.type === "dynamic_tool" &&
+          event.turnItem.status === "running",
+      );
+      yield* fake.emit(removalToolEnd);
+      yield* takeEvent(
+        (event) =>
+          event.type === "turn_item.updated" &&
+          event.turnItem.type === "dynamic_tool" &&
+          event.turnItem.status === "completed",
+      );
+      const secondCopy = { ...assistantSnapshot(5000, "Second reply"), stopReason: "aborted" };
+      fake.setTranscript([
+        storedPrompt(900),
+        {
+          ...assistantSnapshot(1000, "First reply"),
+          stopReason: "toolUse",
+          content: [{ type: "text", text: "First reply" }, removalToolCall],
+        },
+        storedRemovalResult,
+        secondCopy,
+      ]);
+      yield* fake.emit({ type: "turn_start" });
+      yield* fake.emit({ type: "message_end", message: secondCopy });
+      yield* fake.emit({ type: "turn_end", message: secondCopy, toolResults: [] });
+      yield* fake.emit({ type: "agent_end", messages: [secondCopy] });
+
+      assert.deepEqual(yield* takeFinalReplyTexts(takeEvent), ["First reply", "Second reply"]);
+    }).pipe(Effect.scoped, Effect.provide(layerTest)),
+  );
+
+  // Stop read the first turn's history before its aborted copy was stored, so
+  // the copy is still unaccounted when a later Stop reads the history again.
+  it.effect("keeps an earlier turn's aborted copy off the reply a later Stop cut off", () =>
+    Effect.gen(function* () {
+      const fake = yield* makeFakePi;
+      const { runtime, takeEvent, providerThread } = yield* openPrimeThread(fake);
+      yield* startTurn(runtime, providerThread);
+      yield* fake.takeRequest("prompt");
+      const firstTurnId = yield* takeRunningTurnId(takeEvent);
+      if (firstTurnId === undefined) return;
+      const firstText = "I'll check the logs first.";
+      yield* fake.emit({ type: "agent_start" });
+      yield* fake.emit({ type: "message_start", message: assistantSnapshot(1000, "") });
+      yield* fake.emit({
+        type: "message_update",
+        message: assistantSnapshot(1000, firstText),
+        assistantMessageEvent: { type: "text_delta", contentIndex: 0, delta: firstText },
+      });
+      fake.setTranscript([storedPrompt(900)]);
+      yield* runtime.interruptTurn({ providerThread, providerTurnId: firstTurnId });
+      yield* fake.emit({ type: "agent_end", messages: [] });
+      yield* takeRepliesAndOutcome(takeEvent);
+
+      yield* startTurn(runtime, providerThread);
+      yield* fake.takeRequest("prompt");
+      const secondTurnId = yield* takeRunningTurnId(takeEvent);
+      if (secondTurnId === undefined) return;
+      const secondText = "I'll check the config.";
+      yield* fake.emit({ type: "agent_start" });
+      yield* fake.emit({ type: "message_start", message: assistantSnapshot(4000, "") });
+      yield* fake.emit({
+        type: "message_update",
+        message: assistantSnapshot(4000, "I'll check"),
+        assistantMessageEvent: { type: "text_delta", contentIndex: 0, delta: "I'll check" },
+      });
+      fake.setTranscript([
+        storedPrompt(900),
+        { ...assistantSnapshot(3000, firstText), stopReason: "aborted" },
+        storedPrompt(3500, "And the config?"),
+        { ...assistantSnapshot(5000, secondText), stopReason: "aborted" },
+      ]);
+      yield* runtime.interruptTurn({
+        providerThread,
+        providerTurnId: secondTurnId,
+        requestRuntimeRestart: true,
+      });
+      yield* fake.closeStdout;
+
+      assert.deepEqual(yield* takeFinalReplyTexts(takeEvent), [secondText, firstText]);
+    }).pipe(Effect.scoped, Effect.provide(layerTest)),
+  );
+
   it.effect("completes a cut-off reply when Stop aborts the run", () =>
     Effect.gen(function* () {
       const fake = yield* makeFakePi;
