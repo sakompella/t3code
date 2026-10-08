@@ -200,6 +200,36 @@ describe("HtmlRender", () => {
     }).pipe(Effect.provide(layerTest)),
   );
 
+  it.effect("removes the page when its record fails", () =>
+    Effect.gen(function* () {
+      const config = yield* ServerConfig.ServerConfig;
+      const htmlRender = yield* HtmlRender.HtmlRender;
+      let recorded: string | undefined;
+
+      const error = yield* htmlRender
+        .publish({
+          threadId: ThreadId.make("thread-html-record"),
+          html: "<p>x</p>",
+          title: "X",
+          height: 200,
+          record: (reference) => {
+            recorded = reference.attachmentId;
+            return Effect.fail("record failed" as const);
+          },
+        })
+        .pipe(Effect.flip);
+
+      expect(error).toBe("record failed");
+      expect(recorded).toBeDefined();
+      expect(
+        resolveAttachmentPathById({
+          attachmentsDir: config.attachmentsDir,
+          attachmentId: recorded ?? "",
+        }),
+      ).toBeNull();
+    }).pipe(Effect.provide(layerTest)),
+  );
+
   it.effect("removes the page when publishing is interrupted", () =>
     Effect.gen(function* () {
       const measuring = yield* Deferred.make<void>();

@@ -175,3 +175,12 @@ export const PRIME_AGENT_FLAVOR: PiFlavor = {
   terminationGrace: Duration.seconds(15),
   resumesAtLaunch: true,
 };
+
+/**
+ * Whether this driver's agents call T3's MCP tools from code in their kernel.
+ * Their tool items show that code, never the T3 tool it called.
+ */
+export const callsT3ToolsFromKernel = (driver: ProviderDriverKind) =>
+  [PI_FLAVOR, PRIME_AGENT_FLAVOR].some(
+    (flavor) => flavor.driverKind === driver && flavor.kernelMcp !== null,
+  );
