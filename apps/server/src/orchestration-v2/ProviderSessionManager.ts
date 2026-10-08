@@ -511,6 +511,8 @@ export const layerWithOptions = (
               ),
             );
 
+      // Every subscriber receives the same signal and event object. RunExecutionService
+      // relies on that identity to tell one publication from another.
       const publishToSubscribers = (
         subscribers: Ref.Ref<
           ReadonlyMap<number, Queue.Queue<ProviderSessionEventSignal, Cause.Done>>
