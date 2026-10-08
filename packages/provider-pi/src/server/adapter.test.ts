@@ -5472,6 +5472,89 @@ describe("PiAdapterV2 with the Prime Agent flavor", () => {
     }).pipe(Effect.scoped, Effect.provide(layerTest)),
   );
 
+  // The later reply's copy has a block at an index where the earlier reply
+  // stored a tool call, not text. The history must place that block too.
+  it.effect("shows each block of a later stopped reply once after the history splits it off", () =>
+    Effect.gen(function* () {
+      const fake = yield* makeFakePi;
+      const { runtime, takeEvent, providerThread } = yield* openPrimeThread(fake);
+      yield* startTurn(runtime, providerThread);
+      yield* fake.takeRequest("prompt");
+      yield* fake.emit({ type: "agent_start" });
+      yield* fake.emit({ type: "message_start", message: assistantSnapshot(1000, "") });
+      yield* fake.emit({
+        type: "message_update",
+        message: assistantSnapshot(1000, "I'll check"),
+        assistantMessageEvent: { type: "text_delta", contentIndex: 0, delta: "I'll check" },
+      });
+      const secondCopy = {
+        ...assistantSnapshot(5000, ""),
+        content: [
+          { type: "text", text: "I'll check the other config." },
+          { type: "text", text: "Then I'll fix it." },
+        ],
+        stopReason: "aborted",
+      };
+      fake.setTranscript([
+        storedPrompt(900),
+        {
+          ...assistantSnapshot(1000, "I'll check the first config."),
+          stopReason: "toolUse",
+          content: [{ type: "text", text: "I'll check the first config." }, removalToolCall],
+        },
+        storedRemovalResult,
+        secondCopy,
+      ]);
+      yield* fake.emit({ type: "message_end", message: secondCopy });
+      yield* fake.emit({ type: "turn_end", message: secondCopy, toolResults: [] });
+      yield* fake.emit({ type: "agent_end", messages: [secondCopy] });
+
+      assert.deepEqual(yield* takeFinalReplyTexts(takeEvent), [
+        "I'll check the first config.",
+        "I'll check the other config.",
+        "Then I'll fix it.",
+      ]);
+    }).pipe(Effect.scoped, Effect.provide(layerTest)),
+  );
+
+  // Updates lost before Stop: the copy holds a block the stream never showed.
+  it.effect("shows a block only the aborted copy holds once Stop reads the history", () =>
+    Effect.gen(function* () {
+      const fake = yield* makeFakePi;
+      const { runtime, takeEvent, providerThread } = yield* openPrimeThread(fake);
+      yield* startTurn(runtime, providerThread);
+      yield* fake.takeRequest("prompt");
+      const turnId = yield* takeRunningTurnId(takeEvent);
+      if (turnId === undefined) return;
+      yield* fake.emit({ type: "agent_start" });
+      yield* fake.emit({ type: "message_start", message: assistantSnapshot(1000, "") });
+      yield* fake.emit({
+        type: "message_update",
+        message: assistantSnapshot(1000, "I'll check"),
+        assistantMessageEvent: { type: "text_delta", contentIndex: 0, delta: "I'll check" },
+      });
+      const abortedCopy = {
+        ...assistantSnapshot(5000, ""),
+        content: [
+          { type: "text", text: "I'll check the config." },
+          { type: "text", text: "Then I'll fix it." },
+        ],
+        stopReason: "aborted",
+      };
+      fake.setTranscript([storedPrompt(900), abortedCopy]);
+
+      yield* runtime.interruptTurn({ providerThread, providerTurnId: turnId });
+      yield* fake.emit({ type: "message_end", message: abortedCopy });
+      yield* fake.emit({ type: "turn_end", message: abortedCopy, toolResults: [] });
+      yield* fake.emit({ type: "agent_end", messages: [abortedCopy] });
+
+      assert.deepEqual(yield* takeFinalReplyTexts(takeEvent), [
+        "I'll check the config.",
+        "Then I'll fix it.",
+      ]);
+    }).pipe(Effect.scoped, Effect.provide(layerTest)),
+  );
+
   // Stop reads the history before any of the later reply's events arrive, so
   // the stream is still in the earlier reply, which the history holds whole.
   it.effect("keeps an earlier cut reply when Stop restarts Prime Agent during a later reply", () =>
