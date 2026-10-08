@@ -328,10 +328,11 @@ describe("subagent shells that arrive after the launching run's root turn ended"
   const liveState = () =>
     RunExecutionService.makeProviderEventRoutingState({ identity: live, providerTurnId: null });
 
-  // Known limit (gap B): a late subagent thread goes to the run whose root
-  // turn is live, never to the run that launched it. A Prime Agent nested
-  // child started while no run is live therefore gets no thread.
-  it("known limit: the launching run does not adopt a shell after its root turn ended (Prime Agent order)", () => {
+  // A child thread handed to runs goes to the run whose root turn is live,
+  // never to the run that launched it. Prime Agent's child threads never reach
+  // this routing: its session stores them (see ProviderSessionManager's
+  // session-scoped subagent thread tests).
+  it("the launching run does not adopt a node-first shell after its root turn ended", () => {
     const { accepted, state } = route(launching, launchingState(), [
       launchingTerminal,
       subagentNode,
@@ -341,7 +342,7 @@ describe("subagent shells that arrive after the launching run's root turn ended"
     assert.deepEqual(
       accepted,
       [true, true, false, false],
-      "Known limit (gap B): routing gives a late subagent thread to the run whose root turn is live, not to the run that launched it.",
+      "a late shell goes to the live run, not to its launching run",
     );
     assert.isFalse(state.ownedThreadIds.has(childThreadId));
   });
@@ -497,15 +498,11 @@ describe("a late subagent shell across a session's subscribers", () => {
   const secondCallRoot = (status: OrchestrationV2ExecutionNode["status"]) =>
     childRoot(status, NodeId.make("node:shell-owner:child-root:second-call"));
 
-  // Each adapter that reports a subagent's node before its child thread, in
-  // the order it emits them around the shell. None of them is still in its
-  // launching run's root turn here, so the live run takes the thread.
+  // Each adapter that hands runs a child thread whose node comes first, in the
+  // order it emits them around the shell. None of them is still in its
+  // launching run's root turn here, so the live run takes the thread. Prime
+  // Agent's child threads are stored by its session instead.
   const nodeFirstShapes = [
-    {
-      adapter: "Prime Agent",
-      beforeShell: [subagentNode("running", providerThreadId)],
-      afterShell: [childRootNode],
-    },
     {
       adapter: "OpenCode",
       beforeShell: [subagentNode("running", providerThreadId), subagentRow(null)],
@@ -774,7 +771,7 @@ describe("a late subagent shell across a session's subscribers", () => {
   );
 
   it.effect(
-    "known limit: a late Prime Agent shell goes once to the lagging live run, not to its launching run",
+    "a late node-first shell goes once to the lagging live run, not to its launching run",
     () =>
       Effect.scoped(
         Effect.gen(function* () {
@@ -795,7 +792,7 @@ describe("a late subagent shell across a session's subscribers", () => {
           assert.deepEqual(
             yield* session.childEventOwners,
             [],
-            "Known limit (gap B): routing gives a late subagent thread to the run whose root turn is live, not to the run that launched it.",
+            "a late shell goes to the live run, not to its launching run",
           );
           yield* releaseLiveRun;
           yield* session.publish([drainMarker(live)]);

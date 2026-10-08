@@ -3453,6 +3453,8 @@ export function makePiAdapterV2(
                 }),
             ),
           ),
+        // A child can start and work while no run of the parent thread listens.
+        ...(flavor.childThreads ? { childThreadScope: "session" as const } : {}),
         hasPendingBackgroundWork: Effect.sync(hasPendingBackgroundWork),
         hasPendingBackgroundWorkForThread: (providerThread) =>
           Effect.sync(
