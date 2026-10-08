@@ -4173,7 +4173,14 @@ describe("html_render", () => {
   /** Stands in for the orchestrator when the handler records a page. */
   type RecordStep = (threads: Threads, command: RecordCommand) => ReturnType<Threads["dispatch"]>;
 
-  const layerHtmlRender = (name: string, cwd: string, recordStep?: RecordStep) => {
+  /** Stand-ins for the thread service; anything left out is the real one. */
+  interface ThreadStandIns {
+    readonly recordStep?: RecordStep;
+    readonly getTurnItem?: Threads["getTurnItem"];
+  }
+
+  const layerHtmlRender = (name: string, cwd: string, standIns: ThreadStandIns = {}) => {
+    const { recordStep, getTurnItem } = standIns;
     const capturedTurns = Ref.makeUnsafe<ReadonlyArray<CapturedTurn>>([]);
     const layerRegistry = ProviderAdapterRegistry.layerFromAdapters(
       [
@@ -4195,7 +4202,7 @@ describe("html_render", () => {
     );
     const layerThreads = ThreadManagementService.layer.pipe(Layer.provide(layerOrchestrator));
     const layerRecordingThreads =
-      recordStep === undefined
+      recordStep === undefined && getTurnItem === undefined
         ? layerThreads
         : Layer.effect(
             ThreadManagementService.ThreadManagementService,
@@ -4203,9 +4210,10 @@ describe("html_render", () => {
               Effect.map((threads): Threads => ({
                 ...threads,
                 dispatch: (command) =>
-                  command.type === "html_render.record"
+                  command.type === "html_render.record" && recordStep !== undefined
                     ? recordStep(threads, command)
                     : threads.dispatch(command),
+                getTurnItem: getTurnItem ?? threads.getTurnItem,
               })),
             ),
           ).pipe(Layer.provide(layerThreads));
@@ -4364,18 +4372,19 @@ describe("html_render", () => {
           expect(pages).toEqual({ inline: [], attachmentIds: [], stored: false });
         }).pipe(
           Effect.provide(
-            layerHtmlRender("html-render-deleted", cwd, (threads, command) =>
-              Deferred.succeed(attachmentId, command.htmlRender.attachmentId).pipe(
-                Effect.andThen(
-                  threads.dispatch({
-                    type: "thread.delete",
-                    commandId: CommandId.make(`command:${command.threadId}:delete`),
-                    threadId: command.threadId,
-                  }),
+            layerHtmlRender("html-render-deleted", cwd, {
+              recordStep: (threads, command) =>
+                Deferred.succeed(attachmentId, command.htmlRender.attachmentId).pipe(
+                  Effect.andThen(
+                    threads.dispatch({
+                      type: "thread.delete",
+                      commandId: CommandId.make(`command:${command.threadId}:delete`),
+                      threadId: command.threadId,
+                    }),
+                  ),
+                  Effect.andThen(threads.dispatch(command)),
                 ),
-                Effect.andThen(threads.dispatch(command)),
-              ),
-            ),
+            }),
           ),
         );
       }),
@@ -4402,21 +4411,67 @@ describe("html_render", () => {
         }).pipe(
           Effect.provide(
             // The record commits, then its reply fails to come back.
-            layerHtmlRender("html-render-cancel-recorded", cwd, (threads, command) =>
-              threads.dispatch(command).pipe(
-                Effect.andThen(Deferred.succeed(recorded, command.htmlRender.attachmentId)),
-                Effect.andThen(Deferred.await(release)),
-                Effect.andThen(
-                  Effect.fail(
-                    new Orchestrator.OrchestratorDispatchError({
-                      commandId: command.commandId,
-                      commandType: command.type,
-                      cause: "The reply was lost.",
-                    }),
+            layerHtmlRender("html-render-cancel-recorded", cwd, {
+              recordStep: (threads, command) =>
+                threads.dispatch(command).pipe(
+                  Effect.andThen(Deferred.succeed(recorded, command.htmlRender.attachmentId)),
+                  Effect.andThen(Deferred.await(release)),
+                  Effect.andThen(
+                    Effect.fail(
+                      new Orchestrator.OrchestratorDispatchError({
+                        commandId: command.commandId,
+                        commandType: command.type,
+                        cause: "The reply was lost.",
+                      }),
+                    ),
                   ),
                 ),
-              ),
-            ),
+            }),
+          ),
+        );
+      }),
+    ),
+  );
+
+  it.live("keeps a recorded page when neither the record's reply nor a re-read comes back", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const cwd = yield* checkpointWorkspace("html-render-unknown");
+        const threadId = ThreadId.make("thread-html-render-unknown");
+        const recorded = yield* Deferred.make<string>();
+        yield* Effect.gen(function* () {
+          yield* startRun(threadId, primeSelection, cwd);
+          const result = yield* callHtmlRender(threadId, primeSelection);
+          expect(result.isError).toBe(true);
+          const attachmentId = yield* Deferred.await(recorded);
+          const pages = yield* readPages(threadId, attachmentId);
+          expect(pages.attachmentIds).toEqual([attachmentId]);
+          expect(pages.stored).toBe(true);
+        }).pipe(
+          Effect.provide(
+            layerHtmlRender("html-render-unknown", cwd, {
+              // The record commits, then its reply is lost.
+              recordStep: (threads, command) =>
+                threads.dispatch(command).pipe(
+                  Effect.andThen(Deferred.succeed(recorded, command.htmlRender.attachmentId)),
+                  Effect.andThen(
+                    Effect.fail(
+                      new Orchestrator.OrchestratorDispatchError({
+                        commandId: command.commandId,
+                        commandType: command.type,
+                        cause: "The reply was lost.",
+                      }),
+                    ),
+                  ),
+                ),
+              getTurnItem: ({ threadId: lookedUp }) =>
+                Effect.fail(
+                  new Orchestrator.OrchestratorProjectionError({
+                    threadId: lookedUp,
+                    cause: "The read failed.",
+                  }),
+                ),
+            }),
           ),
         );
       }),
@@ -4445,20 +4500,21 @@ describe("html_render", () => {
         }).pipe(
           Effect.provide(
             // The record is refused before it commits.
-            layerHtmlRender("html-render-cancel-unrecorded", cwd, (_threads, command) =>
-              Deferred.succeed(recording, command.htmlRender.attachmentId).pipe(
-                Effect.andThen(Deferred.await(release)),
-                Effect.andThen(
-                  Effect.fail(
-                    new Orchestrator.OrchestratorDispatchError({
-                      commandId: command.commandId,
-                      commandType: command.type,
-                      cause: "The record was refused.",
-                    }),
+            layerHtmlRender("html-render-cancel-unrecorded", cwd, {
+              recordStep: (_threads, command) =>
+                Deferred.succeed(recording, command.htmlRender.attachmentId).pipe(
+                  Effect.andThen(Deferred.await(release)),
+                  Effect.andThen(
+                    Effect.fail(
+                      new Orchestrator.OrchestratorDispatchError({
+                        commandId: command.commandId,
+                        commandType: command.type,
+                        cause: "The record was refused.",
+                      }),
+                    ),
                   ),
                 ),
-              ),
-            ),
+            }),
           ),
         );
       }),
