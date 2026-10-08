@@ -4222,6 +4222,126 @@ describe("PiAdapterV2 with the Prime Agent flavor", () => {
       }).pipe(Effect.scoped, Effect.provide(layerTest)),
   );
 
+  // Two stopped replies and a whole reply between them, in three runs. Only
+  // the earlier copy is stored between the first reply and what followed it.
+  it.effect("matches a stopped reply to the copy stored before what followed it", () =>
+    Effect.gen(function* () {
+      const fake = yield* makeFakePi;
+      const { runtime, takeEvent, providerThread } = yield* openPrimeThread(fake);
+      yield* startTurn(runtime, providerThread);
+      yield* fake.takeRequest("prompt");
+      yield* fake.emit({ type: "agent_start" });
+      const firstCopy = { ...assistantSnapshot(3000, "First full"), stopReason: "aborted" };
+      const middle = assistantSnapshot(5000, "Middle reply");
+      const lastCopy = { ...assistantSnapshot(8000, "Last full"), stopReason: "aborted" };
+      yield* fake.emit({ type: "message_start", message: storedPrompt(900) });
+      yield* fake.emit({
+        type: "message_update",
+        message: assistantSnapshot(1000, "First"),
+        assistantMessageEvent: { type: "text_delta", contentIndex: 0, delta: "First" },
+      });
+      yield* fake.emit({ type: "message_end", message: firstCopy });
+      yield* fake.emit({ type: "turn_end", message: firstCopy, toolResults: [] });
+      yield* fake.emit({ type: "agent_end", messages: [firstCopy] });
+      yield* fake.emit({ type: "agent_start" });
+      yield* fake.emit({ type: "message_start", message: storedPrompt(4000, "Continue") });
+      yield* fake.emit({ type: "message_start", message: assistantSnapshot(5000, "") });
+      yield* fake.emit({
+        type: "message_update",
+        message: middle,
+        assistantMessageEvent: { type: "text_delta", contentIndex: 0, delta: "Middle reply" },
+      });
+      yield* fake.emit({ type: "message_end", message: middle });
+      yield* fake.emit({ type: "turn_end", message: middle, toolResults: [] });
+      yield* fake.emit({ type: "agent_end", messages: [middle] });
+      yield* fake.emit({ type: "agent_start" });
+      fake.setTranscript([
+        storedPrompt(900),
+        firstCopy,
+        storedPrompt(4000, "Continue"),
+        middle,
+        storedPrompt(6000, "Continue again"),
+        lastCopy,
+      ]);
+      yield* fake.emit({ type: "message_end", message: lastCopy });
+      yield* fake.emit({ type: "turn_end", message: lastCopy, toolResults: [] });
+      yield* fake.emit({ type: "agent_end", messages: [lastCopy] });
+
+      assert.deepEqual(yield* takeCompletedReplyTexts(takeEvent), [
+        ["First full"],
+        ["Middle reply"],
+        ["Last full"],
+      ]);
+    }).pipe(Effect.scoped, Effect.provide(layerTest)),
+  );
+
+  // Prime Agent drops a failed reply from its history before it retries
+  // (agent-session.js _retryAfterDelay), so no copy replaced it.
+  it.effect("keeps a reply a retry removed apart from the retried reply's copy", () =>
+    Effect.gen(function* () {
+      const fake = yield* makeFakePi;
+      const { runtime, takeEvent, providerThread } = yield* openPrimeThread(fake);
+      yield* startTurn(runtime, providerThread);
+      yield* fake.takeRequest("prompt");
+      yield* fake.emit({ type: "agent_start" });
+      yield* fake.emit({ type: "message_start", message: storedPrompt(900) });
+      yield* fake.emit({
+        type: "message_update",
+        message: assistantSnapshot(1000, "Failed partial"),
+        assistantMessageEvent: { type: "text_delta", contentIndex: 0, delta: "Failed partial" },
+      });
+      yield* fake.emit({
+        type: "auto_retry_start",
+        attempt: 1,
+        maxAttempts: 3,
+        delayMs: 0,
+        errorMessage: "Transient provider error",
+      });
+      const copy = { ...assistantSnapshot(3000, "Failed partial, retried"), stopReason: "aborted" };
+      fake.setTranscript([storedPrompt(900), copy]);
+      yield* fake.emit({ type: "message_end", message: copy });
+      yield* fake.emit({ type: "turn_end", message: copy, toolResults: [] });
+      yield* fake.emit({ type: "agent_end", messages: [copy] });
+
+      assert.deepEqual(yield* takeFinalReplyTexts(takeEvent), [
+        "Failed partial",
+        "Failed partial, retried",
+      ]);
+    }).pipe(Effect.scoped, Effect.provide(layerTest)),
+  );
+
+  // The history places the copy, and its text confirms it: a stock copy holds
+  // all of the reply it replaced.
+  it.effect("keeps a stopped copy that does not hold the cut reply's text apart", () =>
+    Effect.gen(function* () {
+      const fake = yield* makeFakePi;
+      const { runtime, takeEvent, providerThread } = yield* openPrimeThread(fake);
+      yield* startTurn(runtime, providerThread);
+      yield* fake.takeRequest("prompt");
+      const turnId = yield* takeRunningTurnId(takeEvent);
+      if (turnId === undefined) return;
+      yield* fake.emit({ type: "agent_start" });
+      yield* fake.emit({ type: "message_start", message: assistantSnapshot(1000, "") });
+      yield* fake.emit({
+        type: "message_update",
+        message: assistantSnapshot(1000, "First reply"),
+        assistantMessageEvent: { type: "text_delta", contentIndex: 0, delta: "First reply" },
+      });
+      fake.setTranscript([
+        storedPrompt(900),
+        { ...assistantSnapshot(5000, "Second reply"), stopReason: "aborted" },
+      ]);
+      yield* runtime.interruptTurn({
+        providerThread,
+        providerTurnId: turnId,
+        requestRuntimeRestart: true,
+      });
+      yield* fake.closeStdout;
+
+      assert.deepEqual(yield* takeFinalReplyTexts(takeEvent), ["First reply", "Second reply"]);
+    }).pipe(Effect.scoped, Effect.provide(layerTest)),
+  );
+
   // The wall clock moved back between the turns, so the first turn's copy is
   // stamped after the reply the second turn was streaming.
   it.effect(
