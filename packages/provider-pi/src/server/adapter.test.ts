@@ -5224,6 +5224,44 @@ describe("PiAdapterV2 with the Prime Agent flavor", () => {
     }).pipe(Effect.scoped, Effect.provide(layerTest)),
   );
 
+  it.effect("shows a reply Stop cut off once when Stop restarts Prime Agent before its end", () =>
+    Effect.gen(function* () {
+      const fake = yield* makeFakePi;
+      const { runtime, takeEvent, providerThread } = yield* openPrimeThread(fake);
+      yield* startTurn(runtime, providerThread);
+      yield* fake.takeRequest("prompt");
+      const running = yield* takeEvent(
+        (event) =>
+          event.type === "provider_turn.updated" && event.providerTurn.status === "running",
+      );
+      assert.isTrue(running.type === "provider_turn.updated");
+      if (running.type !== "provider_turn.updated") return;
+      yield* fake.emit({ type: "agent_start" });
+      yield* fake.emit({ type: "message_start", message: assistantSnapshot(1000, "") });
+      yield* fake.emit({
+        type: "message_update",
+        message: assistantSnapshot(1000, cutReply),
+        assistantMessageEvent: { type: "text_delta", contentIndex: 0, delta: cutReply },
+      });
+      fake.setTranscript([
+        storedPrompt(900),
+        { ...assistantSnapshot(5000, cutReply), stopReason: "aborted" },
+      ]);
+
+      yield* runtime.interruptTurn({
+        providerThread,
+        providerTurnId: running.providerTurn.id,
+        requestRuntimeRestart: true,
+      });
+      yield* fake.closeStdout;
+
+      assert.deepEqual(yield* takeRepliesAndOutcome(takeEvent), {
+        texts: [cutReply],
+        status: "interrupted",
+      });
+    }).pipe(Effect.scoped, Effect.provide(layerTest)),
+  );
+
   it.effect("completes a cut-off reply when Stop aborts the run", () =>
     Effect.gen(function* () {
       const fake = yield* makeFakePi;
