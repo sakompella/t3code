@@ -200,6 +200,50 @@ const layerFlakyChildRootEventSink = (failures: Ref.Ref<number>) =>
     }),
   ).pipe(Layer.provide(layerTestEventSink));
 
+interface HeldChildRootWrite {
+  /** Completes when the first running child-root write reaches the sink. */
+  readonly entered: Deferred.Deferred<void>;
+  /** Lets that write go on. */
+  readonly proceed: Deferred.Deferred<void>;
+  /** Completes when a running child-root write commits. */
+  readonly committed: Deferred.Deferred<void>;
+  /** The held write then fails once, as a failed SQL commit does, so the next attempt is a retry. */
+  readonly failOnce: boolean;
+}
+
+// Holds the first running child-root write until the test lets it go.
+const layerHeldChildRootEventSink = (hold: HeldChildRootWrite) =>
+  Layer.effect(
+    EventSink.EventSinkV2,
+    Effect.gen(function* () {
+      const delegate = yield* EventSink.EventSinkV2;
+      const holding = yield* Ref.make(true);
+      const isRunningChildRoot = (events: ReadonlyArray<OrchestrationV2DomainEvent>) =>
+        events.some(
+          (event) =>
+            event.type === "node.updated" &&
+            event.payload.kind === "root_turn" &&
+            event.payload.runId === null &&
+            event.payload.status === "running",
+        );
+      return EventSink.EventSinkV2.of({
+        ...delegate,
+        write: (input) =>
+          Effect.gen(function* () {
+            if (!isRunningChildRoot(input.events)) return yield* delegate.write(input);
+            if (yield* Ref.getAndSet(holding, false)) {
+              yield* Deferred.succeed(hold.entered, undefined);
+              yield* Deferred.await(hold.proceed);
+              if (hold.failOnce) return yield* Effect.die(new Error("simulated commit failure"));
+            }
+            const stored = yield* delegate.write(input);
+            yield* Deferred.succeed(hold.committed, undefined);
+            return stored;
+          }),
+      });
+    }),
+  ).pipe(Layer.provide(layerTestEventSink));
+
 const CodexCapabilities: OrchestrationV2ProviderCapabilities = CodexProviderCapabilitiesV2;
 const ExclusiveCapabilities: OrchestrationV2ProviderCapabilities = {
   ...CodexCapabilities,
@@ -534,19 +578,22 @@ function layerTest(input: {
   readonly projectServiceLayer?: Layer.Layer<ProjectService.ProjectService>;
   readonly childThreadScope?: "session";
   readonly childRootWriteFailures?: Ref.Ref<number>;
+  readonly heldChildRootWrite?: HeldChildRootWrite;
 }) {
   const layerConfiguredEventSink =
-    input.childRootWriteFailures !== undefined
-      ? layerFlakyChildRootEventSink(input.childRootWriteFailures)
-      : input.flakyReleaseWrites !== undefined
-        ? layerFlakyReleaseEventSink(input.flakyReleaseWrites)
-        : input.pauseAttachWrite !== undefined
-          ? layerPausingAttachEventSink(input.pauseAttachWrite)
-          : input.beforeUnchangedWrite !== undefined
-            ? layerBeforeUnchangedWriteEventSink(input.beforeUnchangedWrite)
-          : input.failReleaseEventWrites
-            ? layerFailingReleaseEventSink
-            : layerTestEventSink;
+    input.heldChildRootWrite !== undefined
+      ? layerHeldChildRootEventSink(input.heldChildRootWrite)
+      : input.childRootWriteFailures !== undefined
+        ? layerFlakyChildRootEventSink(input.childRootWriteFailures)
+        : input.flakyReleaseWrites !== undefined
+          ? layerFlakyReleaseEventSink(input.flakyReleaseWrites)
+          : input.pauseAttachWrite !== undefined
+            ? layerPausingAttachEventSink(input.pauseAttachWrite)
+            : input.beforeUnchangedWrite !== undefined
+              ? layerBeforeUnchangedWriteEventSink(input.beforeUnchangedWrite)
+              : input.failReleaseEventWrites
+                ? layerFailingReleaseEventSink
+                : layerTestEventSink;
   const layerRegistry = Layer.unwrap(
     makeProviderAdapter(input.state, {
       failEventStream: input.failEventStream ?? false,
@@ -5276,4 +5323,98 @@ it.live(
         ),
       );
     }),
+);
+
+const holdChildRootWrite = (failOnce: boolean) =>
+  Effect.gen(function* () {
+    return {
+      entered: yield* Deferred.make<void>(),
+      proceed: yield* Deferred.make<void>(),
+      committed: yield* Deferred.make<void>(),
+      failOnce,
+    } satisfies HeldChildRootWrite;
+  });
+
+/**
+ * The pump has started the child's running root write when release begins.
+ * Release must keep the session until that write, retries included, is done,
+ * so the replacement session's completed root is the last word.
+ */
+const releaseDuringChildWrite = (
+  state: Ref.Ref<TestProviderRuntimeState>,
+  hold: HeldChildRootWrite,
+  name: string,
+) =>
+  Effect.gen(function* () {
+    const manager = yield* ProviderSessionManager.ProviderSessionManagerV2;
+    const session = yield* openSessionWithParentThread(name);
+    const child = makeSessionChildThreadEvents({ ...session, name });
+    yield* publishAndDrain(state, session, [child.shell]);
+    const oldQueue = (yield* Ref.get(state)).eventQueues.get(String(session.providerSessionId));
+    assert.isDefined(oldQueue);
+    yield* Queue.offer(oldQueue!, child.childRoot("running"));
+    yield* Deferred.await(hold.entered);
+
+    const releasing = yield* manager
+      .release({ providerSessionId: session.providerSessionId, reason: "manual_shutdown" })
+      .pipe(Effect.forkScoped({ startImmediately: true }));
+    const stillLive = Option.isSome(yield* manager.get(session.providerSessionId));
+    yield* Deferred.succeed(hold.proceed, undefined);
+    assert.isTrue(stillLive, "release waits for the child write the pump already started");
+    yield* Deferred.await(hold.committed);
+    yield* Fiber.join(releasing);
+
+    const replacement = yield* manager.open({
+      threadId: session.threadId,
+      providerSessionId: session.providerSessionId,
+      modelSelection,
+      runtimePolicy,
+    });
+    yield* publishAndDrain(state, { ...session, runtime: replacement }, [
+      child.shell,
+      child.childRoot("completed"),
+    ]);
+    const projection = yield* (yield* ProjectionStore.ProjectionStoreV2).getThreadProjection(
+      child.childThreadId,
+    );
+    assert.equal(
+      projection.nodes.find((node) => node.kind === "root_turn")?.status,
+      "completed",
+      "a released session's pump cannot write over its replacement",
+    );
+  });
+
+it.effect("ProviderSessionManagerV2 release waits for a child thread write the pump started", () =>
+  Effect.gen(function* () {
+    const state = yield* Ref.make(emptyState);
+    const hold = yield* holdChildRootWrite(false);
+    yield* releaseDuringChildWrite(state, hold, "release-child-write").pipe(
+      Effect.provide(
+        layerTest({
+          state,
+          idleTimeoutMs: 60_000,
+          childThreadScope: "session",
+          heldChildRootWrite: hold,
+        }),
+      ),
+    );
+  }),
+);
+
+it.live("ProviderSessionManagerV2 release waits through a child thread write's retry", () =>
+  Effect.gen(function* () {
+    const state = yield* Ref.make(emptyState);
+    const hold = yield* holdChildRootWrite(true);
+    yield* releaseDuringChildWrite(state, hold, "release-child-retry").pipe(
+      Effect.scoped,
+      Effect.provide(
+        layerTest({
+          state,
+          idleTimeoutMs: 60_000,
+          childThreadScope: "session",
+          heldChildRootWrite: hold,
+        }),
+      ),
+    );
+  }),
 );
