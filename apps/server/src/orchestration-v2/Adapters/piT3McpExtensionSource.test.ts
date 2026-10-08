@@ -266,14 +266,35 @@ describe("T3 extension handlers on a stale ctx", () => {
       assert.match(result?.reason ?? "", /bash was blocked.*session was replaced/);
     });
 
-    it("lets an approved tool run and blocks a declined one", async () => {
+    it("asks in a Pi or root Prime Agent session, then runs an approved tool and blocks a declined one", async () => {
       const toolCall = await loadToolCall();
-      const answering = (approved: boolean) => ({ ui: { confirm: async () => approved } });
-      assert.isUndefined(await toolCall(bash, answering(true)));
-      assert.deepEqual(await toolCall(bash, answering(false)), {
-        block: true,
-        reason: "bash was declined in T3 Code.",
-      });
+      // Pi's session header has no rlmDepth; a root Prime Agent session has 0.
+      for (const header of [{ type: "session" }, { type: "session", rlmDepth: 0 }]) {
+        const answering = (approved: boolean) => ({
+          sessionManager: { getHeader: () => header },
+          ui: { confirm: async () => approved },
+        });
+        assert.isUndefined(await toolCall(bash, answering(true)));
+        assert.deepEqual(await toolCall(bash, answering(false)), {
+          block: true,
+          reason: "bash was declined in T3 Code.",
+        });
+      }
+    });
+
+    it("blocks a subagent's tool without asking, since no T3 prompt can reach a subagent", async () => {
+      const toolCall = await loadToolCall();
+      const subagent = {
+        sessionManager: { getHeader: () => ({ type: "session", rlmDepth: 1 }) },
+        ui: {
+          confirm: async () => {
+            throw new Error("a subagent's approval prompt has no recipient");
+          },
+        },
+      };
+      const result = await toolCall(bash, subagent);
+      assert.isTrue(result?.block);
+      assert.match(result?.reason ?? "", /bash was blocked.*subagent/);
     });
 
     it("rejects, rather than approving, when the prompt fails for another reason", async () => {

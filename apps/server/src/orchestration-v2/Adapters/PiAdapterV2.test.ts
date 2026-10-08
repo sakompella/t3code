@@ -59,9 +59,6 @@ const layerTest = Layer.mergeAll(NodeServices.layer, IdAllocator.layer, layerSer
 
 const decodeJsonLine = Schema.decodeSync(Schema.fromJsonString(Schema.Unknown));
 const encodeJsonLine = Schema.encodeSync(Schema.fromJsonString(Schema.Unknown));
-const decodeDialogRoute = Schema.decodeSync(
-  Schema.fromJsonString(Schema.Struct({ requestId: Schema.String })),
-);
 
 const PI_INSTANCE_ID = ProviderInstanceId.make("pi");
 const THREAD_ID = ThreadId.make("thread-pi-test");
@@ -121,7 +118,6 @@ interface FakePi {
   readonly queueCommands: (data: unknown) => void;
   /** Make the next `get_commands` ack fail. */
   readonly failNextCommands: () => void;
-  readonly deferNextDialogRoute: () => void;
   /** Data returned by the next `list_heartbeats` acks, consumed in order; none left means no heartbeats. */
   readonly queueHeartbeats: (data: unknown) => void;
   /** Make the next `list_heartbeats` ack fail. */
@@ -171,7 +167,6 @@ const makeFakePi: Effect.Effect<FakePi> = Effect.gen(function* () {
   const heartbeatsQueue: Array<{ readonly success: boolean; readonly data?: unknown }> = [];
   const allRequests: Array<PiRpcRecord> = [];
   let deferState = false;
-  let deferDialogRoute = false;
   let deferredStateRequest: PiRpcRecord | undefined;
   let failState = false;
   let vetoSwitch = false;
@@ -241,16 +236,7 @@ const makeFakePi: Effect.Effect<FakePi> = Effect.gen(function* () {
       case "get_session_stats":
         return { ...base, data: statsQueue.shift() ?? {} };
       case "get_commands":
-        return {
-          ...base,
-          ...(commandsQueue.shift() ?? {
-            data: {
-              commands: lastSpawn.args.some((arg) => arg.endsWith("prime-agent-t3-dialogs.ts"))
-                ? [{ name: "t3-route-child-dialogs" }]
-                : [],
-            },
-          }),
-        };
+        return { ...base, ...(commandsQueue.shift() ?? { data: { commands: [] } }) };
       case "list_heartbeats":
         return { ...base, ...(heartbeatsQueue.shift() ?? { data: { heartbeats: [] } }) };
       case "fork":
@@ -283,23 +269,6 @@ const makeFakePi: Effect.Effect<FakePi> = Effect.gen(function* () {
         }
         const response = respondTo(record);
         if (response !== null) yield* emit(response);
-        const message = record["message"];
-        if (
-          record["type"] === "prompt" &&
-          typeof message === "string" &&
-          message.startsWith("/t3-route-child-dialogs ")
-        ) {
-          const route = decodeDialogRoute(message.slice("/t3-route-child-dialogs ".length));
-          if (deferDialogRoute) {
-            deferDialogRoute = false;
-            continue;
-          }
-          yield* emit({
-            type: "extension_ui_request",
-            method: "notify",
-            message: `t3-child-dialog-route:${encodeJsonLine({ requestId: route.requestId, ok: true })}`,
-          });
-        }
       }
     });
 
@@ -389,9 +358,6 @@ const makeFakePi: Effect.Effect<FakePi> = Effect.gen(function* () {
     queueStats: (data) => statsQueue.push(data),
     queueCommands: (data) => commandsQueue.push({ success: true, data }),
     failNextCommands: () => commandsQueue.push({ success: false }),
-    deferNextDialogRoute: () => {
-      deferDialogRoute = true;
-    },
     queueHeartbeats: (data) => heartbeatsQueue.push({ success: true, data }),
     failNextHeartbeats: () => heartbeatsQueue.push({ success: false }),
     closeStdout: Queue.end(stdout),
@@ -4411,54 +4377,42 @@ describe("PiAdapterV2 with the Prime Agent flavor", () => {
     }).pipe(Effect.scoped, Effect.provide(layerTest)),
   );
 
-  it.effect("waits for a real child dialog recipient, not prompt admission, before observing", () =>
-    Effect.gen(function* () {
-      const fake = yield* makeFakePi;
-      const session = yield* openPrimeThread(fake);
-      yield* startTurn(session.runtime, session.providerThread);
-      yield* fake.takeRequest("prompt");
-      yield* fake.emit({ type: "agent_start" });
-      fake.deferNextDialogRoute();
-      yield* fake.emit(rlmChild("running", { activeSessionId: "active-1" }));
-      const setup = yield* fake.takeRequest("prompt");
-      const message = setup["message"];
-      assert.isString(message);
-      assert.isTrue(typeof message === "string" && message.startsWith("/t3-route-child-dialogs "));
-      assert.isFalse(fake.allRequests().some((request) => request["type"] === "observe"));
-      const route = decodeDialogRoute(String(message).slice("/t3-route-child-dialogs ".length));
-      yield* fake.emit({
-        type: "extension_ui_request",
-        method: "notify",
-        message: `t3-child-dialog-route:${encodeJsonLine({ requestId: route.requestId, ok: true })}`,
-      });
-      assert.equal((yield* fake.takeRequest("observe"))["activeSessionId"], "active-1");
-    }).pipe(Effect.scoped, Effect.provide(layerTest)),
-  );
-
-  it.effect("does not advertise child UI when the dialog recipient cannot attach", () =>
-    Effect.gen(function* () {
-      const fake = yield* makeFakePi;
-      const session = yield* openPrimeThread(fake);
-      yield* startTurn(session.runtime, session.providerThread);
-      yield* fake.takeRequest("prompt");
-      yield* fake.emit({ type: "agent_start" });
-      fake.deferNextDialogRoute();
-      yield* fake.emit(rlmChild("running", { activeSessionId: "active-1" }));
-      const setup = yield* fake.takeRequest("prompt");
-      const route = decodeDialogRoute(
-        String(setup["message"]).slice("/t3-route-child-dialogs ".length),
-      );
-      yield* fake.emit({
-        type: "extension_ui_request",
-        method: "notify",
-        message: `t3-child-dialog-route:${encodeJsonLine({ requestId: route.requestId, ok: false, error: "Child closed while attaching" })}`,
-      });
-      yield* fake.emit(rlmChild("running", { sessionName: "routing-barrier" }));
-      yield* session.takeEvent(
-        (event) => event.type === "subagent.updated" && event.subagent.title === "routing-barrier",
-      );
-      assert.isFalse(fake.allRequests().some((request) => request["type"] === "observe"));
-    }).pipe(Effect.scoped, Effect.provide(layerTest)),
+  it.effect(
+    "streams a child's session into its thread with no setup step stock Prime Agent can refuse",
+    () =>
+      Effect.gen(function* () {
+        const fake = yield* makeFakePi;
+        const session = yield* openPrimeThread(fake);
+        fake.queueObserved([
+          { role: "user", content: "Reply to your parent with child-ok", timestamp: 1000 },
+          { role: "assistant", content: [{ type: "text", text: "On it." }], timestamp: 1001 },
+        ]);
+        yield* startTurn(session.runtime, session.providerThread);
+        yield* fake.takeRequest("prompt");
+        yield* fake.emit({ type: "agent_start" });
+        yield* fake.emit(rlmChild("running", { activeSessionId: "active-1" }));
+        const running = yield* session.takeEvent(
+          (event) => event.type === "subagent.updated" && event.subagent.childThreadId !== null,
+        );
+        const childThreadId =
+          running.type === "subagent.updated" ? running.subagent.childThreadId : null;
+        const reply = yield* session.takeEvent(
+          (event) =>
+            event.type === "message.updated" &&
+            event.message.threadId === childThreadId &&
+            event.message.text === "On it.",
+        );
+        assert.equal(reply.type, "message.updated");
+        // A daemon-side attach from a second client is refused for every child of a
+        // T3-owned session ("Unknown active session"), so nothing may gate `observe`.
+        assert.deepEqual(
+          fake
+            .allRequests()
+            .filter((request) => request["type"] === "prompt" || request["type"] === "observe")
+            .map((request) => request["type"]),
+          ["prompt", "observe"],
+        );
+      }).pipe(Effect.scoped, Effect.provide(layerTest)),
   );
 
   it.effect("streams a running child's session into its own thread", () =>
@@ -4484,16 +4438,6 @@ describe("PiAdapterV2 with the Prime Agent flavor", () => {
         running.type === "subagent.updated" ? running.subagent.childThreadId : null;
       assert.isNotNull(childThreadId);
       assert.equal((yield* fake.takeRequest("observe"))["activeSessionId"], "active-1");
-      const routeIndex = fake
-        .allRequests()
-        .findIndex(
-          (request) =>
-            typeof request["message"] === "string" &&
-            request["message"].startsWith("/t3-route-child-dialogs "),
-        );
-      const observeIndex = fake.allRequests().findIndex((request) => request["type"] === "observe");
-      assert.isAtLeast(routeIndex, 0);
-      assert.isBelow(routeIndex, observeIndex);
 
       // The history lands in the child thread, and live events follow it.
       yield* fake.emit({
