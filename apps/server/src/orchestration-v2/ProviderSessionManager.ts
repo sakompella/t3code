@@ -1655,7 +1655,12 @@ export const layerWithOptions = (
                   }),
                 ),
               ),
-              Effect.retry({ schedule: Schedule.exponential("20 millis"), times: 3 }),
+              // A malformed event fails the same way every time.
+              Effect.retry({
+                schedule: Schedule.exponential("20 millis"),
+                times: 3,
+                while: (error) => error._tag === "ProviderEventPublishError",
+              }),
               Effect.catchCause((cause) =>
                 Cause.hasInterruptsOnly(cause)
                   ? Effect.interrupt
@@ -1663,7 +1668,7 @@ export const layerWithOptions = (
                       providerSessionId: entry.runtime.providerSessionId,
                       threadId,
                       eventType: event.type,
-                      cause: Cause.pretty(cause),
+                      error: String(Cause.squash(cause)),
                     }),
               ),
             );
