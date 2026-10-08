@@ -447,36 +447,40 @@ describe("a late subagent shell across a session's subscribers", () => {
         status: "running",
       },
     }) as ProviderAdapterV2Event;
-  const childShell = {
-    type: "app_thread.created",
-    driver,
-    appThread: {
-      id: childThreadId,
-      lineage: {
-        parentThreadId: threadId,
-        relationshipToParent: "subagent",
-        rootThreadId: threadId,
+  const childShellFrom = (parentNodeId: NodeId) =>
+    ({
+      type: "app_thread.created",
+      driver,
+      appThread: {
+        id: childThreadId,
+        lineage: {
+          parentThreadId: threadId,
+          relationshipToParent: "subagent",
+          rootThreadId: threadId,
+        },
+        forkedFrom: { type: "node", nodeId: parentNodeId },
       },
-      forkedFrom: { type: "node", nodeId: subagentNodeId },
-    },
-  } as ProviderAdapterV2Event;
+    }) as ProviderAdapterV2Event;
+  const childShell = childShellFrom(subagentNodeId);
   const childProviderThread = {
     type: "provider_thread.updated",
     driver,
     providerThread: { id: childProviderThreadId, appThreadId: childThreadId },
   } as ProviderAdapterV2Event;
-  const childRootNode = {
-    type: "node.updated",
-    driver,
-    node: {
-      id: NodeId.make("node:shell-owner:child-root"),
-      threadId: childThreadId,
-      runId: null,
-      kind: "root_turn",
-      status: "running",
-      providerThreadId: null,
-    },
-  } as ProviderAdapterV2Event;
+  const childRoot = (status: OrchestrationV2ExecutionNode["status"]) =>
+    ({
+      type: "node.updated",
+      driver,
+      node: {
+        id: NodeId.make("node:shell-owner:child-root"),
+        threadId: childThreadId,
+        runId: null,
+        kind: "root_turn",
+        status,
+        providerThreadId: null,
+      },
+    }) as ProviderAdapterV2Event;
+  const childRootNode = childRoot("running");
 
   // Each adapter that reports a subagent's node before its child thread, in
   // the order it emits them around the shell.
@@ -771,14 +775,7 @@ describe("a late subagent shell across a session's subscribers", () => {
         yield* session.awaitDrained(launching);
         yield* session.start(live);
         const releaseLiveRun = yield* session.holdLiveRunAtShell;
-        const childEvents = [
-          childShell,
-          childRootNode,
-          {
-            ...childRootNode,
-            node: { ...childRootNode.node, status: "completed" },
-          } as ProviderAdapterV2Event,
-        ];
+        const childEvents = [childShell, childRootNode, childRoot("completed")];
         yield* session.publish([...childEvents, otherChild("completed")]);
         yield* session.awaitClosed(launching);
         assert.deepEqual(
@@ -801,16 +798,12 @@ describe("a late subagent shell across a session's subscribers", () => {
     Effect.scoped(
       Effect.gen(function* () {
         const session = yield* sharedSessionScenario;
-        const settledChildRoot = {
-          ...childRootNode,
-          node: { ...childRootNode.node, status: "completed" },
-        } as ProviderAdapterV2Event;
         yield* session.start(launching);
         yield* session.publish([
           subagentNode("running", providerThreadId),
           childShell,
           childRootNode,
-          settledChildRoot,
+          childRoot("completed"),
           subagentNode("completed", providerThreadId),
           rootTerminal(launching),
         ]);
@@ -831,15 +824,13 @@ describe("a late subagent shell across a session's subscribers", () => {
             providerThreadId,
           },
         } as ProviderAdapterV2Event;
-        const secondCallShell = {
-          ...childShell,
-          appThread: {
-            ...childShell.appThread,
-            forkedFrom: { type: "node", nodeId: secondCallNodeId },
-          },
-        } as ProviderAdapterV2Event;
         yield* session.start(live);
-        yield* session.publish([secondCallNode, secondCallShell, childRootNode, drainMarker(live)]);
+        yield* session.publish([
+          secondCallNode,
+          childShellFrom(secondCallNodeId),
+          childRootNode,
+          drainMarker(live),
+        ]);
         yield* session.awaitDrained(live);
         assert.deepEqual(yield* session.childEventOwners, [
           launching.runId,

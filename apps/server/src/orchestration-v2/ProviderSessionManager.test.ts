@@ -1137,6 +1137,50 @@ it.effect("ProviderSessionManagerV2 closes event subscriptions normally on serve
   }),
 );
 
+it.effect("ProviderSessionManagerV2 hands every subscriber the same event object", () =>
+  Effect.gen(function* () {
+    const state = yield* Ref.make(emptyState);
+    const effect = Effect.gen(function* () {
+      const eventSink = yield* EventSink.EventSinkV2;
+      const idAllocator = yield* IdAllocator.IdAllocatorV2;
+      const manager = yield* ProviderSessionManager.ProviderSessionManagerV2;
+      const now = yield* DateTime.now;
+      const threadId = ThreadId.make("thread-provider-session-manager-shared-event");
+      const providerSessionId = yield* idAllocator.allocate.providerSession({
+        providerInstanceId: modelSelection.instanceId,
+        threadId,
+      });
+      yield* eventSink.write({
+        events: [yield* makeThreadCreatedEvent({ idAllocator, threadId, now })],
+      });
+      const runtime = yield* manager.open({
+        threadId,
+        providerSessionId,
+        modelSelection,
+        runtimePolicy,
+      });
+      const first = yield* runtime.subscribeEvents!;
+      const second = yield* runtime.subscribeEvents!;
+      const adapterQueue = (yield* Ref.get(state)).eventQueues.get(String(providerSessionId));
+      assert.isDefined(adapterQueue);
+      yield* Queue.offer(adapterQueue!, {
+        type: "provider_session.updated",
+        driver: CODEX_DRIVER,
+        providerSession: runtime.providerSession,
+      });
+      const firstEvent = yield* first.events.pipe(Stream.runHead);
+      const secondEvent = yield* second.events.pipe(Stream.runHead);
+      assert.isTrue(Option.isSome(firstEvent));
+      // RunExecutionService tells one publication from another by this identity.
+      assert.strictEqual(Option.getOrThrow(firstEvent), Option.getOrThrow(secondEvent));
+
+      yield* manager.shutdown;
+    });
+
+    yield* effect.pipe(Effect.provide(layerTest({ state, idleTimeoutMs: 60_000 })));
+  }),
+);
+
 it.effect("ProviderSessionManagerV2 drains subscribers when the provider stops", () =>
   Effect.gen(function* () {
     const state = yield* Ref.make(emptyState);
