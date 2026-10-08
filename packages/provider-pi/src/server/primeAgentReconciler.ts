@@ -74,20 +74,29 @@ function isAbortedReply(message: unknown): boolean {
   );
 }
 
+/** A message the agent loop did not write: a prompt, a wake, a notice. Each run starts with one. */
+function startsRun(message: unknown): boolean {
+  const role = recordString(message, "role");
+  return role !== "assistant" && role !== "toolResult";
+}
+
 /**
  * Which stored aborted copy replaced which reply a turn streamed. Stock ends
  * a reply Stop cut off with a copy of what it streamed, stamped at abort time
  * and announced by no message_start of its own (agent-loop.js
- * `finishAbortedMessage`), and stores the copy where the reply would have
- * been. A reply the turn streamed with no end, that the history does not
- * hold, and that no compaction or retry may have dropped, can only have been
- * replaced by an aborted reply the turn never streamed, stored after what
- * the turn saw before that reply and before what it saw after it, and
- * holding all the text the turn showed of it. Several such copies make the
- * match ambiguous, so the reply keeps none, unless the turn saw nothing
- * stored after the reply: then the latest copy wins, because the abort ends
- * the run the turn was streaming. Returns each copy's key with the timestamp
- * of the reply it replaced.
+ * `finishAbortedMessage`), and the abort ends that run. So a run holds at
+ * most one copy, and the next run starts with a stored message the agent did
+ * not write. A reply the turn streamed with no end, that the history does
+ * not hold, and that no compaction or retry may have dropped, was replaced
+ * by an aborted reply the turn never streamed that holds all the text the
+ * turn showed of it, stored in that reply's run: after the last stored
+ * message the turn saw before the reply, before the next run starts and
+ * before anything the turn saw after the reply. When the turn saw nothing
+ * stored before the reply, its run is one this turn started: a run whose
+ * first message no earlier turn accounted for. A reply matches only when
+ * exactly one copy fits it and that copy fits no other reply; anything else
+ * leaves both apart. Returns each copy's key with the timestamp of the reply
+ * it replaced.
  */
 export function matchStoppedCopies(input: {
   readonly history: ReadonlyArray<unknown>;
@@ -102,37 +111,58 @@ export function matchStoppedCopies(input: {
   /** Whether `copy` holds all the text T3 shows of the reply `replyKey`. */
   readonly holdsShown: (copy: unknown, replyKey: string) => boolean;
 }): ReadonlyMap<string, number> {
-  const keys = input.history.map(transcriptMessageKey);
+  const { history } = input;
+  const keys = history.map(transcriptMessageKey);
   const position = new Map<string, number>();
   keys.forEach((key, index) => key !== undefined && position.set(key, index));
   const streamed = new Set(input.streamed);
   const copies = keys.flatMap((key, index) =>
     key !== undefined &&
-    isAbortedReply(input.history[index]) &&
+    isAbortedReply(history[index]) &&
     !streamed.has(key) &&
     !input.accounted.has(key)
       ? [{ key, index }]
       : [],
   );
+  const runStarts = history.flatMap((message, index) => (startsRun(message) ? [index] : []));
+  const nextRunStart = (after: number) =>
+    runStarts.find((index) => index > after) ?? history.length;
+  const startedThisTurn = (index: number) => {
+    const runStart = runStarts.findLast((start) => start < index);
+    return runStart !== undefined && !input.accounted.has(keys[runStart] ?? "");
+  };
   const storedPositions = (streamedKeys: ReadonlyArray<string>) =>
     streamedKeys.flatMap((key) => position.get(key) ?? []);
-  const matches = new Map<string, number>();
-  input.streamed.forEach((key, index) => {
-    if (position.has(key) || !input.unended.has(key) || input.removed.has(key)) return;
-    if (!isReplyKey(key)) return;
-    const storedAfter = Math.max(-1, ...storedPositions(input.streamed.slice(0, index)));
-    const storedNext = storedPositions(input.streamed.slice(index + 1));
-    const storedBefore = storedNext.length === 0 ? keys.length : Math.min(...storedNext);
+
+  const fitsByReply = input.streamed.flatMap((key, index) => {
+    if (position.has(key) || !input.unended.has(key) || input.removed.has(key)) return [];
+    if (!isReplyKey(key)) return [];
+    const seenBefore = storedPositions(input.streamed.slice(0, index));
+    const anchor = seenBefore.length === 0 ? undefined : Math.max(...seenBefore);
+    const end = Math.min(
+      anchor === undefined ? history.length : nextRunStart(anchor),
+      ...storedPositions(input.streamed.slice(index + 1)),
+    );
     const fits = copies.filter(
       (copy) =>
-        copy.index > storedAfter &&
-        copy.index < storedBefore &&
-        !matches.has(copy.key) &&
-        input.holdsShown(input.history[copy.index], key),
+        copy.index > (anchor ?? -1) &&
+        copy.index < end &&
+        (anchor !== undefined || startedThisTurn(copy.index)) &&
+        input.holdsShown(history[copy.index], key),
     );
-    const copy = storedNext.length === 0 ? fits.at(-1) : fits.length === 1 ? fits[0] : undefined;
-    if (copy !== undefined) matches.set(copy.key, keyTimestamp(key));
+    return [{ key, fits }];
   });
+  const claims = new Map<string, number>();
+  for (const { fits } of fitsByReply) {
+    for (const copy of fits) claims.set(copy.key, (claims.get(copy.key) ?? 0) + 1);
+  }
+  const matches = new Map<string, number>();
+  for (const { key, fits } of fitsByReply) {
+    const [copy, ...others] = fits;
+    if (copy !== undefined && others.length === 0 && claims.get(copy.key) === 1) {
+      matches.set(copy.key, keyTimestamp(key));
+    }
+  }
   return matches;
 }
 
