@@ -1830,6 +1830,7 @@ describe("PiAdapterV2", () => {
         const failed = yield* rollBackSavedThread(runtime, providerThread).pipe(Effect.flip);
 
         assert.equal(failed._tag, "ProviderAdapterRollbackThreadError");
+        assert.include(String(failed.cause), "could not start on session");
         assert.isFalse(fake.allRequests().some((request) => request.type === "fork"));
         assert.deepEqual(replacementRequests(fake), []);
       }).pipe(Effect.scoped, Effect.provide(layerTest)),
