@@ -54,55 +54,16 @@ export interface ProviderEventRoutingState {
   readonly ownedThreadIds: ReadonlySet<ThreadId>;
   // Set once this run's root turn ended. A child thread created after that
   // belongs to the run that is live then, so this one no longer adopts it,
-  // except a workflow member enrolled below (its coordinator keeps this run
-  // open, so the member is this run's to follow) or a thread forked from one
-  // of this run's subagent nodes.
+  // unless the adapter says it launched the subagent under this run, or it
+  // is a workflow member enrolled below (its coordinator keeps this run open).
   readonly rootTurnEnded: boolean;
   readonly workflowMemberParents: ReadonlyMap<ThreadId, ThreadId>;
-  // The run each open subagent node on an owned thread was reported under.
-  readonly subagentNodeRunIds: ReadonlyMap<NodeId, OrchestrationV2Run["id"]>;
   readonly ownedProviderThreadIds: ReadonlySet<ProviderThreadId>;
   readonly ownedProviderTurnIds: ReadonlySet<ProviderTurnId>;
   readonly inheritedBackgroundTurnItems: ReadonlyMap<TurnItemId, OrchestrationV2Run["id"]>;
   // The subagent rows behind inherited subagent items, which report on their own events.
   readonly inheritedBackgroundSubagents: ReadonlyMap<NodeId, OrchestrationV2Run["id"]>;
   readonly rootProviderTurnId: ProviderTurnId | null;
-}
-
-/**
- * Shared by every run listening to provider events. Each run sees a session's
- * events on its own, and a run that subscribes late never sees the earlier
- * ones, so no single run can tell whether another will take a new subagent
- * thread. Each subagent thread gets exactly one owner through these claims.
- */
-export interface SubagentThreadClaims {
-  readonly listeningRunIds: ReadonlySet<OrchestrationV2Run["id"]>;
-  readonly owners: ReadonlyMap<ThreadId, OrchestrationV2Run["id"]>;
-}
-
-export const noSubagentThreadClaims: SubagentThreadClaims = {
-  listeningRunIds: new Set(),
-  owners: new Map(),
-};
-
-export function startListening(
-  claims: SubagentThreadClaims,
-  runId: OrchestrationV2Run["id"],
-): SubagentThreadClaims {
-  return { ...claims, listeningRunIds: new Set([...claims.listeningRunIds, runId]) };
-}
-
-/** A run that stops listening gives up its claims, so they cannot outlive it. */
-export function stopListening(
-  claims: SubagentThreadClaims,
-  runId: OrchestrationV2Run["id"],
-): SubagentThreadClaims {
-  const listeningRunIds = new Set(claims.listeningRunIds);
-  listeningRunIds.delete(runId);
-  return {
-    listeningRunIds,
-    owners: new Map([...claims.owners].filter(([, owner]) => owner !== runId)),
-  };
 }
 
 export interface ProviderEventRouteIdentity {
@@ -377,7 +338,6 @@ export function makeProviderEventRoutingState(input: {
     ownedThreadIds: new Set([input.identity.threadId, ...(input.relatedThreadIds ?? [])]),
     rootTurnEnded: false,
     workflowMemberParents: new Map(),
-    subagentNodeRunIds: new Map(),
     ownedProviderThreadIds: new Set([
       input.identity.providerThreadId,
       ...(input.relatedProviderThreadIds ?? []),
@@ -419,54 +379,8 @@ const logSubagentRouting = (
     }),
   );
 
-/**
- * Whether this run delivers the event, with its next routing state. `claims`
- * defaults to this run being the only one listening.
- */
 export function routeProviderEvent(
   event: ProviderAdapter.ProviderAdapterV2Event,
-  input: ProviderEventRouteIdentity,
-  state: ProviderEventRoutingState,
-  claims: SubagentThreadClaims = startListening(noSubagentThreadClaims, input.runId),
-): readonly [boolean, ProviderEventRoutingState, SubagentThreadClaims] {
-  if (event.type !== "app_thread.created") {
-    return [...routeRunEvent(event, input, state), claims];
-  }
-  const { id, lineage, forkedFrom } = event.appThread;
-  if (id === input.threadId) {
-    return [true, state, claims];
-  }
-  const launchingRunId =
-    forkedFrom?.type === "node" ? state.subagentNodeRunIds.get(forkedFrom.nodeId) : undefined;
-  // The run that launched a subagent takes its thread while it listens. Once
-  // it stops, or when this run never saw the subagent's node (Claude and Codex
-  // report the thread first, and a run can subscribe between the two), the
-  // thread follows a live root turn. A claim keeps a second run off it.
-  // A Claude workflow member enrolled under this run's coordinator follows
-  // it even after the root turn ended: the coordinator keeps this run open.
-  const mayAdopt =
-    launchingRunId === undefined
-      ? !state.rootTurnEnded || state.workflowMemberParents.get(id) === lineage.parentThreadId
-      : launchingRunId === input.runId || !claims.listeningRunIds.has(launchingRunId);
-  const owner = claims.owners.get(id);
-  const adopts =
-    lineage.relationshipToParent === "subagent" &&
-    lineage.parentThreadId !== null &&
-    state.ownedThreadIds.has(lineage.parentThreadId) &&
-    mayAdopt &&
-    (owner === undefined || owner === input.runId);
-  if (!adopts) {
-    return [false, state, claims];
-  }
-  return [
-    true,
-    { ...state, ownedThreadIds: new Set([...state.ownedThreadIds, id]) },
-    { ...claims, owners: new Map(claims.owners).set(id, input.runId) },
-  ];
-}
-
-function routeRunEvent(
-  event: Exclude<ProviderAdapterV2Event, { readonly type: "app_thread.created" }>,
   input: ProviderEventRouteIdentity,
   state: ProviderEventRoutingState,
 ): readonly [boolean, ProviderEventRoutingState] {
@@ -474,12 +388,9 @@ function routeRunEvent(
   const ownsChildThread = (threadId: ThreadId): boolean =>
     threadId !== input.threadId && ownsThread(threadId);
   const ownsRun = (runId: string | null): boolean => runId === input.runId;
-  const addProviderThread = (
-    providerThreadId: ProviderThreadId,
-    base: ProviderEventRoutingState = state,
-  ): ProviderEventRoutingState => ({
-    ...base,
-    ownedProviderThreadIds: new Set([...base.ownedProviderThreadIds, providerThreadId]),
+  const addProviderThread = (providerThreadId: ProviderThreadId): ProviderEventRoutingState => ({
+    ...state,
+    ownedProviderThreadIds: new Set([...state.ownedProviderThreadIds, providerThreadId]),
   });
   const addProviderTurn = (
     providerTurnId: ProviderTurnId,
@@ -493,6 +404,32 @@ function routeRunEvent(
   switch (event.type) {
     case "provider_session.updated":
       return [false, state];
+    case "app_thread.created": {
+      if (event.appThread.id === input.threadId) {
+        return [true, state];
+      }
+      const launchedHere =
+        event.launchingRunId === undefined
+          ? !state.rootTurnEnded ||
+            state.workflowMemberParents.get(event.appThread.id) ===
+              event.appThread.lineage.parentThreadId
+          : ownsRun(event.launchingRunId);
+      const isOwnedSubagent =
+        launchedHere &&
+        event.appThread.lineage.relationshipToParent === "subagent" &&
+        event.appThread.lineage.parentThreadId !== null &&
+        ownsThread(event.appThread.lineage.parentThreadId);
+      if (!isOwnedSubagent) {
+        return [false, state];
+      }
+      return [
+        true,
+        {
+          ...state,
+          ownedThreadIds: new Set([...state.ownedThreadIds, event.appThread.id]),
+        },
+      ];
+    }
     case "provider_thread.updated": {
       const belongs =
         state.ownedProviderThreadIds.has(event.providerThread.id) ||
@@ -510,30 +447,11 @@ function routeRunEvent(
       return belongs ? [true, addProviderTurn(event.providerTurn.id, isRoot)] : [false, state];
     }
     case "node.updated": {
-      const { node } = event;
-      // A finished subagent starts no new thread, so only open nodes are kept.
-      const launchingRunId =
-        node.kind === "subagent" &&
-        node.runId !== null &&
-        ownsThread(node.threadId) &&
-        isOpenExecutionNodeStatus(node.status)
-          ? node.runId
-          : undefined;
-      const withSubagentNode =
-        state.subagentNodeRunIds.get(node.id) === launchingRunId
-          ? state
-          : {
-              ...state,
-              subagentNodeRunIds:
-                launchingRunId === undefined
-                  ? new Map([...state.subagentNodeRunIds].filter(([nodeId]) => nodeId !== node.id))
-                  : new Map(state.subagentNodeRunIds).set(node.id, launchingRunId),
-            };
-      const belongs = ownsRun(node.runId) || ownsChildThread(node.threadId);
-      if (!belongs || node.providerThreadId === null) {
-        return [belongs, withSubagentNode];
+      const belongs = ownsRun(event.node.runId) || ownsChildThread(event.node.threadId);
+      if (!belongs || event.node.providerThreadId === null) {
+        return [belongs, state];
       }
-      return [true, addProviderThread(node.providerThreadId, withSubagentNode)];
+      return [true, addProviderThread(event.node.providerThreadId)];
     }
     case "subagent.updated": {
       const belongs = ownsRun(event.subagent.runId) || ownsChildThread(event.subagent.threadId);
@@ -717,13 +635,6 @@ export const layer: Layer.Layer<
     const serverSettings = yield* ServerSettings.ServerSettingsService;
     const mcpAppModelContext = yield* McpAppModelContext.McpAppModelContext;
     const finalizationObserver = yield* RunFinalizationService.RunFinalizationObserver;
-    const subagentThreadClaims = yield* Ref.make(noSubagentThreadClaims);
-    // A run releases its claims when it stops, so a subagent called again later
-    // can go to the live run. Another run may still have the shell the owner
-    // took queued behind that release. The session hands every subscriber the
-    // same event object, so remembering the object keeps that copy from being
-    // adopted twice. An entry lasts only while some queue still holds the event.
-    const shellsTakenByOwner = new WeakSet<ProviderAdapterV2Event>();
 
     const writeFinalRunEvents = (input: {
       readonly run: OrchestrationV2Run;
@@ -1078,18 +989,10 @@ export const layer: Layer.Layer<
             attemptId: input.attempt.id,
             providerThreadId: input.providerThread.id,
           };
-          const subscription =
+          const eventSubscription =
             input.session.subscribeEvents === undefined
               ? { events: input.session.events, close: Effect.void }
               : yield* input.session.subscribeEvents;
-          yield* Ref.update(subagentThreadClaims, (claims) => startListening(claims, input.run.id));
-          const stopListeningForShells = Ref.update(subagentThreadClaims, (claims) =>
-            stopListening(claims, input.run.id),
-          );
-          const eventSubscription = {
-            events: subscription.events,
-            close: subscription.close.pipe(Effect.ensuring(stopListeningForShells)),
-          };
           const inheritedBackgroundTurnItems = yield* (
             input.loadInheritedBackgroundTurnItems?.() ?? Effect.succeed([])
           ).pipe(
@@ -1355,33 +1258,15 @@ export const layer: Layer.Layer<
           const filterAssistantEvent = makeAssistantStreamingFilter(responseStreamingMode);
           const providerEventFiber = yield* eventSubscription.events.pipe(
             Stream.filterEffect((event) =>
-              Effect.gen(function* () {
-                // Only this fiber writes its routing state; the claims are shared.
-                const state = yield* Ref.get(eventRouting);
-                const [accepted, next] = yield* Ref.modify(subagentThreadClaims, (claims) => {
-                  if (shellsTakenByOwner.has(event)) {
-                    return [[false, state] as const, claims];
-                  }
-                  const [accepted, next, nextClaims] = routeProviderEvent(
-                    event,
-                    routeIdentity,
-                    state,
-                    claims,
-                  );
-                  if (
-                    event.type === "app_thread.created" &&
-                    nextClaims.owners.get(event.appThread.id) === routeIdentity.runId
-                  ) {
-                    shellsTakenByOwner.add(event);
-                  }
-                  return [[accepted, next] as const, nextClaims];
-                });
-                yield* Ref.set(eventRouting, next);
-                if (event.type === "subagent.updated") {
-                  yield* logSubagentRouting(event.subagent, routeIdentity, accepted);
-                }
-                return accepted;
-              }),
+              Ref.modify(eventRouting, (state) =>
+                routeProviderEvent(event, routeIdentity, state),
+              ).pipe(
+                Effect.tap((accepted) =>
+                  event.type === "subagent.updated"
+                    ? logSubagentRouting(event.subagent, routeIdentity, accepted)
+                    : Effect.void,
+                ),
+              ),
             ),
             Stream.tap((event) =>
               Effect.gen(function* () {
@@ -1459,8 +1344,6 @@ export const layer: Layer.Layer<
             ),
             Stream.takeUntilEffect(() => shouldStopProviderEventIngestion),
             Stream.runDrain,
-            // Once this run stops reading, a shell it launched goes to the live run.
-            Effect.ensuring(stopListeningForShells),
             Effect.mapError((cause) => new RunExecutionIngestError({ runId: input.run.id, cause })),
             Effect.flatMap(() =>
               Effect.gen(function* () {
