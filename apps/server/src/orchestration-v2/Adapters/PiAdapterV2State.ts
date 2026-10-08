@@ -22,6 +22,8 @@ import type { PiRpcRecord } from "./PiRpc.ts";
 export interface PiStreamItemState {
   readonly nativeItemId: string;
   readonly kind: "assistant_message" | "reasoning";
+  /** The sink's `messageOrdinal` for the message this block belongs to. */
+  readonly messageOrdinal: number;
   text: string;
   completed: boolean;
   flushScheduled: boolean;
@@ -240,7 +242,10 @@ export interface PiItemHooks {
     message: unknown,
     final: boolean,
   ) => Effect.Effect<void>;
-  readonly completeOpenStreamItems: (turn: PiItemSink) => Effect.Effect<void>;
+  readonly completeOpenStreamItems: (
+    turn: PiItemSink,
+    messageOrdinal?: number,
+  ) => Effect.Effect<void>;
   readonly settleOpenTools: (
     turn: PiItemSink,
     status: "completed" | "failed" | "interrupted",
