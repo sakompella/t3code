@@ -3741,6 +3741,16 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
           ),
         rollbackThread: (rollbackInput) =>
           Effect.gen(function* () {
+            // After a restart or idle release no turn has loaded the thread
+            // yet. Load it the same way the next turn would before rolling back.
+            if (threadState === null) {
+              yield* registerThread({
+                threadId: rollbackInput.providerThread.appThreadId ?? input.threadId,
+                modelSelection: input.modelSelection,
+                runtimePolicy: input.runtimePolicy,
+                existingProviderThread: rollbackInput.providerThread,
+              });
+            }
             const state = threadState;
             if (state === null) {
               return yield* protocolError(`${name} session has no registered thread`);
