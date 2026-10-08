@@ -4190,6 +4190,38 @@ describe("PiAdapterV2 with the Prime Agent flavor", () => {
     }).pipe(Effect.scoped, Effect.provide(layerTest)),
   );
 
+  it.effect(
+    "keeps a copy that does not hold the cut reply apart when Stop could not read the history",
+    () =>
+      Effect.gen(function* () {
+        const fake = yield* makeFakePi;
+        const { runtime, takeEvent, providerThread } = yield* openPrimeThread(fake);
+        yield* startTurn(runtime, providerThread);
+        yield* fake.takeRequest("prompt");
+        const turnId = yield* takeRunningTurnId(takeEvent);
+        if (turnId === undefined) return;
+        yield* fake.emit({ type: "agent_start" });
+        yield* fake.emit({ type: "message_start", message: assistantSnapshot(1000, "") });
+        yield* fake.emit({
+          type: "message_update",
+          message: assistantSnapshot(1000, "First reply"),
+          assistantMessageEvent: { type: "text_delta", contentIndex: 0, delta: "First reply" },
+        });
+        const secondCopy = { ...assistantSnapshot(5000, "Second reply"), stopReason: "aborted" };
+        yield* fake.emit({ type: "message_end", message: secondCopy });
+        fake.queueMessages({});
+
+        yield* runtime.interruptTurn({ providerThread, providerTurnId: turnId });
+        yield* fake.emit({ type: "turn_end", message: secondCopy, toolResults: [] });
+        yield* fake.emit({ type: "agent_end", messages: [secondCopy] });
+
+        assert.deepEqual(yield* takeCompletedReplyTexts(takeEvent), [
+          ["First reply"],
+          ["Second reply"],
+        ]);
+      }).pipe(Effect.scoped, Effect.provide(layerTest)),
+  );
+
   // The wall clock moved back between the turns, so the first turn's copy is
   // stamped after the reply the second turn was streaming.
   it.effect(
