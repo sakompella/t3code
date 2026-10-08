@@ -32,11 +32,8 @@ export function makePrimeAgentStream(input: {
     kind: PiStreamItemState["kind"],
     contentIndex: number,
   ) => Effect.Effect<PiStreamItemState>;
-  /** The item of the sink's current message at `contentIndex`, if the stream made one. */
-  readonly existingStreamItem: (
-    turn: PiItemSink,
-    contentIndex: number,
-  ) => PiStreamItemState | undefined;
+  /** Reserves the place of the sink's current message's block, for an item made later. */
+  readonly reserveStreamItem: (turn: PiItemSink, contentIndex: number) => void;
   readonly completeStreamItem: (
     turn: PiItemSink,
     item: PiStreamItemState,
@@ -52,7 +49,7 @@ export function makePrimeAgentStream(input: {
   const {
     lossyStream,
     streamItemFor,
-    existingStreamItem,
+    reserveStreamItem,
     completeStreamItem,
     scheduleStreamFlush,
     emitCompletedStreamItem,
@@ -61,15 +58,13 @@ export function makePrimeAgentStream(input: {
    * Lossy streams (see `PiFlavor.lossyStream`) can drop `message_start`, so
    * counting starts would give a later message the id of an earlier,
    * completed one. Their messages are keyed by the snapshot's own
-   * timestamp instead, on every event, or by the reply an aborted copy
-   * replaced. Returns whether the snapshot had one.
+   * timestamp instead, on every event. Returns whether the snapshot had one.
    */
   const adoptMessageIdentity = (turn: PiItemSink, message: unknown) => {
     if (!lossyStream) return false;
     const timestamp = recordNumber(message, "timestamp");
     if (timestamp === undefined) return false;
-    const replaced = "replacedReplies" in turn ? turn.replacedReplies.get(timestamp) : undefined;
-    turn.messageOrdinal = replaced ?? timestamp;
+    turn.messageOrdinal = timestamp;
     return true;
   };
 
@@ -77,9 +72,7 @@ export function makePrimeAgentStream(input: {
    * Take the text of every block in a message snapshot as the truth. The
    * lossy streams (see `PiFlavor.lossyStream`) skip deltas, block ends, and
    * whole blocks, but a snapshot is cumulative. A running snapshot keeps
-   * its items open; the final message completes them. An aborted copy the
-   * stream only guessed the reply of fills that reply's shown blocks; the
-   * history read places its other blocks, on whichever reply it confirms.
+   * its items open; the final message completes them.
    */
   const adoptSnapshot = Effect.fnUntraced(function* (
     turn: PiItemSink,
@@ -88,13 +81,9 @@ export function makePrimeAgentStream(input: {
   ) {
     const content = recordField(message, "content");
     if (!Array.isArray(content)) return;
-    const timestamp = recordNumber(message, "timestamp");
-    const guessedCopy =
-      "replacedReplies" in turn && timestamp !== undefined && turn.replacedReplies.has(timestamp);
     for (let contentIndex = 0; contentIndex < content.length; contentIndex += 1) {
       const block = snapshotBlock(message, contentIndex);
       if (block === undefined) continue;
-      if (guessedCopy && existingStreamItem(turn, contentIndex) === undefined) continue;
       const item = yield* streamItemFor(turn, block.kind, contentIndex);
       if (item.completed) continue;
       item.text = block.text;
@@ -104,15 +93,35 @@ export function makePrimeAgentStream(input: {
   });
 
   /**
+   * Keeps the place a message arrived in, for items a history read makes
+   * later, without showing anything.
+   */
+  const reserveMessage = (turn: PiItemSink, message: unknown) => {
+    const liveMessageOrdinal = turn.messageOrdinal;
+    if (!adoptMessageIdentity(turn, message)) return;
+    const content = recordField(message, "content");
+    (Array.isArray(content) ? content : []).forEach((_, contentIndex) => {
+      if (snapshotBlock(message, contentIndex) !== undefined) reserveStreamItem(turn, contentIndex);
+    });
+    turn.messageOrdinal = liveMessageOrdinal;
+  };
+
+  /**
    * Bring every item of a stored assistant message to the text Prime Agent
    * recorded, completing it, whether or not the stream ever started it. The
    * message is matched by the timestamp identity `adoptMessageIdentity`
    * derives, never by its text, so an item that already shows the recorded
-   * text is left alone.
+   * text is left alone. A stopped copy takes the identity of the reply it
+   * `replaced`.
    */
-  const upsertRecordedMessage = Effect.fnUntraced(function* (turn: PiItemSink, message: unknown) {
+  const upsertRecordedMessage = Effect.fnUntraced(function* (
+    turn: PiItemSink,
+    message: unknown,
+    replaced?: number,
+  ) {
     const liveMessageOrdinal = turn.messageOrdinal;
     if (!adoptMessageIdentity(turn, message)) return;
+    if (replaced !== undefined) turn.messageOrdinal = replaced;
     const content = recordField(message, "content");
     const blockCount = Array.isArray(content) ? content.length : 0;
     for (let contentIndex = 0; contentIndex < blockCount; contentIndex += 1) {
@@ -127,5 +136,33 @@ export function makePrimeAgentStream(input: {
     turn.messageOrdinal = liveMessageOrdinal;
   });
 
-  return { adoptMessageIdentity, adoptSnapshot, upsertRecordedMessage };
+  /**
+   * Shows a stopped copy that no history read placed. It finishes `replaced`
+   * when it holds every block T3 shows of it, as stock's copy of a cut reply
+   * does; otherwise it is a reply of its own. Returns whether it finished
+   * `replaced`.
+   */
+  const finishStoppedCopy = Effect.fnUntraced(function* (
+    turn: PiItemSink,
+    copy: unknown,
+    replaced: number | undefined,
+  ) {
+    const finishes =
+      replaced !== undefined &&
+      [...turn.streamItems.values()].every((item) => {
+        if (item.messageOrdinal !== replaced) return true;
+        const block = snapshotBlock(copy, item.contentIndex);
+        return block?.kind === item.kind && block.text.startsWith(item.text);
+      });
+    yield* upsertRecordedMessage(turn, copy, finishes ? replaced : undefined);
+    return finishes;
+  });
+
+  return {
+    adoptMessageIdentity,
+    adoptSnapshot,
+    reserveMessage,
+    upsertRecordedMessage,
+    finishStoppedCopy,
+  };
 }
