@@ -4348,6 +4348,49 @@ describe("PiAdapterV2 with the Prime Agent flavor", () => {
       }).pipe(Effect.scoped, Effect.provide(layerTest)),
   );
 
+  it.effect("gives a subagent its parent execution node before its child thread", () =>
+    Effect.gen(function* () {
+      const fake = yield* makeFakePi;
+      const session = yield* openPrimeThread(fake);
+      yield* startTurn(session.runtime, session.providerThread);
+      yield* fake.takeRequest("prompt");
+      yield* fake.emit({ type: "agent_start" });
+      yield* fake.emit(rlmChild("running"));
+      const events: Array<ProviderAdapterV2Event> = [];
+      while (events.at(-1)?.type !== "subagent.updated") {
+        events.push(yield* session.takeEvent(() => true));
+      }
+      const subagent = events.at(-1);
+      assert.isTrue(subagent?.type === "subagent.updated");
+      if (subagent?.type !== "subagent.updated") return;
+      const nodeIndex = events.findIndex(
+        (event) => event.type === "node.updated" && event.node.id === subagent.subagent.id,
+      );
+      const shellIndex = events.findIndex((event) => event.type === "app_thread.created");
+      assert.isAtLeast(nodeIndex, 0);
+      assert.isBelow(nodeIndex, shellIndex);
+      const node = events[nodeIndex];
+      assert.isTrue(
+        node?.type === "node.updated" &&
+          node.node.kind === "subagent" &&
+          node.node.status === "running" &&
+          node.node.threadId === subagent.subagent.threadId &&
+          node.node.runId === subagent.subagent.runId &&
+          node.node.parentNodeId === subagent.subagent.parentNodeId &&
+          node.node.completedAt === null,
+      );
+
+      yield* fake.emit(rlmChild("done", { answerPreview: "child-ok" }));
+      const done = yield* session.takeEvent(
+        (event) =>
+          event.type === "node.updated" &&
+          event.node.id === subagent.subagent.id &&
+          event.node.status === "completed",
+      );
+      assert.isTrue(done.type === "node.updated" && done.node.completedAt !== null);
+    }).pipe(Effect.scoped, Effect.provide(layerTest)),
+  );
+
   it.effect("streams a running child's session into its own thread", () =>
     Effect.gen(function* () {
       const fake = yield* makeFakePi;
