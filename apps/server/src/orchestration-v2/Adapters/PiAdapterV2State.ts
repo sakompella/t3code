@@ -22,6 +22,9 @@ import type { PiRpcRecord } from "./PiRpc.ts";
 export interface PiStreamItemState {
   readonly nativeItemId: string;
   readonly kind: "assistant_message" | "reasoning";
+  /** The sink's `messageOrdinal` for the message this block belongs to. */
+  readonly messageOrdinal: number;
+  readonly contentIndex: number;
   text: string;
   completed: boolean;
   flushScheduled: boolean;
@@ -86,6 +89,23 @@ export interface ActivePiTurn {
   readonly seenMessageKeys: Set<string>;
   /** The seen messages T3 shows in full: a reply's final text, a tool result's outcome. */
   readonly shownMessageKeys: Set<string>;
+  /**
+   * Stopped copies by key: aborted reply ends whose message the turn never
+   * streamed. They show nothing until a history read places them, or the
+   * turn ends.
+   */
+  readonly heldCopies: Map<
+    string,
+    {
+      readonly message: unknown;
+      /** How many of `seenMessageKeys` had arrived before the copy. */
+      readonly arrivedAfter: number;
+    }
+  >;
+  /** Unended replies a compaction or a retry may have dropped from the history, not a copy. */
+  readonly removedReplies: Set<string>;
+  /** Lost ends a gap read already looked for: reply keys and tool call ids. */
+  readonly soughtEnds: Set<string>;
   /** Whether a history read was reconciled into the turn, or the turn ended without one. */
   transcript: "streaming" | "reconciled" | "unreconciled";
   /** History reads that did not match the idle state at settle. */
@@ -242,7 +262,10 @@ export interface PiItemHooks {
     message: unknown,
     final: boolean,
   ) => Effect.Effect<void>;
-  readonly completeOpenStreamItems: (turn: PiItemSink) => Effect.Effect<void>;
+  readonly completeOpenStreamItems: (
+    turn: PiItemSink,
+    messageOrdinal?: number,
+  ) => Effect.Effect<void>;
   readonly settleOpenTools: (
     turn: PiItemSink,
     status: "completed" | "failed" | "interrupted",

@@ -1054,8 +1054,11 @@ export function makePiAdapterV2(
           );
         });
 
-      const streamItemId = (turn: PiItemSink, contentIndex: number) =>
-        `${itemScope(turn).idPrefix}:m${turn.messageOrdinal}:c${contentIndex}`;
+      const streamItemId = (
+        turn: PiItemSink,
+        contentIndex: number,
+        messageOrdinal = turn.messageOrdinal,
+      ) => `${itemScope(turn).idPrefix}:m${messageOrdinal}:c${contentIndex}`;
 
       const streamItemFor = Effect.fnUntraced(function* (
         turn: PiItemSink,
@@ -1069,6 +1072,8 @@ export function makePiAdapterV2(
         const item: PiStreamItemState = {
           nativeItemId,
           kind,
+          messageOrdinal: turn.messageOrdinal,
+          contentIndex,
           text: "",
           completed: false,
           flushScheduled: false,
@@ -1088,16 +1093,37 @@ export function makePiAdapterV2(
           return item.text.length === 0 ? Effect.void : emitStreamItem(turn, item, false);
         });
 
-      const completeOpenStreamItems = (turn: PiItemSink) =>
+      /** Completes the open blocks of one message, or of every message when none is named. */
+      const completeOpenStreamItems = (turn: PiItemSink, messageOrdinal?: number) =>
         Effect.forEach(
-          Array.from(turn.streamItems.values()).filter((item) => !item.completed),
+          Array.from(turn.streamItems.values()).filter(
+            (item) =>
+              !item.completed &&
+              (messageOrdinal === undefined || item.messageOrdinal === messageOrdinal),
+          ),
           (item) => completeStreamItem(turn, item),
           { discard: true },
         );
 
-      const { adoptMessageIdentity, adoptSnapshot, upsertRecordedMessage } = makePrimeAgentStream({
+      const {
+        adoptMessageIdentity,
+        adoptSnapshot,
+        reserveMessage,
+        upsertRecordedMessage,
+        holdsShownText,
+      } = makePrimeAgentStream({
         lossyStream: flavor.lossyStream,
         streamItemFor,
+        reserveStreamItem: (turn, contentIndex) => {
+          itemOrdinal(turn, streamItemId(turn, contentIndex));
+        },
+        inheritStreamItemPlace: (turn, messageOrdinal, contentIndex) => {
+          const reserved = turn.itemOrdinals.get(streamItemId(turn, contentIndex, messageOrdinal));
+          const nativeItemId = streamItemId(turn, contentIndex);
+          if (reserved !== undefined && !turn.itemOrdinals.has(nativeItemId)) {
+            turn.itemOrdinals.set(nativeItemId, reserved);
+          }
+        },
         completeStreamItem,
         scheduleStreamFlush,
         emitCompletedStreamItem: (turn, item) => emitStreamItem(turn, item, false),
@@ -1817,6 +1843,7 @@ export function makePiAdapterV2(
         if (turn === null) return;
         // Stored messages it projects still belong to this turn.
         if (processAlive) yield* reconciler.reconcileEndingTurn(turn);
+        yield* reconciler.placeHeldCopies(turn);
         state.activeTurn = null;
         const completedAt = yield* DateTime.now;
         yield* completeOpenStreamItems(turn);
@@ -2096,6 +2123,7 @@ export function makePiAdapterV2(
         items: {
           observeCache: (turn, message) => noteCacheUsage(turn, message, "stored"),
           upsertAssistantMessage: upsertRecordedMessage,
+          holdsShownText,
           startTool: (turn, toolCall) =>
             emitToolItem(
               turn,
@@ -2148,7 +2176,10 @@ export function makePiAdapterV2(
         }
         // An event about a message an earlier turn already showed.
         if (reconciler.isLate(event)) return;
-        if (turn !== null) reconciler.noteSeen(turn, event);
+        if (turn !== null) {
+          yield* reconciler.repairLostEnds(turn, event);
+          reconciler.noteSeen(turn, event);
+        }
         if (turn === null && pendingWake !== null && isPiWakeEvent(event)) {
           pendingWake.events.push(event);
           if (event["type"] === "message_start") yield* applyInjectedMessage(event["message"]);
@@ -2272,9 +2303,12 @@ export function makePiAdapterV2(
             if (turn === null) return;
             const message = event["message"];
             if (recordString(message, "role") !== "assistant") return;
+            if (reconciler.holdsCopy(turn, message)) return reserveMessage(turn, message);
             adoptMessageIdentity(turn, message);
             if (flavor.lossyStream) yield* adoptSnapshot(turn, message, true);
-            yield* completeOpenStreamItems(turn);
+            // Only this message ended. An earlier one still open lost its end,
+            // and its partial text must not be shown as final.
+            yield* completeOpenStreamItems(turn, turn.messageOrdinal);
             if (recordString(message, "stopReason") === "error" && turn.failure === null) {
               turn.failure = makeProviderFailure({
                 message: recordString(message, "errorMessage") ?? `${name} reported a model error.`,
@@ -3162,6 +3196,9 @@ export function makePiAdapterV2(
               sessionEventCount: 0,
               seenMessageKeys: new Set(),
               shownMessageKeys: new Set(),
+              heldCopies: new Map(),
+              removedReplies: new Set(),
+              soughtEnds: new Set(),
               transcript: "streaming",
               settleReads: 0,
               sawCompaction: false,
