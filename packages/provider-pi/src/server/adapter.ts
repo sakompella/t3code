@@ -1172,6 +1172,8 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
       const { adoptMessageIdentity, adoptSnapshot, upsertRecordedMessage } = makePrimeAgentStream({
         lossyStream: flavor.lossyStream,
         streamItemFor,
+        existingStreamItem: (turn, contentIndex) =>
+          turn.streamItems.get(streamItemId(turn, contentIndex)),
         completeStreamItem,
         scheduleStreamFlush,
         emitCompletedStreamItem: (turn, item) => emitStreamItem(turn, item, false),
