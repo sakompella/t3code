@@ -496,6 +496,13 @@ export interface ProviderAdapterV2SessionRuntime {
    */
   readonly subscribeEvents?: Effect.Effect<ProviderAdapterV2EventSubscription>;
   /**
+   * `"session"`: the session manager stores this runtime's subagent child
+   * threads (the thread and its runless events) once, and never hands them to
+   * runs. For a provider whose children can start and work while no run of
+   * the parent thread is live or listening (Prime Agent).
+   */
+  readonly childThreadScope?: "session";
+  /**
    * Adapters whose native runtime can hold pending work outside an active
    * turn (for example Claude background tasks and their wake turns) report it
    * here so the session manager defers idle release while it is pending.

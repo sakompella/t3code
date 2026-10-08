@@ -7125,6 +7125,23 @@ describe("PiAdapterV2 subagent capabilities", () => {
       }
     }).pipe(Effect.scoped, Effect.provide(layerTest)),
   );
+
+  it.effect("has the session store child threads only where children get their own thread", () =>
+    Effect.gen(function* () {
+      for (const flavor of [PI_FLAVOR, PRIME_AGENT_FLAVOR]) {
+        const fake = yield* makeFakePi;
+        const { runtime } = yield* openRuntime(
+          fake,
+          "default",
+          THREAD_ID,
+          SESSION_ID,
+          undefined,
+          flavor,
+        );
+        assert.equal(runtime.childThreadScope, flavor.childThreads ? "session" : undefined);
+      }
+    }).pipe(Effect.scoped, Effect.provide(layerTest)),
+  );
 });
 
 describe("PiAdapterV2 reaching T3 through the kernel's MCP client", () => {
