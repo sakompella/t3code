@@ -732,7 +732,7 @@ describe("a late subagent shell across a session's subscribers", () => {
               Effect.asVoid,
             );
             const events = Stream.fromQueue(queue).pipe(
-              Stream.mapEffect((event) =>
+              Stream.mapEffect((event): Effect.Effect<ProviderAdapterV2Event> =>
                 event.type === "app_thread.created"
                   ? Ref.get(shellGate).pipe(
                       Effect.flatMap((held) =>
