@@ -106,11 +106,6 @@ import type {
 } from "./adapterState.ts";
 import { makePrimeAgentChildThreads } from "./primeAgentChildThreads.ts";
 import {
-  daemonSocketFromLaunchArgs,
-  makePrimeAgentChildDialogs,
-  materializePrimeAgentDialogExtension,
-} from "./primeAgentChildDialogs.ts";
-import {
   type MessageSource,
   describeCacheMiss,
   emptyCacheMissState,
@@ -536,13 +531,6 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
       if (!resolvedLaunchArgs.ok) {
         return yield* protocolError(resolvedLaunchArgs.message);
       }
-      const childDialogs = makePrimeAgentChildDialogs();
-      const dialogExtensionPath = flavor.childThreads
-        ? yield* provideCacheFs(
-            materializePrimeAgentDialogExtension(host.paths.providerStatusCacheDir),
-          )
-        : undefined;
-      const dialogSocketPath = daemonSocketFromLaunchArgs(resolvedLaunchArgs.args);
       const launchProcess = (processScope: Scope.Scope, resumeSessionFile?: string) =>
         Effect.gen(function* () {
           const launch = buildPiRpcLaunch({
@@ -556,10 +544,7 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
           });
           const scopedLaunch = yield* agentScope.wrap({
             command: binary,
-            args:
-              dialogExtensionPath === undefined
-                ? launch.args
-                : [...launch.args, "--extension", dialogExtensionPath],
+            args: launch.args,
             name: flavor.defaultBinary,
             threadId: input.threadId,
             env: launch.env,
@@ -570,7 +555,6 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
             cwd,
             env: launch.env,
             terminationGrace: flavor.terminationGrace,
-            ...(flavor.childThreads ? { consumeEvent: childDialogs.consumeEvent } : {}),
           }).pipe(
             Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner),
             Scope.provide(processScope),
@@ -1332,8 +1316,6 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
         instanceId: options.instanceId,
         name,
         childThreads: flavor.childThreads,
-        beforeObserve: (activeSessionId) =>
-          childDialogs.attach(connection, activeSessionId, dialogSocketPath),
         sessionThread: () => ({
           threadId: threadState?.providerThread.appThreadId ?? input.threadId,
           providerThreadId: threadState?.providerThread.id ?? null,
