@@ -98,7 +98,9 @@ function startsRun(message: unknown): boolean {
  * the earliest stored copy that fits arrived live after the reply, no copy
  * stored before it can be the reply's: it is the reply's. Otherwise a reply
  * matches only the one copy that fits it, and a copy two replies would take
- * goes to neither. Anything else is left apart: a reply that shows its cut
+ * goes to neither. Both rest on the reply having a copy at all, which a lost
+ * retry or compaction breaks, so a completed or failed reply, or a summary,
+ * stored between the reply's anchor and its copy leaves the reply unmatched. Anything else is left apart: a reply that shows its cut
  * text is a miss, one that shows another reply's text would be wrong.
  * Returns each copy's key with the timestamp of the reply it replaced.
  */
@@ -137,6 +139,17 @@ export function matchStoppedCopies(input: {
   };
   const storedPositions = (streamedKeys: ReadonlyArray<string>) =>
     streamedKeys.flatMap((key) => position.get(key) ?? []);
+  /**
+   * A stored message no earlier turn accounted for that can stand for a reply
+   * dropped without a copy: the reply a retry stored after it, or a
+   * compaction's summary.
+   */
+  const mayHaveDropped = (message: unknown) => {
+    const key = transcriptMessageKey(message);
+    if (key === undefined || input.accounted.has(key)) return false;
+    const role = recordString(message, "role");
+    return role === "compactionSummary" || (role === "assistant" && !isAbortedReply(message));
+  };
 
   const chosen = input.streamed.flatMap((key, index) => {
     if (position.has(key) || !input.unended.has(key) || input.removed.has(key)) return [];
@@ -156,6 +169,8 @@ export function matchStoppedCopies(input: {
     });
     const [earliest] = fits;
     if (earliest === undefined || (!arrivals.has(earliest.key) && fits.length > 1)) return [];
+    const between = history.slice((anchor ?? -1) + 1, earliest.index);
+    if (between.some(mayHaveDropped)) return [];
     return [{ key, copy: earliest.key }];
   });
   const claims = new Map<string, number>();
