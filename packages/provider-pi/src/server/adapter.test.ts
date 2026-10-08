@@ -5738,7 +5738,7 @@ describe("PiAdapterV2 with the Prime Agent flavor", () => {
         aborted: false,
         willRetry: false,
       });
-      const copy = { ...assistantSnapshot(5000, "Second reply"), stopReason: "aborted" };
+      const copy = { ...assistantSnapshot(5000, "First cut, then more"), stopReason: "aborted" };
       fake.setTranscript([
         { role: "compactionSummary", summary: "Earlier work", tokensBefore: 1000, timestamp: 4000 },
         copy,
@@ -5747,7 +5747,10 @@ describe("PiAdapterV2 with the Prime Agent flavor", () => {
       yield* fake.emit({ type: "turn_end", message: copy, toolResults: [] });
       yield* fake.emit({ type: "agent_end", messages: [copy] });
 
-      assert.deepEqual(yield* takeFinalReplyTexts(takeEvent), ["First cut", "Second reply"]);
+      assert.deepEqual(yield* takeFinalReplyTexts(takeEvent), [
+        "First cut",
+        "First cut, then more",
+      ]);
     }).pipe(Effect.scoped, Effect.provide(layerTest)),
   );
 
@@ -6034,6 +6037,49 @@ describe("PiAdapterV2 with the Prime Agent flavor", () => {
         ["Later reply"],
       ]);
     }).pipe(Effect.scoped, Effect.provide(layerTest)),
+  );
+
+  it.effect(
+    "keeps a reply a retry removed apart from a copy when Stop could not read the history",
+    () =>
+      Effect.gen(function* () {
+        const fake = yield* makeFakePi;
+        const { runtime, takeEvent, providerThread } = yield* openPrimeThread(fake);
+        yield* startTurn(runtime, providerThread);
+        yield* fake.takeRequest("prompt");
+        const turnId = yield* takeRunningTurnId(takeEvent);
+        if (turnId === undefined) return;
+        yield* fake.emit({ type: "agent_start" });
+        yield* fake.emit({ type: "message_start", message: assistantSnapshot(1000, "") });
+        yield* fake.emit({
+          type: "message_update",
+          message: assistantSnapshot(1000, "Failed partial"),
+          assistantMessageEvent: { type: "text_delta", contentIndex: 0, delta: "Failed partial" },
+        });
+        yield* fake.emit({
+          type: "auto_retry_start",
+          attempt: 1,
+          maxAttempts: 3,
+          delayMs: 0,
+          errorMessage: "Transient provider error",
+        });
+        const copy = {
+          ...assistantSnapshot(3000, "Failed partial, retried"),
+          stopReason: "aborted",
+        };
+        fake.setTranscript([storedPrompt(900), copy]);
+        fake.queueMessages({});
+
+        yield* runtime.interruptTurn({ providerThread, providerTurnId: turnId });
+        yield* fake.emit({ type: "message_end", message: copy });
+        yield* fake.emit({ type: "turn_end", message: copy, toolResults: [] });
+        yield* fake.emit({ type: "agent_end", messages: [copy] });
+
+        assert.deepEqual(yield* takeCompletedReplyTexts(takeEvent), [
+          ["Failed partial"],
+          ["Failed partial, retried"],
+        ]);
+      }).pipe(Effect.scoped, Effect.provide(layerTest)),
   );
 
   // The wall clock moved back between the turns, so the first turn's copy is
