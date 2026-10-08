@@ -3361,6 +3361,8 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
               sessionEventCount: 0,
               seenMessageKeys: new Set(),
               shownMessageKeys: new Set(),
+              replacedReplies: new Map(),
+              soughtEnds: new Set(),
               transcript: "streaming",
               settleReads: 0,
               sawCompaction: false,
