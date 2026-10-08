@@ -54,10 +54,14 @@ export interface ProviderEventRoutingState {
   readonly ownedThreadIds: ReadonlySet<ThreadId>;
   // Set once this run's root turn ended. A child thread created after that
   // belongs to the run that is live then, so this one no longer adopts it,
-  // except a workflow member enrolled below: its coordinator keeps this run
-  // open, so the member is this run's to follow.
+  // except a workflow member enrolled below (its coordinator keeps this run
+  // open, so the member is this run's to follow) or a thread forked from one
+  // of this run's subagent nodes.
   readonly rootTurnEnded: boolean;
   readonly workflowMemberParents: ReadonlyMap<ThreadId, ThreadId>;
+  // The run each subagent node on an owned thread was reported under. A
+  // subagent shell forked from a known node belongs to that node's run.
+  readonly subagentNodeRunIds: ReadonlyMap<NodeId, OrchestrationV2Run["id"]>;
   readonly ownedProviderThreadIds: ReadonlySet<ProviderThreadId>;
   readonly ownedProviderTurnIds: ReadonlySet<ProviderTurnId>;
   readonly inheritedBackgroundTurnItems: ReadonlyMap<TurnItemId, OrchestrationV2Run["id"]>;
@@ -338,6 +342,7 @@ export function makeProviderEventRoutingState(input: {
     ownedThreadIds: new Set([input.identity.threadId, ...(input.relatedThreadIds ?? [])]),
     rootTurnEnded: false,
     workflowMemberParents: new Map(),
+    subagentNodeRunIds: new Map(),
     ownedProviderThreadIds: new Set([
       input.identity.providerThreadId,
       ...(input.relatedProviderThreadIds ?? []),
@@ -388,9 +393,12 @@ export function routeProviderEvent(
   const ownsChildThread = (threadId: ThreadId): boolean =>
     threadId !== input.threadId && ownsThread(threadId);
   const ownsRun = (runId: string | null): boolean => runId === input.runId;
-  const addProviderThread = (providerThreadId: ProviderThreadId): ProviderEventRoutingState => ({
-    ...state,
-    ownedProviderThreadIds: new Set([...state.ownedProviderThreadIds, providerThreadId]),
+  const addProviderThread = (
+    providerThreadId: ProviderThreadId,
+    base: ProviderEventRoutingState = state,
+  ): ProviderEventRoutingState => ({
+    ...base,
+    ownedProviderThreadIds: new Set([...base.ownedProviderThreadIds, providerThreadId]),
   });
   const addProviderTurn = (
     providerTurnId: ProviderTurnId,
@@ -408,13 +416,20 @@ export function routeProviderEvent(
       if (event.appThread.id === input.threadId) {
         return [true, state];
       }
+      const { lineage, forkedFrom } = event.appThread;
+      // Prime Agent reports a subagent's node before its shell, and its
+      // children can start after the launching run's root turn ended. Claude
+      // and Codex report the shell first, so the live root turn adopts theirs.
+      const forkedFromRunId =
+        forkedFrom?.type === "node" ? state.subagentNodeRunIds.get(forkedFrom.nodeId) : undefined;
       const isOwnedSubagent =
-        event.appThread.lineage.relationshipToParent === "subagent" &&
-        event.appThread.lineage.parentThreadId !== null &&
-        ownsThread(event.appThread.lineage.parentThreadId) &&
-        (!state.rootTurnEnded ||
-          state.workflowMemberParents.get(event.appThread.id) ===
-            event.appThread.lineage.parentThreadId);
+        lineage.relationshipToParent === "subagent" &&
+        lineage.parentThreadId !== null &&
+        ownsThread(lineage.parentThreadId) &&
+        (forkedFromRunId !== undefined
+          ? ownsRun(forkedFromRunId)
+          : !state.rootTurnEnded ||
+            state.workflowMemberParents.get(event.appThread.id) === lineage.parentThreadId);
       if (!isOwnedSubagent) {
         return [false, state];
       }
@@ -443,11 +458,22 @@ export function routeProviderEvent(
       return belongs ? [true, addProviderTurn(event.providerTurn.id, isRoot)] : [false, state];
     }
     case "node.updated": {
-      const belongs = ownsRun(event.node.runId) || ownsChildThread(event.node.threadId);
-      if (!belongs || event.node.providerThreadId === null) {
-        return [belongs, state];
+      const { node } = event;
+      const withSubagentNode =
+        node.kind === "subagent" &&
+        node.runId !== null &&
+        ownsThread(node.threadId) &&
+        state.subagentNodeRunIds.get(node.id) !== node.runId
+          ? {
+              ...state,
+              subagentNodeRunIds: new Map(state.subagentNodeRunIds).set(node.id, node.runId),
+            }
+          : state;
+      const belongs = ownsRun(node.runId) || ownsChildThread(node.threadId);
+      if (!belongs || node.providerThreadId === null) {
+        return [belongs, withSubagentNode];
       }
-      return [true, addProviderThread(event.node.providerThreadId)];
+      return [true, addProviderThread(node.providerThreadId, withSubagentNode)];
     }
     case "subagent.updated": {
       const belongs = ownsRun(event.subagent.runId) || ownsChildThread(event.subagent.threadId);
