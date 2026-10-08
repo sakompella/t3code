@@ -3497,6 +3497,84 @@ describe("PiAdapterV2 with the Prime Agent flavor", () => {
     }).pipe(Effect.scoped, Effect.provide(layerTest)),
   );
 
+  const historyReads = (fake: FakePi) =>
+    fake.allRequests().filter((request) => request["type"] === "get_messages").length;
+
+  it.effect("looks up a lost reply end once, then leaves it to the settle read", () =>
+    Effect.gen(function* () {
+      const fake = yield* makeFakePi;
+      const { runtime, takeEvent, providerThread } = yield* openPrimeThread(fake);
+      yield* startTurn(runtime, providerThread);
+      yield* fake.takeRequest("prompt");
+      fake.setTranscript([storedPrompt(900)]);
+      const readsBeforeReply = historyReads(fake);
+
+      yield* streamRemovalReplyUntil(fake, removalReply.indexOf("nu1"));
+      yield* fake.emit(removalToolStart);
+      yield* fake.emit(removalToolEnd);
+      yield* fake.emit({ type: "message_start", message: { ...removedReply, content: [] } });
+      yield* fake.emit({ type: "message_end", message: removedReply });
+      const shownUnread = yield* takeShownTimeline(takeEvent, "Removed.");
+      yield* fake.emit({ type: "turn_end", message: removedReply, toolResults: [] });
+      fake.setTranscript([
+        storedPrompt(900),
+        storedRemovalReply,
+        storedRemovalResult,
+        removedReply,
+      ]);
+      yield* fake.emit({ type: "agent_end", messages: [] });
+
+      assert.deepEqual(
+        [...shownUnread, ...(yield* takeShownTimeline(takeEvent))],
+        ["tool:running", "tool:completed", "Removed.", removalReply],
+      );
+      assert.equal(historyReads(fake) - readsBeforeReply, 2, "one gap read, then the settle read");
+    }).pipe(Effect.scoped, Effect.provide(layerTest)),
+  );
+
+  // Stop cuts a reply off. Stock Prime Agent ends it with a copy stamped at
+  // abort time and no message_start of its own (agent-loop.js
+  // finishAbortedMessage), and stores only the copy.
+  it.effect("shows a reply Stop cut off once, ended by its aborted copy", () =>
+    Effect.gen(function* () {
+      const fake = yield* makeFakePi;
+      const { runtime, takeEvent, providerThread } = yield* openPrimeThread(fake);
+      yield* startTurn(runtime, providerThread);
+      yield* fake.takeRequest("prompt");
+      const running = yield* takeEvent(
+        (event) =>
+          event.type === "provider_turn.updated" && event.providerTurn.status === "running",
+      );
+      assert.isTrue(running.type === "provider_turn.updated");
+      if (running.type !== "provider_turn.updated") return;
+      yield* fake.emit({ type: "agent_start" });
+      yield* fake.emit({ type: "message_start", message: assistantSnapshot(1000, "") });
+      yield* fake.emit({
+        type: "message_update",
+        message: assistantSnapshot(1000, cutReply),
+        assistantMessageEvent: { type: "text_delta", contentIndex: 0, delta: cutReply },
+      });
+      const abortedCopy = {
+        ...assistantSnapshot(5000, cutReply),
+        stopReason: "aborted",
+        errorMessage: "Request was aborted",
+      };
+      fake.setTranscript([storedPrompt(900), abortedCopy]);
+      const readsBeforeStop = historyReads(fake);
+
+      yield* runtime.interruptTurn({ providerThread, providerTurnId: running.providerTurn.id });
+      yield* fake.emit({ type: "message_end", message: abortedCopy });
+      yield* fake.emit({ type: "turn_end", message: abortedCopy, toolResults: [] });
+      yield* fake.emit({ type: "agent_end", messages: [abortedCopy] });
+
+      assert.deepEqual(yield* takeRepliesAndOutcome(takeEvent), {
+        texts: [cutReply],
+        status: "interrupted",
+      });
+      assert.equal(historyReads(fake) - readsBeforeStop, 1, "only Stop reads the history");
+    }).pipe(Effect.scoped, Effect.provide(layerTest)),
+  );
+
   it.effect("completes a cut-off reply when Stop aborts the run", () =>
     Effect.gen(function* () {
       const fake = yield* makeFakePi;
