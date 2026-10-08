@@ -3106,6 +3106,20 @@ export const OrchestrationV2Command = Schema.Union([
 ]);
 export type OrchestrationV2Command = typeof OrchestrationV2Command.Type;
 
+/** A page an agent published with T3's `html_render` tool, as the tool returns it. */
+export const PublishedHtmlRender = Schema.Struct({
+  attachmentId: Schema.String,
+  title: Schema.String,
+  height: Schema.Number,
+  heights: Schema.optional(Schema.Array(Schema.Tuple([Schema.Int, Schema.Int]))),
+  outline: Schema.optional(Schema.String),
+});
+export type PublishedHtmlRender = typeof PublishedHtmlRender.Type;
+
+/** The tool item `html_render.record` adds for a page; one per page. */
+export const htmlRenderTurnItemId = (attachmentId: string) =>
+  TurnItemId.make(`turn-item:html-render:${attachmentId}`);
+
 /**
  * Commands only the server dispatches. They stay out of
  * `OrchestrationV2Command`, the `dispatchCommand` payload, so no client can
@@ -3173,6 +3187,17 @@ const OrchestrationV2InternalCommand = Schema.Union([
     reason: Schema.String,
     placeholder: Schema.optional(Schema.String),
     secretStatus: OrchestrationV2SecretRequestStatus,
+  }),
+  /**
+   * Records a published page as its own `html_render` tool item in the run, for
+   * agents that call T3's tools from code, whose tool items never name the tool.
+   */
+  Schema.Struct({
+    type: Schema.Literal("html_render.record"),
+    commandId: CommandId,
+    threadId: ThreadId,
+    runId: RunId,
+    htmlRender: PublishedHtmlRender,
   }),
 ]);
 export type OrchestrationV2InternalCommand = typeof OrchestrationV2InternalCommand.Type;

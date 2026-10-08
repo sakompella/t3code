@@ -1,4 +1,4 @@
-import { OrchestratorMcpFailure } from "@t3tools/contracts";
+import { OrchestratorMcpFailure, PublishedHtmlRender } from "@t3tools/contracts";
 import {
   HTML_RENDER_COLUMN_WIDTH,
   HTML_RENDER_LAYOUT_GUIDE,
@@ -12,6 +12,7 @@ import * as Schema from "effect/Schema";
 import { Tool, Toolkit } from "effect/ai";
 
 import * as HtmlRender from "../../../htmlRender/HtmlRender.ts";
+import * as ProviderAdapterRegistry from "../../../orchestration-v2/ProviderAdapterRegistry.ts";
 import * as ThreadManagementService from "../../../orchestration-v2/ThreadManagementService.ts";
 import * as McpInvocationContext from "../../McpInvocationContext.ts";
 
@@ -83,13 +84,7 @@ const HtmlRenderTool = Tool.make(HTML_RENDER_TOOL_NAME, {
     }),
   }),
   success: Schema.Struct({
-    htmlRender: Schema.Struct({
-      attachmentId: Schema.String,
-      title: Schema.String,
-      height: Schema.Number,
-      heights: Schema.optional(Schema.Array(Schema.Tuple([Schema.Int, Schema.Int]))),
-      outline: Schema.optional(Schema.String),
-    }),
+    htmlRender: PublishedHtmlRender,
     message: Schema.String,
   }),
   failure: OrchestratorMcpFailure,
@@ -97,6 +92,7 @@ const HtmlRenderTool = Tool.make(HTML_RENDER_TOOL_NAME, {
   dependencies: [
     McpInvocationContext.McpInvocationContext,
     ThreadManagementService.ThreadManagementService,
+    ProviderAdapterRegistry.ProviderAdapterRegistryV2,
     HtmlRender.HtmlRender,
   ],
 })
