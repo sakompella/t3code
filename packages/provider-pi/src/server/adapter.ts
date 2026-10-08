@@ -1139,6 +1139,7 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
           nativeItemId,
           kind,
           messageOrdinal: turn.messageOrdinal,
+          contentIndex,
           text: "",
           completed: false,
           flushScheduled: false,
@@ -1169,11 +1170,18 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
           { discard: true },
         );
 
-      const { adoptMessageIdentity, adoptSnapshot, upsertRecordedMessage } = makePrimeAgentStream({
+      const {
+        adoptMessageIdentity,
+        adoptSnapshot,
+        reserveMessage,
+        upsertRecordedMessage,
+        finishStoppedCopy,
+      } = makePrimeAgentStream({
         lossyStream: flavor.lossyStream,
         streamItemFor,
-        existingStreamItem: (turn, contentIndex) =>
-          turn.streamItems.get(streamItemId(turn, contentIndex)),
+        reserveStreamItem: (turn, contentIndex) => {
+          itemOrdinal(turn, streamItemId(turn, contentIndex));
+        },
         completeStreamItem,
         scheduleStreamFlush,
         emitCompletedStreamItem: (turn, item) => emitStreamItem(turn, item, false),
@@ -1953,6 +1961,7 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
         if (turn === null) return;
         // Stored messages it projects still belong to this turn.
         if (processAlive) yield* reconciler.reconcileEndingTurn(turn);
+        yield* reconciler.placeHeldCopies(turn);
         state.activeTurn = null;
         const interrupted = turn.interrupted || turn.nativeAborted;
         const completedAt = yield* DateTime.now;
@@ -2249,6 +2258,7 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
         items: {
           observeCache: (turn, message) => noteCacheUsage(turn, message, "stored"),
           upsertAssistantMessage: upsertRecordedMessage,
+          finishStoppedCopy,
           startTool: (turn, toolCall) =>
             emitToolItem(
               turn,
@@ -2459,6 +2469,7 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
             if (turn === null) return;
             const message = event["message"];
             if (recordString(message, "role") !== "assistant") return;
+            if (reconciler.holdsCopy(turn, message)) return reserveMessage(turn, message);
             adoptMessageIdentity(turn, message);
             if (flavor.lossyStream) yield* adoptSnapshot(turn, message, true);
             // Only this message ended. An earlier one still open lost its end,
@@ -3363,8 +3374,8 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
               sessionEventCount: 0,
               seenMessageKeys: new Set(),
               shownMessageKeys: new Set(),
-              streamingReply: null,
-              replacedReplies: new Map(),
+              heldCopies: new Map(),
+              streamedBeforeCompaction: 0,
               soughtEnds: new Set(),
               transcript: "streaming",
               settleReads: 0,
