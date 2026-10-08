@@ -95,8 +95,8 @@ export interface ActivePiTurn {
    * turn ends.
    */
   readonly heldCopies: Map<string, unknown>;
-  /** How many of `seenMessageKeys` arrived before the turn's last compaction. */
-  streamedBeforeCompaction: number;
+  /** Unended replies a compaction or a retry may have dropped from the history, not a copy. */
+  readonly removedReplies: Set<string>;
   /** Lost ends a gap read already looked for: reply keys and tool call ids. */
   readonly soughtEnds: Set<string>;
   /** Whether a history read was reconciled into the turn, or the turn ended without one. */
