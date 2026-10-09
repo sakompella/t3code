@@ -190,6 +190,11 @@ export function makePrimeAgentChildThreads(input: {
   const rlmChildren = new Map<string, PiRlmChildState>();
   const rlmTranscripts = new Map<string, PiChildTranscript>();
   const observedTranscripts = new Map<string, PiChildTranscript>();
+  /** A nested child's thread is its parent child's, as a nested Codex subagent's is. */
+  const childAppThread = (transcript: PiChildTranscript) => ({
+    ...transcript.appThread,
+    lineage: { ...transcript.appThread.lineage, parentThreadId: transcript.parentThreadId },
+  });
   const openChildTranscript = Effect.fnUntraced(function* (input: {
     readonly turn: ActivePiTurn;
     readonly childId: string;
@@ -211,31 +216,6 @@ export function makePrimeAgentChildThreads(input: {
       driver,
       nativeItemId: `rlm:${input.childId}:thread-root`,
     });
-    const transcript: PiChildTranscript = {
-      scope: {
-        threadId: childThreadId,
-        runId: null,
-        rootNodeId: childRootNodeId,
-        providerThreadId: null,
-        providerTurnId: null,
-        idPrefix: `rlm:${input.childId}`,
-      },
-      childThreadId,
-      childRootNodeId,
-      parentThreadId,
-      itemOrdinals: new Map(),
-      nextItemOrdinal: 0,
-      messageOrdinal: 0,
-      streamItems: new Map(),
-      toolArgs: new Map(),
-      toolStartedAt: new Map(),
-      openTools: new Map(),
-      status: null,
-      observedSessionId: null,
-      failedSessionIds: new Set(),
-      finalReply: null,
-    };
-    rlmTranscripts.set(input.childId, transcript);
     const model = recordString(input.snapshot, "model");
     const appThread = makeSubagentChildThread({
       parentThread: turnInput.appThread,
@@ -251,18 +231,39 @@ export function makePrimeAgentChildThreads(input: {
         parentTitle: turnInput.appThread.title,
         prompt: input.prompt,
         title: input.title,
-        ordinal: rlmTranscripts.size,
+        ordinal: rlmTranscripts.size + 1,
       }),
       now: input.now,
       createdBy: "agent",
       creationSource: "provider",
     });
-    // A nested child's thread is its parent child's, as a nested Codex subagent's is.
-    yield* emit({
-      type: "app_thread.created",
-      driver,
-      appThread: { ...appThread, lineage: { ...appThread.lineage, parentThreadId } },
-    });
+    const transcript: PiChildTranscript = {
+      scope: {
+        threadId: childThreadId,
+        runId: null,
+        rootNodeId: childRootNodeId,
+        providerThreadId: null,
+        providerTurnId: null,
+        idPrefix: `rlm:${input.childId}`,
+      },
+      childThreadId,
+      childRootNodeId,
+      appThread,
+      parentThreadId,
+      itemOrdinals: new Map(),
+      nextItemOrdinal: 0,
+      messageOrdinal: 0,
+      streamItems: new Map(),
+      toolArgs: new Map(),
+      toolStartedAt: new Map(),
+      openTools: new Map(),
+      status: null,
+      observedSessionId: null,
+      failedSessionIds: new Set(),
+      finalReply: null,
+    };
+    rlmTranscripts.set(input.childId, transcript);
+    yield* emit({ type: "app_thread.created", driver, appThread: childAppThread(transcript) });
     return transcript;
   });
 
@@ -734,6 +735,21 @@ export function makePrimeAgentChildThreads(input: {
           now: emittedAt,
         })))
       : undefined;
+    // A nested child seen before its parent child started under the root. Once
+    // T3 has the parent child's thread, the nested child's thread moves under
+    // it here, and its card below.
+    if (
+      transcript !== undefined &&
+      parentTranscript !== undefined &&
+      transcript.parentThreadId !== parentTranscript.childThreadId
+    ) {
+      transcript.parentThreadId = parentTranscript.childThreadId;
+      yield* emit({
+        type: "app_thread.created",
+        driver,
+        appThread: { ...childAppThread(transcript), updatedAt: emittedAt },
+      });
+    }
     if (transcript !== undefined) {
       // Close the transcript before the root reports the outcome.
       if (terminal) yield* finishChildObservation(transcript, status, statusOverride === undefined);

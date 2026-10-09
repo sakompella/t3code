@@ -6373,6 +6373,56 @@ describe("PiAdapterV2 with the Prime Agent flavor", () => {
       assert.isTrue(
         card?.type === "turn_item.updated" && card.turnItem.threadId === parentChildThreadId,
       );
+      yield* fake.emit(nested);
+      const again = yield* untilCard("gamma");
+      assert.isFalse(again.some((event) => event.type === "app_thread.created"));
+    }).pipe(Effect.scoped, Effect.provide(layerTest)),
+  );
+
+  it.effect("keeps a nested child under the root when its parent child finished unseen", () =>
+    Effect.gen(function* () {
+      const fake = yield* makeFakePi;
+      const session = yield* openPrimeThread(fake);
+      yield* startTurn(session.runtime, session.providerThread);
+      yield* fake.takeRequest("prompt");
+      yield* fake.emit({ type: "agent_start" });
+      const nested = (status: string) => ({
+        type: "rlm_child_update",
+        child: { id: "sub-2", parentId: "sub-1", sessionName: "gamma", status },
+      });
+      const seen: Array<ProviderAdapterV2Event> = [];
+      const untilCard = (status: string) =>
+        Effect.gen(function* () {
+          let event: ProviderAdapterV2Event;
+          do {
+            event = yield* session.takeEvent(() => true);
+            seen.push(event);
+          } while (
+            !(
+              event.type === "turn_item.updated" &&
+              event.turnItem.type === "subagent" &&
+              event.turnItem.status === status
+            )
+          );
+        });
+
+      // A parent child T3 first sees finished is dropped, so it never gets a thread.
+      yield* fake.emit(rlmChild("done"));
+      yield* fake.emit(nested("running"));
+      yield* untilCard("running");
+      yield* fake.emit(nested("done"));
+      yield* untilCard("completed");
+
+      const threads = seen.flatMap((event) =>
+        event.type === "app_thread.created" ? [event.appThread.lineage.parentThreadId] : [],
+      );
+      assert.deepEqual(threads, [THREAD_ID]);
+      const cards = seen.flatMap((event) =>
+        event.type === "turn_item.updated" && event.turnItem.type === "subagent"
+          ? [event.turnItem.threadId]
+          : [],
+      );
+      assert.deepEqual(cards, [THREAD_ID, THREAD_ID]);
     }).pipe(Effect.scoped, Effect.provide(layerTest)),
   );
 
