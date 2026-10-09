@@ -193,6 +193,7 @@ import {
   isContextMenuPointerDown,
   isSidebarNestedLinkClick,
   isTrailingDoubleClick,
+  keepComposerFocusOnThreadRowPress,
   resolveProjectStatusIndicator,
   resolveThreadRowClassName,
   resolveThreadLastVisitedAt,
@@ -738,6 +739,7 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
           isFileDragOver && "ring-1 ring-inset ring-primary/70",
         )}
         onClick={handleRowClick}
+        onMouseDown={keepComposerFocusOnThreadRowPress}
         onDoubleClick={handleRowDoubleClick}
         onKeyDown={handleRowKeyDown}
         onContextMenu={handleRowContextMenu}
