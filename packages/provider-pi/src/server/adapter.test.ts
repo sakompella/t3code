@@ -18,9 +18,7 @@ import {
   type OrchestrationV2ProviderTurn,
 } from "@t3tools/contracts";
 import * as Cause from "effect/Cause";
-import * as Clock from "effect/Clock";
 import * as DateTime from "effect/DateTime";
-import * as Deferred from "effect/Deferred";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
@@ -1594,20 +1592,35 @@ describe("PiAdapterV2", () => {
           (request) => request["type"] === "switch_session" || request["type"] === "new_session",
         );
 
-    /** Lets a launch run through its retry waits until it finishes. */
+    /**
+     * Runs a launch, advancing the clock by one retry interval each time it
+     * reports a held lease. The report is the launch's last step before its
+     * retry wait, so the wait is pending when the clock moves.
+     */
     const waitOutLaunch = <A, E, R>(launch: Effect.Effect<A, E, R>) =>
       Effect.gen(function* () {
-        const finished = yield* Deferred.make<void>();
+        const leaseRefusals = yield* Queue.unbounded<void>();
+        const reportsLeaseRefusal = Logger.make(({ logLevel, message }) => {
+          const [text] = message as ReadonlyArray<unknown>;
+          if (
+            logLevel === "Info" &&
+            String(text).endsWith("could not start on the thread's session")
+          ) {
+            Queue.offerUnsafe(leaseRefusals, undefined);
+          }
+        });
         const fiber = yield* launch.pipe(
-          Effect.ensuring(Deferred.succeed(finished, undefined)),
+          Effect.provide(Logger.layer([reportsLeaseRefusal])),
+          Effect.provideService(References.MinimumLogLevel, "Info"),
           Effect.forkChild,
         );
-        for (let waited = 0; waited < 100 && !(yield* Deferred.isDone(finished)); waited++) {
+        while (
+          yield* Effect.raceFirst(
+            Queue.take(leaseRefusals).pipe(Effect.as(true)),
+            Fiber.await(fiber).pipe(Effect.as(false)),
+          )
+        ) {
           yield* TestClock.adjust(Duration.seconds(1));
-          // Real time, so the launch's own process I/O can progress between ticks.
-          yield* Effect.sleep(Duration.millis(5)).pipe(
-            Effect.provideService(Clock.Clock, Clock.Clock.defaultValue()),
-          );
         }
         return yield* Fiber.join(fiber);
       });
@@ -4795,24 +4808,15 @@ describe("PiAdapterV2 with the Prime Agent flavor", () => {
     timestamp,
   });
 
-  /** Steps virtual time until the fake sees a `get_state`, as a quiet-turn probe would send. */
-  const takeQuietProbe = (fake: FakePi) =>
-    Effect.gen(function* () {
-      const probe = yield* fake.takeRequest("get_state").pipe(Effect.forkScoped);
-      for (let step = 0; step < 20 && probe.pollUnsafe() === undefined; step += 1) {
-        yield* TestClock.adjust(Duration.seconds(5));
-        yield* Effect.yieldNow;
-      }
-      return yield* Fiber.join(probe);
-    });
-
   /**
-   * Like `takeQuietProbe`, but the clock stops at the watchdog tick that sends
-   * the probe, so the 2 s reads that follow cannot time out under it.
+   * Advances the clock to the watchdog tick that probes a quiet turn, and takes
+   * the probe. The first probe comes two 15 s ticks in, each later one a tick
+   * after the last. Stopping at the tick keeps the 2 s reads that follow from
+   * timing out under the clock.
    */
-  const takeQuietProbeAtItsTick = (fake: FakePi) =>
+  const takeQuietProbe = (fake: FakePi, after: Duration.Input = Duration.seconds(30)) =>
     Effect.gen(function* () {
-      yield* TestClock.adjust(Duration.seconds(30));
+      yield* TestClock.adjust(after);
       return yield* fake.takeRequest("get_state");
     });
 
@@ -4852,10 +4856,10 @@ describe("PiAdapterV2 with the Prime Agent flavor", () => {
       fake.queueState({ isStreaming: true });
       fake.queueState({ isStreaming: true });
       yield* takeQuietProbe(fake);
-      yield* takeQuietProbe(fake);
+      yield* takeQuietProbe(fake, Duration.seconds(15));
       assert.isUndefined(terminalFiber.pollUnsafe());
 
-      yield* takeQuietProbe(fake);
+      yield* takeQuietProbe(fake, Duration.seconds(15));
       const terminal = yield* Fiber.join(terminalFiber);
       assert.isTrue(terminal.type === "turn.terminal" && terminal.status === "completed");
     }).pipe(Effect.scoped, Effect.provide(layerTest)),
@@ -4902,7 +4906,7 @@ describe("PiAdapterV2 with the Prime Agent flavor", () => {
       yield* streamCutReply(fake);
       fake.setTranscript(recordedTurn);
 
-      yield* takeQuietProbeAtItsTick(fake);
+      yield* takeQuietProbe(fake);
 
       assert.deepEqual(yield* takeRepliesAndOutcome(takeEvent), {
         texts: [fullReply],
@@ -4938,7 +4942,7 @@ describe("PiAdapterV2 with the Prime Agent flavor", () => {
       yield* fake.takeRequest("prompt");
       fake.setTranscript(recordedTurn);
 
-      yield* takeQuietProbeAtItsTick(fake);
+      yield* takeQuietProbe(fake);
 
       assert.deepEqual(yield* takeRepliesAndOutcome(takeEvent), {
         texts: [fullReply],
@@ -4961,7 +4965,7 @@ describe("PiAdapterV2 with the Prime Agent flavor", () => {
       });
       fake.setTranscript(recordedTurn);
 
-      yield* takeQuietProbeAtItsTick(fake);
+      yield* takeQuietProbe(fake);
 
       assert.deepEqual(yield* takeRepliesAndOutcome(takeEvent), {
         texts: [cutReply, fullReply],
@@ -6532,7 +6536,7 @@ describe("PiAdapterV2 with the Prime Agent flavor", () => {
       yield* streamCutReply(fake);
       fake.setTranscript([...earlier, ...recordedTurn]);
 
-      yield* takeQuietProbeAtItsTick(fake);
+      yield* takeQuietProbe(fake);
 
       assert.deepEqual(yield* takeCompletedReplies(takeEvent), [fullReply]);
     }).pipe(Effect.scoped, Effect.provide(layerTest)),
@@ -6582,7 +6586,7 @@ describe("PiAdapterV2 with the Prime Agent flavor", () => {
       yield* streamCutReply(fake);
       fake.setTranscript([...earlier, ...recordedTurn]);
 
-      yield* takeQuietProbeAtItsTick(fake);
+      yield* takeQuietProbe(fake);
 
       assert.deepEqual(yield* takeCompletedReplies(takeEvent), [fullReply]);
       assert.isFalse(
@@ -6634,7 +6638,7 @@ describe("PiAdapterV2 with the Prime Agent flavor", () => {
       yield* streamCutReply(fake);
       fake.setTranscript([longHistory, ...recordedTurn]);
 
-      yield* takeQuietProbeAtItsTick(fake);
+      yield* takeQuietProbe(fake);
 
       assert.deepEqual(yield* takeRepliesAndOutcome(takeEvent), {
         texts: [fullReply],
@@ -6756,7 +6760,7 @@ describe("PiAdapterV2 with the Prime Agent flavor", () => {
       fake.setTranscript(recordedTurn);
       for (let read = 0; read < 3; read += 1) fake.queueMessages({});
 
-      yield* takeQuietProbeAtItsTick(fake);
+      yield* takeQuietProbe(fake);
       assert.deepEqual(yield* awaitRepliesAndOutcome(session.takeEvent), {
         texts: [cutReply],
         status: "completed",
@@ -6866,7 +6870,7 @@ describe("PiAdapterV2 with the Prime Agent flavor", () => {
       });
       fake.setTranscript([storedPrompt(900), ...storedLookup(1000)]);
 
-      yield* takeQuietProbeAtItsTick(fake);
+      yield* takeQuietProbe(fake);
 
       assert.deepEqual(yield* takeCompletedLookup(takeEvent), {
         input: { key: "a" },
