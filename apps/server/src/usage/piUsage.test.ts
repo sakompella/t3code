@@ -237,20 +237,17 @@ describe("Pi and Prime Agent usage", () => {
         ).get(file)!;
         await NodeFSP.appendFile(file, attribution.slice(45) + "\n");
         const next = (await readTranscriptRecords(file, provider, restored.position, options))!;
-        const combined = dedupeWithinFile(
-          [...(next.resumed ? restored.records : []), ...next.records],
-          new Set(),
-        );
         const complete = (await readTranscriptRecords(file, provider, undefined, options))!;
-        expect(combined).toEqual(complete.records);
-        expect(combined[0]?.totals).toEqual({
+        expect(next.resumed).toBe(false);
+        expect(next.records).toEqual(complete.records);
+        expect(next.records[0]?.totals).toEqual({
           uncachedInputTokens: 2,
           outputTokens: 7,
           cachedInputTokens: 11,
           cacheCreationTokens: 13,
           reasoningTokens: 0,
         });
-        expect(combined[0]?.reportedCostUsd).toBe(0.5);
+        expect(next.records[0]?.reportedCostUsd).toBe(0.5);
       } finally {
         await NodeFSP.rm(root, { recursive: true, force: true });
       }
