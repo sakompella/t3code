@@ -417,9 +417,8 @@ function parseNavigateTreeResult(json: string): unknown {
 }
 
 /**
- * Events that stay live while a wake is buffered. Child session observation
- * must not wait on the parent's turn, or its roster update can drop the route
- * first.
+ * Events that stay live while a wake is buffered, so a child's events never
+ * wait on the parent's turn.
  */
 const PI_SESSION_SCOPED_EVENTS: ReadonlySet<string> = new Set([
   "rlm_child_update",
