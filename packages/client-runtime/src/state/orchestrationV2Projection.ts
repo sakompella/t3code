@@ -249,6 +249,15 @@ export function applyOrchestrationV2ProjectionEvent(
     case "plan.updated":
       return { ...base, plans: upsertEntity(base.plans, event.payload) };
     case "turn-item.updated": {
+      // An item that names another thread moved there. The server tells its old
+      // thread, and a fresh load of this thread no longer has it.
+      if (event.payload.threadId !== projection.thread.id) {
+        return {
+          ...base,
+          turnItems: base.turnItems.filter((item) => item.id !== event.payload.id),
+          visibleTurnItems: removeVisibleItem(base.visibleTurnItems, event.payload.id),
+        };
+      }
       if (
         partialTimeline &&
         !projection.turnItems.some((candidate) => candidate.id === event.payload.id) &&

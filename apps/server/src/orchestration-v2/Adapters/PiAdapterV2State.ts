@@ -12,7 +12,6 @@ import type {
   OrchestrationV2RuntimeRequest,
   OrchestrationV2TurnItem,
   OrchestrationV2ProviderRef,
-  OrchestrationV2AppThread,
 } from "@t3tools/contracts";
 import type * as DateTime from "effect/DateTime";
 import type * as Effect from "effect/Effect";
@@ -190,8 +189,6 @@ export interface PiChildTranscript {
   readonly scope: PiItemScope;
   readonly childThreadId: ThreadId;
   readonly childRootNodeId: NodeId;
-  /** The child's thread as created. `parentThreadId` overrides its lineage parent. */
-  readonly appThread: OrchestrationV2AppThread;
   /**
    * Parent thread, which sends the child's task prompt. A nested child's is the
    * root thread until T3 sees its parent child.
