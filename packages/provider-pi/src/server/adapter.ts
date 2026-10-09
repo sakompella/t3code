@@ -145,8 +145,7 @@ const PI_SESSION_TIMEOUT_MS = 60_000;
  * daemon may still need to stop the worker. A lease held longer, for example
  * after the previous process was killed, falls back to a new session.
  */
-const SESSION_LEASE_RETRY_INTERVAL = Duration.seconds(1);
-const SESSION_LEASE_MAX_RETRIES = 15;
+const SESSION_LEASE_RETRY = Schedule.spaced(Duration.seconds(1)).pipe(Schedule.upTo({ times: 15 }));
 const SETTLE_PROBE_MAX_ATTEMPTS = 3;
 const SETTLE_PROBE_RETRY_DELAY = Duration.millis(100);
 /** Idle-probe flavors re-read state while a retry, compaction, or queued action is still running. */
@@ -596,8 +595,7 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
           ),
           Effect.retry({
             while: (error) => error._tag === "PiSessionLeaseHeldError",
-            schedule: Schedule.spaced(SESSION_LEASE_RETRY_INTERVAL),
-            times: SESSION_LEASE_MAX_RETRIES,
+            schedule: SESSION_LEASE_RETRY,
           }),
         );
       /** The session file the process is known to be on; null while a replacement is in flight. */
@@ -3008,11 +3006,7 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
           }
           const result = yield* resumeId != null
             ? lifecycleRequest({ type: "switch_session", sessionPath: resumeId }).pipe(
-                Effect.retry({
-                  while: isPiSessionLeaseContention,
-                  schedule: Schedule.spaced(SESSION_LEASE_RETRY_INTERVAL),
-                  times: SESSION_LEASE_MAX_RETRIES,
-                }),
+                Effect.retry({ while: isPiSessionLeaseContention, schedule: SESSION_LEASE_RETRY }),
               )
             : lifecycleRequest({ type: "new_session" });
           if (recordField(result, "cancelled") === true) {
