@@ -1,4 +1,6 @@
-import { expect, it } from "@effect/vitest";
+import { describe, expect, it } from "@effect/vitest";
+import * as Arbitrary from "effect/Arbitrary";
+import * as Schema from "effect/Schema";
 
 import {
   expandPiSkillReference,
@@ -165,19 +167,103 @@ it("prepends the builtin compact command without duplicating a discovered one", 
   ).toEqual([PI_COMPACT_SLASH_COMMAND, { name: "hello" }]);
 });
 
+// Stock Prime Agent 0.9.8 (`_expandSkillCommand`) expands only a message that
+// starts with `/skill:name`, then gives the model the trimmed rest after the skill.
+const primeSkillInvocation = (message: string) => {
+  const match = /^\/skill:(\S+)(?:\s+([\s\S]*))?$/.exec(message);
+  return match === null ? undefined : { skill: match[1], text: (match[2] ?? "").trim() };
+};
+
 it("leaves unrelated dollar-prefixed text unchanged", () => {
   expect(expandPiSkillReference("Explain $HOME", new Set(["global-review"]))).toBe("Explain $HOME");
 });
 
-it("hoists every known $ skill and keeps the rest of the prompt", () => {
-  expect(expandPiSkillReference("use $alpha then $beta please", new Set(["alpha", "beta"]))).toBe(
-    "/skill:alpha /skill:beta use  then  please",
-  );
+it("invokes a mentioned skill and keeps the whole message, mention included", () => {
+  const skills = new Set(["ddg"]);
+  expect(primeSkillInvocation(expandPiSkillReference("use $ddg", skills))).toEqual({
+    skill: "ddg",
+    text: "use $ddg",
+  });
+  expect(primeSkillInvocation(expandPiSkillReference("$ddg", skills))).toEqual({
+    skill: "ddg",
+    text: "$ddg",
+  });
+});
+
+it("invokes the first of several skills and keeps every mention in the text", () => {
+  expect(
+    primeSkillInvocation(
+      expandPiSkillReference("use $alpha then $beta please", new Set(["alpha", "beta"])),
+    ),
+  ).toEqual({ skill: "alpha", text: "use $alpha then $beta please" });
+});
+
+it("accepts any currency sigil, like the composer's skill chips", () => {
+  expect(primeSkillInvocation(expandPiSkillReference("use €ddg", new Set(["ddg"])))).toEqual({
+    skill: "ddg",
+    text: "use €ddg",
+  });
+});
+
+it("ignores a skill name inside a URL, inline code or followed by punctuation", () => {
+  const text = "see https://example.com/$ddg, `$ddg` and $ddg.";
+  expect(expandPiSkillReference(text, new Set(["ddg"]))).toBe(text);
 });
 
 it("preserves code indentation and line breaks when expanding a skill", () => {
-  expect(expandPiSkillReference("$review\n```ts\n  const x = 1;\n```", new Set(["review"]))).toBe(
-    "/skill:review ```ts\n  const x = 1;\n```",
+  const text = "$review\n```ts\n  const x = 1;\n```";
+  expect(primeSkillInvocation(expandPiSkillReference(text, new Set(["review"])))).toEqual({
+    skill: "review",
+    text,
+  });
+});
+
+describe("skill mentions in generated prompts", () => {
+  const mentions = ["$alpha", "$beta", "€alpha", "£beta"] as const;
+  const fragment = Arbitrary.schema(
+    Schema.Union([
+      Schema.Literals(mentions),
+      Schema.Literals([
+        "use",
+        "$HOME",
+        "$20k",
+        "$gamma",
+        "$alpha.",
+        "`$alpha`",
+        "https://example.com/$beta",
+        "a$beta",
+        "```",
+        "/skill:beta",
+      ]),
+      Schema.String,
+    ]),
+  ).pipe(Arbitrary.filter((text) => !/\s/.test(text)));
+  const separator = Arbitrary.schema(Schema.Literals(["", " ", "  ", "\n", "\t", "\r\n"]));
+  const prompt = Arbitrary.all([
+    separator,
+    Arbitrary.array(Arbitrary.all([fragment, separator.pipe(Arbitrary.filter((s) => s !== ""))])),
+    Arbitrary.schema(Schema.Boolean),
+  ]);
+  const mentionSet = new Set<string>(mentions);
+
+  it.prop(
+    "Prime gets the whole prompt, after the first mentioned skill",
+    [prompt],
+    ([[leading, parts, endsAtWord]]) => {
+      const joined = leading + parts.map(([word, after]) => word + after).join("");
+      const text = endsAtWord ? joined.trimEnd() : joined;
+      const firstSkill = parts
+        .map(([word]) => word)
+        .find((word) => mentionSet.has(word))
+        ?.slice(1);
+      const sent = expandPiSkillReference(text, new Set(["alpha", "beta"]));
+      if (firstSkill === undefined) {
+        expect(sent).toBe(text);
+        return;
+      }
+      expect(primeSkillInvocation(sent)).toEqual({ skill: firstSkill, text: text.trim() });
+    },
+    { arbitrary: { runs: 500 } },
   );
 });
 

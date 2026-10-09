@@ -1427,11 +1427,11 @@ describe("PiAdapterV2", () => {
         "Review this change please $repo-review",
       );
       const prompt = yield* fake.takeRequest("prompt");
-      assert.equal(prompt["message"], "/skill:repo-review Review this change please");
+      assert.equal(prompt["message"], "/skill:repo-review Review this change please $repo-review");
     }).pipe(Effect.scoped, Effect.provide(layerTest)),
   );
 
-  it.effect("expands every selected $ skill through Pi native skill commands", () =>
+  it.effect("invokes the first of several selected $ skills and keeps the prompt whole", () =>
     Effect.gen(function* () {
       const fake = yield* makeFakePi;
       fake.queueCommands({
@@ -1463,7 +1463,7 @@ describe("PiAdapterV2", () => {
 
       yield* startTurn(runtime, providerThread, "default", [], "use $repo-review and $deploy");
       const prompt = yield* fake.takeRequest("prompt");
-      assert.equal(prompt["message"], "/skill:repo-review /skill:deploy use  and");
+      assert.equal(prompt["message"], "/skill:repo-review use $repo-review and $deploy");
     }).pipe(Effect.scoped, Effect.provide(layerTest)),
   );
 
