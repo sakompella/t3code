@@ -7976,6 +7976,58 @@ describe("PiAdapterV2 with the Prime Agent flavor", () => {
     }).pipe(Effect.scoped, Effect.provide(layerTest)),
   );
 
+  /** Reads adapter events until a subagent card with this title, which ends the batch. */
+  const takeUntilCard = (
+    session: {
+      readonly takeEvent: (
+        predicate: (event: ProviderAdapterV2Event) => boolean,
+      ) => Effect.Effect<ProviderAdapterV2Event>;
+    },
+    title: string,
+  ) =>
+    Effect.gen(function* () {
+      const seen: Array<ProviderAdapterV2Event> = [];
+      do seen.push(yield* session.takeEvent(() => true));
+      while (
+        !seen.some(
+          (event) =>
+            event.type === "turn_item.updated" &&
+            event.turnItem.type === "subagent" &&
+            event.turnItem.title === title,
+        )
+      );
+      return seen;
+    });
+
+  /** What a late-seen parent child did to a nested child: its thread's parents and its card's moves. */
+  const nestedPlacement = (events: ReadonlyArray<ProviderAdapterV2Event>, title: string) => {
+    const threadId = events.flatMap((event) =>
+      event.type === "app_thread.created" && event.appThread.title === title
+        ? [event.appThread.id]
+        : [],
+    )[0];
+    return {
+      threadId,
+      created: events.flatMap((event) =>
+        event.type === "app_thread.created" && event.appThread.id === threadId
+          ? [event.appThread.lineage.parentThreadId]
+          : [],
+      ),
+      reparented: events.flatMap((event) =>
+        event.type === "app_thread.reparented" && event.threadId === threadId
+          ? [event.parentThreadId]
+          : [],
+      ),
+      cards: events.flatMap((event) =>
+        event.type === "turn_item.updated" &&
+        event.turnItem.type === "subagent" &&
+        event.turnItem.title === title
+          ? [event]
+          : [],
+      ),
+    };
+  };
+
   it.effect("moves a nested child under its parent child once T3 first sees the parent", () =>
     Effect.gen(function* () {
       const fake = yield* makeFakePi;
@@ -7983,48 +8035,91 @@ describe("PiAdapterV2 with the Prime Agent flavor", () => {
       yield* startTurn(session.runtime, session.providerThread);
       yield* fake.takeRequest("prompt");
       yield* fake.emit({ type: "agent_start" });
-      const untilCard = (title: string) =>
-        Effect.gen(function* () {
-          const seen: Array<ProviderAdapterV2Event> = [];
-          do seen.push(yield* session.takeEvent(() => true));
-          while (
-            !seen.some(
-              (event) =>
-                event.type === "turn_item.updated" &&
-                event.turnItem.type === "subagent" &&
-                event.turnItem.title === title,
-            )
-          );
-          return seen;
-        });
       const nested = {
         type: "rlm_child_update",
         child: { id: "sub-2", parentId: "sub-1", sessionName: "gamma", status: "running" },
       };
+      const sentinel = (id: string) => ({
+        type: "rlm_child_update",
+        child: { id, status: "running", sessionName: id },
+      });
 
       // Prime Agent's roster can report a nested child before its parent child.
       yield* fake.emit(nested);
-      const beforeParent = yield* untilCard("gamma");
+      const beforeParent = yield* takeUntilCard(session, "gamma");
       yield* fake.emit(rlmChild("running"));
-      const parentSeen = yield* untilCard("worker");
+      const parentSeen = yield* takeUntilCard(session, "worker");
       yield* fake.emit(nested);
-      const afterParent = yield* untilCard("gamma");
+      yield* fake.emit(sentinel("sentinel-1"));
+      const afterParent = yield* takeUntilCard(session, "sentinel-1");
+      yield* fake.emit(nested);
+      yield* fake.emit(sentinel("sentinel-2"));
+      const again = yield* takeUntilCard(session, "sentinel-2");
 
-      const parentChildThreadId =
-        parentSeen.flatMap((event) =>
-          event.type === "app_thread.created" ? [event.appThread.id] : [],
-        )[0] ?? null;
-      const nestedLineage = [...beforeParent, ...afterParent].flatMap((event) =>
-        event.type === "app_thread.created" ? [event.appThread.lineage.parentThreadId] : [],
+      const parentChildThreadId = parentSeen.flatMap((event) =>
+        event.type === "app_thread.created" ? [event.appThread.id] : [],
+      )[0];
+      const placement = nestedPlacement([...beforeParent, ...afterParent, ...again], "gamma");
+      // Created once under the root, then only its parent changes, so edits to the thread stay.
+      assert.deepEqual(placement.created, [THREAD_ID]);
+      assert.deepEqual(placement.reparented, [parentChildThreadId]);
+      // The card leaves the root's timeline once, and its later updates stay in the parent child's thread.
+      assert.deepEqual(
+        placement.cards.map((card) => [card.movedFromThreadId ?? null, card.turnItem.threadId]),
+        [
+          [null, THREAD_ID],
+          [THREAD_ID, parentChildThreadId],
+          [null, parentChildThreadId],
+          [null, parentChildThreadId],
+        ],
       );
-      assert.deepEqual(nestedLineage, [THREAD_ID, parentChildThreadId]);
-      const card = afterParent.at(-1);
-      assert.isTrue(
-        card?.type === "turn_item.updated" && card.turnItem.threadId === parentChildThreadId,
+    }).pipe(Effect.scoped, Effect.provide(layerTest)),
+  );
+
+  it.effect("moves a nested child that finished before T3 first saw its parent child", () =>
+    Effect.gen(function* () {
+      const fake = yield* makeFakePi;
+      const session = yield* openPrimeThread(fake);
+      yield* startTurn(session.runtime, session.providerThread);
+      yield* fake.takeRequest("prompt");
+      yield* fake.emit({ type: "agent_start" });
+      const nested = (status: string) => ({
+        type: "rlm_child_update",
+        child: { id: "sub-2", parentId: "sub-1", sessionName: "gamma", status },
+      });
+
+      yield* fake.emit(nested("running"));
+      const running = yield* takeUntilCard(session, "gamma");
+      yield* fake.emit(nested("done"));
+      const done = yield* takeUntilCard(session, "gamma");
+      yield* fake.emit(rlmChild("running"));
+      const parentSeen = yield* takeUntilCard(session, "worker");
+      // Roster churn repeats the finished status, which leaves the card's outcome alone.
+      yield* fake.emit(nested("done"));
+      yield* fake.emit({
+        type: "rlm_child_update",
+        child: { id: "sub-3", status: "running", sessionName: "sentinel" },
+      });
+      const afterParent = yield* takeUntilCard(session, "sentinel");
+
+      const parentChildThreadId = parentSeen.flatMap((event) =>
+        event.type === "app_thread.created" ? [event.appThread.id] : [],
+      )[0];
+      const placement = nestedPlacement([...running, ...done, ...afterParent], "gamma");
+      assert.deepEqual(placement.created, [THREAD_ID]);
+      assert.deepEqual(placement.reparented, [parentChildThreadId]);
+      const [, finished, moved] = placement.cards;
+      assert.equal(placement.cards.length, 3);
+      assert.equal(moved?.movedFromThreadId, THREAD_ID);
+      assert.equal(moved?.turnItem.threadId, parentChildThreadId);
+      assert.equal(moved?.turnItem.status, "completed");
+      assert.deepEqual(moved?.turnItem.completedAt, finished?.turnItem.completedAt);
+      // The record keeps its run; only the card's placement changes.
+      assert.isFalse(
+        afterParent.some(
+          (event) => event.type === "subagent.updated" && event.subagent.title === "gamma",
+        ),
       );
-      yield* fake.emit(nested);
-      const again = yield* untilCard("gamma");
-      assert.isFalse(again.some((event) => event.type === "app_thread.created"));
     }).pipe(Effect.scoped, Effect.provide(layerTest)),
   );
 
