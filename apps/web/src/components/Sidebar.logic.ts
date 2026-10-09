@@ -766,6 +766,19 @@ export function isSidebarNestedLinkClick(target: EventTarget | null): boolean {
   return nodeClosest(parent, "a[href]") !== null;
 }
 
+/**
+ * A pointer press on a thread row leaves focus in the composer, so keys typed
+ * right after the click reach the thread it opens. Tab still focuses the row,
+ * nested controls still take focus, and focus elsewhere (a rename field) moves
+ * to the row as before.
+ */
+export function keepComposerFocusOnThreadRowPress(event: React.MouseEvent<HTMLElement>): void {
+  const focused = event.currentTarget.ownerDocument.activeElement;
+  if (focused?.closest('[data-chat-composer-form="true"]') == null) return;
+  if (nodeClosest(event.target, "button, a[href], input, textarea") !== null) return;
+  event.preventDefault();
+}
+
 export function shouldCreateNewThreadInCurrentProject(
   shiftKey: boolean,
   projectGroupCount: number,

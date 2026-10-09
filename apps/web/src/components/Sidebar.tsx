@@ -201,6 +201,7 @@ import {
   isSidebarNestedLinkClick,
   isSidebarThreadWorking,
   isTrailingDoubleClick,
+  keepComposerFocusOnThreadRowPress,
   orderItemsByPreferredIds,
   planSidebarThreadDrop,
   sidebarDropHoldsPlacement,
@@ -1362,6 +1363,7 @@ const SidebarDraftRow = memo(function SidebarDraftRow(props: {
           props.isActive ? "bg-sidebar-row-active" : draftSurfaceClassName,
         )}
         onClick={handleActivate}
+        onMouseDown={keepComposerFocusOnThreadRowPress}
         onContextMenu={handleContextMenu}
         onKeyDown={handleKeyDown}
       >
@@ -2118,6 +2120,7 @@ export const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThr
                 aria-busy={isRegeneratingTitle || undefined}
                 className={cn(rowSurfaceClassName, "flex h-9 items-center gap-2.5 px-2.5")}
                 onClick={handleClick}
+                onMouseDown={keepComposerFocusOnThreadRowPress}
                 onDoubleClick={handleDoubleClick}
                 onKeyDown={handleKeyDown}
                 onContextMenu={handleContextMenu}
@@ -2277,6 +2280,7 @@ export const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThr
               aria-busy={isRegeneratingTitle || undefined}
               className={rowSurfaceClassName}
               onClick={handleClick}
+              onMouseDown={keepComposerFocusOnThreadRowPress}
               onDoubleClick={handleDoubleClick}
               onKeyDown={handleKeyDown}
               onContextMenu={handleContextMenu}
