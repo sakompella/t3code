@@ -93,6 +93,33 @@ describe("thread relationships", () => {
     expect(related(nested)).toEqual([worker]);
   });
 
+  it("shows a parent whose run settled while it waits on a subagent as waiting", () => {
+    const parent = ThreadId.make("thread-parent");
+    const child = ThreadId.make("thread-child");
+    const graph = deriveThreadRelationshipGraph({
+      threads: [
+        {
+          id: parent,
+          status: "completed",
+          activityRunStatus: null,
+          pendingBackgroundTasks: [{ taskId: "rlm:sub-1", kind: "subagent", childThreadId: child }],
+          lineage: { parentThreadId: null },
+        },
+        {
+          id: child,
+          status: "running",
+          activityRunStatus: "running",
+          lineage: { parentThreadId: parent, relationshipToParent: "subagent" },
+        },
+      ] as never,
+      projection: null,
+    });
+
+    expect(threadRelationshipRowStatus(graph, immediateThreadRelationships(graph, child)[0]!)).toBe(
+      "waiting",
+    );
+  });
+
   it("does not label a missing parent with its child's running status", () => {
     const parent = ThreadId.make("missing-parent");
     const child = ThreadId.make("child");
