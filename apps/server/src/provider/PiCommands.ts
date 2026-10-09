@@ -1,4 +1,5 @@
 import { type ServerProviderSkill, type ServerProviderSlashCommand } from "@t3tools/contracts";
+import { SKILL_MENTION_PATTERN } from "@t3tools/shared/composerInlineTokens";
 import * as Predicate from "effect/Predicate";
 
 import { T3_NAVIGATE_TREE_COMMAND } from "../orchestration-v2/Adapters/piT3McpExtensionSource.ts";
@@ -105,38 +106,17 @@ export function hasPiNavigateTreeCommand(data: unknown): boolean {
 }
 
 /**
- * Pi expands skills only through leading `/skill:name` commands. T3 stores
- * skill chips as `$name`, so hoist every known `$skill` to that native
- * command position while preserving the rest of the user's prompt.
+ * Pi expands a skill only from a message that starts with `/skill:name`, and
+ * only one per message; the text after the name follows the skill's
+ * instructions. T3 stores skill chips as `$name`, so the first chip that names
+ * a known skill is invoked that way and the user's prompt follows unchanged,
+ * every mention included.
  */
 export function expandPiSkillReference(text: string, skillNames: ReadonlySet<string>): string {
-  const references = /(^|\s)\$([^\s]+)(?=\s|$)/g;
-  const found: Array<{ name: string; start: number; end: number }> = [];
-  for (const match of text.matchAll(references)) {
-    const name = match[2];
-    if (name === undefined || !skillNames.has(name) || match.index === undefined) continue;
-    const tokenStart = match.index + (match[1]?.length ?? 0);
-    found.push({ name, start: tokenStart, end: tokenStart + name.length + 1 });
-  }
-  if (found.length === 0) return text;
-
-  const orderedNames: string[] = [];
-  const seen = new Set<string>();
-  for (const token of found) {
-    if (seen.has(token.name)) continue;
-    seen.add(token.name);
-    orderedNames.push(token.name);
-  }
-
-  let body = text;
-  for (let index = found.length - 1; index >= 0; index -= 1) {
-    const token = found[index];
-    if (token === undefined) continue;
-    body = `${body.slice(0, token.start)}${body.slice(token.end)}`;
-  }
-  body = body.trim();
-  const prefix = orderedNames.map((name) => `/skill:${name}`).join(" ");
-  return body.length === 0 ? prefix : `${prefix} ${body}`;
+  const invoked = Array.from(text.matchAll(SKILL_MENTION_PATTERN), (match) => match[2]).find(
+    (name) => name !== undefined && skillNames.has(name),
+  );
+  return invoked === undefined ? text : `/skill:${invoked} ${text}`;
 }
 
 function recordField(input: unknown, key: string): unknown {

@@ -2989,7 +2989,7 @@ export function makePiAdapterV2(
         // Provider discovery and the live session are separate Pi processes.
         // Retry a failed session-local lookup once at first use so a transient
         // startup failure cannot leave a visible $ skill inert for this session.
-        if (skillNames === null && text.includes("$")) {
+        if (skillNames === null && /\p{Sc}/u.test(text)) {
           skillNames = yield* discoverSkillNames.pipe(
             Effect.orElseSucceed(() => new Set<string>()),
           );

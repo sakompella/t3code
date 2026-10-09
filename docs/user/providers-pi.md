@@ -27,7 +27,10 @@ dialogs appear in the T3 Code composer, and the composer context meter follows P
 reporting while a response streams and after it settles.
 
 Pi skills appear in the composer's `$` menu. This includes user skills and project skills that Pi
-loads for the current workspace; selecting one uses Pi's native skill expansion.
+loads for the current workspace; selecting one uses Pi's native skill expansion. Pi expands one
+skill per message, the first one you name, and your message reaches it unchanged after the skill.
+Pi may read later named skills itself, but not ones marked `disable-model-invocation`: invoke those
+one per message.
 
 Pi loads its normal user and project extensions. Blocking `select`, `confirm`, `input`, and `editor`
 dialogs work in T3 Code. Notifications appear in the work log. Pi terminal decoration such as
