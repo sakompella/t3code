@@ -202,8 +202,11 @@ export interface PiChildTranscript {
   readonly scope: PiItemScope;
   readonly childThreadId: ThreadId;
   readonly childRootNodeId: NodeId;
-  /** Parent thread, which sends the child's task prompt. */
-  readonly parentThreadId: ThreadId;
+  /**
+   * Parent thread, which sends the child's task prompt. A nested child's is the
+   * root thread until T3 sees its parent child.
+   */
+  parentThreadId: ThreadId;
   readonly itemOrdinals: Map<string, number>;
   nextItemOrdinal: number;
   /** The timestamp of the message being streamed; see `observeChildEvent`. */
