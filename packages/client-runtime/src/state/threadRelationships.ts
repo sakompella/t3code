@@ -3,8 +3,9 @@ import type {
   OrchestrationV2ThreadShell,
   ThreadId,
 } from "@t3tools/contracts";
-import { backgroundWorkHoldsCompletion } from "@t3tools/shared/orchestrationV2PendingBackgroundWork";
 import * as DateTime from "effect/DateTime";
+
+import { backgroundWorkHoldsThread } from "./models.ts";
 
 export type ThreadRelationshipKind = "parent" | "fork" | "subagent" | "transfer";
 
@@ -42,16 +43,11 @@ export function resolveMergeBackTargetThreadId(
     : projection.thread.lineage.parentThreadId;
 }
 
-/**
- * A thread's status as Lineage shows it. A settled run whose subagents or
- * monitors are still working reads as waiting, as the sidebar shows it.
- */
+/** A thread's status as Lineage shows it: waiting where the sidebar shows Waiting. */
 function shellActivityStatus(thread: OrchestrationV2ThreadShell): string {
-  if (thread.activityRunStatus != null) return thread.activityRunStatus;
-  return thread.status !== "failed" &&
-    backgroundWorkHoldsCompletion(thread.pendingBackgroundTasks ?? [])
+  return backgroundWorkHoldsThread(thread)
     ? "waiting"
-    : thread.status;
+    : (thread.activityRunStatus ?? thread.status);
 }
 
 function edgeKey(edge: ThreadRelationshipEdge): string {
