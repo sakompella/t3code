@@ -79,11 +79,31 @@ export function deriveThreadRelationshipGraph(input: {
     );
   };
 
+  // A subagent nested under another subagent belongs to that subagent's
+  // thread. This outranks the lineage of threads recorded before nested
+  // subagent threads named their parent subagent's thread.
+  const subagentThreadByNodeId = new Map(
+    (input.projection?.subagents ?? []).flatMap((subagent) =>
+      subagent.childThreadId === null ? [] : [[subagent.id, subagent.childThreadId] as const],
+    ),
+  );
+  const nestedParentThreadIds = new Map(
+    (input.projection?.subagents ?? []).flatMap((subagent) => {
+      const parentThreadId = subagentThreadByNodeId.get(subagent.parentNodeId);
+      return subagent.childThreadId === null ||
+        parentThreadId === undefined ||
+        parentThreadId === subagent.childThreadId
+        ? []
+        : [[subagent.childThreadId, parentThreadId] as const];
+    }),
+  );
+
   for (const thread of threads) {
     const parentThreadId =
-      thread.forkedFrom?.type === "run"
+      nestedParentThreadIds.get(thread.id) ??
+      (thread.forkedFrom?.type === "run"
         ? thread.forkedFrom.threadId
-        : thread.lineage.parentThreadId;
+        : thread.lineage.parentThreadId);
     if (parentThreadId === null) continue;
     addEdge({
       sourceThreadId: parentThreadId,
@@ -99,7 +119,7 @@ export function deriveThreadRelationshipGraph(input: {
       if (subagent.childThreadId === null) continue;
       const child = threadsById.get(subagent.childThreadId);
       addEdge({
-        sourceThreadId: ownerThreadId,
+        sourceThreadId: nestedParentThreadIds.get(subagent.childThreadId) ?? ownerThreadId,
         targetThreadId: subagent.childThreadId,
         kind: "subagent",
         status:
