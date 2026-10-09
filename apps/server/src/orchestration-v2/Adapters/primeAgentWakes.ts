@@ -19,8 +19,8 @@ import type { ActivePiTurn, PiItemHooks } from "./PiAdapterV2State.ts";
 
 /**
  * Agent work that belongs to a wake turn. Dialogs, acks, and child session
- * observation keep flowing live: a child's events must not wait on the
- * parent's turn, or its roster update can drop the route first.
+ * observation keep flowing live, so a child's events never wait on the
+ * parent's turn.
  */
 export function isPiWakeEvent(event: PiRpcRecord): boolean {
   switch (event["type"]) {
