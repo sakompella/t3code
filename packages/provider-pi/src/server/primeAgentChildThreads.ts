@@ -194,12 +194,15 @@ export function makePrimeAgentChildThreads(input: {
     readonly turn: ActivePiTurn;
     readonly childId: string;
     readonly subagentId: NodeId;
+    /** The parent child's transcript, for a nested child. */
+    readonly parentTranscript: PiChildTranscript | undefined;
     readonly snapshot: unknown;
     readonly title: string | null;
     readonly prompt: string;
     readonly now: DateTime.Utc;
   }) {
     const { turnInput } = input.turn;
+    const parentThreadId = input.parentTranscript?.childThreadId ?? turnInput.threadId;
     const childThreadId = idAllocator.derive.threadFromProviderThread({
       driver,
       nativeThreadId: `${turnInput.providerThread.id}:rlm:${input.childId}`,
@@ -219,7 +222,7 @@ export function makePrimeAgentChildThreads(input: {
       },
       childThreadId,
       childRootNodeId,
-      parentThreadId: turnInput.threadId,
+      parentThreadId,
       itemOrdinals: new Map(),
       nextItemOrdinal: 0,
       messageOrdinal: 0,
@@ -234,29 +237,31 @@ export function makePrimeAgentChildThreads(input: {
     };
     rlmTranscripts.set(input.childId, transcript);
     const model = recordString(input.snapshot, "model");
+    const appThread = makeSubagentChildThread({
+      parentThread: turnInput.appThread,
+      childThreadId,
+      parentNodeId: input.subagentId,
+      activeProviderThreadId: null,
+      providerInstanceId: instanceId,
+      modelSelection:
+        model !== undefined && model !== turnInput.modelSelection.model
+          ? { instanceId: instanceId, model }
+          : turnInput.modelSelection,
+      title: subagentThreadTitle({
+        parentTitle: turnInput.appThread.title,
+        prompt: input.prompt,
+        title: input.title,
+        ordinal: rlmTranscripts.size,
+      }),
+      now: input.now,
+      createdBy: "agent",
+      creationSource: "provider",
+    });
+    // A nested child's thread is its parent child's, as a nested Codex subagent's is.
     yield* emit({
       type: "app_thread.created",
       driver,
-      appThread: makeSubagentChildThread({
-        parentThread: turnInput.appThread,
-        childThreadId,
-        parentNodeId: input.subagentId,
-        activeProviderThreadId: null,
-        providerInstanceId: instanceId,
-        modelSelection:
-          model !== undefined && model !== turnInput.modelSelection.model
-            ? { instanceId: instanceId, model }
-            : turnInput.modelSelection,
-        title: subagentThreadTitle({
-          parentTitle: turnInput.appThread.title,
-          prompt: input.prompt,
-          title: input.title,
-          ordinal: rlmTranscripts.size,
-        }),
-        now: input.now,
-        createdBy: "agent",
-        creationSource: "provider",
-      }),
+      appThread: { ...appThread, lineage: { ...appThread.lineage, parentThreadId } },
     });
     return transcript;
   });
@@ -615,11 +620,13 @@ export function makePrimeAgentChildThreads(input: {
     // child's id. Their first update can arrive after the root turn settled.
     const parentChildId = recordString(snapshot, "parentId");
     const parentChild = parentChildId === undefined ? undefined : rlmChildren.get(parentChildId);
-    // A child outlives the run that spawned it; its card stays on that run.
-    // A nested child's card goes to its parent child's run while the parent is
-    // still on its task and that run's turn did not fail or get interrupted
+    const parentTranscript =
+      parentChildId === undefined ? undefined : rlmTranscripts.get(parentChildId);
+    // A child outlives the run that spawned it; its record stays on that run.
+    // A nested child's record goes to its parent child's run while the parent
+    // is still on its task and that run's turn did not fail or get interrupted
     // (either ends the run's listener at once). Otherwise it goes to the live
-    // turn, as a resumed Claude task does, so the card has a run to land on.
+    // turn, as a resumed Claude task does, so the record has a run to land on.
     const parentRunEnded = (candidate: ActivePiTurn) =>
       candidate !== currentTurn && (candidate.interrupted || candidate.failure !== null);
     const launchingTurn =
@@ -720,6 +727,7 @@ export function makePrimeAgentChildThreads(input: {
           turn,
           childId,
           subagentId,
+          parentTranscript,
           snapshot,
           title,
           prompt,
@@ -764,11 +772,22 @@ export function makePrimeAgentChildThreads(input: {
         updatedAt: emittedAt,
       },
     });
+    // A nested child's card is drawn in its parent child's thread, where the
+    // parent spawned it, not on the root thread's timeline. Its task node stays
+    // on the root thread for the subagent tree, so the card hangs off that
+    // thread's root turn instead.
+    const cardFields =
+      parentTranscript === undefined
+        ? baseItemFields(turn, nativeTaskId, state.startedAt, emittedAt)
+        : {
+            ...baseItemFields(parentTranscript, nativeTaskId, state.startedAt, emittedAt),
+            nodeId: parentTranscript.childRootNodeId,
+          };
     yield* emit({
       type: "turn_item.updated",
       driver,
       turnItem: {
-        ...baseItemFields(turn, nativeTaskId, state.startedAt, emittedAt),
+        ...cardFields,
         status,
         title,
         completedAt,
