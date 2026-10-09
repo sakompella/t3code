@@ -5,6 +5,7 @@ import type {
   ProviderThreadId,
   ThreadId,
   OrchestrationV2ExecutionNode,
+  OrchestrationV2TurnItem,
 } from "@t3tools/contracts";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
@@ -38,7 +39,11 @@ interface PiRlmChildState {
   /** When a finished child started working again on a follow-up message, outside its task card. */
   readonly followUpStartedAt: DateTime.Utc | null;
   readonly turn: ActivePiTurn;
+  /** The child's card as last emitted. */
+  card: SubagentCard | null;
 }
+
+type SubagentCard = Extract<OrchestrationV2TurnItem, { readonly type: "subagent" }>;
 
 /**
  * What the adapter did with one roster update. Dropped updates leave no
@@ -194,12 +199,15 @@ export function makePrimeAgentChildThreads(input: {
     readonly turn: ActivePiTurn;
     readonly childId: string;
     readonly subagentId: NodeId;
+    /** The parent child's transcript, for a nested child. */
+    readonly parentTranscript: PiChildTranscript | undefined;
     readonly snapshot: unknown;
     readonly title: string | null;
     readonly prompt: string;
     readonly now: DateTime.Utc;
   }) {
     const { turnInput } = input.turn;
+    const parentThreadId = input.parentTranscript?.childThreadId ?? turnInput.threadId;
     const childThreadId = idAllocator.derive.threadFromProviderThread({
       driver,
       nativeThreadId: `${turnInput.providerThread.id}:rlm:${input.childId}`,
@@ -207,6 +215,27 @@ export function makePrimeAgentChildThreads(input: {
     const childRootNodeId = idAllocator.derive.nodeFromProviderItem({
       driver,
       nativeItemId: `rlm:${input.childId}:thread-root`,
+    });
+    const model = recordString(input.snapshot, "model");
+    const appThread = makeSubagentChildThread({
+      parentThread: turnInput.appThread,
+      childThreadId,
+      parentNodeId: input.subagentId,
+      activeProviderThreadId: null,
+      providerInstanceId: instanceId,
+      modelSelection:
+        model !== undefined && model !== turnInput.modelSelection.model
+          ? { instanceId: instanceId, model }
+          : turnInput.modelSelection,
+      title: subagentThreadTitle({
+        parentTitle: turnInput.appThread.title,
+        prompt: input.prompt,
+        title: input.title,
+        ordinal: rlmTranscripts.size + 1,
+      }),
+      now: input.now,
+      createdBy: "agent",
+      creationSource: "provider",
     });
     const transcript: PiChildTranscript = {
       scope: {
@@ -219,7 +248,7 @@ export function makePrimeAgentChildThreads(input: {
       },
       childThreadId,
       childRootNodeId,
-      parentThreadId: turnInput.threadId,
+      parentThreadId,
       itemOrdinals: new Map(),
       nextItemOrdinal: 0,
       messageOrdinal: 0,
@@ -233,30 +262,12 @@ export function makePrimeAgentChildThreads(input: {
       finalReply: null,
     };
     rlmTranscripts.set(input.childId, transcript);
-    const model = recordString(input.snapshot, "model");
+    // A nested child's thread names its parent child's thread as its parent,
+    // as a nested Codex subagent's does.
     yield* emit({
       type: "app_thread.created",
       driver,
-      appThread: makeSubagentChildThread({
-        parentThread: turnInput.appThread,
-        childThreadId,
-        parentNodeId: input.subagentId,
-        activeProviderThreadId: null,
-        providerInstanceId: instanceId,
-        modelSelection:
-          model !== undefined && model !== turnInput.modelSelection.model
-            ? { instanceId: instanceId, model }
-            : turnInput.modelSelection,
-        title: subagentThreadTitle({
-          parentTitle: turnInput.appThread.title,
-          prompt: input.prompt,
-          title: input.title,
-          ordinal: rlmTranscripts.size,
-        }),
-        now: input.now,
-        createdBy: "agent",
-        creationSource: "provider",
-      }),
+      appThread: { ...appThread, lineage: { ...appThread.lineage, parentThreadId } },
     });
     return transcript;
   });
@@ -594,6 +605,67 @@ export function makePrimeAgentChildThreads(input: {
     yield* syncChildObservation(transcript, snapshot);
   });
 
+  /**
+   * A nested child's card is drawn in its parent child's thread, where the
+   * parent spawned it, not on the root thread's timeline. Its task node stays
+   * on the root thread for the subagent tree, so the card hangs off that
+   * thread's root turn instead.
+   */
+  const nestedCardFields = (
+    parentTranscript: PiChildTranscript,
+    nativeTaskId: string,
+    startedAt: DateTime.Utc,
+    updatedAt: DateTime.Utc,
+  ) => ({
+    ...baseItemFields(parentTranscript, nativeTaskId, startedAt, updatedAt),
+    nodeId: parentTranscript.childRootNodeId,
+  });
+
+  /** Emits a child's card and keeps it. A card that changed thread names the one it left. */
+  const emitCard = Effect.fnUntraced(function* (child: PiRlmChildState, card: SubagentCard) {
+    const movedFromThreadId = child.card?.threadId;
+    child.card = card;
+    yield* emit({
+      type: "turn_item.updated",
+      driver,
+      turnItem: card,
+      ...(movedFromThreadId === undefined || movedFromThreadId === card.threadId
+        ? {}
+        : { movedFromThreadId }),
+    });
+  });
+
+  /**
+   * A nested child seen before its parent child starts under the root. Once
+   * T3 has the parent child's thread, the nested child's thread and card move
+   * under it on the nested child's next update, whatever its status. The
+   * thread changes only its parent, so the user's edits to it stay, and the
+   * card keeps its outcome.
+   */
+  const moveUnderParentChild = Effect.fnUntraced(function* (
+    childId: string,
+    child: PiRlmChildState,
+    parentTranscript: PiChildTranscript,
+    now: DateTime.Utc,
+  ) {
+    const transcript = rlmTranscripts.get(childId);
+    if (transcript !== undefined && transcript.parentThreadId !== parentTranscript.childThreadId) {
+      transcript.parentThreadId = parentTranscript.childThreadId;
+      yield* emit({
+        type: "app_thread.reparented",
+        driver,
+        threadId: transcript.childThreadId,
+        parentThreadId: transcript.parentThreadId,
+      });
+    }
+    const card = child.card;
+    if (card === null || card.threadId === parentTranscript.childThreadId) return;
+    yield* emitCard(child, {
+      ...card,
+      ...nestedCardFields(parentTranscript, `rlm:${childId}`, child.startedAt, now),
+    });
+  });
+
   /** Mirrors one `rlm_child_update` roster snapshot onto T3's subagent surfaces. */
   const emitRlmChild = Effect.fnUntraced(function* (
     snapshot: unknown,
@@ -615,11 +687,13 @@ export function makePrimeAgentChildThreads(input: {
     // child's id. Their first update can arrive after the root turn settled.
     const parentChildId = recordString(snapshot, "parentId");
     const parentChild = parentChildId === undefined ? undefined : rlmChildren.get(parentChildId);
-    // A child outlives the run that spawned it; its card stays on that run.
-    // A nested child's card goes to its parent child's run while the parent is
-    // still on its task and that run's turn did not fail or get interrupted
+    const parentTranscript =
+      parentChildId === undefined ? undefined : rlmTranscripts.get(parentChildId);
+    // A child outlives the run that spawned it; its record stays on that run.
+    // A nested child's record goes to its parent child's run while the parent
+    // is still on its task and that run's turn did not fail or get interrupted
     // (either ends the run's listener at once). Otherwise it goes to the live
-    // turn, as a resumed Claude task does, so the card has a run to land on.
+    // turn, as a resumed Claude task does, so the record has a run to land on.
     const parentRunEnded = (candidate: ActivePiTurn) =>
       candidate !== currentTurn && (candidate.interrupted || candidate.failure !== null);
     const launchingTurn =
@@ -636,6 +710,9 @@ export function makePrimeAgentChildThreads(input: {
     }
     const status = statusOverride ?? rlmChildStatus(recordString(snapshot, "status"));
     const terminal = status !== "pending" && status !== "running";
+    if (previous !== undefined && parentTranscript !== undefined) {
+      yield* moveUnderParentChild(childId, previous, parentTranscript, emittedAt);
+    }
     // A child that finished in an earlier turn already shows its outcome.
     // Later roster churn (the parent deleting it, a resynced roster) must
     // not rewrite that card from an unrelated turn.
@@ -666,6 +743,7 @@ export function makePrimeAgentChildThreads(input: {
       terminal,
       followUpStartedAt: null,
       turn,
+      card: previous?.card ?? null,
     };
     rlmChildren.set(childId, state);
     const nativeTaskId = `rlm:${childId}`;
@@ -720,6 +798,7 @@ export function makePrimeAgentChildThreads(input: {
           turn,
           childId,
           subagentId,
+          parentTranscript,
           snapshot,
           title,
           prompt,
@@ -764,24 +843,22 @@ export function makePrimeAgentChildThreads(input: {
         updatedAt: emittedAt,
       },
     });
-    yield* emit({
-      type: "turn_item.updated",
+    yield* emitCard(state, {
+      ...(parentTranscript === undefined
+        ? baseItemFields(turn, nativeTaskId, state.startedAt, emittedAt)
+        : nestedCardFields(parentTranscript, nativeTaskId, state.startedAt, emittedAt)),
+      status,
+      title,
+      completedAt,
+      type: "subagent",
+      subagentId,
+      origin: "provider_native",
       driver,
-      turnItem: {
-        ...baseItemFields(turn, nativeTaskId, state.startedAt, emittedAt),
-        status,
-        title,
-        completedAt,
-        type: "subagent",
-        subagentId,
-        origin: "provider_native",
-        driver,
-        providerInstanceId: instanceId,
-        childThreadId: transcript?.childThreadId ?? null,
-        prompt,
-        ...(progress === undefined ? {} : { progress }),
-        result,
-      },
+      providerInstanceId: instanceId,
+      childThreadId: transcript?.childThreadId ?? null,
+      prompt,
+      ...(progress === undefined ? {} : { progress }),
+      result,
     });
     if (transcript !== undefined && !terminal) {
       yield* syncChildObservation(transcript, snapshot);

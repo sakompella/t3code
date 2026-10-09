@@ -274,6 +274,8 @@ function sessionScopedRuntimeRequestThreadId(
 /** The thread of a runless event; an event that names a run stays with that run. */
 function runlessEventThreadId(event: ProviderAdapterV2Event): ThreadId | undefined {
   switch (event.type) {
+    case "app_thread.reparented":
+      return event.threadId;
     case "node.updated":
       return event.node.runId === null ? event.node.threadId : undefined;
     case "message.updated":

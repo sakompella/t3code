@@ -12,6 +12,7 @@ import {
   type OrchestrationV2ProviderCapabilities,
   type OrchestrationV2ProviderSession,
   type OrchestrationV2ProviderThread,
+  type OrchestrationV2TurnItem,
   type Project,
   ProjectId,
   ProviderDriverKind,
@@ -19,6 +20,7 @@ import {
   type ProviderSessionId,
   RunId,
   ThreadId,
+  TurnItemId,
 } from "@t3tools/contracts";
 import * as Cause from "effect/Cause";
 import * as DateTime from "effect/DateTime";
@@ -5237,6 +5239,169 @@ it.effect(
           "node.updated",
           "node.updated",
         ]);
+      });
+      yield* effect.pipe(
+        Effect.provide(layerTest({ state, idleTimeoutMs: 60_000, childThreadScope: "session" })),
+      );
+    }),
+);
+
+it.effect(
+  "ProviderSessionManagerV2 moves a session-scoped subagent thread under a new parent and keeps the user's edits",
+  () =>
+    Effect.gen(function* () {
+      const state = yield* Ref.make(emptyState);
+      const effect = Effect.gen(function* () {
+        const session = yield* openSessionWithParentThread("reparent");
+        const child = makeSessionChildThreadEvents({ ...session, name: "reparent-child" });
+        const nested = makeSessionChildThreadEvents({ ...session, name: "reparent-nested" });
+        yield* publishAndDrain(state, session, [nested.shell, nested.childRoot("running")]);
+        const store = yield* ProjectionStore.ProjectionStoreV2;
+        const sink = yield* EventSink.EventSinkV2;
+        const idAllocator = yield* IdAllocator.IdAllocatorV2;
+        const created = yield* store.getThreadProjection(nested.childThreadId);
+        const pinnedAt = DateTime.add(session.now, { seconds: 1 });
+        yield* sink.write({
+          events: [
+            {
+              ...(yield* makeThreadCreatedEvent({
+                idAllocator,
+                threadId: nested.childThreadId,
+                now: pinnedAt,
+              })),
+              type: "thread.metadata-updated",
+              payload: { ...created.thread, title: "My renamed child", pinnedAt },
+            },
+          ],
+        });
+        const reparented: ProviderAdapterV2Event = {
+          type: "app_thread.reparented",
+          driver: CODEX_DRIVER,
+          threadId: nested.childThreadId,
+          parentThreadId: child.childThreadId,
+        };
+        yield* publishAndDrain(state, session, [child.shell, reparented, reparented]);
+
+        const after = yield* store.getThreadProjection(nested.childThreadId);
+        assert.equal(after.thread.lineage.parentThreadId, child.childThreadId);
+        assert.equal(after.thread.title, "My renamed child");
+        assert.deepEqual(after.thread.pinnedAt, pinnedAt);
+        assert.deepEqual(
+          { ...after.thread, lineage: created.thread.lineage, updatedAt: created.thread.updatedAt },
+          { ...created.thread, title: "My renamed child", pinnedAt },
+        );
+        // The repeated repair finds the parent already set and stores nothing.
+        assert.deepEqual(yield* storedEventTypes(nested.childThreadId), [
+          "thread.created",
+          "node.updated",
+          "thread.metadata-updated",
+          "thread.metadata-updated",
+        ]);
+      });
+      yield* effect.pipe(
+        Effect.provide(layerTest({ state, idleTimeoutMs: 60_000, childThreadScope: "session" })),
+      );
+    }),
+);
+
+it.effect(
+  "ProviderSessionManagerV2 takes a moved subagent card off its old thread for stored and live readers alike",
+  () =>
+    Effect.gen(function* () {
+      const state = yield* Ref.make(emptyState);
+      const effect = Effect.gen(function* () {
+        const session = yield* openSessionWithParentThread("moved-card");
+        const parent = makeSessionChildThreadEvents({ ...session, name: "moved-card-parent" });
+        const nested = makeSessionChildThreadEvents({ ...session, name: "moved-card-nested" });
+        const parentRoot = parent.childRoot("running");
+        assert.isTrue(parentRoot.type === "node.updated");
+        if (parentRoot.type !== "node.updated") return;
+        const rootCard: OrchestrationV2TurnItem = {
+          id: TurnItemId.make("turn-item:moved-card"),
+          threadId: session.threadId,
+          runId: null,
+          nodeId: NodeId.make("node:moved-card:root-turn"),
+          providerThreadId: null,
+          providerTurnId: null,
+          nativeItemRef: null,
+          parentItemId: null,
+          ordinal: 1,
+          startedAt: session.now,
+          updatedAt: session.now,
+          completedAt: null,
+          status: "running",
+          title: "Nested",
+          type: "subagent",
+          subagentId: NodeId.make("node:moved-card-nested:subagent"),
+          origin: "provider_native",
+          driver: CODEX_DRIVER,
+          providerInstanceId: modelSelection.instanceId,
+          childThreadId: nested.childThreadId,
+          prompt: "nested",
+          result: null,
+        };
+        const sink = yield* EventSink.EventSinkV2;
+        const idAllocator = yield* IdAllocator.IdAllocatorV2;
+        yield* sink.write({
+          events: [
+            {
+              ...(yield* makeThreadCreatedEvent({
+                idAllocator,
+                threadId: session.threadId,
+                now: session.now,
+              })),
+              type: "turn-item.updated",
+              payload: rootCard,
+            },
+          ],
+        });
+        const store = yield* ProjectionStore.ProjectionStoreV2;
+        const rootBefore = yield* store.getThreadProjection(session.threadId);
+        assert.equal(rootBefore.turnItems.length, 1);
+        const afterSequence = yield* sink.latestSequence({ threadId: session.threadId });
+        const movedCard = {
+          ...rootCard,
+          threadId: parent.childThreadId,
+          nodeId: parentRoot.node.id,
+        };
+        yield* publishAndDrain(state, session, [
+          parent.shell,
+          parentRoot,
+          nested.shell,
+          {
+            type: "turn_item.updated",
+            driver: CODEX_DRIVER,
+            movedFromThreadId: session.threadId,
+            turnItem: movedCard,
+          },
+          {
+            type: "turn_item.updated",
+            driver: CODEX_DRIVER,
+            turnItem: { ...movedCard, status: "completed", completedAt: session.now },
+          },
+        ]);
+
+        const storedRoot = yield* store.getThreadProjection(session.threadId);
+        const storedParent = yield* store.getThreadProjection(parent.childThreadId);
+        assert.deepEqual(storedRoot.turnItems, []);
+        assert.deepEqual(
+          storedParent.turnItems.map((item) => [item.id, item.status]),
+          [[rootCard.id, "completed"]],
+        );
+        // A client that had the root open applies what the root's subscription delivers.
+        const eventStore = yield* EventStore.EventStoreV2;
+        const delivered = yield* eventStore
+          .read({ threadId: session.threadId, afterSequence })
+          .pipe(Stream.runCollect);
+        const liveRoot = Array.from(delivered).reduce(
+          (projection, stored) => ProjectionStore.applyToProjection(projection, stored.event),
+          rootBefore,
+        );
+        assert.deepEqual(liveRoot.turnItems, storedRoot.turnItems);
+        assert.deepEqual(
+          liveRoot.visibleTurnItems.map((row) => row.sourceItemId),
+          storedRoot.visibleTurnItems.map((row) => row.sourceItemId),
+        );
       });
       yield* effect.pipe(
         Effect.provide(layerTest({ state, idleTimeoutMs: 60_000, childThreadScope: "session" })),
