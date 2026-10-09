@@ -47,6 +47,52 @@ describe("thread relationships", () => {
     ).toBe(childStatus);
   });
 
+  it("lists a nested subagent under its parent subagent's thread, not the root", () => {
+    const root = ThreadId.make("thread-root");
+    const worker = ThreadId.make("thread-worker");
+    const nested = ThreadId.make("thread-nested");
+    // Threads recorded before nested lineage name the root as the nested thread's parent.
+    const subagentThread = (id: ThreadId) => ({
+      id,
+      status: "running",
+      forkedFrom: null,
+      lineage: { parentThreadId: root, relationshipToParent: "subagent" },
+    });
+    const graph = deriveThreadRelationshipGraph({
+      threads: [
+        { id: root, status: "completed", forkedFrom: null, lineage: { parentThreadId: null } },
+        subagentThread(worker),
+        subagentThread(nested),
+      ] as never,
+      projection: {
+        thread: { id: root },
+        subagents: [
+          {
+            id: "node-worker",
+            parentNodeId: "node-root-turn",
+            childThreadId: worker,
+            status: "running",
+          },
+          {
+            id: "node-nested",
+            parentNodeId: "node-worker",
+            childThreadId: nested,
+            status: "running",
+          },
+        ],
+        contextTransfers: [],
+      } as never,
+    });
+    const related = (threadId: ThreadId) =>
+      immediateThreadRelationships(graph, threadId)
+        .map((row) => row.threadId)
+        .toSorted();
+
+    expect(related(root)).toEqual([worker]);
+    expect(related(worker)).toEqual([nested, root].toSorted());
+    expect(related(nested)).toEqual([worker]);
+  });
+
   it("does not label a missing parent with its child's running status", () => {
     const parent = ThreadId.make("missing-parent");
     const child = ThreadId.make("child");

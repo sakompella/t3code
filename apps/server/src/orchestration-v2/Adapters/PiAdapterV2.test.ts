@@ -6275,6 +6275,58 @@ describe("PiAdapterV2 with the Prime Agent flavor", () => {
     }).pipe(Effect.scoped, Effect.provide(layerTest)),
   );
 
+  it.effect("draws a nested child in its parent child's thread, not on the parent thread", () =>
+    Effect.gen(function* () {
+      const fake = yield* makeFakePi;
+      const session = yield* openPrimeThread(fake);
+      const parent = yield* settleWithRunningChild(fake, session);
+      const parentChildThreadId = parent?.childThreadId ?? null;
+      assert.isNotNull(parentChildThreadId);
+      yield* fake.emit({
+        type: "rlm_child_update",
+        child: {
+          id: "sub-2",
+          parentId: "sub-1",
+          sessionName: "gamma",
+          label: "Run sleep 20",
+          status: "running",
+          sessionDir: "/fake/.prime/agent/session-artifacts/s/sub-2",
+        },
+      });
+      const seen: Array<ProviderAdapterV2Event> = [];
+      do seen.push(yield* session.takeEvent(() => true));
+      while (
+        !seen.some(
+          (event) =>
+            event.type === "turn_item.updated" &&
+            event.turnItem.type === "subagent" &&
+            event.turnItem.title === "gamma",
+        )
+      );
+
+      const thread = seen.find((event) => event.type === "app_thread.created");
+      assert.isTrue(
+        thread?.type === "app_thread.created" &&
+          thread.appThread.lineage.parentThreadId === parentChildThreadId,
+      );
+      const card = seen.at(-1);
+      assert.isTrue(
+        card?.type === "turn_item.updated" &&
+          card.turnItem.threadId === parentChildThreadId &&
+          card.turnItem.runId === null,
+      );
+      // The parent thread keeps the record, so its subagent tray still nests the child.
+      const record = seen.find(
+        (event) => event.type === "subagent.updated" && event.subagent.title === "gamma",
+      );
+      assert.isTrue(
+        record?.type === "subagent.updated" &&
+          record.subagent.threadId === THREAD_ID &&
+          record.subagent.parentNodeId === parent?.id,
+      );
+    }).pipe(Effect.scoped, Effect.provide(layerTest)),
+  );
+
   it.effect(
     "reopens a finished child's thread for follow-up work and routes its nested children",
     () =>
