@@ -65,10 +65,11 @@ const MAX_PREFLIGHT_FAILURE_ATTEMPTS = 5;
 const DEFAULT_BACKEND_READINESS_TIMEOUT = Duration.minutes(1);
 const DEFAULT_BACKEND_READINESS_INTERVAL = Duration.millis(100);
 const DEFAULT_BACKEND_READINESS_REQUEST_TIMEOUT = Duration.seconds(1);
-// Server shutdown stops provider processes, each with up to a one-second grace,
-// and records their final state in SQLite. Keep the grace plus the SIGKILL wait
-// inside the 5 s quit timeout in `stopAllPoolInstances`, or quit could leave
-// the backend running.
+// Server shutdown stops provider processes and records their final state in
+// SQLite. Keep this grace plus the SIGKILL wait inside the 5 s quit timeout in
+// `stopAllPoolInstances`, or quit could leave the backend running. Prime Agent
+// may take up to 15 s to close, but it runs in its own process group and
+// already has SIGTERM, so killing the backend does not cut that close short.
 const DEFAULT_BACKEND_TERMINATE_GRACE = Duration.seconds(3);
 const DEFAULT_BACKEND_OUTPUT_DRAIN_TIMEOUT = Duration.seconds(5);
 const BACKEND_READINESS_PATH = "/.well-known/t3/environment";

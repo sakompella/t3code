@@ -52,6 +52,7 @@ import * as Scope from "effect/Scope";
 import * as Stream from "effect/Stream";
 import * as SqlClient from "effect/sql/SqlClient";
 import { writeFileStringAtomically } from "./atomicWrite.ts";
+import { resolveProjectSettings } from "@t3tools/shared/projectSettings";
 import { resolveSymlinkTarget } from "@t3tools/shared/symlink";
 import * as ServerConfig from "./config.ts";
 import { type DeepPartial, deepMerge } from "@t3tools/shared/Struct";
@@ -176,6 +177,17 @@ function redactProviderEnvironmentVariable(
     ...(variable.value.length > 0 || variable.valueRedacted ? { valueRedacted: true } : {}),
   };
 }
+
+/** The project's response streaming mode, read fresh so a change applies to the next run. */
+export const readResponseStreamingMode = (
+  getSettings: Effect.Effect<ServerSettings, ServerSettingsError>,
+  projectId: ProjectId,
+) =>
+  getSettings.pipe(
+    Effect.map(
+      (settings) => resolveProjectSettings(settings, projectId).settings.responseStreamingMode,
+    ),
+  );
 
 export function redactServerSettingsForClient(settings: ServerSettings): ServerSettings {
   const providerInstances = Object.fromEntries(

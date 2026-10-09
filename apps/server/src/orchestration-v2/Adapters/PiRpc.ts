@@ -59,6 +59,8 @@ export class PiRpcTimeoutError extends Schema.TaggedError<PiRpcTimeoutError>()(
   }
 }
 
+const SESSION_LEASE_HELD_TEXT = "Session is already active";
+
 /**
  * Prime Agent refuses `switch_session` while another worker still holds the
  * session lease, and reports only the message text. The holder releases the
@@ -69,7 +71,7 @@ export function isPiSessionLeaseContention(error: unknown): boolean {
     isPiRpcError(error) &&
     error.operation === "switch_session" &&
     typeof error.cause === "string" &&
-    error.cause.startsWith("Session is already active")
+    error.cause.startsWith(SESSION_LEASE_HELD_TEXT)
   );
 }
 
@@ -93,7 +95,7 @@ export class PiRpcRecordTooLargeError extends Schema.TaggedError<PiRpcRecordTooL
  * transient.
  */
 export function isPiSessionLeaseRefusal(stderr: string): boolean {
-  return stderr.includes("Session is already active");
+  return stderr.includes(SESSION_LEASE_HELD_TEXT);
 }
 
 /** A `--resume` launch the daemon refused because another worker still holds the session. */

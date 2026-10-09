@@ -244,27 +244,15 @@ const writeFileIfChanged = Effect.fnUntraced(function* (dest: string, content: s
   if (existing !== content) yield* fs.writeFileString(dest, content);
 });
 
-/** Writes a T3-shipped extension into the cache and returns its path, the value for `--extension`. */
-export const materializeExtensionSource = Effect.fnUntraced(function* (
-  cacheDir: string,
-  fileName: string,
-  source: string,
-) {
-  const fs = yield* FileSystem.FileSystem;
-  yield* fs.makeDirectory(cacheDir, { recursive: true });
-  const dest = `${cacheDir.replace(/\\/g, "/")}/${fileName}`;
-  yield* writeFileIfChanged(dest, source);
-  return dest;
-});
-
+/** Writes the T3 extension into the cache and returns its path, the value for `--extension`. */
 export const materializePiT3McpExtension = Effect.fn("materializePiT3McpExtension")(function* (
   cacheDir: string,
 ) {
-  return yield* materializeExtensionSource(
-    cacheDir,
-    PI_T3_MCP_EXTENSION_FILENAME,
-    PI_T3_MCP_EXTENSION_SOURCE,
-  );
+  const fs = yield* FileSystem.FileSystem;
+  yield* fs.makeDirectory(cacheDir, { recursive: true });
+  const dest = `${cacheDir.replace(/\\/g, "/")}/${PI_T3_MCP_EXTENSION_FILENAME}`;
+  yield* writeFileIfChanged(dest, PI_T3_MCP_EXTENSION_SOURCE);
+  return dest;
 });
 
 /**

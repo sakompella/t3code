@@ -1610,17 +1610,14 @@ export const layerWithOptions = (
           ),
         );
 
-      // The settings default, for compositions without a settings service.
+      // The settings default, for compositions without a settings service or a failed read.
       const responseStreamingMode = (projectId: ProjectId) =>
-        Option.isNone(serverSettings)
-          ? Effect.succeed<ResponseStreamingMode>("paragraph")
-          : serverSettings.value.getSettings.pipe(
-              Effect.map(
-                (settings) =>
-                  resolveProjectSettings(settings, projectId).settings.responseStreamingMode,
-              ),
-              Effect.orElseSucceed((): ResponseStreamingMode => "paragraph"),
-            );
+        Effect.fromOption(serverSettings).pipe(
+          Effect.flatMap((settings) =>
+            ServerSettings.readResponseStreamingMode(settings.getSettings, projectId),
+          ),
+          Effect.orElseSucceed((): ResponseStreamingMode => "paragraph"),
+        );
 
       /**
        * Stores one event of a session-scoped child thread. A failed write is

@@ -1,5 +1,4 @@
 import { makeAssistantStreamingFilter } from "./assistantStreaming.ts";
-import { resolveProjectSettings } from "@t3tools/shared/projectSettings";
 import {
   isOrchestrationV2WorkActive,
   CommandId,
@@ -887,12 +886,9 @@ export const layer: Layer.Layer<
             threadDisposition: "reusable",
           });
           const responseStreamingMode = yield* Effect.gen(function* () {
-            const responseStreamingMode = yield* serverSettings.getSettings.pipe(
-              Effect.map(
-                (settings) =>
-                  resolveProjectSettings(settings, input.appThread.projectId).settings
-                    .responseStreamingMode,
-              ),
+            const responseStreamingMode = yield* ServerSettings.readResponseStreamingMode(
+              serverSettings.getSettings,
+              input.appThread.projectId,
             );
             yield* checkpointService
               .captureBaseline({
