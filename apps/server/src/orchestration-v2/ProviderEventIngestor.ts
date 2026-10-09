@@ -397,6 +397,30 @@ export const layer: Layer.Layer<
                 payload: input.event.appThread,
               }),
             ];
+          case "app_thread.reparented": {
+            const { threadId, parentThreadId } = input.event;
+            const thread = yield* projections
+              .getThread(threadId)
+              .pipe(
+                Effect.catchTags({
+                  ProjectionStoreThreadNotFoundError: () => Effect.succeed(null),
+                }),
+              );
+            if (thread === null || thread.lineage.parentThreadId === parentThreadId) return [];
+            const now = yield* DateTime.now;
+            return [
+              yield* makeDomainEvent(input, {
+                type: "thread.metadata-updated",
+                threadId,
+                payload: {
+                  ...thread,
+                  lineage: { ...thread.lineage, parentThreadId },
+                  updatedAt: now,
+                },
+                occurredAt: now,
+              }),
+            ];
+          }
           case "provider_session.updated":
             return [
               yield* makeDomainEvent(input, {
@@ -460,16 +484,33 @@ export const layer: Layer.Layer<
                 nodeId: input.event.message.nodeId,
               }),
             ];
-          case "turn_item.updated":
+          case "turn_item.updated": {
+            const { movedFromThreadId, turnItem } = input.event;
+            // A thread's subscribers only hear its own events, so the item's old
+            // thread gets a copy naming the new one, and its readers drop the item.
+            const departure =
+              movedFromThreadId === undefined || movedFromThreadId === turnItem.threadId
+                ? []
+                : [
+                    yield* makeDomainEvent(input, {
+                      type: "turn-item.updated",
+                      threadId: movedFromThreadId,
+                      payload: turnItem,
+                      runId: turnItem.runId,
+                      nodeId: turnItem.nodeId,
+                    }),
+                  ];
             return [
+              ...departure,
               yield* makeDomainEvent(input, {
                 type: "turn-item.updated",
-                threadId: input.event.turnItem.threadId,
-                payload: input.event.turnItem,
-                runId: input.event.turnItem.runId,
-                nodeId: input.event.turnItem.nodeId,
+                threadId: turnItem.threadId,
+                payload: turnItem,
+                runId: turnItem.runId,
+                nodeId: turnItem.nodeId,
               }),
             ];
+          }
           case "runtime_request.updated":
             return [
               yield* makeDomainEvent(input, {
@@ -591,6 +632,11 @@ export const layer: Layer.Layer<
             .pipe(Effect.mapError(mapWriteError));
           return result.storedEvents;
         }).pipe(
+          // A reparent reads and rewrites the whole thread row, as thread commands do.
+          (ingest) =>
+            input.event.type === "app_thread.reparented"
+              ? threadCommands.withLock(input.event.threadId, ingest)
+              : ingest,
           Effect.flatMap((storedEvents) =>
             storedEvents.length === 0 || input.event.type !== "subagent.updated"
               ? Effect.succeed(storedEvents)

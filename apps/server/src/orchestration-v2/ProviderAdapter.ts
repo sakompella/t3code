@@ -81,6 +81,13 @@ export const ProviderAdapterV2Event = Schema.Union([
     driver: ProviderDriverKind,
     appThread: OrchestrationV2AppThread,
   }),
+  /** A created thread's lineage parent changed. Its other fields are the user's. */
+  Schema.Struct({
+    type: Schema.Literal("app_thread.reparented"),
+    driver: ProviderDriverKind,
+    threadId: ThreadId,
+    parentThreadId: ThreadId,
+  }),
   Schema.Struct({
     type: Schema.Literal("provider_session.updated"),
     driver: ProviderDriverKind,
@@ -116,6 +123,8 @@ export const ProviderAdapterV2Event = Schema.Union([
     type: Schema.Literal("turn_item.updated"),
     driver: ProviderDriverKind,
     turnItem: OrchestrationV2TurnItem,
+    /** The thread the item was in until this update, which also tells that thread it left. */
+    movedFromThreadId: Schema.optional(ThreadId),
   }),
   Schema.Struct({
     type: Schema.Literal("runtime_request.updated"),
