@@ -33,7 +33,7 @@ Changes against upstream `main`, grouped by feature. Each item says what changed
 
 ### Prime Agent provider
 
-- **Prime Agent is a provider.** It runs through upstream's Pi RPC adapter as a second "flavor" (`PiFlavor.ts`), with its own settings, picker entry and user guide (`docs/user/providers-prime-agent.md`). Prime-Agent-only logic lives in `Adapters/primeAgent*.ts`.
+- **Prime Agent is a provider.** It runs through upstream's Pi RPC adapter as a second "flavor" (`PiFlavor.ts`), with its own settings, picker entry and user guide (`docs/user/providers-prime-agent.md`). Most Prime-Agent-only logic lives in `Adapters/primeAgent*.ts`. Two pieces live outside it. Session-scoped child threads (`childThreadScope`) are stored by `ProviderSessionManager.ts`, and the kernel-caller branch of `html_render` is in `mcp/toolkits/html/handlers.ts`.
   - Why not a new adapter: Prime Agent is a fork of Pi and speaks the same RPC protocol; reusing the adapter keeps the diff in one place.
 - **Prime Agent sessions see one model tool, `ipython`.** T3 features reach the agent through the kernel and the `t3-code` MCP server, using a bundled `t3-code` skill. If `t3-code` isn't declared in Prime Agent's global settings at this server's endpoint, the session still opens kernel-only and shows the exact entry to add. The T3 extension still loads, for the permission hook, in-place rollback and the OpenRouter output cap.
   - Why: the owner's rule is one tool. Prime Agent 0.9.8 reads MCP servers only from the global settings file, so T3 can't supply the server at launch. Without the permission hook, Supervised mode would run every tool unchecked.
