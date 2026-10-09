@@ -33,9 +33,9 @@ Changes against upstream `main`, grouped by feature. Each item says what changed
 
 ### Prime Agent provider
 
-- **Prime Agent is a provider.** It runs through upstream's Pi RPC adapter as a second "flavor" (`PiFlavor.ts`), with its own settings, picker entry and user guide (`docs/user/providers-prime-agent.md`). Prime-Agent-only logic lives in `Adapters/primeAgent*.ts`.
+- **Prime Agent is a provider.** It runs through upstream's Pi RPC adapter as a second "flavor" (`PiFlavor.ts`), with its own settings, picker entry and user guide (`docs/user/providers-prime-agent.md`). Most Prime-Agent-only logic lives in `Adapters/primeAgent*.ts`. Two pieces live outside it. Session-scoped child threads (`childThreadScope`) are stored by `ProviderSessionManager.ts`, and the kernel-caller branch of `html_render` is in `mcp/toolkits/html/handlers.ts`.
   - Why not a new adapter: Prime Agent is a fork of Pi and speaks the same RPC protocol; reusing the adapter keeps the diff in one place.
-- **Prime Agent sessions see one model tool, `ipython`.** T3 features reach the agent through the kernel and the `t3-code` MCP server, using a bundled `t3-code` skill. If `t3-code` isn't declared in Prime Agent's global settings at this server's endpoint, the session still opens kernel-only and shows the exact entry to add. The T3 extension still loads, only for the permission hook.
+- **Prime Agent sessions see one model tool, `ipython`.** T3 features reach the agent through the kernel and the `t3-code` MCP server, using a bundled `t3-code` skill. If `t3-code` isn't declared in Prime Agent's global settings at this server's endpoint, the session still opens kernel-only and shows the exact entry to add. The T3 extension still loads, for the permission hook, in-place rollback and the OpenRouter output cap.
   - Why: the owner's rule is one tool. Prime Agent 0.9.8 reads MCP servers only from the global settings file, so T3 can't supply the server at launch. Without the permission hook, Supervised mode would run every tool unchecked.
 - **Prime Agent opens a thread by launching on its session** (`--resume <session file>`), not by switching sessions after launch.
   - Why: in 0.9.8, replacing a session at runtime (`switch_session`, `new_session`) drops its agent-messaging, `agent_observe` and heartbeat support, so a T3-hosted parent couldn't message its subagents. Plain Pi still switches sessions.
@@ -110,7 +110,7 @@ These aren't Prime Agent-specific.
 - **A steer sent to a turn that just ended is no longer lost.** If the turn failed, the steer runs as the next run. If it was stopped, the steer goes back to the held queue.
 - **`ELECTRON_RUN_AS_NODE` is passed only to children that run Electron as Node.**
   - Why: it leaked into every spawned process. Agents and tools that launch Electron apps then started bare Node instead.
-- **Faster quit.** Server shutdown releases provider sessions concurrently. Stopping a Pi session returns as soon as the process exits. The desktop app gives the backend 3 s before a forced kill.
+- **Faster quit.** Server shutdown releases provider sessions concurrently. Stopping a Pi session returns as soon as the process exits. The desktop app gives the backend 3 s before a forced kill. On macOS and Linux that kill does not cut Prime Agent's 15 s close, because Prime Agent runs in its own process group and already has SIGTERM.
 - **Startup.** Requests that arrive after the port is bound, but before the server is ready, get `503` with `Retry-After` instead of hanging.
 - **Preview.** Evaluating a void expression, like `click()`, returns `null` instead of failing.
 - **Rollback.** A fork no longer brings back turns that were rolled back first.
