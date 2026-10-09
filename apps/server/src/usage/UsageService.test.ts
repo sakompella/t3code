@@ -328,6 +328,94 @@ describe("UsageService", () => {
   );
 
   it.live(
+    "replaces a Prime Agent parent's folded usage when its attribution lands on a rescan",
+    () =>
+      Effect.gen(function* () {
+        const { home, settings } = yield* setup;
+        const sessions = NodePath.join(home, "prime", "sessions");
+        const transcript = NodePath.join(sessions, "parent.jsonl");
+        const response = (id: string, usage: object) =>
+          encodeUnknownJsonString({
+            type: "message",
+            id,
+            timestamp: "2026-08-01T10:00:00.000Z",
+            message: {
+              role: "assistant",
+              provider: "anthropic",
+              model: "claude-opus-5-5",
+              timestamp: Date.parse("2026-08-01T10:00:00Z"),
+              responseId: id,
+              usage,
+            },
+          }) + "\n";
+        const aggregateUsage = {
+          input: 12,
+          output: 10,
+          cacheRead: 11,
+          cacheWrite: 13,
+          cost: { total: 1.25 },
+        };
+        const childUsage = {
+          input: 10,
+          output: 3,
+          cacheRead: 0,
+          cacheWrite: 0,
+          cost: { total: 0.75 },
+        };
+        yield* Effect.promise(async () => {
+          await NodeFSP.mkdir(sessions, { recursive: true });
+          await NodeFSP.writeFile(transcript, response("parent", aggregateUsage));
+        });
+        yield* Effect.gen(function* () {
+          const service = yield* UsageService.make;
+          const folded = yield* service.readSummary(WINDOW);
+          assert.strictEqual(totalOutputTokens(folded), 10);
+
+          yield* Effect.promise(() =>
+            NodeFSP.appendFile(
+              transcript,
+              encodeUnknownJsonString({
+                type: "child_usage_attributed",
+                id: "attribution",
+                targetId: "parent",
+                childUsage,
+                aggregateUsage,
+              }) +
+                "\n" +
+                response("later", {
+                  input: 1,
+                  output: 5,
+                  cacheRead: 0,
+                  cacheWrite: 0,
+                  cost: { total: 0.25 },
+                }),
+            ),
+          );
+          const rescanned = yield* service.readSummary(WINDOW);
+          assert.strictEqual(totalOutputTokens(rescanned), 7 + 5);
+          assert.strictEqual(
+            rescanned.buckets.reduce((sum, bucket) => sum + bucket.records, 0),
+            2,
+          );
+          assert.closeTo(
+            rescanned.buckets.reduce((sum, bucket) => sum + bucket.costUsd, 0),
+            0.5 + 0.25,
+            1e-12,
+          );
+
+          const fresh = yield* UsageService.make.pipe(
+            Effect.provide(
+              layerService({ prefix: "usage-prime-attribution-fresh", home, settings }),
+            ),
+          );
+          assert.deepStrictEqual((yield* fresh.readSummary(WINDOW)).buckets, rescanned.buckets);
+        }).pipe(
+          Effect.provide(layerService({ prefix: "usage-prime-attribution", home, settings })),
+        );
+      }).pipe(Effect.scoped),
+  );
+
+  it.live(
     "reads Pi per-model usage and auxiliary costs once across forks and repeated entries",
     () =>
       Effect.gen(function* () {
