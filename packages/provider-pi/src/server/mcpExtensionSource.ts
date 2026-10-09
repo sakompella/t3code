@@ -364,9 +364,6 @@ export default async function t3McpExtension(pi: ExtensionAPI) {
     if (changed) return replacement;
   });
 
-  // Pi deliberately leaves permission policy to extensions. T3's injected
-  // bridge uses Pi's public blocking tool hook so the shared runtime modes
-  // keep their normal meaning without replacing or shadowing Pi's runtime.
   // Only Pi's own search is known to be read-only. An extension that replaces
   // it keeps the name, and cannot discover deferred tools either.
   const hasBuiltinToolSearch = () =>
@@ -415,6 +412,9 @@ export default async function t3McpExtension(pi: ExtensionAPI) {
     },
   });
 
+  // Pi deliberately leaves permission policy to extensions. T3's injected
+  // bridge uses Pi's public blocking tool hook so the shared runtime modes
+  // keep their normal meaning without replacing or shadowing Pi's runtime.
   pi.on("tool_call", async (event, ctx) => {
     const mode = runtimeMode();
     if (mode === "full-access") return;
