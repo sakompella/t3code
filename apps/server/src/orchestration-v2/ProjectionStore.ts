@@ -869,7 +869,12 @@ export function applyToProjection(
     case "turn-item.updated":
       return withLocalVisibleTurnItems({
         ...base,
-        turnItems: upsertById(base.turnItems, event.payload),
+        // An item that names another thread moved there; the SQL projection keys
+        // items by the thread they name.
+        turnItems:
+          event.payload.threadId === projection.thread.id
+            ? upsertById(base.turnItems, event.payload)
+            : base.turnItems.filter((item) => item.id !== event.payload.id),
       });
     case "plan.updated":
       return {
