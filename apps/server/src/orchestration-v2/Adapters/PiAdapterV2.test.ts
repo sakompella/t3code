@@ -6327,6 +6327,55 @@ describe("PiAdapterV2 with the Prime Agent flavor", () => {
     }).pipe(Effect.scoped, Effect.provide(layerTest)),
   );
 
+  it.effect("moves a nested child under its parent child once T3 first sees the parent", () =>
+    Effect.gen(function* () {
+      const fake = yield* makeFakePi;
+      const session = yield* openPrimeThread(fake);
+      yield* startTurn(session.runtime, session.providerThread);
+      yield* fake.takeRequest("prompt");
+      yield* fake.emit({ type: "agent_start" });
+      const untilCard = (title: string) =>
+        Effect.gen(function* () {
+          const seen: Array<ProviderAdapterV2Event> = [];
+          do seen.push(yield* session.takeEvent(() => true));
+          while (
+            !seen.some(
+              (event) =>
+                event.type === "turn_item.updated" &&
+                event.turnItem.type === "subagent" &&
+                event.turnItem.title === title,
+            )
+          );
+          return seen;
+        });
+      const nested = {
+        type: "rlm_child_update",
+        child: { id: "sub-2", parentId: "sub-1", sessionName: "gamma", status: "running" },
+      };
+
+      // Prime Agent's roster can report a nested child before its parent child.
+      yield* fake.emit(nested);
+      const beforeParent = yield* untilCard("gamma");
+      yield* fake.emit(rlmChild("running"));
+      const parentSeen = yield* untilCard("worker");
+      yield* fake.emit(nested);
+      const afterParent = yield* untilCard("gamma");
+
+      const parentChildThreadId =
+        parentSeen.flatMap((event) =>
+          event.type === "app_thread.created" ? [event.appThread.id] : [],
+        )[0] ?? null;
+      const nestedLineage = [...beforeParent, ...afterParent].flatMap((event) =>
+        event.type === "app_thread.created" ? [event.appThread.lineage.parentThreadId] : [],
+      );
+      assert.deepEqual(nestedLineage, [THREAD_ID, parentChildThreadId]);
+      const card = afterParent.at(-1);
+      assert.isTrue(
+        card?.type === "turn_item.updated" && card.turnItem.threadId === parentChildThreadId,
+      );
+    }).pipe(Effect.scoped, Effect.provide(layerTest)),
+  );
+
   it.effect(
     "reopens a finished child's thread for follow-up work and routes its nested children",
     () =>
