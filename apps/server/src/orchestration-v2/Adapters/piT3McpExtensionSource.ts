@@ -301,9 +301,6 @@ export default async function t3McpExtension(pi: ExtensionAPI) {
     if (changed) return replacement;
   });
 
-  // Pi deliberately leaves permission policy to extensions. T3's injected
-  // bridge uses Pi's public blocking tool hook so the shared runtime modes
-  // keep their normal meaning without replacing or shadowing Pi's runtime.
   pi.registerCommand(NAVIGATE_TREE_COMMAND, {
     description: "T3 Code internal: roll the conversation back in place.",
     handler: async (args, ctx) => {
@@ -335,6 +332,9 @@ export default async function t3McpExtension(pi: ExtensionAPI) {
     },
   });
 
+  // Pi deliberately leaves permission policy to extensions. T3's injected
+  // bridge uses Pi's public blocking tool hook so the shared runtime modes
+  // keep their normal meaning without replacing or shadowing Pi's runtime.
   pi.on("tool_call", async (event, ctx) => {
     const mode = runtimeMode();
     if (mode === "full-access" || READ_ONLY_TOOLS.has(event.toolName)) return;
