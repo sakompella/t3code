@@ -87,31 +87,11 @@ export function deriveThreadRelationshipGraph(input: {
     edgesByKey.set(edgeKey(edge), edge);
   };
 
-  // A subagent nested under another subagent belongs to that subagent's
-  // thread. This outranks the lineage of threads recorded before nested
-  // subagent threads named their parent subagent's thread.
-  const subagentThreadByNodeId = new Map(
-    (input.projection?.subagents ?? []).flatMap((subagent) =>
-      subagent.childThreadId === null ? [] : [[subagent.id, subagent.childThreadId] as const],
-    ),
-  );
-  const nestedParentThreadIds = new Map(
-    (input.projection?.subagents ?? []).flatMap((subagent) => {
-      const parentThreadId = subagentThreadByNodeId.get(subagent.parentNodeId);
-      return subagent.childThreadId === null ||
-        parentThreadId === undefined ||
-        parentThreadId === subagent.childThreadId
-        ? []
-        : [[subagent.childThreadId, parentThreadId] as const];
-    }),
-  );
-
   for (const thread of threads) {
     const parentThreadId =
-      nestedParentThreadIds.get(thread.id) ??
-      (thread.forkedFrom?.type === "run"
+      thread.forkedFrom?.type === "run"
         ? thread.forkedFrom.threadId
-        : thread.lineage.parentThreadId);
+        : thread.lineage.parentThreadId;
     if (parentThreadId === null) continue;
     addEdge({
       sourceThreadId: parentThreadId,
@@ -127,9 +107,11 @@ export function deriveThreadRelationshipGraph(input: {
       if (subagent.childThreadId === null) continue;
       // The subagent record settles with the delegated task's first run, but the
       // parent can keep sending the child follow-ups. A live run on the child
-      // thread outranks that settled status.
+      // thread outranks that settled status. A nested subagent's record stays
+      // on the owner while its thread names its parent subagent's thread.
       addEdge({
-        sourceThreadId: nestedParentThreadIds.get(subagent.childThreadId) ?? ownerThreadId,
+        sourceThreadId:
+          threadsById.get(subagent.childThreadId)?.lineage.parentThreadId ?? ownerThreadId,
         targetThreadId: subagent.childThreadId,
         kind: "subagent",
         status: threadsById.get(subagent.childThreadId)?.activityRunStatus ?? subagent.status,
