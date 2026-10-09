@@ -3,6 +3,7 @@ import type {
   OrchestrationV2ThreadShell,
   ThreadId,
 } from "@t3tools/contracts";
+import { backgroundWorkHoldsCompletion } from "@t3tools/shared/orchestrationV2PendingBackgroundWork";
 import * as DateTime from "effect/DateTime";
 
 export type ThreadRelationshipKind = "parent" | "fork" | "subagent" | "transfer";
@@ -39,6 +40,18 @@ export function resolveMergeBackTargetThreadId(
   return projection.thread.forkedFrom?.type === "run"
     ? projection.thread.forkedFrom.threadId
     : projection.thread.lineage.parentThreadId;
+}
+
+/**
+ * A thread's status as Lineage shows it. A settled run whose subagents or
+ * monitors are still working reads as waiting, as the sidebar shows it.
+ */
+function shellActivityStatus(thread: OrchestrationV2ThreadShell): string {
+  if (thread.activityRunStatus != null) return thread.activityRunStatus;
+  return thread.status !== "failed" &&
+    backgroundWorkHoldsCompletion(thread.pendingBackgroundTasks ?? [])
+    ? "waiting"
+    : thread.status;
 }
 
 function edgeKey(edge: ThreadRelationshipEdge): string {
@@ -104,7 +117,7 @@ export function deriveThreadRelationshipGraph(input: {
       sourceThreadId: parentThreadId,
       targetThreadId: thread.id,
       kind: thread.lineage.relationshipToParent === "subagent" ? "subagent" : "fork",
-      status: thread.activityRunStatus ?? thread.status,
+      status: shellActivityStatus(thread),
     });
   }
 
@@ -218,7 +231,7 @@ export function threadRelationshipRowStatus(
     return row.edge.status;
   }
   const thread = graph.nodes.get(row.threadId)?.thread;
-  return thread?.activityRunStatus ?? thread?.status ?? null;
+  return thread == null ? null : shellActivityStatus(thread);
 }
 
 function threadCreatedAtMillis(node: ThreadRelationshipNode | undefined): number | null {
