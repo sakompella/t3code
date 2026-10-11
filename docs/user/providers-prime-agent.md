@@ -80,17 +80,24 @@ T3 Code cannot tell an edit from a command before approving it.
 
 ## Prime Agent 0.10 (fork)
 
-T3 Code also runs the 0.10 fork of Prime Agent. It tells the fork apart by what
-`prime-agent --help` offers, and shows the provider as "Prime Agent (fork, 0.10)". Subagents,
-heartbeats, wakes and edit cards work as described above. The differences:
+T3 Code also runs the T3 fork of Prime Agent 0.10 (`sakompella/prime-agent`). It recognizes the
+fork by the `+t3fork.N` marker in `prime-agent --version` (for example `0.10.0+t3fork.3`), and shows
+the provider as "Prime Agent (fork, 0.10)". Stock Prime Agent 0.10 is not supported: T3 Code does
+not launch it, and Settings says to install the fork. Subagents, heartbeats, wakes and edit cards
+work as described above. The differences:
 
 - Only **Full access** is offered, in the composer and in the default permissions setting. The
   fork cannot ask before it runs a cell, so its threads run with full access whatever mode they
-  stored. An agent or MCP client approved for narrower permissions cannot send work to them.
-- Rollback rewinds the session in place, and Prime Agent is told on your next message. Older fork
-  builds lose the rewind when the session reopens; T3 Code repeats it when the thread reopens
-  before your next message. A heartbeat or message wake that runs before your next message is not
-  told about the rollback.
+  stored. When the default permissions setting covers several environments, or no default model
+  is set, it offers only the modes every possible provider runs. An agent or MCP client approved
+  for narrower permissions cannot send work to fork threads, move a thread onto the fork, or fork
+  its own fork thread into a new one.
+- Rollback rewinds the session in place, and Prime Agent is told with the next message it
+  accepts. Older fork builds can lose the rewind when the session reopens. T3 Code never repeats
+  the rewind, because a heartbeat or message wake may have added conversation since. Instead, the
+  thread warns "Rollback not confirmed" until the fork shows the rewind kept or accepts your next
+  message. A heartbeat or message wake that runs before your next message is not told about the
+  rollback.
 - T3 Code tools may not reach the kernel yet. The fork runs sessions in background workers that do
   not receive T3 Code's per-session credential, so the setup above can still leave a session
   without T3 Code tools.
@@ -105,8 +112,8 @@ heartbeats, wakes and edit cards work as described above. The differences:
 ## Troubleshooting
 
 - If Prime Agent is unavailable, confirm that the configured binary runs on the server machine and
-  reports version 0.9.6 or newer, then refresh the provider in Settings. T3 Code also reads
-  `prime-agent --help` and does not launch a binary whose help fails or does not look like Prime
-  Agent's.
+  reports version 0.9.6 or newer (or the T3 fork's `+t3fork.N` version), then refresh the
+  provider in Settings. T3 Code does not launch a binary whose `--version` it cannot read or whose
+  `--help` offers no `--mode rpc`.
 - If no models appear, open Prime Agent directly and confirm its authentication and model
   configuration.
