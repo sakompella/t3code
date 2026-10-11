@@ -224,6 +224,12 @@ export interface PiChildTranscript {
   readonly failedSessionIds: Set<string>;
   /** The text of the child's latest finished reply that had any, for its card's result. */
   finalReply: string | null;
+  /**
+   * The item id each agent message (by the `details.id` it carries) first got.
+   * The fork stores such a message with an ISO timestamp where the live frame
+   * has epoch milliseconds, so the timestamp alone cannot match the two.
+   */
+  readonly agentMessageItemIds: Map<string, string>;
 }
 
 export type PiItemSink = ActivePiTurn | PiChildTranscript;
