@@ -1861,16 +1861,24 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
        * `get_entries` is append-ordered and keeps abandoned branches, so both come from walking
        * the leaf's `parentId` chain, never from list order.
        */
-      /** Active-branch user entry ids from `get_fork_messages`, in branch order. */
+      /**
+       * Active-branch user entry ids from `get_fork_messages`, in branch order.
+       * `None` when the read failed or a listed message has no entry id, since
+       * such a listing cannot show which entries are on the branch.
+       */
       const readUserEntryIds = (timeoutMs = PI_REQUEST_TIMEOUT_MS) =>
         request({ type: "get_fork_messages" }, timeoutMs).pipe(
-          Effect.map((data) => {
-            const messages = recordField(data, "messages");
-            return Array.isArray(messages)
-              ? messages.flatMap((message) => recordString(message, "entryId") ?? [])
-              : [];
-          }),
           Effect.option,
+          Effect.map(
+            Option.flatMap((data): Option.Option<ReadonlyArray<string>> => {
+              const messages = recordField(data, "messages");
+              if (!Array.isArray(messages)) return Option.none();
+              const entryIds = messages.flatMap(
+                (message) => recordString(message, "entryId") ?? [],
+              );
+              return entryIds.length === messages.length ? Option.some(entryIds) : Option.none();
+            }),
+          ),
         );
 
       /**
@@ -1878,7 +1886,13 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
        * fork-messages flavors baseline the user entries already present.
        * `None` when the listing failed.
        */
-      const readSessionTreeBaseline = Effect.fnUntraced(function* () {
+      type SessionTreeBaseline = {
+        readonly leafId: string | null;
+        readonly userEntryIds: ReadonlyArray<string>;
+      };
+      const readSessionTreeBaseline = Effect.fnUntraced(function* (): Effect.fn.Return<
+        Option.Option<SessionTreeBaseline>
+      > {
         if (flavor.sessionTree === "fork_messages") {
           const entryIds = yield* readUserEntryIds();
           return Option.map(entryIds, (userEntryIds) => ({ leafId: null, userEntryIds }));
@@ -1897,10 +1911,7 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
        * empty tree is a success with no leafId.
        */
       const applySessionTreeBaseline = (
-        baseline: Option.Option<{
-          readonly leafId: string | null;
-          readonly userEntryIds: ReadonlyArray<string>;
-        }>,
+        baseline: Option.Option<SessionTreeBaseline>,
       ): string | null => {
         leafCursorStale = Option.isNone(baseline);
         if (flavor.sessionTree === "fork_messages") {
@@ -1918,9 +1929,6 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
         });
         return lastKnownLeaf;
       };
-
-      const baselineSessionTree = () =>
-        readSessionTreeBaseline().pipe(Effect.map(applySessionTreeBaseline));
 
       /**
        * Fork-messages flavors cannot see the leaf, so they only recover the
@@ -3168,7 +3176,8 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
         threadState = state;
         // Baseline the session tree so the first turn's user entry can be
         // located without a full scan.
-        yield* baselineSessionTree();
+        const treeBaseline = yield* readSessionTreeBaseline();
+        applySessionTreeBaseline(treeBaseline);
         const rolledBackBefore =
           flavor.rollback === "rpc_tree" && !needsNewSession
             ? (providerThread.nativeConversationHeadRef?.nativeId ?? undefined)
@@ -3176,10 +3185,15 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
         if (rolledBackBefore !== undefined) {
           rollbackNoticePending = true;
           // T3 never repeats the move: a wake may have added conversation on
-          // the new branch since. A fork that lists the entry off its active
-          // branch kept the move. One that still lists it may have reopened
-          // on the discarded branch, which only the user can repair.
-          if (knownUserEntryIds.has(rolledBackBefore)) {
+          // the new branch since. Only a readable listing without the entry
+          // shows that the fork kept the move. A listing that still has it,
+          // or one T3 could not read, leaves the move unconfirmed, which only
+          // the user can repair.
+          const moveKept = Option.exists(
+            treeBaseline,
+            ({ userEntryIds }) => !userEntryIds.includes(rolledBackBefore),
+          );
+          if (!moveKept) {
             sessionNotices.push({
               key: "t3-rollback-unconfirmed",
               title: "Rollback not confirmed",
