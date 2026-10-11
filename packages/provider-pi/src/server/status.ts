@@ -32,7 +32,13 @@ import {
   piRecordString as recordString,
 } from "./rpc.ts";
 import * as ProviderLatestVersions from "@t3tools/provider-core/server/ProviderLatestVersions";
-import { identifyPiCli, type PiFlavor } from "./flavor.ts";
+import {
+  identifyForkPiCli,
+  identifyStockPiCli,
+  piCliProbeForVersion,
+  type PiCliIdentity,
+  type PiFlavor,
+} from "./flavor.ts";
 import {
   buildServerProvider,
   isCommandMissingCause,
@@ -232,7 +238,7 @@ const runPiCliCommand = (
   flavor: PiFlavor,
   piSettings: PiSettings,
   environment: NodeJS.ProcessEnv,
-  flag: "--version" | "--help",
+  flag: "--version" | "--help" | "--capabilities",
 ) =>
   Effect.gen(function* () {
     const command = piSettings.binaryPath || flavor.defaultBinary;
@@ -262,9 +268,10 @@ export class PiCliUnsupportedError extends Schema.TaggedError<PiCliUnsupportedEr
 }
 
 /**
- * The flavor the configured binary speaks, from its `--version` and `--help`
- * (see `identifyPiCli`). A CLI T3 cannot identify is never launched. A caller
- * that already read `--version` passes its output.
+ * The flavor the configured binary speaks, from its `--version` and then its
+ * `--help` (below 0.10) or `--capabilities` (0.10 on, the T3 fork). A CLI T3
+ * cannot identify is never launched. A caller that already read `--version`
+ * passes its output.
  */
 export const detectPiFlavor = (
   flavor: PiFlavor,
@@ -275,32 +282,48 @@ export const detectPiFlavor = (
   if (flavor.successor === undefined) return Effect.succeed(flavor);
   const binary = piSettings.binaryPath || flavor.defaultBinary;
   const unsupported = (reason: string) => new PiCliUnsupportedError({ binary, reason });
-  const readOutput = (flag: "--version" | "--help") =>
+  const run = (flag: "--version" | "--help" | "--capabilities") =>
     runPiCliCommand(flavor, piSettings, environment, flag).pipe(
       Effect.mapError((error) => unsupported(`\`${flag}\` failed to run: ${error.message}`)),
       Effect.timeoutOption(VERSION_PROBE_TIMEOUT_MS),
-      Effect.flatMap((output) => {
-        if (Option.isNone(output)) {
-          return Effect.fail(
-            unsupported(`\`${flag}\` timed out after ${VERSION_PROBE_TIMEOUT_MS}ms`),
-          );
-        }
-        if (output.value.code !== 0) {
-          return Effect.fail(unsupported(`\`${flag}\` exited with code ${output.value.code}`));
-        }
-        return Effect.succeed(`${output.value.stdout}\n${output.value.stderr}`);
-      }),
+      Effect.flatMap((output) =>
+        Option.isNone(output)
+          ? Effect.fail(unsupported(`\`${flag}\` timed out after ${VERSION_PROBE_TIMEOUT_MS}ms`))
+          : Effect.succeed(output.value),
+      ),
     );
-  const version =
-    versionOutput === undefined ? readOutput("--version") : Effect.succeed(versionOutput);
-  return Effect.all([version, readOutput("--help")], {
-    concurrency: "unbounded",
-  }).pipe(
-    Effect.flatMap(([version, help]) => {
-      const identity = identifyPiCli(flavor, { version, help });
-      return identity._tag === "Supported"
-        ? Effect.succeed(identity.flavor)
-        : Effect.fail(unsupported(identity.reason));
+  const output = (flag: "--version" | "--help") =>
+    run(flag).pipe(
+      Effect.flatMap((result) =>
+        result.code === 0
+          ? Effect.succeed(`${result.stdout}\n${result.stderr}`)
+          : Effect.fail(unsupported(`\`${flag}\` exited with code ${result.code}`)),
+      ),
+    );
+  const launchable = (identity: PiCliIdentity) =>
+    identity._tag === "Supported"
+      ? Effect.succeed(identity.flavor)
+      : Effect.fail(unsupported(identity.reason));
+  const version = versionOutput === undefined ? output("--version") : Effect.succeed(versionOutput);
+  return version.pipe(
+    Effect.flatMap((versionText) => {
+      const probe = piCliProbeForVersion(versionText);
+      switch (probe._tag) {
+        case "Unsupported":
+          return Effect.fail(unsupported(probe.reason));
+        case "Help":
+          return output("--help").pipe(
+            Effect.flatMap((help) => launchable(identifyStockPiCli(flavor, help))),
+          );
+        case "Capabilities":
+          return run("--capabilities").pipe(
+            Effect.flatMap((result) =>
+              launchable(
+                identifyForkPiCli(flavor, { exitCode: result.code, stdout: result.stdout }),
+              ),
+            ),
+          );
+      }
     }),
   );
 };

@@ -261,8 +261,8 @@ export interface PiAdapterV2Options {
   readonly environment: NodeJS.ProcessEnv;
   /**
    * The flavor the binary speaks, read each time a session opens so a swapped
-   * binary is picked up. Defaults to `flavor`; the drivers read `--version`
-   * and `--help` (`detectPiFlavor`).
+   * binary is picked up. Defaults to `flavor`; the drivers probe the binary
+   * (`detectPiFlavor`).
    */
   readonly detectFlavor?: Effect.Effect<PiFlavor, PiCliUnsupportedError>;
   readonly continuationRequests?: {

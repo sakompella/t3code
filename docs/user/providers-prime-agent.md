@@ -81,9 +81,9 @@ T3 Code cannot tell an edit from a command before approving it.
 ## Prime Agent 0.10 (fork)
 
 T3 Code also runs the T3 fork of Prime Agent 0.10 (`sakompella/prime-agent`). It recognizes the
-fork by the `+t3fork.N` marker in `prime-agent --version` (for example `0.10.0+t3fork.3`), and shows
-the provider as "Prime Agent (fork, 0.10)". Stock Prime Agent 0.10 is not supported: T3 Code does
-not launch it, and Settings says to install the fork. Subagents, heartbeats, wakes and edit cards
+fork by its answer to `prime-agent --capabilities`, and shows the provider as "Prime Agent (fork,
+0.10)". Stock Prime Agent 0.10 and fork builds without that command are not supported: T3 Code
+does not launch them, and Settings says to install the fork. Subagents, heartbeats, wakes and edit cards
 work as described above. The differences:
 
 - Only **Full access** is offered, in the composer and in the default permissions setting. The
@@ -112,8 +112,9 @@ work as described above. The differences:
 ## Troubleshooting
 
 - If Prime Agent is unavailable, confirm that the configured binary runs on the server machine and
-  reports version 0.9.6 or newer (or the T3 fork's `+t3fork.N` version), then refresh the
-  provider in Settings. T3 Code does not launch a binary whose `--version` it cannot read or whose
-  `--help` offers no `--mode rpc`.
+  reports version 0.9.6 or newer, then refresh the provider in Settings. T3 Code does not launch a
+  binary whose `--version` it cannot read. Below 0.10, `--help` must offer `--mode rpc`. From 0.10
+  on, `prime-agent --capabilities` must print the T3 fork's contract 1 with every command T3 Code
+  uses; the Settings message names what is missing.
 - If no models appear, open Prime Agent directly and confirm its authentication and model
   configuration.

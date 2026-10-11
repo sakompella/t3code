@@ -402,7 +402,7 @@ describe("PiProvider", () => {
   );
 
   // The RPC commands the fork adapter sends; the contract must name each one.
-  const COMMANDS_T3_CALLS = [
+  const COMMANDS_T3_CALLS = new Set([
     "prompt",
     "abort",
     "abort_retry",
@@ -423,7 +423,7 @@ describe("PiProvider", () => {
     "list_heartbeats",
     "observe",
     "unobserve",
-  ];
+  ]);
   it.effect("refuses a fork without a command T3 calls, and only then", () =>
     Effect.gen(function* () {
       const advertised: ReadonlyArray<string> = JSON.parse(PRIME_AGENT_FORK_CAPABILITIES).rpc;
@@ -443,7 +443,7 @@ describe("PiProvider", () => {
           ),
           Effect.exit,
         );
-        if (COMMANDS_T3_CALLS.includes(dropped)) {
+        if (COMMANDS_T3_CALLS.has(dropped)) {
           assert.isTrue(Exit.isFailure(exit), `a fork without ${dropped} must not launch`);
           if (Exit.isFailure(exit)) assert.include(Cause.pretty(exit.cause), dropped);
         } else {
