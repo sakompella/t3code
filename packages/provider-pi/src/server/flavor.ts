@@ -12,7 +12,6 @@ import { ProviderDriverKind } from "@t3tools/contracts";
 import * as Duration from "effect/Duration";
 
 import { expandHomePath } from "@t3tools/provider-core/server/pathExpansion";
-import { compareSemverVersions } from "@t3tools/shared/semver";
 
 export interface PiFlavor {
   readonly driverKind: ProviderDriverKind;
@@ -71,8 +70,8 @@ export interface PiFlavor {
    */
   readonly extensions: boolean;
   /**
-   * The flavor that a CLI at `successor.minimumVersion` or newer speaks
-   * instead. The adapter reads `--version` when it opens a session.
+   * The flavor a CLI of this driver speaks instead when its `--help` lists no
+   * `--extension`. The adapter reads `--help` when it opens a session.
    */
   readonly successor?: PiFlavor;
   /**
@@ -226,14 +225,17 @@ export const PRIME_AGENT_FLAVOR: PiFlavor = {
   successor: PRIME_AGENT_FORK_FLAVOR,
 };
 
-/** The flavor a CLI that reports `version` speaks, starting from its driver's flavor. */
-export function piFlavorForVersion(flavor: PiFlavor, version: string | null): PiFlavor {
-  const successor = flavor.successor;
-  return successor !== undefined &&
-    version !== null &&
-    compareSemverVersions(version, successor.minimumVersion) >= 0
-    ? piFlavorForVersion(successor, version)
-    : flavor;
+/**
+ * The flavor a CLI speaks, read from its `--help`, starting from its driver's
+ * flavor. A CLI that lists `--extension` loads extensions and speaks
+ * `flavor`; one that lists `--mode` but no `--extension` is its successor.
+ * Help that lists neither is not a CLI T3 knows, so the answer is undefined.
+ */
+export function piFlavorForHelp(flavor: PiFlavor, help: string): PiFlavor | undefined {
+  if (!/^\s+--mode\b/m.test(help)) return undefined;
+  return /^\s+(-e, )?--extension\b/m.test(help) || flavor.successor === undefined
+    ? flavor
+    : flavor.successor;
 }
 
 /**

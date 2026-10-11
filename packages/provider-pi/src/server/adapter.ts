@@ -90,7 +90,7 @@ import {
   T3_ROLLBACK_NOTICE,
 } from "./mcpExtensionSource.ts";
 import { PI_FLAVOR, PRIME_AGENT_FLAVOR, type PiFlavor } from "./flavor.ts";
-import { detectPiFlavor } from "./status.ts";
+import { detectPiFlavor, type PiFlavorUndetectedError } from "./status.ts";
 import { resolveKernelMcpAccess } from "./primeAgentT3Mcp.ts";
 
 import type {
@@ -259,9 +259,9 @@ export interface PiAdapterV2Options {
   readonly environment: NodeJS.ProcessEnv;
   /**
    * The flavor the binary speaks, read each time a session opens so a swapped
-   * binary is picked up. Defaults to `flavor`; the drivers read `--version`.
+   * binary is picked up. Defaults to `flavor`; the drivers read `--help`.
    */
-  readonly detectFlavor?: Effect.Effect<PiFlavor>;
+  readonly detectFlavor?: Effect.Effect<PiFlavor, PiFlavorUndetectedError>;
   readonly continuationRequests?: {
     readonly offer: (
       request: ProviderContinuationRequests.ProviderContinuationRequest,
@@ -487,7 +487,9 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
     openSession: Effect.fn("PiAdapterV2.openSession")(function* (
       input: ProviderAdapter.ProviderAdapterV2OpenSessionInput,
     ) {
-      const flavor = yield* options.detectFlavor ?? Effect.succeed(options.flavor);
+      const flavor = yield* (options.detectFlavor ?? Effect.succeed(options.flavor)).pipe(
+        Effect.mapError((error) => protocolError(error.message)),
+      );
       if (!flavor.extensions && input.runtimePolicy.runtimeMode !== "full-access") {
         return yield* protocolError(
           `${flavor.displayName} cannot ask before it runs a tool, so it runs only with Full access. Switch this thread to Full access.`,

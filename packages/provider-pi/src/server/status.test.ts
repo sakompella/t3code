@@ -3,7 +3,6 @@ import { assert, describe, it } from "@effect/vitest";
 import * as Cause from "effect/Cause";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
-import * as Option from "effect/Option";
 import * as PlatformError from "effect/PlatformError";
 import * as Fiber from "effect/Fiber";
 import * as Sink from "effect/Sink";
@@ -180,10 +179,7 @@ describe("PiProvider", () => {
         Effect.exit,
       );
       assert.isTrue(Exit.isFailure(exit), "an unknown CLI must not launch as 0.9.8");
-      assert.include(
-        Cause.pretty(exit.pipe(Exit.causeOption, Option.getOrThrow)),
-        "/opt/bin/prime-agent",
-      );
+      if (Exit.isFailure(exit)) assert.include(Cause.pretty(exit.cause), "/opt/bin/prime-agent");
 
       const snapshot = yield* checkPiProviderStatus(PRIME_AGENT_FLAVOR, {
         ...settings,

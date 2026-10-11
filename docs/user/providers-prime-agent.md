@@ -80,7 +80,7 @@ T3 Code cannot tell an edit from a command before approving it.
 
 ## Prime Agent 0.10 (fork)
 
-T3 Code also runs the 0.10 fork of Prime Agent. It detects the fork from `prime-agent --version` and
+T3 Code also runs the 0.10 fork of Prime Agent. It detects the fork from what `prime-agent --help` offers and
 shows the provider as "Prime Agent (fork, 0.10)". Subagents, heartbeats, wakes, rollback and edit
 cards work as described above. The differences:
 
@@ -93,6 +93,8 @@ cards work as described above. The differences:
 ## Troubleshooting
 
 - If Prime Agent is unavailable, confirm that the configured binary runs on the server machine and
-  reports version 0.9.6 or newer, then refresh the provider in Settings.
+  reports version 0.9.6 or newer, then refresh the provider in Settings. T3 Code also reads
+  `prime-agent --help` and does not launch a binary whose help fails or does not look like Prime
+  Agent's.
 - If no models appear, open Prime Agent directly and confirm its authentication and model
   configuration.
