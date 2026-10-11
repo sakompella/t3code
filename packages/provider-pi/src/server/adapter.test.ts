@@ -10659,8 +10659,8 @@ describe("PiAdapterV2 reaching T3 through the kernel's MCP client", () => {
       return yield* effect.pipe(Effect.ensuring(sessions.clear(THREAD_ID)));
     });
 
-  const openPrime = (fake: FakePi, agentDir: string) =>
-    openRuntime(fake, "default", THREAD_ID, SESSION_ID, undefined, PRIME_AGENT_FLAVOR, undefined, {
+  const openPrime = (fake: FakePi, agentDir: string, flavor: PiFlavor = PRIME_AGENT_FLAVOR) =>
+    openRuntime(fake, "default", THREAD_ID, SESSION_ID, undefined, flavor, undefined, {
       PRIME_AGENT_CODING_AGENT_DIR: agentDir,
     });
 
@@ -10736,6 +10736,26 @@ describe("PiAdapterV2 reaching T3 through the kernel's MCP client", () => {
           assert.lengthOf(yield* finishTurn(2), 0);
         }),
       ).pipe(Effect.scoped, Effect.provide(layerTest)),
+  );
+
+  it.effect("gives the 0.10 fork the t3-code skill and credential without the extension", () =>
+    withMcpSession(
+      Effect.gen(function* () {
+        const agentDir = yield* makeAgentDir(declaredEntry);
+        const fake = yield* makeFakePi;
+        yield* openPrime(fake, agentDir, PRIME_AGENT_FORK_FLAVOR);
+        const { args, env } = fake.lastSpawn();
+        assert.notInclude(args, "--extension");
+        const skillIndex = args.indexOf("--skill");
+        assert.isAbove(skillIndex, -1);
+        assert.match(args[skillIndex + 1] ?? "", /\/pi-t3-skills\/t3-code$/);
+        assert.equal(env.T3_MCP_URL, ENDPOINT);
+        assert.equal(env.T3_MCP_BEARER_TOKEN, "secret-prime-token");
+        // Only T3's extension reads these.
+        assert.notProperty(env, "T3_PI_MCP_TOOLS");
+        assert.notProperty(env, "T3_PI_RUNTIME_MODE");
+      }),
+    ).pipe(Effect.scoped, Effect.provide(layerTest)),
   );
 
   it.effect("treats a server declared for another port as undeclared", () =>
