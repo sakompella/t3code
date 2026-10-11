@@ -1,5 +1,6 @@
 import {
   EnvironmentId,
+  providerForNewThread,
   type ProjectId,
   ScheduledTaskId,
   type ScheduledTask,
@@ -164,6 +165,10 @@ export function taskToDraft(task: ScheduledTask): DraftState {
   };
 }
 
+/**
+ * Use configured defaults before the default model of the provider a new
+ * thread starts on (`providerForNewThread`), as mobile does.
+ */
 export function scheduledTaskDefaultModel(
   settings: ServerSettings,
   project: (LegacyProjectSettingsFields & { readonly id: ProjectId }) | null,
@@ -189,11 +194,14 @@ export function scheduledTaskDefaultModel(
     )
       return selection;
   }
-  const models = available.flatMap((entry) =>
-    entry.models
-      .filter((model) => !model.isLegacy)
-      .map((model) => ({ instanceId: entry.instanceId, model })),
-  );
+  const startProvider = providerForNewThread(entries, configured?.instanceId);
+  const models = available
+    .filter((entry) => startProvider === undefined || entry.instanceId === startProvider.instanceId)
+    .flatMap((entry) =>
+      entry.models
+        .filter((model) => !model.isLegacy)
+        .map((model) => ({ instanceId: entry.instanceId, model })),
+    );
   const fallback = models.find(({ model }) => model.isDefault) ?? models[0];
   return fallback ? { instanceId: fallback.instanceId, model: fallback.model.slug } : null;
 }
