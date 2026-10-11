@@ -199,20 +199,15 @@ interface PendingPiRequest {
 }
 
 /**
- * Default record limit, in characters. The largest `get_messages` reply among
- * this machine's Prime Agent sessions is about 13 million characters, so 64 Mi
- * (67 million) leaves a 5x margin. It also bounds the cost of a bad record:
- * `JSON.parse` of 64 Mi characters blocks the event loop for about 200 ms and
- * the line exists as pieces, a joined string and a parsed value at once.
- *
- * MCP completion events carry images in both model content and the script
- * CallToolResult, so the limit also allows the shared image budget twice, plus
- * bounded JSON/text overhead, before an extension's record is refused.
+ * Default record limit, in characters. MCP completion events carry images in
+ * both model content and the script CallToolResult, so upstream allows the
+ * shared image budget twice plus bounded JSON/text overhead (about 232 million
+ * characters). That is far above the largest Prime Agent `get_messages` reply
+ * seen here (about 13 million). A record over it fails pending requests with
+ * `PiRpcRecordTooLargeError` instead of vanishing.
  */
-const DEFAULT_MAX_PI_RECORD_CHARS = Math.max(
-  64 * 1024 * 1024,
-  2 * MAX_TOOL_OUTPUT_IMAGES * MAX_TOOL_OUTPUT_IMAGE_BASE64_LENGTH + 8 * 1024 * 1024,
-);
+const DEFAULT_MAX_PI_RECORD_CHARS =
+  2 * MAX_TOOL_OUTPUT_IMAGES * MAX_TOOL_OUTPUT_IMAGE_BASE64_LENGTH + 8 * 1024 * 1024;
 const STDERR_TAIL_CHARS = 2_000;
 const STDERR_CLOSE_WAIT = Duration.millis(500);
 
