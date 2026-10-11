@@ -1,6 +1,6 @@
 import { useNavigation } from "@react-navigation/native";
 import { SettingsRow } from "./components/SettingsRow";
-import { AuthSettingsWriteScope } from "@t3tools/contracts";
+import { AuthSettingsWriteScope, providerRuntimeMode } from "@t3tools/contracts";
 import { readEnvironmentScope, useEnvironmentsWithScope } from "../../state/session";
 import { ScreenScrollView as ScrollView } from "../../components/ui/ScreenScrollView";
 import { AppText as Text } from "../../components/ui/AppText";
@@ -33,6 +33,7 @@ import { SettingsSwitchRow } from "./components/SettingsSwitchRow";
 import { SettingsProjectOverridesSection } from "./components/SettingsProjectOverridesSection";
 import { useSettingsEnvironmentFilter } from "./settings-environment-filter";
 import {
+  offeredDefaultRuntimeModes,
   planMobileScopedSettingsClear,
   planMobileScopedSettingsPatch,
   resolveMobileSettingsTargets,
@@ -161,6 +162,16 @@ function ServerSettingsDetail(props: { readonly page: SettingsPage }) {
   const reference = displayTargets[0] ?? null;
   const uniform = <K extends keyof ServerSettings>(key: K) =>
     uniformMobileSetting(displayTargets, key);
+  // A default the default provider does not offer runs as the mode shown here.
+  const offeredDefaultModes = offeredDefaultRuntimeModes(displayTargets);
+  const defaultRuntimeModeChoices = RUNTIME_MODE_CHOICES.filter((choice) =>
+    offeredDefaultModes.includes(choice.mode),
+  );
+  const uniformDefaultRuntimeMode = uniform("defaultRuntimeMode");
+  const displayedDefaultRuntimeMode =
+    uniformDefaultRuntimeMode === null
+      ? null
+      : providerRuntimeMode(uniformDefaultRuntimeMode, offeredDefaultModes);
   // `uniform` folds a real null into "mixed"; nullable keys need the distinction.
   const isMixed = (key: keyof ServerSettings) =>
     reference === null ||
@@ -330,12 +341,12 @@ function ServerSettingsDetail(props: { readonly page: SettingsPage }) {
                       ) : null
                     }
                   >
-                    {RUNTIME_MODE_CHOICES.map((choice, index) => (
+                    {defaultRuntimeModeChoices.map((choice, index) => (
                       <SettingsChoiceRow
                         key={choice.mode}
                         label={choice.label}
                         description={choice.description}
-                        selected={uniform("defaultRuntimeMode") === choice.mode}
+                        selected={displayedDefaultRuntimeMode === choice.mode}
                         separated={index > 0}
                         disabled={disabledFor("defaultRuntimeMode")}
                         onPress={() => write({ defaultRuntimeMode: choice.mode })}
