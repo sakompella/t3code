@@ -10,6 +10,7 @@ import { describe, expect, it } from "vite-plus/test";
 
 import type { SettingsTarget } from "./settings-environment-filter";
 import {
+  displayedDefaultRuntimeMode,
   offeredDefaultRuntimeModes,
   planMobileScopedSettingsClear,
   planMobileScopedSettingsPatch,
@@ -175,7 +176,14 @@ describe("mobile default permissions", () => {
       readonly instanceId: ProviderInstanceId;
       readonly supportedRuntimeModes?: ReadonlyArray<RuntimeMode>;
     }>,
-  ) => ({ ...target, serverConfig: { ...target.serverConfig, providers } }) as SettingsTarget;
+  ) =>
+    ({
+      ...target,
+      serverConfig: {
+        ...target.serverConfig,
+        providers: providers.map((provider) => ({ enabled: true, status: "ready", ...provider })),
+      },
+    }) as SettingsTarget;
   const forkDefault: ServerSettings = {
     ...DEFAULT_SERVER_SETTINGS,
     defaultRuntimeMode: "approval-required",
@@ -225,5 +233,30 @@ describe("mobile default permissions", () => {
       null,
     );
     expect(offeredDefaultRuntimeModes(targets)).toEqual(["full-access"]);
+  });
+
+  it("shows the mode of the provider an unset default starts on, per environment", () => {
+    const unset: ServerSettings = {
+      ...DEFAULT_SERVER_SETTINGS,
+      defaultRuntimeMode: "approval-required",
+      defaultModelSelection: null,
+    };
+    const codexFirst = withProviders(environment(firstId, unset), [
+      { instanceId: codex },
+      { instanceId: primeAgent, supportedRuntimeModes: ["full-access"] },
+    ]);
+    const forkFirst = withProviders(environment(secondId, unset), [
+      { instanceId: primeAgent, supportedRuntimeModes: ["full-access"] },
+      { instanceId: codex },
+    ]);
+    const codexTargets = resolveMobileSettingsTargets([codexFirst], null);
+    expect(displayedDefaultRuntimeMode(codexTargets)).toBe("approval-required");
+    expect(offeredDefaultRuntimeModes(codexTargets)).toContain("approval-required");
+    expect(displayedDefaultRuntimeMode(resolveMobileSettingsTargets([forkFirst], null))).toBe(
+      "full-access",
+    );
+    expect(
+      displayedDefaultRuntimeMode(resolveMobileSettingsTargets([codexFirst, forkFirst], null)),
+    ).toBeNull();
   });
 });
