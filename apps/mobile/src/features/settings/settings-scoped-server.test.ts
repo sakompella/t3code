@@ -2,12 +2,16 @@ import {
   DEFAULT_SERVER_SETTINGS,
   type EnvironmentId,
   type ProjectId,
+  type ProviderInstanceId,
+  RuntimeMode,
   type ServerSettings,
 } from "@t3tools/contracts";
 import { describe, expect, it } from "vite-plus/test";
 
 import type { SettingsTarget } from "./settings-environment-filter";
 import {
+  displayedDefaultRuntimeMode,
+  offeredDefaultRuntimeModes,
   planMobileScopedSettingsClear,
   planMobileScopedSettingsPatch,
   resolveMobileSettingsTargets,
@@ -160,5 +164,99 @@ describe("mobile project settings scope", () => {
     expect(
       planMobileScopedSettingsPatch(targets, true, { enableProviderUpdateChecks: false }),
     ).toEqual([]);
+  });
+});
+
+describe("mobile default permissions", () => {
+  const primeAgent = "primeAgent" as ProviderInstanceId;
+  const codex = "codex" as ProviderInstanceId;
+  const withProviders = (
+    target: SettingsTarget,
+    providers: ReadonlyArray<{
+      readonly instanceId: ProviderInstanceId;
+      readonly supportedRuntimeModes?: ReadonlyArray<RuntimeMode>;
+    }>,
+  ) =>
+    ({
+      ...target,
+      serverConfig: {
+        ...target.serverConfig,
+        providers: providers.map((provider) => ({ enabled: true, status: "ready", ...provider })),
+      },
+    }) as unknown as SettingsTarget;
+  const forkDefault: ServerSettings = {
+    ...DEFAULT_SERVER_SETTINGS,
+    defaultRuntimeMode: "approval-required",
+    defaultModelSelection: { instanceId: primeAgent, model: "default" },
+  };
+
+  it("offers only Full access when new threads default to the Prime Agent 0.10 fork", () => {
+    const targets = resolveMobileSettingsTargets(
+      [
+        withProviders(environment(firstId, forkDefault), [
+          { instanceId: primeAgent, supportedRuntimeModes: ["full-access"] },
+        ]),
+      ],
+      null,
+    );
+    expect(offeredDefaultRuntimeModes(targets)).toEqual(["full-access"]);
+  });
+
+  it("offers only the modes every selected environment's default provider runs", () => {
+    const targets = resolveMobileSettingsTargets(
+      [
+        withProviders(environment(firstId, forkDefault), [
+          { instanceId: primeAgent, supportedRuntimeModes: ["full-access"] },
+        ]),
+        withProviders(
+          environment(secondId, {
+            ...DEFAULT_SERVER_SETTINGS,
+            defaultModelSelection: { instanceId: codex, model: "gpt-5" },
+          }),
+          [{ instanceId: codex }],
+        ),
+      ],
+      null,
+    );
+    expect(offeredDefaultRuntimeModes(targets)).toEqual(["full-access"]);
+    expect(offeredDefaultRuntimeModes(targets.slice(1))).toEqual(RuntimeMode.literals);
+  });
+
+  it("offers only Full access when the default is unset and the fork is the only provider", () => {
+    const targets = resolveMobileSettingsTargets(
+      [
+        withProviders(
+          environment(firstId, { ...DEFAULT_SERVER_SETTINGS, defaultModelSelection: null }),
+          [{ instanceId: primeAgent, supportedRuntimeModes: ["full-access"] }],
+        ),
+      ],
+      null,
+    );
+    expect(offeredDefaultRuntimeModes(targets)).toEqual(["full-access"]);
+  });
+
+  it("shows the mode of the provider an unset default starts on, per environment", () => {
+    const unset: ServerSettings = {
+      ...DEFAULT_SERVER_SETTINGS,
+      defaultRuntimeMode: "approval-required",
+      defaultModelSelection: null,
+    };
+    const codexFirst = withProviders(environment(firstId, unset), [
+      { instanceId: codex },
+      { instanceId: primeAgent, supportedRuntimeModes: ["full-access"] },
+    ]);
+    const forkFirst = withProviders(environment(secondId, unset), [
+      { instanceId: primeAgent, supportedRuntimeModes: ["full-access"] },
+      { instanceId: codex },
+    ]);
+    const codexTargets = resolveMobileSettingsTargets([codexFirst], null);
+    expect(displayedDefaultRuntimeMode(codexTargets)).toBe("approval-required");
+    expect(offeredDefaultRuntimeModes(codexTargets)).toContain("approval-required");
+    expect(displayedDefaultRuntimeMode(resolveMobileSettingsTargets([forkFirst], null))).toBe(
+      "full-access",
+    );
+    expect(
+      displayedDefaultRuntimeMode(resolveMobileSettingsTargets([codexFirst, forkFirst], null)),
+    ).toBeNull();
   });
 });

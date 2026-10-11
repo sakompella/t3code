@@ -13,11 +13,17 @@ import * as Stream from "effect/Stream";
 import * as Exit from "effect/Exit";
 import * as Option from "effect/Option";
 import * as Result from "effect/Result";
+import * as Schema from "effect/Schema";
 import * as HttpClient from "effect/http/HttpClient";
 import * as ChildProcess from "effect/process/ChildProcess";
 import * as ChildProcessSpawner from "effect/process/ChildProcessSpawner";
 
-import { buildPiRpcLaunch, resolvePiLaunchArgs } from "./mcpInjection.ts";
+import {
+  buildPiRpcLaunch,
+  piLaunchArgsForFlavor,
+  rejectedPiLaunchArgsNotice,
+  resolvePiLaunchArgs,
+} from "./mcpInjection.ts";
 import {
   makePiRpcConnection,
   PiRpcError,
@@ -26,11 +32,19 @@ import {
   piRecordString as recordString,
 } from "./rpc.ts";
 import * as ProviderLatestVersions from "@t3tools/provider-core/server/ProviderLatestVersions";
-import type { PiFlavor } from "./flavor.ts";
+import { binaryFileKey } from "./binaryFileKey.ts";
+import {
+  identifyForkPiCli,
+  identifyStockPiCli,
+  piCliProbeForVersion,
+  type PiCliIdentity,
+  type PiFlavor,
+} from "./flavor.ts";
 import {
   buildServerProvider,
   isCommandMissingCause,
   parseGenericCliVersion,
+  type ProviderProbeResult,
   providerModelsFromSettings,
   spawnAndCollect,
   type ServerProviderDraft,
@@ -55,10 +69,12 @@ const piPresentation = (flavor: PiFlavor): ServerProviderPresentation => ({
   // Pi left early access upstream; Prime Agent is still new here.
   ...(flavor.tools === "ipython" ? { badgeLabel: "Early Access" } : {}),
   showInteractionModeToggle: false,
-  // Prime Agent runs every tool as one ipython cell, so the approval hook
-  // cannot tell an edit from a command before it runs.
-  supportedRuntimeModes:
-    flavor.tools === "ipython"
+  // Approvals come only from T3's extension, so a CLI without extensions
+  // runs every tool unasked. Prime Agent runs every tool as one ipython cell,
+  // so the approval hook cannot tell an edit from a command before it runs.
+  supportedRuntimeModes: !flavor.extensions
+    ? ["full-access"]
+    : flavor.tools === "ipython"
       ? ["approval-required", "full-access"]
       : ["approval-required", "auto-accept-edits", "full-access"],
   reportsContextWindow: true,
@@ -194,11 +210,14 @@ export const discoverPiCommandsForCwd = Effect.fn("discoverPiCommandsForCwd")(
     if (!launchArgs.ok) {
       return yield* new PiRpcError({ operation: "launch", detail: launchArgs.message });
     }
+    const cliFlavor = yield* detectPiFlavor(flavor, piSettings, environment).pipe(
+      Effect.mapError((error) => new PiRpcError({ operation: "launch", detail: error.message })),
+    );
     const connection = yield* makePiDiscoveryConnection(
       flavor,
       piSettings,
       environment,
-      launchArgs.args,
+      piLaunchArgsForFlavor(cliFlavor, launchArgs.args).accepted,
       cwd,
     );
     // A failed read must not replace a previously usable workspace catalog with an empty one.
@@ -216,14 +235,15 @@ export const discoverPiCommandsForCwd = Effect.fn("discoverPiCommandsForCwd")(
   }),
 );
 
-const runPiVersionCommand = (
+const runPiCliCommand = (
   flavor: PiFlavor,
   piSettings: PiSettings,
   environment: NodeJS.ProcessEnv,
+  flag: "--version" | "--help" | "--capabilities",
 ) =>
   Effect.gen(function* () {
     const command = piSettings.binaryPath || flavor.defaultBinary;
-    const spawnCommand = yield* resolveSpawnCommand(command, ["--version"], {
+    const spawnCommand = yield* resolveSpawnCommand(command, [flag], {
       env: environment,
     });
     return yield* spawnAndCollect(
@@ -234,6 +254,119 @@ const runPiVersionCommand = (
       }),
     );
   });
+
+/** The configured binary is a CLI of this driver that T3 could not identify or does not support. */
+export class PiCliUnsupportedError extends Schema.TaggedError<PiCliUnsupportedError>()(
+  "PiCliUnsupportedError",
+  {
+    binary: Schema.String,
+    reason: Schema.String,
+  },
+) {
+  override get message(): string {
+    return `T3 Code did not launch \`${this.binary}\`: ${this.reason}.`;
+  }
+}
+
+/**
+ * Flavors already identified, by driver and binary file (see `binaryFileKey`). Identifying a binary costs two sequential runs, and a
+ * session open, a status check and a text-generation request each need the
+ * answer. Only a launchable answer is kept: a refusal may be a probe that
+ * failed for a moment, so it is asked again.
+ */
+const identifiedFlavors = new Map<string, PiFlavor>();
+
+/** The identity-cache key of the file the configured binary launches, if T3 Code can stat it. */
+const piBinaryKey = (flavor: PiFlavor, piSettings: PiSettings, environment: NodeJS.ProcessEnv) =>
+  binaryFileKey(piSettings.binaryPath || flavor.defaultBinary, environment).pipe(
+    Effect.map(Option.map((key) => `${flavor.driverKind}\0${key}`)),
+  );
+
+/**
+ * A `--version` run the caller made itself, with the key of the file taken
+ * before that run. The key must come first: a file replaced since then must not
+ * take an answer that was read from the old one.
+ */
+export interface PiVersionRead {
+  readonly output: string;
+  readonly fileKey: Option.Option<string>;
+}
+
+/**
+ * The flavor the configured binary speaks, from its `--version` and then its
+ * `--help` (below 0.10) or `--capabilities` (0.10 on, the T3 fork). A CLI T3
+ * cannot identify is never launched. A caller that already read `--version`
+ * passes it as a `PiVersionRead`. The binary file is checked on every call, so
+ * an upgraded binary is identified again.
+ */
+export const detectPiFlavor = (
+  flavor: PiFlavor,
+  piSettings: PiSettings,
+  environment: NodeJS.ProcessEnv,
+  versionRead?: PiVersionRead,
+): Effect.Effect<PiFlavor, PiCliUnsupportedError, ChildProcessSpawner.ChildProcessSpawner> => {
+  if (flavor.successor === undefined) return Effect.succeed(flavor);
+  const binary = piSettings.binaryPath || flavor.defaultBinary;
+  const unsupported = (reason: string) => new PiCliUnsupportedError({ binary, reason });
+  const run = (flag: "--version" | "--help" | "--capabilities") =>
+    runPiCliCommand(flavor, piSettings, environment, flag).pipe(
+      Effect.mapError((error) => unsupported(`\`${flag}\` failed to run: ${error.message}`)),
+      Effect.timeoutOption(VERSION_PROBE_TIMEOUT_MS),
+      Effect.flatMap((output) =>
+        Option.isNone(output)
+          ? Effect.fail(unsupported(`\`${flag}\` timed out after ${VERSION_PROBE_TIMEOUT_MS}ms`))
+          : Effect.succeed(output.value),
+      ),
+    );
+  const output = (flag: "--version" | "--help") =>
+    run(flag).pipe(
+      Effect.flatMap((result) =>
+        result.code === 0
+          ? Effect.succeed(`${result.stdout}\n${result.stderr}`)
+          : Effect.fail(unsupported(`\`${flag}\` exited with code ${result.code}`)),
+      ),
+    );
+  const launchable = (identity: PiCliIdentity) =>
+    identity._tag === "Supported"
+      ? Effect.succeed(identity.flavor)
+      : Effect.fail(unsupported(identity.reason));
+  const version =
+    versionRead === undefined ? output("--version") : Effect.succeed(versionRead.output);
+  const fileKey = piBinaryKey(flavor, piSettings, environment);
+  const identify = version.pipe(
+    Effect.flatMap((versionText) => {
+      const probe = piCliProbeForVersion(versionText);
+      switch (probe._tag) {
+        case "Unsupported":
+          return Effect.fail(unsupported(probe.reason));
+        case "Help":
+          return output("--help").pipe(
+            Effect.flatMap((help) => launchable(identifyStockPiCli(flavor, help))),
+          );
+        case "Capabilities":
+          return run("--capabilities").pipe(
+            Effect.flatMap((result) =>
+              launchable(
+                identifyForkPiCli(flavor, { exitCode: result.code, stdout: result.stdout }),
+              ),
+            ),
+          );
+      }
+    }),
+  );
+  return Effect.gen(function* () {
+    const key = versionRead === undefined ? yield* fileKey : versionRead.fileKey;
+    const known = Option.flatMapNullishOr(key, (name) => identifiedFlavors.get(name));
+    if (Option.isSome(known)) return known.value;
+    const detected = yield* identify;
+    // A file that changed while it was probed has no answer worth keeping.
+    const keyAfter = yield* fileKey;
+    if (Option.isSome(key) && Option.isSome(keyAfter) && keyAfter.value === key.value) {
+      identifiedFlavors.set(key.value, detected);
+    }
+    return detected;
+  });
+};
 
 export function buildInitialPiProviderSnapshot(
   flavor: PiFlavor,
@@ -298,7 +431,8 @@ export const checkPiProviderStatus = Effect.fn("checkPiProviderStatus")(function
     });
   }
 
-  const versionResult = yield* runPiVersionCommand(flavor, piSettings, environment).pipe(
+  const fileKeyBeforeVersion = yield* piBinaryKey(flavor, piSettings, environment);
+  const versionResult = yield* runPiCliCommand(flavor, piSettings, environment, "--version").pipe(
     Effect.timeoutOption(VERSION_PROBE_TIMEOUT_MS),
     Effect.result,
   );
@@ -359,6 +493,27 @@ export const checkPiProviderStatus = Effect.fn("checkPiProviderStatus")(function
     });
   }
 
+  const detection = yield* detectPiFlavor(flavor, piSettings, environment, {
+    output: `${versionOutput.stdout}\n${versionOutput.stderr}`,
+    fileKey: fileKeyBeforeVersion,
+  }).pipe(Effect.result);
+  if (Result.isFailure(detection)) {
+    return buildServerProvider({
+      presentation: piPresentation(flavor),
+      enabled: piSettings.enabled,
+      checkedAt,
+      models: fallbackModels,
+      probe: {
+        installed: true,
+        version,
+        status: "error",
+        auth: { status: "unknown" },
+        message: detection.failure.message,
+      },
+    });
+  }
+  const cliFlavor = detection.success;
+
   if (version === null) {
     return buildServerProvider({
       presentation: piPresentation(flavor),
@@ -375,7 +530,11 @@ export const checkPiProviderStatus = Effect.fn("checkPiProviderStatus")(function
     });
   }
 
-  if (compareSemverVersions(version, flavor.minimumVersion) < 0) {
+  if (
+    cliFlavor === flavor &&
+    version !== null &&
+    compareSemverVersions(version, flavor.minimumVersion) < 0
+  ) {
     return buildServerProvider({
       presentation: piPresentation(flavor),
       enabled: piSettings.enabled,
@@ -394,7 +553,7 @@ export const checkPiProviderStatus = Effect.fn("checkPiProviderStatus")(function
   const resolvedLaunchArgs = resolvePiLaunchArgs(piSettings.launchArgs);
   if (!resolvedLaunchArgs.ok) {
     return buildServerProvider({
-      presentation: piPresentation(flavor),
+      presentation: piPresentation(cliFlavor),
       enabled: piSettings.enabled,
       checkedAt,
       models: fallbackModels,
@@ -408,11 +567,27 @@ export const checkPiProviderStatus = Effect.fn("checkPiProviderStatus")(function
     });
   }
 
+  const { accepted: launchArgs, rejected: rejectedLaunchArgs } = piLaunchArgsForFlavor(
+    cliFlavor,
+    resolvedLaunchArgs.args,
+  );
+  /** Launch args T3 left out are a setup problem only the user can fix. */
+  const withLaunchArgsWarning = (probe: ProviderProbeResult): ProviderProbeResult =>
+    rejectedLaunchArgs.length === 0
+      ? probe
+      : {
+          ...probe,
+          status: probe.status === "ready" ? "warning" : probe.status,
+          message: [rejectedPiLaunchArgsNotice(cliFlavor, rejectedLaunchArgs), probe.message]
+            .filter((part) => part !== undefined)
+            .join(" "),
+        };
+
   const discoveryExit = yield* discoverPiViaRpc(
     flavor,
     piSettings,
     environment,
-    resolvedLaunchArgs.args,
+    launchArgs,
     cwd,
   ).pipe(Effect.timeoutOption(PI_RPC_DISCOVERY_TIMEOUT_MS), Effect.exit);
   if (Exit.isFailure(discoveryExit)) {
@@ -420,45 +595,45 @@ export const checkPiProviderStatus = Effect.fn("checkPiProviderStatus")(function
       errorTag: causeErrorTag(discoveryExit.cause),
     });
     return buildServerProvider({
-      presentation: piPresentation(flavor),
+      presentation: piPresentation(cliFlavor),
       enabled: piSettings.enabled,
       checkedAt,
       models: fallbackModels,
-      probe: {
+      probe: withLaunchArgsWarning({
         installed: true,
         version,
         status: "ready",
         auth: { status: "unknown" },
         message: `${flavor.displayName} is available, but T3 Code could not refresh its models and commands. The live session will retry startup.`,
-      },
+      }),
     });
   }
   if (Option.isNone(discoveryExit.value)) {
     return buildServerProvider({
-      presentation: piPresentation(flavor),
+      presentation: piPresentation(cliFlavor),
       enabled: piSettings.enabled,
       checkedAt,
       models: fallbackModels,
-      probe: {
+      probe: withLaunchArgsWarning({
         installed: true,
         version,
         status: "ready",
         auth: { status: "unknown" },
         message: `${flavor.displayName} is available, but model and command discovery needs interactive input. The live session will handle it.`,
-      },
+      }),
     });
   }
 
   const discovery = discoveryExit.value.value;
   const models = piModelsFromSettings(flavor, piSettings.customModels, discovery.models);
   return buildServerProvider({
-    presentation: piPresentation(flavor),
+    presentation: piPresentation(cliFlavor),
     enabled: piSettings.enabled,
     checkedAt,
     models,
     slashCommands: discovery.slashCommands,
     skills: discovery.skills,
-    probe: {
+    probe: withLaunchArgsWarning({
       installed: true,
       version,
       status: discovery.authenticated ? "ready" : "warning",
@@ -471,7 +646,7 @@ export const checkPiProviderStatus = Effect.fn("checkPiProviderStatus")(function
         : {
             message: flavor.loginHint,
           }),
-    },
+    }),
   });
 });
 

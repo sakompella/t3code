@@ -81,14 +81,18 @@ import {
   buildPiRpcLaunch,
   materializePiT3McpExtension,
   materializePiT3Skill,
+  piLaunchArgsForFlavor,
+  rejectedPiLaunchArgsNotice,
   resolvePiLaunchArgs,
 } from "./mcpInjection.ts";
 import {
   PI_FILE_CHANGE_TOOLS,
   T3_NAVIGATE_TREE_COMMAND,
   T3_NAVIGATE_TREE_RESULT_MARKER,
+  T3_ROLLBACK_NOTICE,
 } from "./mcpExtensionSource.ts";
 import { PI_FLAVOR, PRIME_AGENT_FLAVOR, type PiFlavor } from "./flavor.ts";
+import { detectPiFlavor, type PiCliUnsupportedError } from "./status.ts";
 import { resolveKernelMcpAccess } from "./primeAgentT3Mcp.ts";
 
 import type {
@@ -255,6 +259,12 @@ export interface PiAdapterV2Options {
   readonly instanceId: ProviderInstanceId;
   readonly settings: PiSettings;
   readonly environment: NodeJS.ProcessEnv;
+  /**
+   * The flavor the binary speaks, read each time a session opens so a swapped
+   * binary is picked up. Defaults to `flavor`; the drivers probe the binary
+   * (`detectPiFlavor`).
+   */
+  readonly detectFlavor?: Effect.Effect<PiFlavor, PiCliUnsupportedError>;
   readonly continuationRequests?: {
     readonly offer: (
       request: ProviderContinuationRequests.ProviderContinuationRequest,
@@ -375,7 +385,12 @@ function piProviderCapabilities(flavor: PiFlavor): OrchestrationV2ProviderCapabi
   if (flavor.tools === "pi") return PiProviderCapabilitiesV2;
   return {
     ...PiProviderCapabilitiesV2,
-    approvals: { ...PiProviderCapabilitiesV2.approvals, supportsFileChangeApproval: false },
+    approvals: {
+      ...PiProviderCapabilitiesV2.approvals,
+      // Without T3's extension nothing can ask before a tool runs.
+      supportsCommandApproval: flavor.extensions,
+      supportsFileChangeApproval: false,
+    },
     subagents: {
       ...PiProviderCapabilitiesV2.subagents,
       // Observed `rlm_child_update` children get their own T3 thread.
@@ -469,11 +484,21 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
   return ProviderAdapter.ProviderAdapterV2.of({
     instanceId: options.instanceId,
     driver,
+    // The driver's own flavor. An open session reports what its binary supports.
     getCapabilities: () => Effect.succeed(capabilities),
     planSelectionTransition: () => Effect.succeed(turnScopedSelectionTransition()),
     openSession: Effect.fn("PiAdapterV2.openSession")(function* (
       input: ProviderAdapter.ProviderAdapterV2OpenSessionInput,
     ) {
+      const flavor = yield* (options.detectFlavor ?? Effect.succeed(options.flavor)).pipe(
+        Effect.mapError((error) => protocolError(error.message)),
+      );
+      if (!flavor.extensions && input.runtimePolicy.runtimeMode !== "full-access") {
+        return yield* protocolError(
+          `${flavor.displayName} cannot ask before it runs a tool, so it runs only with Full access. Switch this thread to Full access.`,
+        );
+      }
+      const sessionCapabilities = piProviderCapabilities(flavor);
       const scope = yield* Effect.scope;
       const cwd = input.runtimePolicy.cwd ?? host.paths.cwd;
       // Prime Agent reports edited paths through realpath (/tmp is /private/tmp
@@ -502,12 +527,14 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
       // The extension owns both the optional MCP bridge and Pi's permission
       // hook. Materialize it even when this session has no MCP credential so
       // Supervised never silently degrades to unrestricted tool execution.
-      const extensionPath = yield* provideCacheFs(
-        materializePiT3McpExtension(host.paths.providerStatusCacheDir),
-      );
+      const extensionPath = flavor.extensions
+        ? yield* provideCacheFs(materializePiT3McpExtension(host.paths.providerStatusCacheDir))
+        : undefined;
       // An agent with its own MCP client never gets T3's tools natively. It
       // reaches T3 through the t3-code skill once the user declared the server
       // in its settings. Until then the user gets a setup notice.
+      // Seam: the 0.10 fork will get T3's tools from a native `t3` Python
+      // module (Prime fork slice 3). Until it lands, the fork uses this route.
       const kernelMcpAccess =
         mcpSession === undefined || flavor.kernelMcp === null
           ? undefined
@@ -524,15 +551,37 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
         kernelMcpAccess !== undefined && !kernelMcpAccess.declared
           ? kernelMcpAccess.hint
           : undefined;
-      let mcpSetupHintShown = false;
       const resolvedLaunchArgs = resolvePiLaunchArgs(options.settings.launchArgs);
       if (!resolvedLaunchArgs.ok) {
         return yield* protocolError(resolvedLaunchArgs.message);
       }
+      const { accepted: launchArgs, rejected: rejectedLaunchArgs } = piLaunchArgsForFlavor(
+        flavor,
+        resolvedLaunchArgs.args,
+      );
+      const sessionNotices: Array<{
+        readonly key: string;
+        readonly title: string;
+        readonly message: string;
+      }> = [
+        ...(mcpSetupHint === undefined
+          ? []
+          : [{ key: "t3-mcp-setup", title: "T3 Code MCP setup", message: mcpSetupHint }]),
+        ...(rejectedLaunchArgs.length === 0
+          ? []
+          : [
+              {
+                key: "t3-launch-args",
+                title: "Launch arguments left out",
+                message: rejectedPiLaunchArgsNotice(flavor, rejectedLaunchArgs),
+              },
+            ]),
+      ];
+      let sessionNoticesShown = false;
       const launchProcess = (processScope: Scope.Scope, resumeSessionFile?: string) =>
         Effect.gen(function* () {
           const launch = buildPiRpcLaunch({
-            launchArgs: resolvedLaunchArgs.args,
+            launchArgs,
             environment: options.environment,
             mcpSession,
             extensionPath,
@@ -622,6 +671,15 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
             );
       /** Whether T3's extension command for in-place rollback is loaded; null until discovered. */
       let navigateTreeAvailable: boolean | null = null;
+      /**
+       * Set by an in-place rollback the RPC did itself. T3's extension tells the
+       * agent that its kernel kept its state; without one, the next prompt does.
+       * The 0.10 fork reports no leaf id, so its provider thread's head ref
+       * keeps this durable: it names the user entry the conversation was rolled
+       * back before, until the fork accepts a prompt carrying the notice or
+       * lists that entry off its active branch (see `registerThread`).
+       */
+      let rollbackNoticePending = false;
       /** In-place rollbacks waiting for the extension command's reported outcome. */
       const pendingTreeNavigations = new Map<string, Deferred.Deferred<unknown>>();
       let treeNavigationCounter = 0;
@@ -634,7 +692,7 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
         status: "ready",
         cwd,
         model: input.modelSelection.model,
-        capabilities,
+        capabilities: sessionCapabilities,
         createdAt: now,
         updatedAt: now,
         lastError: null,
@@ -717,6 +775,7 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
       const pendingPromptResponses: Array<{
         readonly providerTurnId: OrchestrationV2ProviderTurn["id"];
         readonly kind: "turn_start" | "steer";
+        readonly carriesRollbackNotice?: boolean;
       }> = [];
       const pendingCompactResponses: Array<{
         readonly providerTurnId: OrchestrationV2ProviderTurn["id"];
@@ -1671,9 +1730,13 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
         }
       });
 
-      const emitMcpSetupHint = Effect.fnUntraced(function* (turn: ActivePiTurn, hint: string) {
+      /** A warning about this session's setup, shown once in its first turn. */
+      const emitSessionNotice = Effect.fnUntraced(function* (
+        turn: ActivePiTurn,
+        notice: { readonly key: string; readonly title: string; readonly message: string },
+      ) {
         const emittedAt = yield* DateTime.now;
-        const nativeItemId = `${turn.providerTurn.id}:t3-mcp-setup`;
+        const nativeItemId = `${turn.providerTurn.id}:${notice.key}`;
         yield* emitItemNode(turn, nativeItemId, "system", "completed", emittedAt, emittedAt);
         yield* emit({
           type: "turn_item.updated",
@@ -1681,10 +1744,10 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
           turnItem: {
             ...baseItemFields(turn, nativeItemId, emittedAt, emittedAt),
             status: "completed",
-            title: "T3 Code MCP setup",
+            title: notice.title,
             completedAt: emittedAt,
             type: "system_notice",
-            message: hint,
+            message: notice.message,
             tone: "warning",
           },
         });
@@ -1798,16 +1861,24 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
        * `get_entries` is append-ordered and keeps abandoned branches, so both come from walking
        * the leaf's `parentId` chain, never from list order.
        */
-      /** Active-branch user entry ids from `get_fork_messages`, in branch order. */
+      /**
+       * Active-branch user entry ids from `get_fork_messages`, in branch order.
+       * `None` when the read failed or a listed message has no entry id, since
+       * such a listing cannot show which entries are on the branch.
+       */
       const readUserEntryIds = (timeoutMs = PI_REQUEST_TIMEOUT_MS) =>
         request({ type: "get_fork_messages" }, timeoutMs).pipe(
-          Effect.map((data) => {
-            const messages = recordField(data, "messages");
-            return Array.isArray(messages)
-              ? messages.flatMap((message) => recordString(message, "entryId") ?? [])
-              : [];
-          }),
           Effect.option,
+          Effect.map(
+            Option.flatMap((data): Option.Option<ReadonlyArray<string>> => {
+              const messages = recordField(data, "messages");
+              if (!Array.isArray(messages)) return Option.none();
+              const entryIds = messages.flatMap(
+                (message) => recordString(message, "entryId") ?? [],
+              );
+              return entryIds.length === messages.length ? Option.some(entryIds) : Option.none();
+            }),
+          ),
         );
 
       /**
@@ -1815,7 +1886,13 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
        * fork-messages flavors baseline the user entries already present.
        * `None` when the listing failed.
        */
-      const readSessionTreeBaseline = Effect.fnUntraced(function* () {
+      type SessionTreeBaseline = {
+        readonly leafId: string | null;
+        readonly userEntryIds: ReadonlyArray<string>;
+      };
+      const readSessionTreeBaseline = Effect.fnUntraced(function* (): Effect.fn.Return<
+        Option.Option<SessionTreeBaseline>
+      > {
         if (flavor.sessionTree === "fork_messages") {
           const entryIds = yield* readUserEntryIds();
           return Option.map(entryIds, (userEntryIds) => ({ leafId: null, userEntryIds }));
@@ -1834,10 +1911,7 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
        * empty tree is a success with no leafId.
        */
       const applySessionTreeBaseline = (
-        baseline: Option.Option<{
-          readonly leafId: string | null;
-          readonly userEntryIds: ReadonlyArray<string>;
-        }>,
+        baseline: Option.Option<SessionTreeBaseline>,
       ): string | null => {
         leafCursorStale = Option.isNone(baseline);
         if (flavor.sessionTree === "fork_messages") {
@@ -1855,9 +1929,6 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
         });
         return lastKnownLeaf;
       };
-
-      const baselineSessionTree = () =>
-        readSessionTreeBaseline().pipe(Effect.map(applySessionTreeBaseline));
 
       /**
        * Fork-messages flavors cannot see the leaf, so they only recover the
@@ -2011,7 +2082,8 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
           state,
           {
             status: "idle",
-            ...(treeRefs === null
+            // A wake that ran before the notice's prompt keeps the rollback mark.
+            ...(treeRefs === null || rollbackNoticePending
               ? {}
               : {
                   nativeConversationHeadRef:
@@ -2725,6 +2797,10 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
             const responseTurn =
               pendingPrompt?.providerTurnId === turn?.providerTurn.id ? turn : null;
             if (event["success"] === true) {
+              if (pendingPrompt?.carriesRollbackNotice === true && state !== null) {
+                rollbackNoticePending = false;
+                yield* updateProviderThread(state, { nativeConversationHeadRef: null });
+              }
               // Deferred success ack. Command-only prompts (pure extension
               // slash commands) never start an agent run and never emit
               // `agent_settled`, so probe for idleness. The probe result is
@@ -3096,19 +3172,46 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
                 createdAt,
                 updatedAt: createdAt,
               };
-        threadState = { providerThread, activeTurn: null };
+        const state: PiThreadState = { providerThread, activeTurn: null };
+        threadState = state;
         // Baseline the session tree so the first turn's user entry can be
         // located without a full scan.
-        yield* baselineSessionTree();
+        const treeBaseline = yield* readSessionTreeBaseline();
+        applySessionTreeBaseline(treeBaseline);
+        const rolledBackBefore =
+          flavor.rollback === "rpc_tree" && !needsNewSession
+            ? (providerThread.nativeConversationHeadRef?.nativeId ?? undefined)
+            : undefined;
+        if (rolledBackBefore !== undefined) {
+          rollbackNoticePending = true;
+          // T3 never repeats the move: a wake may have added conversation on
+          // the new branch since. Only a readable listing without the entry
+          // shows that the fork kept the move. A listing that still has it,
+          // or one T3 could not read, leaves the move unconfirmed, which only
+          // the user can repair.
+          const moveKept = Option.exists(
+            treeBaseline,
+            ({ userEntryIds }) => !userEntryIds.includes(rolledBackBefore),
+          );
+          if (!moveKept) {
+            sessionNotices.push({
+              key: "t3-rollback-unconfirmed",
+              title: "Rollback not confirmed",
+              message: `${name} has not confirmed the last rollback after reopening, so the agent may still see the messages it discarded. Update the Prime Agent fork, or roll back again.`,
+            });
+          } else {
+            state.providerThread = { ...providerThread, nativeConversationHeadRef: null };
+          }
+        }
         // What is stored now predates this view of the session.
         yield* reconciler.baseline(nativeId);
         if (publish)
           yield* emit({
             type: "provider_thread.updated",
             driver,
-            providerThread,
+            providerThread: state.providerThread,
           });
-        return providerThread;
+        return state.providerThread;
       });
 
       const applySelection = Effect.fnUntraced(function* (modelSelection: ModelSelection) {
@@ -3220,6 +3323,18 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
             ? `A ${name} extension cancelled the rollback`
             : `${name} rollback failed: ${recordString(result, "error") ?? "unknown error"}`,
         );
+      });
+
+      /** Rolls the conversation back to just before `entryId` with the RPC's `navigate_tree`. */
+      const navigateTreeByRpc = Effect.fnUntraced(function* (entryId: string) {
+        const result = yield* request(
+          { type: "navigate_tree", targetId: entryId },
+          PI_SESSION_TIMEOUT_MS,
+        );
+        if (recordField(result, "cancelled") === true) {
+          return yield* protocolError(`${name} cancelled the rollback`);
+        }
+        rollbackNoticePending = true;
       });
 
       const runtime: ProviderAdapter.ProviderAdapterV2SessionRuntime = {
@@ -3409,15 +3524,19 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
                   kind: "turn_start",
                 });
               } else if (payload !== null) {
+                const carriesRollbackNotice = rollbackNoticePending;
                 yield* connection.send({
                   type: "prompt",
-                  message: payload.message,
+                  message: carriesRollbackNotice
+                    ? `${T3_ROLLBACK_NOTICE}\n\n${payload.message}`
+                    : payload.message,
                   streamingBehavior: "steer",
                   ...(payload.images.length === 0 ? {} : { images: payload.images }),
                 });
                 pendingPromptResponses.push({
                   providerTurnId: providerTurn.id,
                   kind: "turn_start",
+                  carriesRollbackNotice,
                 });
               }
               yield* emit({
@@ -3432,9 +3551,9 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
                 lastRunOrdinal: turnInput.runOrdinal,
               });
               yield* updateProviderSession("running", null);
-              if (mcpSetupHint !== undefined && !mcpSetupHintShown) {
-                mcpSetupHintShown = true;
-                yield* emitMcpSetupHint(activeTurn, mcpSetupHint);
+              if (!sessionNoticesShown) {
+                sessionNoticesShown = true;
+                for (const notice of sessionNotices) yield* emitSessionNotice(activeTurn, notice);
               }
               if (wake !== null) {
                 if (continuation) activeTurn.wakeTrigger = piWakeTrigger(wake.events)?.message;
@@ -3852,27 +3971,32 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
                         }),
                       );
                     });
-                  if (flavor.rollback === "tree") {
-                    const available =
-                      navigateTreeAvailable ??
-                      (yield* request({ type: "get_commands" }).pipe(
-                        Effect.map(hasPiNavigateTreeCommand),
-                        Effect.orElseSucceed(() => false),
-                      ));
-                    navigateTreeAvailable = available;
-                    if (available) {
-                      yield* navigateTreeInPlace(forkEntryId);
-                      const treeBaseline = yield* readSessionTreeBaseline();
-                      return yield* commitAfterDrain(
-                        Effect.gen(function* () {
-                          // Same session file and model; only the branch head moved.
-                          applySessionTreeBaseline(treeBaseline);
-                          cacheMissState = resetCacheBaseline(cacheMissState);
-                          yield* updateProviderThread(state, { nativeConversationHeadRef: null });
-                          return piThreadSnapshot(state.providerThread);
-                        }),
-                      );
-                    }
+                  if (flavor.rollback === "tree" && navigateTreeAvailable === null) {
+                    navigateTreeAvailable = yield* request({ type: "get_commands" }).pipe(
+                      Effect.map(hasPiNavigateTreeCommand),
+                      Effect.orElseSucceed(() => false),
+                    );
+                  }
+                  if (
+                    flavor.rollback === "rpc_tree" ||
+                    (flavor.rollback === "tree" && navigateTreeAvailable === true)
+                  ) {
+                    yield* flavor.rollback === "rpc_tree"
+                      ? navigateTreeByRpc(forkEntryId)
+                      : navigateTreeInPlace(forkEntryId);
+                    const treeBaseline = yield* readSessionTreeBaseline();
+                    return yield* commitAfterDrain(
+                      Effect.gen(function* () {
+                        // Same session file and model; only the branch head moved.
+                        applySessionTreeBaseline(treeBaseline);
+                        cacheMissState = resetCacheBaseline(cacheMissState);
+                        yield* updateProviderThread(state, {
+                          nativeConversationHeadRef:
+                            flavor.rollback === "rpc_tree" ? providerRef(forkEntryId) : null,
+                        });
+                        return piThreadSnapshot(state.providerThread);
+                      }),
+                    );
                   }
                   liveSession = null;
                   const forkData = yield* lifecycleRequest({ type: "fork", entryId: forkEntryId });
@@ -3957,12 +4081,12 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
             // CLI --fork uses Pi's own session format and sets the destination cwd. RPC
             // switch_session/clone alone would retain the source cwd.
             const forkLaunch = buildPiRpcLaunch({
-              launchArgs: resolvedLaunchArgs.args,
+              launchArgs,
               environment: options.environment,
               mcpSession: undefined,
               extensionPath: undefined,
-              disableExtensions: true,
-              disableTools: true,
+              // A CLI without extensions has neither flag and rejects both.
+              ...(flavor.extensions ? { disableExtensions: true, disableTools: true } : {}),
             });
             const nativeId = yield* Effect.scoped(
               Effect.gen(function* () {
@@ -4217,11 +4341,20 @@ function makePiFlavorAdapterV2Driver(
         const hostEnvironment = yield* HostProcess.Environment;
         const continuationRequests =
           yield* ProviderContinuationRequests.ProviderContinuationRequests;
+        const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
+        const settings = { ...input.config, enabled: input.enabled };
+        const environment = yield* mergeProviderInstanceEnvironment(
+          input.environment,
+          hostEnvironment,
+        );
         return yield* makePiAdapterV2({
           flavor,
+          detectFlavor: detectPiFlavor(flavor, settings, environment).pipe(
+            Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner),
+          ),
           instanceId: input.instanceId,
-          settings: { ...input.config, enabled: input.enabled },
-          environment: yield* mergeProviderInstanceEnvironment(input.environment, hostEnvironment),
+          settings,
+          environment,
           continuationRequests,
         });
       },
