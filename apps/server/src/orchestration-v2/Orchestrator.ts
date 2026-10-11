@@ -461,6 +461,35 @@ function isGoalCommand(message: {
 
 const threadPullRequestLinksEqual = Schema.toEquivalence(Schema.NullOr(ThreadLinkedPullRequest));
 
+/** The modes and model a limited sender's command is checked against. */
+interface DispatchThreadModes {
+  readonly runtimeMode: RuntimeMode;
+  readonly interactionMode: ProviderInteractionMode;
+  readonly modelSelection: ModelSelection;
+}
+
+/** What `thread` runs in once `command` applies: a new model can change the mode it runs in. */
+function threadAfterCommand(
+  command: OrchestrationV2ServerCommand,
+  thread: DispatchThreadModes,
+): DispatchThreadModes {
+  switch (command.type) {
+    case "provider.switch":
+    case "thread.model-selection.set":
+      return { ...thread, modelSelection: command.modelSelection };
+    case "message.dispatch":
+      return command.modelSelection === undefined
+        ? thread
+        : { ...thread, modelSelection: command.modelSelection };
+    case "thread.runtime-mode.set":
+      return { ...thread, runtimeMode: command.runtimeMode };
+    case "thread.interaction-mode.set":
+      return { ...thread, interactionMode: command.interactionMode };
+    default:
+      return thread;
+  }
+}
+
 function commandThreadId(command: OrchestrationV2ServerCommand): ThreadId {
   switch (command.type) {
     case "thread.create":
@@ -3557,24 +3586,37 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
     },
   );
 
+  const runModes = (thread: DispatchThreadModes) =>
+    runtimePolicy
+      .runtimeMode(thread)
+      .pipe(
+        Effect.map((runtimeMode) => ({ runtimeMode, interactionMode: thread.interactionMode })),
+      );
+
+  /**
+   * Fails when a limited sender's command would touch a thread running above
+   * its limit. `thread` is what the command leaves the thread running in. The
+   * calling thread may keep the modes it already runs in (`before`), but not
+   * broaden them.
+   */
   const refuseAboveDispatchModeLimit = Effect.fn("orchestrationV2.dispatch.refuseAboveModeLimit")(
     function* (
       command: OrchestrationV2ServerCommand,
       threadId: ThreadId,
-      thread: {
-        readonly runtimeMode: RuntimeMode;
-        readonly interactionMode: ProviderInteractionMode;
-        readonly modelSelection: ModelSelection;
-      },
+      thread: DispatchThreadModes,
+      before: DispatchThreadModes = thread,
     ) {
       const limit = yield* DispatchModeLimit;
-      if (limit === undefined || threadId === limit.callerThreadId) return;
-      const modes = {
-        runtimeMode: yield* runtimePolicy.runtimeMode(thread),
-        interactionMode: thread.interactionMode,
-      };
+      if (limit === undefined) return;
+      const modes = yield* runModes(thread);
       const exceeded = exceededDispatchModeLimit(limit, modes);
       if (exceeded === undefined) return;
+      if (
+        threadId === limit.callerThreadId &&
+        exceededDispatchModeLimit(yield* runModes(before), modes) === undefined
+      ) {
+        return;
+      }
       const refusal = { threadId, mode: exceeded, ...modes };
       if (limit.refused !== undefined) yield* Ref.set(limit.refused, refusal);
       return yield* new OrchestratorThreadAboveModeLimitError({
@@ -11094,7 +11136,14 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       const shell = yield* projectionStore
         .getThreadShell(threadId)
         .pipe(Effect.mapError((cause) => new OrchestratorProjectionError({ threadId, cause })));
-      if (shell !== null) yield* refuseAboveDispatchModeLimit(command, threadId, shell);
+      if (shell !== null) {
+        yield* refuseAboveDispatchModeLimit(
+          command,
+          threadId,
+          threadAfterCommand(command, shell),
+          shell,
+        );
+      }
       // A new thread runs in the modes it is created with, on its provider.
       if (shell === null && command.type === "thread.create") {
         yield* refuseAboveDispatchModeLimit(command, threadId, command);
