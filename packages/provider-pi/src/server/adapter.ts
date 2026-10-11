@@ -559,7 +559,11 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
         flavor,
         resolvedLaunchArgs.args,
       );
-      const sessionNotices = [
+      const sessionNotices: Array<{
+        readonly key: string;
+        readonly title: string;
+        readonly message: string;
+      }> = [
         ...(mcpSetupHint === undefined
           ? []
           : [{ key: "t3-mcp-setup", title: "T3 Code MCP setup", message: mcpSetupHint }]),
@@ -672,7 +676,8 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
        * agent that its kernel kept its state; without one, the next prompt does.
        * The 0.10 fork reports no leaf id, so its provider thread's head ref
        * keeps this durable: it names the user entry the conversation was rolled
-       * back before, until a prompt carries the notice (see `registerThread`).
+       * back before, until the fork accepts a prompt carrying the notice or
+       * lists that entry off its active branch (see `registerThread`).
        */
       let rollbackNoticePending = false;
       /** In-place rollbacks waiting for the extension command's reported outcome. */
@@ -770,6 +775,7 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
       const pendingPromptResponses: Array<{
         readonly providerTurnId: OrchestrationV2ProviderTurn["id"];
         readonly kind: "turn_start" | "steer";
+        readonly carriesRollbackNotice?: boolean;
       }> = [];
       const pendingCompactResponses: Array<{
         readonly providerTurnId: OrchestrationV2ProviderTurn["id"];
@@ -2783,6 +2789,10 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
             const responseTurn =
               pendingPrompt?.providerTurnId === turn?.providerTurn.id ? turn : null;
             if (event["success"] === true) {
+              if (pendingPrompt?.carriesRollbackNotice === true && state !== null) {
+                rollbackNoticePending = false;
+                yield* updateProviderThread(state, { nativeConversationHeadRef: null });
+              }
               // Deferred success ack. Command-only prompts (pure extension
               // slash commands) never start an agent run and never emit
               // `agent_settled`, so probe for idleness. The probe result is
@@ -3154,7 +3164,8 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
                 createdAt,
                 updatedAt: createdAt,
               };
-        threadState = { providerThread, activeTurn: null };
+        const state: PiThreadState = { providerThread, activeTurn: null };
+        threadState = state;
         // Baseline the session tree so the first turn's user entry can be
         // located without a full scan.
         yield* baselineSessionTree();
@@ -3164,11 +3175,18 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
             : undefined;
         if (rolledBackBefore !== undefined) {
           rollbackNoticePending = true;
-          // A fork build that does not persist the move reopens on the
-          // discarded branch. Moving again is a no-op where it did persist.
+          // T3 never repeats the move: a wake may have added conversation on
+          // the new branch since. A fork that lists the entry off its active
+          // branch kept the move. One that still lists it may have reopened
+          // on the discarded branch, which only the user can repair.
           if (knownUserEntryIds.has(rolledBackBefore)) {
-            yield* navigateTreeByRpc(rolledBackBefore);
-            yield* baselineSessionTree();
+            sessionNotices.push({
+              key: "t3-rollback-unconfirmed",
+              title: "Rollback not confirmed",
+              message: `${name} has not confirmed the last rollback after reopening, so the agent may still see the messages it discarded. Update the Prime Agent fork, or roll back again.`,
+            });
+          } else {
+            state.providerThread = { ...providerThread, nativeConversationHeadRef: null };
           }
         }
         // What is stored now predates this view of the session.
@@ -3177,9 +3195,9 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
           yield* emit({
             type: "provider_thread.updated",
             driver,
-            providerThread,
+            providerThread: state.providerThread,
           });
-        return providerThread;
+        return state.providerThread;
       });
 
       const applySelection = Effect.fnUntraced(function* (modelSelection: ModelSelection) {
@@ -3492,22 +3510,19 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
                   kind: "turn_start",
                 });
               } else if (payload !== null) {
-                const message = rollbackNoticePending
-                  ? `${T3_ROLLBACK_NOTICE}\n\n${payload.message}`
-                  : payload.message;
-                if (rollbackNoticePending) {
-                  rollbackNoticePending = false;
-                  yield* updateProviderThread(state, { nativeConversationHeadRef: null });
-                }
+                const carriesRollbackNotice = rollbackNoticePending;
                 yield* connection.send({
                   type: "prompt",
-                  message,
+                  message: carriesRollbackNotice
+                    ? `${T3_ROLLBACK_NOTICE}\n\n${payload.message}`
+                    : payload.message,
                   streamingBehavior: "steer",
                   ...(payload.images.length === 0 ? {} : { images: payload.images }),
                 });
                 pendingPromptResponses.push({
                   providerTurnId: providerTurn.id,
                   kind: "turn_start",
+                  carriesRollbackNotice,
                 });
               }
               yield* emit({
