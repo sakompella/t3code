@@ -313,4 +313,28 @@ describe("scheduled task model defaults", () => {
       ),
     ).toBeNull();
   });
+  it.each([
+    { warning: "codex", ready: "primeAgent" },
+    { warning: "primeAgent", ready: "codex" },
+  ])(
+    "starts on the ready provider, not a warning one listed first ($warning first)",
+    ({ warning, ready }) => {
+      const provider = (driver: string, status: "ready" | "warning") => ({
+        ...config.providers[0]!,
+        instanceId: ProviderInstanceId.make(driver),
+        driver,
+        status,
+      });
+      expect(
+        resolve(
+          {
+            ...config,
+            settings: { ...config.settings, defaultModelSelection: null },
+            providers: [provider(warning, "warning"), provider(ready, "ready")] as never,
+          },
+          null,
+        )?.instanceId,
+      ).toEqual(ready);
+    },
+  );
 });
