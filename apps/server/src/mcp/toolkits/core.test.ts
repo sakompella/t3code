@@ -34,7 +34,7 @@ import {
 
 import * as ServerSecretStore from "../../auth/ServerSecretStore.ts";
 import * as ServerConfig from "../../config.ts";
-import type { ProviderAdapterV2Shape } from "../../orchestration-v2/ProviderAdapter.ts";
+import type { ProviderAdapterV2 } from "@t3tools/provider-core/server/ProviderAdapter";
 import * as ProviderAdapterRegistry from "../../orchestration-v2/ProviderAdapterRegistry.ts";
 import * as ThreadLaunchService from "../../orchestration-v2/ThreadLaunchService.ts";
 import * as GitVcsDriver from "../../vcs/GitVcsDriver.ts";
@@ -81,6 +81,8 @@ import {
   resolveT3McpToolSummaryAction,
 } from "@t3tools/shared/t3McpToolPresentation";
 import { htmlRenderFromToolItem } from "@t3tools/shared/toolOutput";
+
+type ProviderAdapterV2Shape = ProviderAdapterV2["Service"];
 
 const decodeMcpAttachmentInput = Schema.decodeUnknownEffect(McpAttachmentInput);
 const decodeThreadReadResult = Schema.decodeUnknownEffect(OrchestratorMcpThreadReadResult);

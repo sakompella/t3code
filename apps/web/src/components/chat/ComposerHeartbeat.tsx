@@ -16,7 +16,6 @@ export function heartbeatBannerItem(
     id: `heartbeat:${threadId}`,
     variant: "info",
     priority: "notice",
-    compact: true,
     icon: <HeartPulseIcon />,
     title: presentation.title,
     ...(presentation.detail === null ? {} : { description: presentation.detail }),

@@ -51,6 +51,11 @@ export interface PiFlavor {
    */
   readonly wakeNotices: boolean;
   /**
+   * Whether the adapter aborts a pending auto-retry before it replaces the
+   * session. Prime Agent disposes a replaced session without cancelling it.
+   */
+  readonly abortsRetryOnSwitch: boolean;
+  /**
    * How rollback rewinds the native conversation. `fork` writes a new session
    * file; `tree` moves the branch head inside the same file through T3's
    * extension command, falling back to `fork` when the extension is absent.
@@ -147,6 +152,7 @@ export const PI_FLAVOR: PiFlavor = {
   sessionTree: "entries",
   tools: "pi",
   wakeNotices: false,
+  abortsRetryOnSwitch: false,
   rollback: "fork",
   lossyStream: false,
   cacheMissNotices: false,
@@ -172,6 +178,7 @@ export const PRIME_AGENT_FLAVOR: PiFlavor = {
   sessionTree: "fork_messages",
   tools: "ipython",
   wakeNotices: true,
+  abortsRetryOnSwitch: true,
   rollback: "tree",
   lossyStream: true,
   cacheMissNotices: true,

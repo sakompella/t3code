@@ -1776,7 +1776,7 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
       });
 
       const { emitMidRunWakeNotice } = makePrimeAgentWakeNotices({
-        enabled: flavor.selfWakes === "continuation",
+        enabled: flavor.wakeNotices,
         driver,
         handleOf: backgroundJobs.handleOf,
         items: { emit, emitItemNode, baseItemFields },
@@ -1841,10 +1841,12 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
       ): string | null => {
         leafCursorStale = Option.isNone(baseline);
         if (flavor.sessionTree === "fork_messages") {
-          knownUserEntryIds = new Set(Option.match(baseline, {
-            onNone: () => [],
-            onSome: (value) => value.userEntryIds,
-          }));
+          knownUserEntryIds = new Set(
+            Option.match(baseline, {
+              onNone: () => [],
+              onSome: (value) => value.userEntryIds,
+            }),
+          );
           return null;
         }
         lastKnownLeaf = Option.match(baseline, {
@@ -2180,7 +2182,9 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
             providerThreadId: state.providerThread.id,
             driver,
             detail: null,
-            ...(flavor.wakeNotices ? { notification: piWakeNotification(wake.events, name, backgroundJobs.handleOf) } : {}),
+            ...(flavor.wakeNotices
+              ? { notification: piWakeNotification(wake.events, name, backgroundJobs.handleOf) }
+              : {}),
             delivery: "adapter_buffered",
             dispatchIfCurrent: (dispatch) =>
               sessionEventPermit.withPermits(1)(
@@ -2998,7 +3002,7 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
           baselineModel = null;
           baselineThinking = null;
           contextWindow = null;
-          if (flavor.selfWakes === "continuation") {
+          if (flavor.abortsRetryOnSwitch) {
             // Prime Agent disposes the replaced session without cancelling a
             // pending auto-retry. The retry would still fire later and send
             // the failed request again, on the old model.
