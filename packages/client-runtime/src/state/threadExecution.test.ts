@@ -590,7 +590,7 @@ describe("presentPendingBackgroundWork", () => {
     ).toMatchObject({ title: "Running: Watch PR", waiting: false });
     expect(
       presentPendingBackgroundWork([{ taskId: "a", kind: "monitor", description: "Watch PR" }]),
-    ).toMatchObject({ title: "Waiting on monitor Watch PR", waiting: true });
+    ).toMatchObject({ title: "Watch PR", waiting: true });
   });
 
   it("groups work by kind, subagents first, and keeps each name", () => {
