@@ -1,9 +1,9 @@
 import {
   DEFAULT_SERVER_SETTINGS,
   type ModelSelection,
-  offeredRuntimeModes,
+  newThreadRuntimeMode,
   type ProviderInstanceId,
-  providerRuntimeMode,
+  runtimeModesForNewThreads,
   type WorktreeSubmodules,
 } from "@t3tools/contracts";
 import { createModelSelection } from "@t3tools/shared/model";
@@ -76,13 +76,26 @@ export function ProjectDefaultsSettings({ category }: { category: ProjectSetting
   const activeEntry = entries.find((entry) => entry.instanceId === selection?.instanceId);
   const mixedModel = useScopedSettingsMixed(["defaultModelSelection"]);
   const mixedPermissions = useScopedSettingsMixed(["defaultRuntimeMode"]);
-  // A default the default provider does not offer runs as the mode shown here.
-  const defaultRuntimeModes = offeredRuntimeModes(activeEntry?.snapshot.supportedRuntimeModes);
-  const defaultRuntimeMode = providerRuntimeMode(
-    settings.defaultRuntimeMode,
-    activeEntry?.snapshot.supportedRuntimeModes,
-  );
-  const PermissionIcon = runtimeModeConfig[defaultRuntimeMode].icon;
+  // Each selected target offers what its new threads can run in, and a
+  // default a provider does not offer runs as the mode shown here.
+  const newThreadDefaults = targets.flatMap((candidate) => {
+    const config = environments.find(
+      (environment) => environment.environmentId === candidate.environmentId,
+    )?.serverConfig;
+    return config
+      ? [
+          {
+            providers: config.providers,
+            defaultModelSelection: candidate.settings.defaultModelSelection,
+            defaultRuntimeMode: candidate.settings.defaultRuntimeMode,
+          },
+        ]
+      : [];
+  });
+  const defaultRuntimeModes = runtimeModesForNewThreads(newThreadDefaults);
+  const shownDefaultRuntimeMode = newThreadRuntimeMode(newThreadDefaults);
+  const PermissionIcon =
+    runtimeModeConfig[shownDefaultRuntimeMode ?? settings.defaultRuntimeMode].icon;
   const mixedWorkspace = useScopedSettingsMixed(["defaultThreadEnvMode"]);
   const mixedSubmodules = useScopedSettingsMixed(["worktreeSubmodules"]);
   const mixedBrowser = useScopedSettingsMixed(["enableAgentBrowserAccess"]);
@@ -302,17 +315,19 @@ export function ProjectDefaultsSettings({ category }: { category: ProjectSetting
             }
             control={
               <Select
-                value={mixedPermissions ? null : defaultRuntimeMode}
+                value={shownDefaultRuntimeMode}
                 onValueChange={(value) => {
                   if (value) updateSettings({ defaultRuntimeMode: value });
                 }}
               >
                 <SelectTrigger size="sm" aria-label="Default permissions">
-                  {!mixedPermissions && (
+                  {shownDefaultRuntimeMode !== null && (
                     <PermissionIcon className="size-3.5 shrink-0 text-muted-foreground" />
                   )}
                   <SelectValue>
-                    {mixedPermissions ? "Mixed" : runtimeModeConfig[defaultRuntimeMode].label}
+                    {shownDefaultRuntimeMode === null
+                      ? "Mixed"
+                      : runtimeModeConfig[shownDefaultRuntimeMode].label}
                   </SelectValue>
                 </SelectTrigger>
                 <SelectPopup align="end" alignItemWithTrigger={false}>

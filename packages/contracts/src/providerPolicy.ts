@@ -54,6 +54,59 @@ export function providerRuntimeMode(
   return offered.includes(runtimeMode) ? runtimeMode : (offered[0] ?? runtimeMode);
 }
 
+/** Where new threads start: a target's providers and its default model and permissions. */
+export interface NewThreadDefaults {
+  readonly providers: ReadonlyArray<{
+    readonly instanceId: string;
+    readonly enabled?: boolean;
+    readonly supportedRuntimeModes?: ReadonlyArray<RuntimeMode> | undefined;
+  }>;
+  readonly defaultModelSelection: { readonly instanceId: string } | null;
+  readonly defaultRuntimeMode: RuntimeMode;
+}
+
+/**
+ * The runtime modes a new thread can run in on `target`: its default
+ * provider's, or, when the default is unset or names no enabled provider, the
+ * modes every enabled provider offers, since it may start on any of them.
+ */
+function newThreadOfferedModes(target: NewThreadDefaults): ReadonlyArray<RuntimeMode> {
+  const enabled = target.providers.filter((provider) => provider.enabled !== false);
+  const byDefault = enabled.find(
+    (provider) => provider.instanceId === target.defaultModelSelection?.instanceId,
+  );
+  return (byDefault === undefined ? enabled : [byDefault]).reduce<ReadonlyArray<RuntimeMode>>(
+    (offered, provider) => {
+      const providerOffers = offeredRuntimeModes(provider.supportedRuntimeModes);
+      return offered.filter((mode) => providerOffers.includes(mode));
+    },
+    RuntimeMode.literals,
+  );
+}
+
+/** The default permissions a picker may offer: modes new threads can run in on every target. */
+export function runtimeModesForNewThreads(
+  targets: ReadonlyArray<NewThreadDefaults>,
+): ReadonlyArray<RuntimeMode> {
+  return targets.reduce<ReadonlyArray<RuntimeMode>>((offered, target) => {
+    const targetOffers = newThreadOfferedModes(target);
+    return offered.filter((mode) => targetOffers.includes(mode));
+  }, RuntimeMode.literals);
+}
+
+/** The mode new threads run in on every target, or null when targets differ. */
+export function newThreadRuntimeMode(
+  targets: ReadonlyArray<NewThreadDefaults>,
+): RuntimeMode | null {
+  const modes = new Set(
+    targets.map((target) =>
+      providerRuntimeMode(target.defaultRuntimeMode, newThreadOfferedModes(target)),
+    ),
+  );
+  const [mode] = modes;
+  return modes.size === 1 && mode !== undefined ? mode : null;
+}
+
 export const ProviderInteractionMode = Schema.Literals(["default", "plan"]);
 export type ProviderInteractionMode = typeof ProviderInteractionMode.Type;
 export const DEFAULT_PROVIDER_INTERACTION_MODE: ProviderInteractionMode = "default";
