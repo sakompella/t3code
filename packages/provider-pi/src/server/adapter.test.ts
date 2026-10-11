@@ -10863,7 +10863,7 @@ describe("PiAdapterV2 reaching T3 through the kernel's MCP client", () => {
 });
 
 describe("PiAdapterV2 on the Prime Agent 0.10 fork", () => {
-  const FORK_CLI = { version: "0.10.0", help: PRIME_AGENT_FORK_HELP, helpExitCode: 0 };
+  const FORK_CLI = { version: "0.10.0+t3fork.1", help: PRIME_AGENT_FORK_HELP, helpExitCode: 0 };
 
   /**
    * Opens a session through the Prime Agent driver, as production does, on a
@@ -10947,10 +10947,8 @@ describe("PiAdapterV2 on the Prime Agent 0.10 fork", () => {
 
   it.effect.each([
     { version: "0.9.8", help: PRIME_AGENT_098_HELP, loadsExtension: true },
-    { version: "0.10.0", help: PRIME_AGENT_FORK_HELP, loadsExtension: false },
-    { version: "0.10.1-beta.3", help: PRIME_AGENT_FORK_HELP, loadsExtension: false },
-    { version: "0.10", help: PRIME_AGENT_FORK_HELP, loadsExtension: false },
-    { version: "nightly", help: PRIME_AGENT_FORK_HELP, loadsExtension: false },
+    { version: "0.10.0+t3fork.1", help: PRIME_AGENT_FORK_HELP, loadsExtension: false },
+    { version: "0.10.1-beta.3+t3fork.2", help: PRIME_AGENT_FORK_HELP, loadsExtension: false },
   ])(
     "launches $version with T3's extension: $loadsExtension",
     ({ version, help, loadsExtension }) =>
@@ -10964,21 +10962,33 @@ describe("PiAdapterV2 on the Prime Agent 0.10 fork", () => {
   );
 
   it.effect.each([
-    { name: "a help run that fails", help: "", helpExitCode: 1 },
+    { name: "a help run that fails", version: "0.9.8", help: "", helpExitCode: 1 },
     {
       name: "help that names no Prime Agent options",
+      version: "0.9.8",
       help: "usage: tool [args]\n",
       helpExitCode: 0,
     },
-  ])("does not launch a binary whose flavor it cannot tell, from $name", ({ help, helpExitCode }) =>
-    Effect.gen(function* () {
-      const fake = yield* makeFakePi;
-      const error = yield* openPrimeAgent(fake, {
-        cli: { version: "0.9.8", help, helpExitCode },
-      }).pipe(Effect.flip);
-      assert.include(String(error.message), "prime-agent");
-      assert.deepEqual(fake.lastSpawn().args, [], "no RPC process may start");
-    }).pipe(Effect.scoped, Effect.provide(layerTest)),
+    {
+      name: "stock Prime Agent 0.10",
+      version: "0.10.0",
+      help: PRIME_AGENT_FORK_HELP,
+      helpExitCode: 0,
+      reason: "stock Prime Agent 0.10 is not supported; install the T3 fork",
+    },
+    { name: "a nightly label", version: "nightly", help: PRIME_AGENT_FORK_HELP, helpExitCode: 0 },
+  ])(
+    "does not launch a binary it cannot identify, from $name",
+    ({ version, help, helpExitCode, reason }) =>
+      Effect.gen(function* () {
+        const fake = yield* makeFakePi;
+        const error = yield* openPrimeAgent(fake, {
+          cli: { version, help, helpExitCode },
+        }).pipe(Effect.flip);
+        assert.include(String(error.message), "prime-agent");
+        if (reason !== undefined) assert.include(String(error.message), reason);
+        assert.deepEqual(fake.lastSpawn().args, [], "no RPC process may start");
+      }).pipe(Effect.scoped, Effect.provide(layerTest)),
   );
 
   it.effect("forks a session without the extension flags the fork rejects", () =>
