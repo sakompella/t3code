@@ -26,7 +26,7 @@ import {
   piRecordString as recordString,
 } from "./rpc.ts";
 import * as ProviderLatestVersions from "@t3tools/provider-core/server/ProviderLatestVersions";
-import type { PiFlavor } from "./flavor.ts";
+import { piFlavorForVersion, type PiFlavor } from "./flavor.ts";
 import {
   buildServerProvider,
   isCommandMissingCause,
@@ -235,6 +235,31 @@ const runPiVersionCommand = (
     );
   });
 
+/**
+ * The flavor the configured binary speaks, read from its `--version`. A read
+ * that fails or times out keeps the driver's own flavor, whose launch then
+ * reports what went wrong.
+ */
+export const detectPiFlavor = (
+  flavor: PiFlavor,
+  piSettings: PiSettings,
+  environment: NodeJS.ProcessEnv,
+): Effect.Effect<PiFlavor, never, ChildProcessSpawner.ChildProcessSpawner> =>
+  flavor.successor === undefined
+    ? Effect.succeed(flavor)
+    : runPiVersionCommand(flavor, piSettings, environment).pipe(
+        Effect.timeoutOption(VERSION_PROBE_TIMEOUT_MS),
+        Effect.map((output) =>
+          Option.isSome(output) && output.value.code === 0
+            ? piFlavorForVersion(
+                flavor,
+                parseGenericCliVersion(`${output.value.stdout}\n${output.value.stderr}`),
+              )
+            : flavor,
+        ),
+        Effect.orElseSucceed(() => flavor),
+      );
+
 export function buildInitialPiProviderSnapshot(
   flavor: PiFlavor,
   piSettings: PiSettings,
@@ -391,10 +416,11 @@ export const checkPiProviderStatus = Effect.fn("checkPiProviderStatus")(function
     });
   }
 
+  const cliFlavor = piFlavorForVersion(flavor, version);
   const resolvedLaunchArgs = resolvePiLaunchArgs(piSettings.launchArgs);
   if (!resolvedLaunchArgs.ok) {
     return buildServerProvider({
-      presentation: piPresentation(flavor),
+      presentation: piPresentation(cliFlavor),
       enabled: piSettings.enabled,
       checkedAt,
       models: fallbackModels,
@@ -420,7 +446,7 @@ export const checkPiProviderStatus = Effect.fn("checkPiProviderStatus")(function
       errorTag: causeErrorTag(discoveryExit.cause),
     });
     return buildServerProvider({
-      presentation: piPresentation(flavor),
+      presentation: piPresentation(cliFlavor),
       enabled: piSettings.enabled,
       checkedAt,
       models: fallbackModels,
@@ -435,7 +461,7 @@ export const checkPiProviderStatus = Effect.fn("checkPiProviderStatus")(function
   }
   if (Option.isNone(discoveryExit.value)) {
     return buildServerProvider({
-      presentation: piPresentation(flavor),
+      presentation: piPresentation(cliFlavor),
       enabled: piSettings.enabled,
       checkedAt,
       models: fallbackModels,
@@ -452,7 +478,7 @@ export const checkPiProviderStatus = Effect.fn("checkPiProviderStatus")(function
   const discovery = discoveryExit.value.value;
   const models = piModelsFromSettings(flavor, piSettings.customModels, discovery.models);
   return buildServerProvider({
-    presentation: piPresentation(flavor),
+    presentation: piPresentation(cliFlavor),
     enabled: piSettings.enabled,
     checkedAt,
     models,

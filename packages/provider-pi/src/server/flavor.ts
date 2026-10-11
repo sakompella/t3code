@@ -12,6 +12,7 @@ import { ProviderDriverKind } from "@t3tools/contracts";
 import * as Duration from "effect/Duration";
 
 import { expandHomePath } from "@t3tools/provider-core/server/pathExpansion";
+import { compareSemverVersions } from "@t3tools/shared/semver";
 
 export interface PiFlavor {
   readonly driverKind: ProviderDriverKind;
@@ -58,9 +59,22 @@ export interface PiFlavor {
   /**
    * How rollback rewinds the native conversation. `fork` writes a new session
    * file; `tree` moves the branch head inside the same file through T3's
-   * extension command, falling back to `fork` when the extension is absent.
+   * extension command, falling back to `fork` when the extension is absent;
+   * `rpc_tree` moves it with the RPC's own `navigate_tree` command.
    */
-  readonly rollback: "fork" | "tree";
+  readonly rollback: "fork" | "tree" | "rpc_tree";
+  /**
+   * Whether the CLI loads TypeScript extensions. T3 then loads its own
+   * (`--extension`), which holds the only approval hook, and turns
+   * extensions and tools off for headless helpers (`--no-extensions
+   * --no-tools`). The Prime Agent 0.10 fork rejects all three flags.
+   */
+  readonly extensions: boolean;
+  /**
+   * The flavor that a CLI at `successor.minimumVersion` or newer speaks
+   * instead. The adapter reads `--version` when it opens a session.
+   */
+  readonly successor?: PiFlavor;
   /**
    * Whether the RPC can drop stream events. Prime Agent's RPC rides its
    * daemon socket and resyncs instead of queueing when that socket backs up,
@@ -154,6 +168,7 @@ export const PI_FLAVOR: PiFlavor = {
   wakeNotices: false,
   abortsRetryOnSwitch: false,
   rollback: "fork",
+  extensions: true,
   lossyStream: false,
   cacheMissNotices: false,
   childThreads: false,
@@ -163,7 +178,8 @@ export const PI_FLAVOR: PiFlavor = {
   resumesAtLaunch: false,
 };
 
-export const PRIME_AGENT_FLAVOR: PiFlavor = {
+/** Prime Agent 0.9.8, the TypeScript release. */
+const primeAgent098 = {
   driverKind: ProviderDriverKind.make("primeAgent"),
   displayName: "Prime Agent",
   defaultBinary: "prime-agent",
@@ -180,6 +196,7 @@ export const PRIME_AGENT_FLAVOR: PiFlavor = {
   wakeNotices: true,
   abortsRetryOnSwitch: true,
   rollback: "tree",
+  extensions: true,
   lossyStream: true,
   cacheMissNotices: true,
   childThreads: true,
@@ -187,7 +204,36 @@ export const PRIME_AGENT_FLAVOR: PiFlavor = {
   heartbeats: true,
   terminationGrace: Duration.seconds(15),
   resumesAtLaunch: true,
+} satisfies PiFlavor;
+
+/**
+ * The `sakompella/prime-agent` fork of the Rust Prime Agent 0.10. Its RPC
+ * runs in the daemon (RLM children, agent messages, heartbeats, wakes),
+ * speaks the 0.9.8 commands and frames, and adds `navigate_tree`. It has no
+ * extensions, so T3 cannot gate tools before they run.
+ */
+export const PRIME_AGENT_FORK_FLAVOR: PiFlavor = {
+  ...primeAgent098,
+  displayName: "Prime Agent (fork, 0.10)",
+  minimumVersion: "0.10.0",
+  rollback: "rpc_tree",
+  extensions: false,
 };
+
+export const PRIME_AGENT_FLAVOR: PiFlavor = {
+  ...primeAgent098,
+  successor: PRIME_AGENT_FORK_FLAVOR,
+};
+
+/** The flavor a CLI that reports `version` speaks, starting from its driver's flavor. */
+export function piFlavorForVersion(flavor: PiFlavor, version: string | null): PiFlavor {
+  const successor = flavor.successor;
+  return successor !== undefined &&
+    version !== null &&
+    compareSemverVersions(version, successor.minimumVersion) >= 0
+    ? piFlavorForVersion(successor, version)
+    : flavor;
+}
 
 /**
  * Whether this driver's agents call T3's MCP tools from code in their kernel.
