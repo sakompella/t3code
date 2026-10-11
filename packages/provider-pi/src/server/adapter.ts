@@ -1985,8 +1985,9 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
         }
         const treeRefs =
           turn.stopTreeRefs !== undefined ? turn.stopTreeRefs : yield* captureTurnTreeRefs();
+        // A null ref means the turn left nothing on the active branch.
         const nativeTurnRef =
-          turn.startTurnRef != null ? turn.startTurnRef : (treeRefs?.nativeTurnRef ?? undefined);
+          turn.startTurnRef != null ? turn.startTurnRef : treeRefs?.nativeTurnRef;
         const tokenUsage = processAlive
           ? yield* readTokenUsage(turn.latestCompactionAfterTokens, completedAt)
           : undefined;
