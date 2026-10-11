@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vite-plus/test";
 
 import {
+  ProviderInstanceId,
   providerForNewThread,
   providerRuntimeMode,
   type ModelSelection,
@@ -61,7 +62,10 @@ const codex = (status: ServerProviderState, options: Partial<FixtureProvider> = 
 const configOf = (providers: ReadonlyArray<FixtureProvider>) =>
   ({ providers }) as unknown as ServerConfig;
 
-const selectionOn = (instanceId: string): ModelSelection => ({ instanceId, model: "default" });
+const selectionOn = (instanceId: string): ModelSelection => ({
+  instanceId: ProviderInstanceId.make(instanceId),
+  model: "default",
+});
 
 /** The new-task flow's resolution of a fresh draft, as `new-task-flow-provider` wires it. */
 function startOfFreshDraft(
@@ -77,6 +81,7 @@ function startOfFreshDraft(
     configuredDefaultSelection: defaultModelSelection,
     stickySelection: sticky,
     config,
+    projectId: null,
     modelOptions: buildModelOptions(config, projectDefaultSelection ?? sticky),
   });
 }
@@ -164,8 +169,9 @@ const startScenarios: ReadonlyArray<{
 ];
 
 describe("the provider a fresh mobile thread starts on", () => {
-  for (const { name, providers, defaultModelSelection } of startScenarios) {
-    it(`is the provider every surface starts on, for ${name}`, () => {
+  it.each(startScenarios)(
+    "is the provider every surface starts on, for $name",
+    ({ providers, defaultModelSelection }) => {
       const config = configOf(providers);
       const started = startOfFreshDraft(config, defaultModelSelection);
 
@@ -181,9 +187,12 @@ describe("the provider a fresh mobile thread starts on", () => {
       );
       expect(shown).toBe(runs);
       expect(offered).toContain(runs);
-    });
+    },
+  );
 
-    it(`is the provider scheduled tasks start on, for ${name}`, () => {
+  it.each(startScenarios)(
+    "is the provider scheduled tasks start on, for $name",
+    ({ providers, defaultModelSelection }) => {
       const config = {
         ...configOf(providers),
         settings: { defaultModelSelection, projectSettingsOverrides: {}, providerInstances: {} },
@@ -192,8 +201,8 @@ describe("the provider a fresh mobile thread starts on", () => {
       expect(scheduledTaskDefaultModel(config, null)?.instanceId).toBe(
         sharedStartProvider(providers, defaultModelSelection)?.instanceId,
       );
-    });
-  }
+    },
+  );
 
   it("keeps the device's last manual pick over the start provider", () => {
     const providers = [codex("warning"), fork("ready")];
@@ -214,6 +223,7 @@ describe("the provider a fresh mobile thread starts on", () => {
         configuredDefaultSelection: null,
         stickySelection: null,
         config,
+        projectId: null,
         modelOptions: buildModelOptions(config, draft),
       }),
     ).toBe(draft);
