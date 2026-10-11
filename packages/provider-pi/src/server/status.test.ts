@@ -5,6 +5,7 @@ import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
 import * as PlatformError from "effect/PlatformError";
 import * as Fiber from "effect/Fiber";
+import * as FileSystem from "effect/FileSystem";
 import * as Sink from "effect/Sink";
 import * as Stream from "effect/Stream";
 import * as ChildProcess from "effect/process/ChildProcess";
@@ -565,5 +566,130 @@ describe("PiProvider", () => {
         assert.equal(snapshot.status, "ready");
         assert.equal(snapshot.version, flavor.minimumVersion);
       }).pipe(Effect.provide(NodeServices.layer)),
+  );
+});
+
+describe("detectPiFlavor identity cache", () => {
+  const forkSpawner = (probes: Array<ReadonlyArray<string>>) =>
+    piProbeSpawner(
+      "0.10.0",
+      "prime-agent",
+      { stdout: PRIME_AGENT_FORK_HELP },
+      { stdout: PRIME_AGENT_FORK_CAPABILITIES },
+      probes,
+    );
+  const stockSpawner = (probes: Array<ReadonlyArray<string>>) =>
+    piProbeSpawner(
+      "0.9.8",
+      "prime-agent",
+      { stdout: PRIME_AGENT_098_HELP },
+      PRIME_AGENT_098_CAPABILITIES,
+      probes,
+    );
+  const stockOneTenSpawner = (probes: Array<ReadonlyArray<string>>) =>
+    piProbeSpawner(
+      "0.10.0",
+      "prime-agent",
+      { stdout: PRIME_AGENT_FORK_HELP },
+      STOCK_PRIME_AGENT_010_CAPABILITIES,
+      probes,
+    );
+
+  /** A real executable the detector can resolve, standing in for the Prime Agent binary. */
+  const installBinary = (directory: string, name: string, contents: string) =>
+    Effect.gen(function* () {
+      const fileSystem = yield* FileSystem.FileSystem;
+      const path = `${directory}/${name}`;
+      yield* fileSystem.writeFileString(path, contents);
+      yield* fileSystem.chmod(path, 0o755);
+      return path;
+    });
+
+  const detect = (
+    binaryPath: string,
+    spawner: ChildProcessSpawner.ChildProcessSpawner["Service"],
+    environment: NodeJS.ProcessEnv = {},
+  ) =>
+    detectPiFlavor(PRIME_AGENT_FLAVOR, { ...settings, binaryPath }, environment).pipe(
+      Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner),
+    );
+
+  it.effect("probes a binary once, however often a session opens", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const directory = yield* (yield* FileSystem.FileSystem).makeTempDirectoryScoped();
+        const binary = yield* installBinary(directory, "prime-agent", "#!/bin/sh\n");
+        const probes: Array<ReadonlyArray<string>> = [];
+
+        const first = yield* detect(binary, forkSpawner(probes));
+        const probesForFirstOpen = probes.length;
+        const second = yield* detect(binary, forkSpawner(probes));
+
+        assert.isAbove(probesForFirstOpen, 0);
+        assert.equal(probes.length, probesForFirstOpen, "the second open must not probe");
+        assert.strictEqual(second, first);
+        assert.isFalse(second.extensions);
+      }),
+    ).pipe(Effect.provide(NodeServices.layer)),
+  );
+
+  it.effect("finds the same binary through PATH, and keeps stock 0.9.8 on its own flavor", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const directory = yield* (yield* FileSystem.FileSystem).makeTempDirectoryScoped();
+        yield* installBinary(directory, "prime-agent", "#!/bin/sh\n");
+        const environment = { PATH: directory };
+        const probes: Array<ReadonlyArray<string>> = [];
+
+        const first = yield* detect("prime-agent", stockSpawner(probes), environment);
+        const probesForFirstOpen = probes.length;
+        const second = yield* detect("prime-agent", stockSpawner(probes), environment);
+
+        assert.equal(probes.length, probesForFirstOpen, "the second open must not probe");
+        assert.strictEqual(second, first);
+        assert.isTrue(second.extensions);
+      }),
+    ).pipe(Effect.provide(NodeServices.layer)),
+  );
+
+  it.effect("probes again when the binary file changes, and per binary path", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const fileSystem = yield* FileSystem.FileSystem;
+        const directory = yield* fileSystem.makeTempDirectoryScoped();
+        const binary = yield* installBinary(directory, "prime-agent", "#!/bin/sh\n");
+        const other = yield* installBinary(directory, "other-agent", "#!/bin/sh\n");
+        const probes: Array<ReadonlyArray<string>> = [];
+
+        yield* detect(binary, stockSpawner(probes));
+        const afterFirst = probes.length;
+
+        yield* detect(other, stockSpawner(probes));
+        const afterOther = probes.length;
+        assert.isAbove(afterOther, afterFirst, "another path is another binary");
+
+        yield* fileSystem.writeFileString(binary, "#!/bin/sh\n# upgraded in place\n");
+        const upgraded = yield* detect(binary, forkSpawner(probes));
+        assert.isAbove(probes.length, afterOther, "a changed file must be probed again");
+        assert.isFalse(upgraded.extensions, "and the new answer wins");
+      }),
+    ).pipe(Effect.provide(NodeServices.layer)),
+  );
+
+  it.effect("never keeps a refusal: a binary that gets fixed in place is launched", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const fileSystem = yield* FileSystem.FileSystem;
+        const directory = yield* fileSystem.makeTempDirectoryScoped();
+        const binary = yield* installBinary(directory, "prime-agent", "#!/bin/sh\n");
+        const probes: Array<ReadonlyArray<string>> = [];
+
+        const refused = yield* detect(binary, stockOneTenSpawner(probes)).pipe(Effect.exit);
+        assert.isTrue(Exit.isFailure(refused));
+
+        const fixed = yield* detect(binary, forkSpawner(probes));
+        assert.isFalse(fixed.extensions);
+      }),
+    ).pipe(Effect.provide(NodeServices.layer)),
   );
 });
