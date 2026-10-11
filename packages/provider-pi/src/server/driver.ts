@@ -8,7 +8,7 @@
  * `~/.pi/agent` or `~/.prime/agent`, so continuation identity uses the
  * default instance grouping.
  */
-import type { ServerProvider } from "@t3tools/contracts";
+import { PROVIDER_DISPLAY_NAMES, type ServerProvider } from "@t3tools/contracts";
 import { PiSettings, PrimeAgentSettings } from "../settings.ts";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
@@ -82,6 +82,11 @@ export type PiDriverEnv =
   | ProviderLatestVersions.ProviderLatestVersions
   | Path.Path;
 
+/**
+ * An instance name equal to the driver's brand label is the default, not a
+ * choice, so it does not hide the detected flavor's label ("Prime Agent
+ * (fork, 0.10)"). A name the user picked still wins.
+ */
 export const withInstanceIdentity =
   (driverKind: PiFlavor["driverKind"]) =>
   (input: {
@@ -94,7 +99,9 @@ export const withInstanceIdentity =
     ...snapshot,
     instanceId: input.instanceId,
     driver: driverKind,
-    ...(input.displayName ? { displayName: input.displayName } : {}),
+    ...(input.displayName && input.displayName !== PROVIDER_DISPLAY_NAMES[driverKind]
+      ? { displayName: input.displayName }
+      : {}),
     ...(input.accentColor ? { accentColor: input.accentColor } : {}),
     continuation: { groupKey: input.continuationGroupKey },
   });
