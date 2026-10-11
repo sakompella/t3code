@@ -9804,6 +9804,7 @@ describe("PiAdapterV2 with the Prime Agent flavor", () => {
         runOrdinal,
       );
       yield* fake.takeRequest("prompt");
+      yield* fake.emit({ type: "response", command: "prompt", success: true });
       fake.queueForkMessages({
         messages: userEntries.map((entryId) => ({ entryId, text: entryId })),
       });
@@ -10000,12 +10001,47 @@ describe("PiAdapterV2 with the Prime Agent flavor", () => {
     }).pipe(Effect.scoped, Effect.provide(layerTest)),
   );
 
+  /** Reopens the thread after a T3 restart, on a process whose branch lists `activeBranch`. */
+  const reopenForkThread = (
+    stored: OrchestrationV2ProviderThread,
+    activeBranch: ReadonlyArray<string>,
+  ) =>
+    Effect.gen(function* () {
+      const fake = yield* makeFakePi;
+      fake.queueForkMessages({
+        messages: activeBranch.map((entryId) => ({ entryId, text: entryId })),
+      });
+      const { runtime, takeEvent } = yield* openRuntime(
+        fake,
+        "default",
+        THREAD_ID,
+        SESSION_ID,
+        undefined,
+        PRIME_AGENT_FORK_FLAVOR,
+        undefined,
+        {},
+        stored.nativeThreadRef?.nativeId ?? undefined,
+      );
+      const providerThread = yield* runtime.resumeThread({ providerThread: stored });
+      return { fake, session: { runtime, takeEvent, providerThread } };
+    });
+
+  const lastPrompt = (fake: FakePi) =>
+    String(fake.allRequests().findLast((request) => request.type === "prompt")?.["message"]);
+
+  const navigations = (fake: FakePi) =>
+    fake.allRequests().filter((request) => request.type === "navigate_tree");
+
   it.effect.each([
-    { build: "a fork build that lost it on resume", activeBranch: ["u1", "u2"], renavigates: true },
-    { build: "a fork build that kept it", activeBranch: ["u1"], renavigates: false },
+    {
+      build: "a fork build that lost the move on resume",
+      activeBranch: ["u1", "u2"],
+      confirmed: false,
+    },
+    { build: "a fork build that kept the move", activeBranch: ["u1"], confirmed: true },
   ])(
-    "keeps a 0.10 fork rollback and its notice across a reopen, on $build",
-    ({ activeBranch, renavigates }) =>
+    "never repeats a 0.10 fork rollback on reopen, and warns while it is unconfirmed, on $build",
+    ({ activeBranch, confirmed }) =>
       Effect.gen(function* () {
         const fake = yield* makeFakePi;
         fake.queueForkMessages({ messages: [] });
@@ -10013,42 +10049,117 @@ describe("PiAdapterV2 with the Prime Agent flavor", () => {
         const first = yield* runPrimeTurn(session, fake, 1, ["u1"]);
         const second = yield* runPrimeTurn(session, fake, 2, ["u1", "u2"]);
         const { providerThread: stored } = yield* rollBackToFirstTurn(session, [first, second]);
+        assert.equal(stored.nativeConversationHeadRef?.nativeId, "u2");
 
-        // T3 restarts before the next prompt and reopens the thread on its session.
-        const reopenedFake = yield* makeFakePi;
-        reopenedFake.queueForkMessages({
-          messages: activeBranch.map((entryId) => ({ entryId, text: entryId })),
-        });
-        const { runtime, takeEvent } = yield* openRuntime(
-          reopenedFake,
-          "default",
-          THREAD_ID,
-          SESSION_ID,
-          undefined,
-          PRIME_AGENT_FORK_FLAVOR,
-          undefined,
-          {},
-          stored.nativeThreadRef?.nativeId ?? undefined,
-        );
-        const providerThread = yield* runtime.resumeThread({ providerThread: stored });
-
-        assert.deepEqual(
-          reopenedFake
-            .allRequests()
-            .filter((request) => request.type === "navigate_tree")
-            .map(({ id: _id, ...request }) => request),
-          renavigates ? [{ type: "navigate_tree", targetId: "u2" }] : [],
-        );
-        yield* runPrimeTurn({ runtime, takeEvent, providerThread }, reopenedFake, 3, ["u1", "u3"]);
+        const reopened = yield* reopenForkThread(stored, activeBranch);
+        assert.deepEqual(navigations(reopened.fake), [], "a reopen must never move the leaf");
         assert.equal(
-          String(
-            reopenedFake.allRequests().findLast((request) => request.type === "prompt")?.[
-              "message"
-            ],
-          ),
-          `${T3_ROLLBACK_NOTICE}\n\nturn 3`,
+          reopened.session.providerThread.nativeConversationHeadRef?.nativeId ?? null,
+          confirmed ? null : "u2",
+          "the mark stays until the fork confirms the move",
         );
+
+        const notices: Array<string> = [];
+        yield* startTurn(
+          reopened.session.runtime,
+          reopened.session.providerThread,
+          "default",
+          [],
+          "turn 3",
+          undefined,
+          3,
+        );
+        yield* reopened.fake.takeRequest("prompt");
+        yield* reopened.fake.emit({ type: "response", command: "prompt", success: true });
+        reopened.fake.queueForkMessages({
+          messages: ["u1", "u3"].map((entryId) => ({ entryId, text: entryId })),
+        });
+        yield* reopened.fake.emit({ type: "agent_start" });
+        yield* reopened.fake.emit({ type: "agent_end", messages: [] });
+        yield* reopened.session.takeEvent((event) => {
+          if (event.type === "turn_item.updated" && event.turnItem.type === "system_notice") {
+            notices.push(event.turnItem.message);
+          }
+          return event.type === "turn.terminal";
+        });
+        assert.equal(
+          notices.some((message) => message.includes("not confirmed")),
+          !confirmed,
+          JSON.stringify(notices),
+        );
+        assert.equal(lastPrompt(reopened.fake), `${T3_ROLLBACK_NOTICE}\n\nturn 3`);
       }).pipe(Effect.scoped, Effect.provide(layerTest)),
+  );
+
+  it.effect("keeps the 0.10 fork rollback mark and notice until a prompt is accepted", () =>
+    Effect.gen(function* () {
+      const fake = yield* makeFakePi;
+      fake.queueForkMessages({ messages: [] });
+      const session = yield* openPrimeThread(fake, THREAD_ID, PRIME_AGENT_FORK_FLAVOR);
+      const first = yield* runPrimeTurn(session, fake, 1, ["u1"]);
+      const second = yield* runPrimeTurn(session, fake, 2, ["u1", "u2"]);
+      const { providerThread: stored } = yield* rollBackToFirstTurn(session, [first, second]);
+
+      const marks: Array<string | null> = [];
+      const recordMarks = (event: ProviderAdapter.ProviderAdapterV2Event) => {
+        if (event.type === "provider_thread.updated") {
+          marks.push(event.providerThread.nativeConversationHeadRef?.nativeId ?? null);
+        }
+      };
+      yield* startTurn(session.runtime, stored, "default", [], "turn 3", undefined, 3);
+      assert.include(String((yield* fake.takeRequest("prompt"))["message"]), T3_ROLLBACK_NOTICE);
+      yield* fake.emit({ type: "response", command: "prompt", success: false, error: "busy" });
+      yield* session.takeEvent((event) => {
+        recordMarks(event);
+        return event.type === "turn.terminal";
+      });
+      assert.notInclude(marks, null, "a rejected prompt must not clear the mark");
+
+      const reopened = yield* reopenForkThread(stored, ["u1", "u2"]);
+      assert.equal(reopened.session.providerThread.nativeConversationHeadRef?.nativeId, "u2");
+      yield* runPrimeTurn(reopened.session, reopened.fake, 4, ["u1", "u4"]);
+      assert.equal(lastPrompt(reopened.fake), `${T3_ROLLBACK_NOTICE}\n\nturn 4`);
+      yield* runPrimeTurn(reopened.session, reopened.fake, 5, ["u1", "u4", "u5"]);
+      assert.equal(lastPrompt(reopened.fake), "turn 5", "an accepted prompt clears the notice");
+    }).pipe(Effect.scoped, Effect.provide(layerTest)),
+  );
+
+  it.effect("does not move the 0.10 fork leaf on reopen after a wake ran on the new branch", () =>
+    Effect.gen(function* () {
+      const fake = yield* makeFakePi;
+      fake.queueForkMessages({ messages: [] });
+      const session = yield* openPrimeThread(fake, THREAD_ID, PRIME_AGENT_FORK_FLAVOR);
+      const first = yield* runPrimeTurn(session, fake, 1, ["u1"]);
+      const second = yield* runPrimeTurn(session, fake, 2, ["u1", "u2"]);
+      const { providerThread: stored } = yield* rollBackToFirstTurn(session, [first, second]);
+      yield* startTurn(
+        session.runtime,
+        stored,
+        "default",
+        [],
+        "wake",
+        undefined,
+        3,
+        THREAD_ID,
+        true,
+      );
+      fake.queueForkMessages({
+        messages: ["u1", "u2"].map((entryId) => ({ entryId, text: entryId })),
+      });
+      yield* fake.emit({ type: "agent_start" });
+      yield* fake.emit({ type: "agent_end", messages: [] });
+      const wakeEnd = yield* session.takeEvent(
+        (event) =>
+          event.type === "provider_thread.updated" &&
+          event.providerThread.status === "idle" &&
+          event.providerThread.lastRunOrdinal === 3,
+      );
+      assert.isTrue(wakeEnd.type === "provider_thread.updated");
+      if (wakeEnd.type !== "provider_thread.updated") return;
+
+      const reopened = yield* reopenForkThread(wakeEnd.providerThread, ["u1", "u2"]);
+      assert.deepEqual(navigations(reopened.fake), [], "the wake's conversation must survive");
+    }).pipe(Effect.scoped, Effect.provide(layerTest)),
   );
 
   describe("prompt-cache miss notices", () => {
