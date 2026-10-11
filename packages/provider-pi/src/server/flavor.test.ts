@@ -1,7 +1,19 @@
 import { assert, describe, it } from "@effect/vitest";
 
-import { identifyPiCli, PI_FLAVOR, PRIME_AGENT_FLAVOR, resolvePiAgentDir } from "./flavor.ts";
-import { PRIME_AGENT_098_HELP, PRIME_AGENT_FORK_HELP } from "./primeAgentHelp.testkit.ts";
+import {
+  identifyForkPiCli,
+  identifyStockPiCli,
+  PI_FLAVOR,
+  piCliProbeForVersion,
+  PRIME_AGENT_FLAVOR,
+  PRIME_AGENT_FORK_FLAVOR,
+  resolvePiAgentDir,
+} from "./flavor.ts";
+import {
+  forkCapabilitiesWith,
+  PRIME_AGENT_098_HELP,
+  PRIME_AGENT_FORK_CAPABILITIES,
+} from "./primeAgentHelp.testkit.ts";
 
 const home = "/home/user";
 const cases = [
@@ -47,67 +59,39 @@ describe("resolvePiAgentDir", () => {
 });
 
 const stockHelp = PRIME_AGENT_098_HELP;
-const forkHelp = PRIME_AGENT_FORK_HELP;
-const STOCK_010_REFUSAL = "stock Prime Agent 0.10 is not supported; install the T3 fork";
 
-describe("identifyPiCli", () => {
-  it.each([
-    { version: "0.9.8", help: stockHelp, displayName: "Prime Agent" },
-    { version: "prime-agent 0.9.6", help: stockHelp, displayName: "Prime Agent" },
-    { version: "0.10.0+t3fork.1", help: forkHelp, displayName: "Prime Agent (fork, 0.10)" },
-    {
-      version: "prime-agent 0.11.2+t3fork.14",
-      help: forkHelp,
-      displayName: "Prime Agent (fork, 0.10)",
-    },
-  ])("launches $version as $displayName", ({ version, help, displayName }) => {
-    const identity = identifyPiCli(PRIME_AGENT_FLAVOR, { version, help });
-    assert.equal(identity._tag, "Supported");
-    if (identity._tag === "Supported") assert.equal(identity.flavor.displayName, displayName);
+describe("piCliProbeForVersion", () => {
+  it.each(["0.9.8", "prime-agent 0.9.6", "v0.9.8-beta.1"])("asks %s for --help", (version) => {
+    assert.deepEqual(piCliProbeForVersion(version), { _tag: "Help" });
   });
 
+  it.each(["0.10.0", "0.10.0-beta.3", "0.10.0+t3fork.1", "prime-agent 1.2.3"])(
+    "asks %s for --capabilities",
+    (version) => {
+      assert.deepEqual(piCliProbeForVersion(version), { _tag: "Capabilities" });
+    },
+  );
+
+  it.each(["0.10", "nightly", ""])("refuses the unreadable version %j", (version) => {
+    const probe = piCliProbeForVersion(version);
+    assert.equal(probe._tag, "Unsupported");
+    if (probe._tag === "Unsupported") assert.include(probe.reason, "--version");
+  });
+});
+
+describe("identifyStockPiCli", () => {
   it.each([
-    { name: "stock 0.10", version: "0.10.0", help: forkHelp, reason: STOCK_010_REFUSAL },
-    {
-      name: "a stock 0.10 beta",
-      version: "0.10.0-beta.3",
-      help: forkHelp,
-      reason: STOCK_010_REFUSAL,
-    },
-    {
-      name: "a stock build with other metadata",
-      version: "0.10.1+fork.7",
-      help: forkHelp,
-      reason: STOCK_010_REFUSAL,
-    },
-    { name: "a two-part version", version: "0.10", help: forkHelp, reason: "--version" },
-    { name: "a nightly label", version: "nightly", help: forkHelp, reason: "--version" },
-    {
-      name: "the fork marker without rpc mode",
-      version: "0.10.0+t3fork.1",
-      help: "  --mode <text>\n",
-      reason: "--mode rpc",
-    },
-    {
-      name: "a mode-only CLI",
-      version: "0.9.8",
-      help: "Options:\n  --mode <text>  pick\n",
-      reason: "--mode rpc",
-    },
-    {
-      name: "help with no options",
-      version: "0.9.8",
-      help: "usage: something else\n",
-      reason: "--mode rpc",
-    },
-  ])("refuses $name", ({ version, help, reason }) => {
-    const identity = identifyPiCli(PRIME_AGENT_FLAVOR, { version, help });
+    { name: "a mode-only CLI", help: "Options:\n  --mode <text>  pick\n" },
+    { name: "help with no options", help: "usage: something else\n" },
+  ])("refuses $name", ({ help }) => {
+    const identity = identifyStockPiCli(PRIME_AGENT_FLAVOR, help);
     assert.equal(identity._tag, "Unsupported");
-    if (identity._tag === "Unsupported") assert.include(identity.reason, reason);
+    if (identity._tag === "Unsupported") assert.include(identity.reason, "--mode rpc");
   });
 
   it("reads 0.9.8 help however its option columns are spaced", () => {
     const variants = [
+      stockHelp,
       stockHelp.replaceAll(", --", ",  --"),
       stockHelp.replaceAll(", --", ",\t--"),
       stockHelp.replaceAll("  --mode ", "\t--mode "),
@@ -115,9 +99,58 @@ describe("identifyPiCli", () => {
       stockHelp.replaceAll("\n", "\r\n"),
     ];
     for (const help of variants) {
-      const identity = identifyPiCli(PRIME_AGENT_FLAVOR, { version: "0.9.8", help });
+      const identity = identifyStockPiCli(PRIME_AGENT_FLAVOR, help);
       assert.equal(identity._tag, "Supported", JSON.stringify(help.slice(0, 400)));
-      if (identity._tag === "Supported") assert.isTrue(identity.flavor.extensions);
+      if (identity._tag === "Supported") assert.strictEqual(identity.flavor, PRIME_AGENT_FLAVOR);
+    }
+  });
+});
+
+describe("identifyForkPiCli", () => {
+  const advertised: ReadonlyArray<string> = JSON.parse(PRIME_AGENT_FORK_CAPABILITIES).rpc;
+  const identify = (stdout: string, exitCode = 0) =>
+    identifyForkPiCli(PRIME_AGENT_FLAVOR, { exitCode, stdout });
+
+  it("launches the slice-4 fork, and any fork that advertises more commands", () => {
+    for (const stdout of [
+      PRIME_AGENT_FORK_CAPABILITIES,
+      PRIME_AGENT_FORK_CAPABILITIES.trim(),
+      forkCapabilitiesWith({ rpc: [...advertised, "get_goal"], version: "0.11.0" }),
+      forkCapabilitiesWith({ rpc: advertised.toReversed(), extra: [1, 2] }),
+    ]) {
+      const identity = identify(stdout);
+      assert.equal(identity._tag, "Supported", stdout);
+      if (identity._tag === "Supported")
+        assert.strictEqual(identity.flavor, PRIME_AGENT_FORK_FLAVOR);
+    }
+  });
+
+  it("refuses every contract but 1", () => {
+    for (const contract of [-1, 0, 0.5, 1.000001, 2, 3, 10, 2 ** 31]) {
+      const identity = identify(forkCapabilitiesWith({ contract }));
+      assert.equal(identity._tag, "Unsupported", String(contract));
+      if (identity._tag === "Unsupported") assert.include(identity.reason, `contract ${contract}`);
+    }
+  });
+
+  it("refuses any failed run as stock, whatever it printed", () => {
+    for (const exitCode of [1, 2, 127]) {
+      const identity = identify(PRIME_AGENT_FORK_CAPABILITIES, exitCode);
+      assert.equal(identity._tag, "Unsupported");
+      if (identity._tag === "Unsupported") {
+        assert.include(identity.reason, "stock Prime Agent 0.10 is not supported");
+      }
+    }
+  });
+
+  it("names every missing command T3 calls", () => {
+    const identity = identify(forkCapabilitiesWith({ rpc: ["prompt", "abort", "steer"] }));
+    assert.equal(identity._tag, "Unsupported");
+    if (identity._tag === "Unsupported") {
+      for (const command of ["navigate_tree", "get_fork_messages", "observe"]) {
+        assert.include(identity.reason, command);
+      }
+      assert.notInclude(identity.reason, "steer");
     }
   });
 });

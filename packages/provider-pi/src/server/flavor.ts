@@ -10,6 +10,8 @@
  */
 import { ProviderDriverKind } from "@t3tools/contracts";
 import * as Duration from "effect/Duration";
+import * as Option from "effect/Option";
+import * as Schema from "effect/Schema";
 
 import { expandHomePath } from "@t3tools/provider-core/server/pathExpansion";
 
@@ -70,9 +72,9 @@ export interface PiFlavor {
    */
   readonly extensions: boolean;
   /**
-   * The flavor a CLI of this driver speaks instead when its `--version`
-   * carries the T3 fork marker (see `identifyPiCli`). The adapter reads it
-   * when it opens a session.
+   * The flavor a CLI of this driver speaks instead when it answers
+   * `--capabilities` with the T3 fork's contract (see `identifyForkPiCli`).
+   * The adapter reads it when it opens a session.
    */
   readonly successor?: PiFlavor;
   /**
@@ -227,25 +229,40 @@ export const PRIME_AGENT_FLAVOR: PiFlavor = {
 };
 
 /**
- * What T3 makes of a CLI from its `--version` and `--help` output: the flavor
- * it speaks, or why T3 will not launch it. Launch flags differ between
- * flavors, so a CLI T3 cannot identify is never launched with a guessed one.
+ * What T3 makes of a CLI from its probes: the flavor it speaks, or why T3
+ * will not launch it. Launch flags differ between flavors, so a CLI T3
+ * cannot identify is never launched with a guessed one.
  */
 export type PiCliIdentity =
   | { readonly _tag: "Supported"; readonly flavor: PiFlavor }
   | { readonly _tag: "Unsupported"; readonly reason: string };
 
-const unsupported = (reason: string): PiCliIdentity => ({ _tag: "Unsupported", reason });
+const unsupported = (reason: string) => ({ _tag: "Unsupported", reason }) as const;
 
 /**
- * The T3 fork marks its builds in the semver build metadata, for example
- * `0.10.0+t3fork.3`. Stock Prime Agent 0.10 reports the same version without
- * it and lacks the daemon RPC T3 relies on.
+ * The probe that identifies a CLI after `--version`. Below 0.10 it is 0.9.8's
+ * `--help`, which must offer `--mode rpc`. From 0.10 on it is the T3 fork's
+ * `--capabilities`. 0.9.8 is never asked for capabilities: it takes an
+ * unknown long flag as an extension flag and runs print mode.
  */
-const T3_FORK_BUILD = /(?:^|\.)t3fork\.\d+(?:\.|$)/;
-const CLI_VERSION = /\bv?(\d+)\.(\d+)\.(\d+)(?:-[0-9A-Za-z.-]+)?(?:\+([0-9A-Za-z.-]+))?/;
+export type PiCliProbe =
+  | { readonly _tag: "Help" }
+  | { readonly _tag: "Capabilities" }
+  | Extract<PiCliIdentity, { _tag: "Unsupported" }>;
+
+const CLI_VERSION = /\bv?(\d+)\.(\d+)\.(\d+)/;
 /** The first Rust Prime Agent release. Prereleases of it count as 0.10 too. */
 const FIRST_RUST_MINOR = { major: 0, minor: 10 };
+
+export function piCliProbeForVersion(version: string): PiCliProbe {
+  const parsed = CLI_VERSION.exec(version);
+  if (parsed === null) return unsupported("its `--version` printed no version T3 Code can read");
+  const [major, minor] = [Number(parsed[1]), Number(parsed[2])];
+  const isRust =
+    major > FIRST_RUST_MINOR.major ||
+    (major === FIRST_RUST_MINOR.major && minor >= FIRST_RUST_MINOR.minor);
+  return isRust ? { _tag: "Capabilities" } : { _tag: "Help" };
+}
 
 /** Whether an option line of the help offers `--mode` with an `rpc` value. */
 function offersRpcMode(help: string): boolean {
@@ -259,30 +276,86 @@ function offersRpcMode(help: string): boolean {
   });
 }
 
+/** Identifies a CLI below 0.10 from its `--help`: `flavor` itself, if it offers `--mode rpc`. */
+export function identifyStockPiCli(flavor: PiFlavor, help: string): PiCliIdentity {
+  return offersRpcMode(help)
+    ? { _tag: "Supported", flavor }
+    : unsupported("its `--help` offers no `--mode rpc`");
+}
+
 /**
- * Identifies a CLI of `flavor`'s driver. Every CLI must offer `--mode rpc`.
- * A version carrying the T3 fork marker speaks `flavor.successor`; a version
- * below 0.10 speaks `flavor`; anything else is refused.
+ * What the T3 fork prints for `prime-agent --capabilities`: one JSON object
+ * naming the fork, the contract its T3-facing RPC follows, its version and
+ * the RPC commands it routes.
  */
-export function identifyPiCli(
+const ForkCapabilities = Schema.fromJsonString(
+  Schema.Struct({
+    fork: Schema.String,
+    contract: Schema.Number,
+    version: Schema.String,
+    rpc: Schema.Array(Schema.String),
+  }),
+);
+const decodeForkCapabilities = Schema.decodeUnknownOption(ForkCapabilities);
+
+const T3_FORK_MARKER = "t3fork";
+/** The fork contract whose commands and frames this adapter was reviewed against. */
+const SUPPORTED_FORK_CONTRACT = 1;
+/** The RPC commands the adapter sends to the fork (contract 1). It may advertise more. */
+const FORK_COMMANDS_T3_CALLS = [
+  "prompt",
+  "abort",
+  "abort_retry",
+  "compact",
+  "new_session",
+  "switch_session",
+  "get_state",
+  "get_available_models",
+  "set_model",
+  "set_thinking_level",
+  "set_session_name",
+  "get_messages",
+  "get_session_stats",
+  "get_fork_messages",
+  "get_commands",
+  "fork",
+  "navigate_tree",
+  "list_heartbeats",
+  "observe",
+  "unobserve",
+];
+
+/**
+ * Identifies a CLI of 0.10 or later from its `--capabilities` run. Only the
+ * T3 fork answers it, with exit 0 and a contract T3 supports; stock 0.10
+ * exits 1 with "Unknown option".
+ */
+export function identifyForkPiCli(
   flavor: PiFlavor,
-  cli: { readonly version: string; readonly help: string },
+  run: { readonly exitCode: number; readonly stdout: string },
 ): PiCliIdentity {
-  if (!offersRpcMode(cli.help)) return unsupported("its `--help` offers no `--mode rpc`");
-  const version = CLI_VERSION.exec(cli.version);
-  if (version === null) return unsupported("its `--version` printed no version T3 Code can read");
-  const [, major, minor, , build] = version;
-  if (flavor.successor !== undefined && build !== undefined && T3_FORK_BUILD.test(build)) {
-    return { _tag: "Supported", flavor: flavor.successor };
+  if (flavor.successor === undefined || run.exitCode !== 0) {
+    return unsupported(
+      "stock Prime Agent 0.10 is not supported; install the T3 fork (`sakompella/prime-agent`), which answers `prime-agent --capabilities`",
+    );
   }
-  const isRust =
-    Number(major) > FIRST_RUST_MINOR.major ||
-    (Number(major) === FIRST_RUST_MINOR.major && Number(minor) >= FIRST_RUST_MINOR.minor);
-  return isRust
-    ? unsupported(
-        "stock Prime Agent 0.10 is not supported; install the T3 fork (`sakompella/prime-agent`), whose `--version` carries `+t3fork.N`",
-      )
-    : { _tag: "Supported", flavor };
+  const capabilities = decodeForkCapabilities(run.stdout);
+  if (Option.isNone(capabilities)) {
+    return unsupported("its `--capabilities` output is not the T3 fork's JSON contract");
+  }
+  const { fork, contract, rpc } = capabilities.value;
+  if (fork !== T3_FORK_MARKER) {
+    return unsupported(`its \`--capabilities\` names fork "${fork}", not "${T3_FORK_MARKER}"`);
+  }
+  if (contract !== SUPPORTED_FORK_CONTRACT) {
+    return unsupported(
+      `its fork contract ${contract} is not supported; T3 Code supports contract ${SUPPORTED_FORK_CONTRACT}`,
+    );
+  }
+  const missing = FORK_COMMANDS_T3_CALLS.filter((command) => !rpc.includes(command));
+  return missing.length === 0
+    ? { _tag: "Supported", flavor: flavor.successor }
+    : unsupported(`its fork lacks RPC commands T3 Code calls: ${missing.join(", ")}`);
 }
 
 /**
