@@ -272,7 +272,7 @@ function sessionScopedRuntimeRequestThreadId(
 }
 
 /** The thread of a runless event; an event that names a run stays with that run. */
-function runlessEventThreadId(event: ProviderAdapterV2Event): ThreadId | undefined {
+function runlessEventThreadId(event: ProviderAdapter.ProviderAdapterV2Event): ThreadId | undefined {
   switch (event.type) {
     case "app_thread.reparented":
       return event.threadId;
@@ -1949,7 +1949,7 @@ export const layerWithOptions = (
       const storeSessionChildThreadEvent = (
         entry: LiveSessionEntry,
         threadId: ThreadId,
-        event: ProviderAdapterV2Event,
+        event: ProviderAdapter.ProviderAdapterV2Event,
       ) =>
         Effect.gen(function* () {
           const current = (yield* Ref.get(sessions)).get(
@@ -2005,7 +2005,7 @@ export const layerWithOptions = (
           ThreadId,
           ReturnType<typeof makeAssistantStreamingFilter>
         >();
-        const sessionChildThreadOf = (event: ProviderAdapterV2Event) =>
+        const sessionChildThreadOf = (event: ProviderAdapter.ProviderAdapterV2Event) =>
           Effect.gen(function* () {
             if (entry.runtime.childThreadScope !== "session") return undefined;
             if (

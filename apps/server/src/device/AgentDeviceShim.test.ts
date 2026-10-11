@@ -70,10 +70,10 @@ describe("agent-device shim", () => {
         entryPath: path.join(directory, "entry.mjs"),
         stateDir: directory,
       }).pipe(
-        Effect.provideService(HostProcessPlatform, "win32"),
-        Effect.provideService(HostProcessExecutablePath, "C:\\T3\\T3.exe"),
-        Effect.provideService(HostProcessIsExecutable, false),
-        Effect.provideService(HostProcessIsElectron, true),
+        Effect.provideService(HostProcess.Platform, "win32"),
+        Effect.provideService(HostProcess.ExecutablePath, "C:\\T3\\T3.exe"),
+        Effect.provideService(HostProcess.IsExecutable, false),
+        Effect.provideService(HostProcess.IsElectron, true),
       );
       const lines = (yield* fs.readFileString(path.join(shimDir, "agent-device.cmd"))).split(
         "\r\n",

@@ -74,7 +74,7 @@ export interface TranscriptUsageFormat<State> {
      * Whether lines read after a resume point changed what earlier lines
      * produced, so the file must be parsed whole. Asked only after a resumed parse.
      */
-    readonly needsFullParse?: (state: State) => boolean;
+    needsFullParse?(state: State): boolean;
   };
   /**
    * Whether one session's records may appear in several files, such as a

@@ -5016,7 +5016,7 @@ function makeSessionChildThreadEvents(input: {
   const childThreadId = ThreadId.make(`thread:${input.name}:child`);
   const subagentId = NodeId.make(`node:${input.name}:subagent`);
   const rootNodeId = NodeId.make(`node:${input.name}:child-root`);
-  const shell: ProviderAdapterV2Event = {
+  const shell: ProviderAdapter.ProviderAdapterV2Event = {
     type: "app_thread.created",
     driver: CODEX_DRIVER,
     appThread: makeSubagentChildThread({
@@ -5032,7 +5032,7 @@ function makeSessionChildThreadEvents(input: {
       creationSource: "provider",
     }),
   };
-  const childRoot = (status: "running" | "completed"): ProviderAdapterV2Event => ({
+  const childRoot = (status: "running" | "completed"): ProviderAdapter.ProviderAdapterV2Event => ({
     type: "node.updated",
     driver: CODEX_DRIVER,
     node: {
@@ -5053,7 +5053,7 @@ function makeSessionChildThreadEvents(input: {
       completedAt: status === "completed" ? input.now : null,
     },
   });
-  const reply = (text: string, streaming: boolean): ProviderAdapterV2Event => ({
+  const reply = (text: string, streaming: boolean): ProviderAdapter.ProviderAdapterV2Event => ({
     type: "message.updated",
     driver: CODEX_DRIVER,
     message: {
@@ -5071,7 +5071,7 @@ function makeSessionChildThreadEvents(input: {
       updatedAt: input.now,
     },
   });
-  const card: ProviderAdapterV2Event = {
+  const card: ProviderAdapter.ProviderAdapterV2Event = {
     type: "subagent.updated",
     driver: CODEX_DRIVER,
     subagent: {
@@ -5129,7 +5129,7 @@ const openSessionWithParentThread = (name: string) =>
 const publishAndDrain = (
   state: Ref.Ref<TestProviderRuntimeState>,
   session: Effect.Success<ReturnType<typeof openSessionWithParentThread>>,
-  events: ReadonlyArray<ProviderAdapterV2Event>,
+  events: ReadonlyArray<ProviderAdapter.ProviderAdapterV2Event>,
 ) =>
   Effect.gen(function* () {
     const eventSink = yield* EventSink.EventSinkV2;
@@ -5207,17 +5207,19 @@ it.effect(
         const child = makeSessionChildThreadEvents({ ...session, name: "session-child-runs" });
         // The launching run hears the card; a second run subscribes between the
         // card and the shell; the launching run stops before the child ends.
-        const listen = (subscription: ProviderAdapterV2EventSubscription) =>
+        const listen = (subscription: ProviderAdapter.ProviderAdapterV2EventSubscription) =>
           Effect.gen(function* () {
-            const heard = yield* Queue.unbounded<ProviderAdapterV2Event["type"]>();
+            const heard = yield* Queue.unbounded<ProviderAdapter.ProviderAdapterV2Event["type"]>();
             yield* subscription.events.pipe(
               Stream.runForEach((event) => Queue.offer(heard, event.type)),
               Effect.forkScoped,
             );
             return heard;
           });
-        const heard = (queue: Queue.Queue<ProviderAdapterV2Event["type"]>, count: number) =>
-          Queue.takeN(queue, count).pipe(Effect.map((types) => Array.from(types)));
+        const heard = (
+          queue: Queue.Queue<ProviderAdapter.ProviderAdapterV2Event["type"]>,
+          count: number,
+        ) => Queue.takeN(queue, count).pipe(Effect.map((types) => Array.from(types)));
         const launchingRun = yield* session.runtime.subscribeEvents!;
         const launching = yield* listen(launchingRun);
         yield* publishAndDrain(state, session, [child.card]);
@@ -5274,7 +5276,7 @@ it.effect(
             },
           ],
         });
-        const reparented: ProviderAdapterV2Event = {
+        const reparented: ProviderAdapter.ProviderAdapterV2Event = {
           type: "app_thread.reparented",
           driver: CODEX_DRIVER,
           threadId: nested.childThreadId,

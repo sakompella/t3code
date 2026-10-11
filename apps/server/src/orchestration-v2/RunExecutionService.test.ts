@@ -360,7 +360,7 @@ describe("subagent shells that arrive after the launching run's root turn ended"
       startedAt: null,
       completedAt: null,
     },
-  } satisfies ProviderAdapterV2Event;
+  } satisfies ProviderAdapter.ProviderAdapterV2Event;
   const childShell = {
     type: "app_thread.created",
     driver,
@@ -373,7 +373,7 @@ describe("subagent shells that arrive after the launching run's root turn ended"
       },
       forkedFrom: { type: "node", nodeId: subagentNodeId },
     },
-  } as ProviderAdapterV2Event;
+  } as ProviderAdapter.ProviderAdapterV2Event;
   const childRootNode = {
     type: "node.updated",
     driver,
@@ -384,7 +384,7 @@ describe("subagent shells that arrive after the launching run's root turn ended"
       runId: null,
       kind: "root_turn",
     },
-  } satisfies ProviderAdapterV2Event;
+  } satisfies ProviderAdapter.ProviderAdapterV2Event;
   const launchingTerminal = {
     type: "turn.terminal",
     driver,
@@ -394,12 +394,12 @@ describe("subagent shells that arrive after the launching run's root turn ended"
     status: "completed",
     failure: null,
     threadDisposition: "reusable",
-  } satisfies ProviderAdapterV2Event;
+  } satisfies ProviderAdapter.ProviderAdapterV2Event;
 
   const route = (
     identity: RunExecutionService.ProviderEventRouteIdentity,
     initial: RunExecutionService.ProviderEventRoutingState,
-    events: ReadonlyArray<ProviderAdapterV2Event>,
+    events: ReadonlyArray<ProviderAdapter.ProviderAdapterV2Event>,
   ) =>
     events.reduce<{
       readonly accepted: ReadonlyArray<boolean>;
@@ -507,7 +507,7 @@ describe("a late subagent shell across a session's subscribers", () => {
         startedAt: null,
         completedAt: null,
       },
-    }) as ProviderAdapterV2Event;
+    }) as ProviderAdapter.ProviderAdapterV2Event;
   const subagentRow = (childThread: ThreadId | null) =>
     ({
       type: "subagent.updated",
@@ -519,7 +519,7 @@ describe("a late subagent shell across a session's subscribers", () => {
         childThreadId: childThread,
         status: "running",
       },
-    }) as ProviderAdapterV2Event;
+    }) as ProviderAdapter.ProviderAdapterV2Event;
   const childShellFrom = (parentNodeId: NodeId) =>
     ({
       type: "app_thread.created",
@@ -533,13 +533,13 @@ describe("a late subagent shell across a session's subscribers", () => {
         },
         forkedFrom: { type: "node", nodeId: parentNodeId },
       },
-    }) as ProviderAdapterV2Event;
+    }) as ProviderAdapter.ProviderAdapterV2Event;
   const childShell = childShellFrom(subagentNodeId);
   const childProviderThread = {
     type: "provider_thread.updated",
     driver,
     providerThread: { id: childProviderThreadId, appThreadId: childThreadId },
-  } as ProviderAdapterV2Event;
+  } as ProviderAdapter.ProviderAdapterV2Event;
   const childRoot = (
     status: OrchestrationV2ExecutionNode["status"],
     nodeId = NodeId.make("node:shell-owner:child-root"),
@@ -555,7 +555,7 @@ describe("a late subagent shell across a session's subscribers", () => {
         status,
         providerThreadId: null,
       },
-    }) as ProviderAdapterV2Event;
+    }) as ProviderAdapter.ProviderAdapterV2Event;
   const childRootNode = childRoot("running");
   // Another child of the launching run, which keeps it ingesting after its root turn.
   const otherChild = (status: OrchestrationV2Subagent["status"]) =>
@@ -568,7 +568,7 @@ describe("a late subagent shell across a session's subscribers", () => {
         runId: launching.runId,
         status,
       },
-    }) as ProviderAdapterV2Event;
+    }) as ProviderAdapter.ProviderAdapterV2Event;
   // OpenCode2 reports a subagent called again under a new node, with its thread again.
   const secondCallNodeId = NodeId.make("node:shell-owner:subagent:second-call");
   const secondCallNode = (status: OrchestrationV2ExecutionNode["status"]) =>
@@ -585,7 +585,7 @@ describe("a late subagent shell across a session's subscribers", () => {
         status,
         providerThreadId,
       },
-    }) as ProviderAdapterV2Event;
+    }) as ProviderAdapter.ProviderAdapterV2Event;
   const secondCallRoot = (status: OrchestrationV2ExecutionNode["status"]) =>
     childRoot(status, NodeId.make("node:shell-owner:child-root:second-call"));
 
@@ -616,7 +616,7 @@ describe("a late subagent shell across a session's subscribers", () => {
     },
   ] as const;
 
-  const touchesChildThread = (event: ProviderAdapterV2Event): boolean =>
+  const touchesChildThread = (event: ProviderAdapter.ProviderAdapterV2Event): boolean =>
     (event.type === "app_thread.created" && event.appThread.id === childThreadId) ||
     (event.type === "provider_thread.updated" &&
       event.providerThread.appThreadId === childThreadId) ||
@@ -631,7 +631,7 @@ describe("a late subagent shell across a session's subscribers", () => {
       status: "completed",
       failure: null,
       threadDisposition: "reusable",
-    }) as ProviderAdapterV2Event;
+    }) as ProviderAdapter.ProviderAdapterV2Event;
   // A run ingests its own root node update, so seeing it ingested proves the
   // run processed every event published before it.
   const drainMarker = (run: ScenarioRun) =>
@@ -646,12 +646,12 @@ describe("a late subagent shell across a session's subscribers", () => {
         status: "running",
         providerThreadId: null,
       },
-    }) as ProviderAdapterV2Event;
+    }) as ProviderAdapter.ProviderAdapterV2Event;
 
   /** One provider session that several runs subscribe to, as ProviderSessionManager does. */
   const sharedSessionScenario = Effect.gen(function* () {
     const subscribers = yield* Ref.make<
-      ReadonlyMap<RunId, Queue.Queue<ProviderAdapterV2Event, Cause.Done>>
+      ReadonlyMap<RunId, Queue.Queue<ProviderAdapter.ProviderAdapterV2Event, Cause.Done>>
     >(new Map());
     const closed = new Map(
       [launching, live].map((run) => [run.runId, Deferred.makeUnsafe<void>()]),
@@ -667,6 +667,7 @@ describe("a late subagent shell across a session's subscribers", () => {
     const layerTest = RunExecutionService.layer.pipe(
       Layer.provide(
         Layer.mergeAll(
+          McpAppModelContext.layerEmpty,
           Layer.mock(CheckpointService.CheckpointServiceV2)({ captureBaseline: () => Effect.void }),
           Layer.mock(EventSink.EventSinkV2)({
             write: () => Effect.succeed([]),
@@ -696,7 +697,7 @@ describe("a late subagent shell across a session's subscribers", () => {
     );
     const runtime = yield* Layer.build(layerTest);
     const runExecution = Context.get(runtime, RunExecutionService.RunExecutionServiceV2);
-    const publish = (events: ReadonlyArray<ProviderAdapterV2Event>) =>
+    const publish = (events: ReadonlyArray<ProviderAdapter.ProviderAdapterV2Event>) =>
       Effect.gen(function* () {
         for (const queue of (yield* Ref.get(subscribers)).values()) {
           yield* Queue.offerAll(queue, events);
@@ -710,7 +711,10 @@ describe("a late subagent shell across a session's subscribers", () => {
         session: {
           events: Stream.empty,
           subscribeEvents: Effect.gen(function* () {
-            const queue = yield* Queue.unbounded<ProviderAdapterV2Event, Cause.Done>();
+            const queue = yield* Queue.unbounded<
+              ProviderAdapter.ProviderAdapterV2Event,
+              Cause.Done
+            >();
             yield* Ref.update(subscribers, (current) => new Map(current).set(run.runId, queue));
             const close = Ref.update(subscribers, (current) => {
               const next = new Map(current);
@@ -722,7 +726,7 @@ describe("a late subagent shell across a session's subscribers", () => {
               Effect.asVoid,
             );
             const events = Stream.fromQueue(queue).pipe(
-              Stream.mapEffect((event): Effect.Effect<ProviderAdapterV2Event> =>
+              Stream.mapEffect((event): Effect.Effect<ProviderAdapter.ProviderAdapterV2Event> =>
                 event.type === "app_thread.created"
                   ? Ref.get(shellGate).pipe(
                       Effect.flatMap((held) =>
@@ -738,7 +742,7 @@ describe("a late subagent shell across a session's subscribers", () => {
             return { events, close };
           }),
           startTurn: () => Effect.void,
-        } as unknown as ProviderAdapterV2SessionRuntime,
+        } as unknown as ProviderAdapter.ProviderAdapterV2SessionRuntime,
         run: { id: run.runId, threadId, ordinal: 1, providerInstanceId } as OrchestrationV2Run,
         rootNode: { id: run.rootNodeId } as OrchestrationV2ExecutionNode,
         checkpointScope: {
@@ -811,7 +815,7 @@ describe("a late subagent shell across a session's subscribers", () => {
                 runId: launching.runId,
                 status: "running",
               },
-            } as ProviderAdapterV2Event,
+            } as ProviderAdapter.ProviderAdapterV2Event,
             rootTerminal(launching),
             ...shape.beforeShell,
           ]);
@@ -1174,7 +1178,7 @@ it("routes a settled run's subagent update to the live run that inherited its ca
       type: "subagent.updated",
       driver,
       subagent: { id: subagentId, threadId, runId: priorRunId, status, ...overrides },
-    }) as ProviderAdapterV2Event;
+    }) as ProviderAdapter.ProviderAdapterV2Event;
 
   const [runningAccepted, afterRunning] = RunExecutionService.routeProviderEvent(
     subagentUpdate("running"),

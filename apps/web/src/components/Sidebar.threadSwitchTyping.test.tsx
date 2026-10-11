@@ -160,6 +160,10 @@ function ThreadView() {
     setThreadError: noop,
     onExpandImage: noop,
     onFileOpen: noop,
+    canOperateThread: true,
+    resumeCompactionTokens: null,
+    keepFullHistory: false,
+    onToggleKeepFullHistory: noop,
   };
   return (
     <>
@@ -168,6 +172,7 @@ function ThreadView() {
           thread={threads.b}
           variant="card"
           variantAction="settle"
+          scratchMachineLabel={null}
           settlementSupported={false}
           snoozeSupported={false}
           pinningSupported={false}

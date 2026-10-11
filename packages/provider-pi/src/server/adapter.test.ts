@@ -22,6 +22,7 @@ import * as DateTime from "effect/DateTime";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
+import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Logger from "effect/Logger";
 import * as Option from "effect/Option";
@@ -396,20 +397,22 @@ const makeAdapter = Effect.fnUntraced(function* (
         );
   if (continuationRequests !== undefined) {
     const driver = flavor === PRIME_AGENT_FLAVOR ? PrimeAgentAdapterV2Driver : PiAdapterV2Driver;
-    return yield* driver.create({
-      instanceId: PI_INSTANCE_ID,
-      displayName: undefined,
-      enabled: true,
-      environment: [],
-      config: { enabled: true, binaryPath: "pi", launchArgs, customModels: [] },
-    }).pipe(
-      Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner),
-      Effect.provideService(HostProcess.Environment, environment),
-      Effect.provideService(ProviderContinuationRequests.ProviderContinuationRequests, {
-        ...continuationRequests,
-        take: Effect.never,
-      }),
-    );
+    return yield* driver
+      .create({
+        instanceId: PI_INSTANCE_ID,
+        displayName: undefined,
+        enabled: true,
+        environment: [],
+        config: { enabled: true, binaryPath: "pi", launchArgs, customModels: [] },
+      })
+      .pipe(
+        Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner),
+        Effect.provideService(HostProcess.Environment, environment),
+        Effect.provideService(ProviderContinuationRequests.ProviderContinuationRequests, {
+          ...continuationRequests,
+          take: Effect.never,
+        }),
+      );
   }
   return yield* makePiAdapterV2({
     flavor,
@@ -1750,7 +1753,7 @@ describe("PiAdapterV2", () => {
 
     /** Rolls `providerThread` back to its first of two turns, as the checkpoint executor asks. */
     const rollBackSavedThread = (
-      runtime: ProviderAdapterV2SessionRuntime,
+      runtime: ProviderAdapter.ProviderAdapterV2SessionRuntime,
       providerThread: OrchestrationV2ProviderThread,
     ) => {
       const turn = (ordinal: number): OrchestrationV2ProviderTurn => ({
@@ -4776,8 +4779,8 @@ describe("PiAdapterV2 with the Prime Agent flavor", () => {
   );
 
   type TakeEvent = (
-    predicate: (event: ProviderAdapterV2Event) => boolean,
-  ) => Effect.Effect<ProviderAdapterV2Event>;
+    predicate: (event: ProviderAdapter.ProviderAdapterV2Event) => boolean,
+  ) => Effect.Effect<ProviderAdapter.ProviderAdapterV2Event>;
 
   /** Completed assistant texts of a turn, in order, and how the turn ended. */
   const takeRepliesAndOutcome = (takeEvent: TakeEvent) =>
@@ -6951,7 +6954,7 @@ describe("PiAdapterV2 with the Prime Agent flavor", () => {
     message: { role: "assistant", content: [{ type: "text", text: "done" }], stopReason: "stop" },
   } as const;
 
-  const systemNotices = (events: ReadonlyArray<ProviderAdapterV2Event>) =>
+  const systemNotices = (events: ReadonlyArray<ProviderAdapter.ProviderAdapterV2Event>) =>
     events.flatMap((event) =>
       event.type === "turn_item.updated" && event.turnItem.type === "system_notice"
         ? [
@@ -6992,7 +6995,7 @@ describe("PiAdapterV2 with the Prime Agent flavor", () => {
       );
 
       yield* fake.emit({ type: "agent_end", messages: [] });
-      const seen: Array<ProviderAdapterV2Event> = [];
+      const seen: Array<ProviderAdapter.ProviderAdapterV2Event> = [];
       yield* takeEvent((event) => {
         seen.push(event);
         return event.type === "turn.terminal";
@@ -7013,7 +7016,7 @@ describe("PiAdapterV2 with the Prime Agent flavor", () => {
       yield* fake.emit(finalReply);
       yield* fake.emit({ type: "agent_end", messages: [] });
       yield* fake.takeRequest("get_state");
-      const seen: Array<ProviderAdapterV2Event> = [];
+      const seen: Array<ProviderAdapter.ProviderAdapterV2Event> = [];
       yield* takeEvent((event) => {
         seen.push(event);
         return event.type === "turn.terminal";
@@ -7030,8 +7033,8 @@ describe("PiAdapterV2 with the Prime Agent flavor", () => {
   const showFinishingUp = Effect.fnUntraced(function* (
     fake: FakePi,
     takeEvent: (
-      predicate: (event: ProviderAdapterV2Event) => boolean,
-    ) => Effect.Effect<ProviderAdapterV2Event>,
+      predicate: (event: ProviderAdapter.ProviderAdapterV2Event) => boolean,
+    ) => Effect.Effect<ProviderAdapter.ProviderAdapterV2Event>,
   ) {
     yield* fake.emit({ type: "agent_start" });
     yield* fake.emit(finalReply);
@@ -7043,10 +7046,10 @@ describe("PiAdapterV2 with the Prime Agent flavor", () => {
     return running;
   });
 
-  const isSystemNotice = (event: ProviderAdapterV2Event) =>
+  const isSystemNotice = (event: ProviderAdapter.ProviderAdapterV2Event) =>
     event.type === "turn_item.updated" && event.turnItem.type === "system_notice";
 
-  const noticeIds = (event: ProviderAdapterV2Event) =>
+  const noticeIds = (event: ProviderAdapter.ProviderAdapterV2Event) =>
     event.type === "turn_item.updated"
       ? { id: event.turnItem.id, nodeId: event.turnItem.nodeId }
       : undefined;
@@ -7093,7 +7096,7 @@ describe("PiAdapterV2 with the Prime Agent flavor", () => {
       yield* fake.emit({ type: "refine_complete", result: { id: "r1", summary: "x" } });
       yield* fake.emit({ type: "refine_failed", error: "boom" });
       yield* fake.emit({ type: "agent_settled" });
-      const seen: Array<ProviderAdapterV2Event> = [];
+      const seen: Array<ProviderAdapter.ProviderAdapterV2Event> = [];
       yield* takeEvent((event) => {
         seen.push(event);
         return event.type === "turn.terminal";
@@ -7120,7 +7123,7 @@ describe("PiAdapterV2 with the Prime Agent flavor", () => {
       yield* startTurn(runtime, providerThread, "default", [], "Again", undefined, 2);
       yield* fake.takeRequest("prompt");
       yield* fake.emit({ type: "agent_start" });
-      const seen: Array<ProviderAdapterV2Event> = [];
+      const seen: Array<ProviderAdapter.ProviderAdapterV2Event> = [];
       yield* takeEvent((event) => {
         seen.push(event);
         return event.type === "provider_turn.updated" && event.providerTurn.status === "running";
@@ -7144,7 +7147,7 @@ describe("PiAdapterV2 with the Prime Agent flavor", () => {
       yield* fake.emit(finalReply);
       yield* TestClock.adjust(Duration.millis(5_000));
       yield* fake.emit({ type: "agent_settled" });
-      const seen: Array<ProviderAdapterV2Event> = [];
+      const seen: Array<ProviderAdapter.ProviderAdapterV2Event> = [];
       yield* takeEvent((event) => {
         seen.push(event);
         return event.type === "turn.terminal";
@@ -7236,7 +7239,7 @@ describe("PiAdapterV2 with the Prime Agent flavor", () => {
       if (running.type !== "turn_item.updated") return;
 
       yield* end(fake, session, running.turnItem.providerTurnId ?? "");
-      const seen: Array<ProviderAdapterV2Event> = [];
+      const seen: Array<ProviderAdapter.ProviderAdapterV2Event> = [];
       yield* session.takeEvent((event) => {
         seen.push(event);
         return event.type === "turn.terminal";
@@ -7272,7 +7275,7 @@ describe("PiAdapterV2 with the Prime Agent flavor", () => {
       });
       yield* fake.emit({ type: "refine_failed", error: "planner timed out" });
       yield* fake.emit({ type: "agent_end", messages: [] });
-      const seen: Array<ProviderAdapterV2Event> = [];
+      const seen: Array<ProviderAdapter.ProviderAdapterV2Event> = [];
       yield* takeEvent((event) => {
         seen.push(event);
         return event.type === "turn.terminal";
@@ -7574,7 +7577,7 @@ describe("PiAdapterV2 with the Prime Agent flavor", () => {
       yield* fake.takeRequest("prompt");
       yield* fake.emit({ type: "agent_start" });
       yield* fake.emit(rlmChild("running"));
-      const events: Array<ProviderAdapterV2Event> = [];
+      const events: Array<ProviderAdapter.ProviderAdapterV2Event> = [];
       while (events.at(-1)?.type !== "subagent.updated") {
         events.push(yield* session.takeEvent(() => true));
       }
@@ -7942,7 +7945,7 @@ describe("PiAdapterV2 with the Prime Agent flavor", () => {
           sessionDir: "/fake/.prime/agent/session-artifacts/s/sub-2",
         },
       });
-      const seen: Array<ProviderAdapterV2Event> = [];
+      const seen: Array<ProviderAdapter.ProviderAdapterV2Event> = [];
       do seen.push(yield* session.takeEvent(() => true));
       while (
         !seen.some(
@@ -7980,13 +7983,13 @@ describe("PiAdapterV2 with the Prime Agent flavor", () => {
   const takeUntilCard = (
     session: {
       readonly takeEvent: (
-        predicate: (event: ProviderAdapterV2Event) => boolean,
-      ) => Effect.Effect<ProviderAdapterV2Event>;
+        predicate: (event: ProviderAdapter.ProviderAdapterV2Event) => boolean,
+      ) => Effect.Effect<ProviderAdapter.ProviderAdapterV2Event>;
     },
     title: string,
   ) =>
     Effect.gen(function* () {
-      const seen: Array<ProviderAdapterV2Event> = [];
+      const seen: Array<ProviderAdapter.ProviderAdapterV2Event> = [];
       do seen.push(yield* session.takeEvent(() => true));
       while (
         !seen.some(
@@ -8000,7 +8003,10 @@ describe("PiAdapterV2 with the Prime Agent flavor", () => {
     });
 
   /** What a late-seen parent child did to a nested child: its thread's parents and its card's moves. */
-  const nestedPlacement = (events: ReadonlyArray<ProviderAdapterV2Event>, title: string) => {
+  const nestedPlacement = (
+    events: ReadonlyArray<ProviderAdapter.ProviderAdapterV2Event>,
+    title: string,
+  ) => {
     const threadId = events.flatMap((event) =>
       event.type === "app_thread.created" && event.appThread.title === title
         ? [event.appThread.id]
@@ -8134,10 +8140,10 @@ describe("PiAdapterV2 with the Prime Agent flavor", () => {
         type: "rlm_child_update",
         child: { id: "sub-2", parentId: "sub-1", sessionName: "gamma", status },
       });
-      const seen: Array<ProviderAdapterV2Event> = [];
+      const seen: Array<ProviderAdapter.ProviderAdapterV2Event> = [];
       const untilCard = (status: string) =>
         Effect.gen(function* () {
-          let event: ProviderAdapterV2Event;
+          let event: ProviderAdapter.ProviderAdapterV2Event;
           do {
             event = yield* session.takeEvent(() => true);
             seen.push(event);
@@ -8201,9 +8207,9 @@ describe("PiAdapterV2 with the Prime Agent flavor", () => {
         assert.isFalse(yield* session.runtime.hasPendingBackgroundWork!);
 
         /** Every event up to the first one matching `done`, so none can slip by unchecked. */
-        const eventsUntil = (done: (event: ProviderAdapterV2Event) => boolean) =>
+        const eventsUntil = (done: (event: ProviderAdapter.ProviderAdapterV2Event) => boolean) =>
           Effect.gen(function* () {
-            const seen: Array<ProviderAdapterV2Event> = [];
+            const seen: Array<ProviderAdapter.ProviderAdapterV2Event> = [];
             do seen.push(yield* session.takeEvent(() => true));
             while (!done(seen[seen.length - 1]!));
             return seen;
@@ -8263,7 +8269,7 @@ describe("PiAdapterV2 with the Prime Agent flavor", () => {
 
         // The child thread works again while the follow-up runs, as a resumed
         // Claude subagent does, and settles when it ends.
-        const childRootStates = (events: ReadonlyArray<ProviderAdapterV2Event>) =>
+        const childRootStates = (events: ReadonlyArray<ProviderAdapter.ProviderAdapterV2Event>) =>
           events.flatMap((event) =>
             event.type === "node.updated" &&
             event.node.kind === "root_turn" &&
@@ -8544,7 +8550,7 @@ describe("PiAdapterV2 with the Prime Agent flavor", () => {
     },
   });
 
-  const heartbeatIds = (event: ProviderAdapterV2Event) =>
+  const heartbeatIds = (event: ProviderAdapter.ProviderAdapterV2Event) =>
     event.type === "provider_thread.updated"
       ? event.providerThread.heartbeats?.map((heartbeat) => heartbeat.id)
       : undefined;
@@ -8717,11 +8723,11 @@ describe("PiAdapterV2 with the Prime Agent flavor", () => {
   /** Collects the events a turn publishes until it settles. */
   const drainUntilTerminal = (
     takeEvent: (
-      predicate: (event: ProviderAdapterV2Event) => boolean,
-    ) => Effect.Effect<ProviderAdapterV2Event>,
+      predicate: (event: ProviderAdapter.ProviderAdapterV2Event) => boolean,
+    ) => Effect.Effect<ProviderAdapter.ProviderAdapterV2Event>,
   ) =>
     Effect.gen(function* () {
-      const seen: Array<ProviderAdapterV2Event> = [];
+      const seen: Array<ProviderAdapter.ProviderAdapterV2Event> = [];
       yield* takeEvent((event) => {
         seen.push(event);
         return event.type === "turn.terminal";
@@ -8746,7 +8752,7 @@ describe("PiAdapterV2 with the Prime Agent flavor", () => {
       });
     });
 
-  const rosterLengths = (events: ReadonlyArray<ProviderAdapterV2Event>) =>
+  const rosterLengths = (events: ReadonlyArray<ProviderAdapter.ProviderAdapterV2Event>) =>
     events.flatMap((event) =>
       event.type === "provider_thread.updated"
         ? [event.providerThread.pendingBackgroundTasks?.length ?? 0]
@@ -8972,7 +8978,10 @@ describe("PiAdapterV2 with the Prime Agent flavor", () => {
   const emitLostCell = (fake: FakePi, toolCallId: string, code: string) =>
     fake.emit({ type: "tool_execution_start", toolCallId, toolName: "ipython", args: { code } });
 
-  const cellStatuses = (events: ReadonlyArray<ProviderAdapterV2Event>, toolCallId: string) =>
+  const cellStatuses = (
+    events: ReadonlyArray<ProviderAdapter.ProviderAdapterV2Event>,
+    toolCallId: string,
+  ) =>
     events.flatMap((event) =>
       event.type === "turn_item.updated" && event.turnItem.nativeItemRef?.nativeId === toolCallId
         ? [event.turnItem.status]
@@ -9111,8 +9120,8 @@ describe("PiAdapterV2 with the Prime Agent flavor", () => {
 
   const takeCompletedReply = (
     takeEvent: (
-      predicate: (event: ProviderAdapterV2Event) => boolean,
-    ) => Effect.Effect<ProviderAdapterV2Event>,
+      predicate: (event: ProviderAdapter.ProviderAdapterV2Event) => boolean,
+    ) => Effect.Effect<ProviderAdapter.ProviderAdapterV2Event>,
   ) =>
     takeEvent(
       (event) =>
@@ -9354,7 +9363,8 @@ describe("PiAdapterV2 with the Prime Agent flavor", () => {
   );
 
   const openPrimeThreadWithWakes = Effect.fnUntraced(function* (fake: FakePi) {
-    const offers = yield* Queue.unbounded<ProviderContinuationRequest>();
+    const offers =
+      yield* Queue.unbounded<ProviderContinuationRequests.ProviderContinuationRequest>();
     const { runtime, takeEvent } = yield* openRuntime(
       fake,
       "default",
@@ -9567,7 +9577,9 @@ describe("PiAdapterV2 with the Prime Agent flavor", () => {
     });
 
   /** Takes the one wake offer the quiet checks make for work T3 never saw. */
-  const takeRecoveredOffer = (offers: Queue.Queue<ProviderContinuationRequest>) =>
+  const takeRecoveredOffer = (
+    offers: Queue.Queue<ProviderContinuationRequests.ProviderContinuationRequest>,
+  ) =>
     Effect.gen(function* () {
       yield* tickUntil(() => Queue.sizeUnsafe(offers) > 0);
       const offer = yield* Queue.poll(offers);
@@ -9578,7 +9590,7 @@ describe("PiAdapterV2 with the Prime Agent flavor", () => {
   /** Dispatches a wake offer as a continuation run and returns how that run ended. */
   const runContinuation = (
     session: Effect.Success<ReturnType<typeof openPrimeThreadWithWakes>>,
-    offer: ProviderContinuationRequest,
+    offer: ProviderContinuationRequests.ProviderContinuationRequest,
   ) =>
     Effect.gen(function* () {
       const dispatched = yield* offer.dispatchIfCurrent!(Effect.succeed("dispatched"));
@@ -10560,8 +10572,9 @@ describe("PiAdapterV2 reaching T3 through the kernel's MCP client", () => {
   };
 
   const withMcpSession = <A, E, R>(effect: Effect.Effect<A, E, R>) =>
-    Effect.sync(() =>
-      McpProviderSession.setMcpProviderSession({
+    Effect.gen(function* () {
+      const sessions = yield* McpProviderSessions.McpProviderSessions;
+      yield* sessions.set({
         environmentId: EnvironmentId.make("environment-pi-mcp"),
         threadId: THREAD_ID,
         providerSessionId: "mcp-session-prime",
@@ -10569,18 +10582,16 @@ describe("PiAdapterV2 reaching T3 through the kernel's MCP client", () => {
         endpoint: ENDPOINT,
         authorizationHeader: "Bearer secret-prime-token",
         browserToolsAvailable: true,
-      }),
-    ).pipe(
-      Effect.andThen(effect),
-      Effect.ensuring(Effect.sync(() => McpProviderSession.clearMcpProviderSession(THREAD_ID))),
-    );
+      });
+      return yield* effect.pipe(Effect.ensuring(sessions.clear(THREAD_ID)));
+    });
 
   const openPrime = (fake: FakePi, agentDir: string) =>
     openRuntime(fake, "default", THREAD_ID, SESSION_ID, undefined, PRIME_AGENT_FLAVOR, undefined, {
       PRIME_AGENT_CODING_AGENT_DIR: agentDir,
     });
 
-  const t3SetupNotices = (events: ReadonlyArray<ProviderAdapterV2Event>) =>
+  const t3SetupNotices = (events: ReadonlyArray<ProviderAdapter.ProviderAdapterV2Event>) =>
     events.flatMap((event) =>
       event.type === "turn_item.updated" &&
       event.turnItem.type === "system_notice" &&
@@ -10630,7 +10641,7 @@ describe("PiAdapterV2 reaching T3 through the kernel's MCP client", () => {
             yield* fake.emit({ type: "agent_start" });
             yield* fake.emit({ type: "agent_end", messages: [] });
             yield* fake.takeRequest("get_state");
-            const seen: Array<ProviderAdapterV2Event> = [];
+            const seen: Array<ProviderAdapter.ProviderAdapterV2Event> = [];
             yield* takeEvent((event) => {
               seen.push(event);
               return event.type === "turn.terminal";
