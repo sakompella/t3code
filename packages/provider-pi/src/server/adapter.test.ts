@@ -56,6 +56,10 @@ import { loadMcpBridge } from "./mcpBridge.testkit.ts";
 import { turnItemOutputText } from "../../../client-runtime/src/work-log/itemDetail.ts";
 import { PI_FLAVOR, PRIME_AGENT_FLAVOR, PRIME_AGENT_FORK_FLAVOR, type PiFlavor } from "./flavor.ts";
 import { T3_ROLLBACK_NOTICE } from "./mcpExtensionSource.ts";
+import {
+  PRIME_AGENT_FORK_CHILD_WAKE_RECORDS,
+  PRIME_AGENT_FORK_OBSERVED_MESSAGES,
+} from "./primeAgentFork.testkit.ts";
 
 const layerTest = Layer.mergeAll(
   NodeServices.layer,
@@ -10788,9 +10792,10 @@ describe("PiAdapterV2 on the Prime Agent 0.10 fork", () => {
       readonly forkFake?: FakePi;
       readonly runtimeMode?: ProviderAdapter.ProviderAdapterV2RuntimePolicy["runtimeMode"];
       readonly environment?: NodeJS.ProcessEnv;
-      readonly offers?: Array<ProviderContinuationRequests.ProviderContinuationRequest>;
     } = {},
   ) {
+    const offers =
+      yield* Queue.unbounded<ProviderContinuationRequests.ProviderContinuationRequest>();
     fake.setVersion(options.version ?? "0.10.0");
     options.forkFake?.setVersion(options.version ?? "0.10.0");
     const { forkFake } = options;
@@ -10812,10 +10817,7 @@ describe("PiAdapterV2 on the Prime Agent 0.10 fork", () => {
       Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner),
       Effect.provideService(HostProcess.Environment, options.environment ?? {}),
       Effect.provideService(ProviderContinuationRequests.ProviderContinuationRequests, {
-        offer: (request) =>
-          Effect.sync(() => {
-            options.offers?.push(request);
-          }),
+        offer: (request) => Queue.offer(offers, request).pipe(Effect.asVoid),
         take: Effect.never,
       }),
     );
@@ -10842,7 +10844,7 @@ describe("PiAdapterV2 on the Prime Agent 0.10 fork", () => {
           if (predicate(event)) return event;
         }
       });
-    return { runtime, takeEvent, seen };
+    return { runtime, takeEvent, seen, offers };
   });
 
   it.effect.each([
@@ -10880,6 +10882,138 @@ describe("PiAdapterV2 on the Prime Agent 0.10 fork", () => {
       for (const flag of ["--extension", "--no-extensions", "--no-tools"]) {
         assert.notInclude(args, flag);
       }
+    }).pipe(Effect.scoped, Effect.provide(layerTest)),
+  );
+  it.effect("projects a child from the fork's recorded frames into its own thread", () =>
+    Effect.gen(function* () {
+      const fake = yield* makeFakePi;
+      const { runtime, takeEvent, seen, offers } = yield* openPrimeAgent(fake);
+      const providerThread = yield* runtime.ensureThread({
+        threadId: THREAD_ID,
+        modelSelection: modelSelection("default"),
+        runtimePolicy,
+      });
+      fake.queueObserved(PRIME_AGENT_FORK_OBSERVED_MESSAGES);
+      yield* startTurn(runtime, providerThread);
+      yield* fake.takeRequest("prompt");
+      // The parent's first run ends, and T3 settles it, while the child works.
+      const firstRunEnd = PRIME_AGENT_FORK_CHILD_WAKE_RECORDS.findIndex(
+        (record) => record["type"] === "agent_end",
+      );
+      for (const record of PRIME_AGENT_FORK_CHILD_WAKE_RECORDS.slice(0, firstRunEnd + 1)) {
+        yield* fake.emit(record);
+      }
+      yield* takeEvent((event) => event.type === "turn.terminal");
+      for (const record of PRIME_AGENT_FORK_CHILD_WAKE_RECORDS.slice(firstRunEnd + 1)) {
+        yield* fake.emit(record);
+      }
+
+      const done = yield* takeEvent(
+        (event) => event.type === "subagent.updated" && event.subagent.status === "completed",
+      );
+      assert.isTrue(done.type === "subagent.updated");
+      if (done.type !== "subagent.updated") return;
+      assert.equal(done.subagent.title, "adder");
+      assert.equal(done.subagent.result, "42");
+      assert.equal((yield* fake.takeRequest("observe"))["activeSessionId"], "f37cc57f87da");
+      const childReplies = seen.flatMap((event) =>
+        event.type === "message.updated" &&
+        event.message.threadId === done.subagent.childThreadId &&
+        event.message.role === "assistant"
+          ? [event.message.text]
+          : [],
+      );
+      assert.equal(childReplies.at(-1), "42");
+      assert.equal((yield* fake.takeRequest("unobserve"))["activeSessionId"], "f37cc57f87da");
+
+      // The child's message woke the parent, which the recorded wake names.
+      assert.deepEqual((yield* Queue.take(offers)).notification, {
+        source: { kind: "subagent" },
+        outcome: "updated",
+        summary: "Message from adder",
+        detail: "42",
+      });
+    }).pipe(Effect.scoped, Effect.provide(layerTest)),
+  );
+
+  /** A heartbeat job as the fork's `heartbeats_list` serializes it (`AgentCronJob`). */
+  const forkHeartbeatJob = {
+    id: "hb-1",
+    status: "active",
+    activeSessionId: "2a1193474648",
+    sessionId: "00000000-0000-4000-8000-000000000002",
+    sessionFile: FAKE_SESSION_FILE,
+    cwd: "/workspace",
+    label: "Watch CI",
+    prompt: "Check the CI run and report failures.",
+    schedule: { kind: "cron", expression: "*/10 * * * *" },
+    createdAt: "2026-10-11T09:00:00.000Z",
+    updatedAt: "2026-10-11T09:00:00.000Z",
+    nextRunAt: "2026-10-11T09:10:00.000Z",
+    runCount: 0,
+  };
+
+  it.effect("lists the fork's heartbeats and names a heartbeat wake", () =>
+    Effect.gen(function* () {
+      const fake = yield* makeFakePi;
+      fake.queueHeartbeats({ heartbeats: [{ job: forkHeartbeatJob, sessionName: "parent" }] });
+      const { runtime, takeEvent, offers } = yield* openPrimeAgent(fake);
+      yield* runtime.ensureThread({
+        threadId: THREAD_ID,
+        modelSelection: modelSelection("default"),
+        runtimePolicy,
+      });
+      const listed = yield* takeEvent(
+        (event) =>
+          event.type === "provider_thread.updated" &&
+          (event.providerThread.heartbeats?.length ?? 0) > 0,
+      );
+      assert.deepEqual(
+        listed.type === "provider_thread.updated" ? listed.providerThread.heartbeats : null,
+        [
+          {
+            id: "hb-1",
+            schedule: "*/10 * * * *",
+            paused: false,
+            description: "Watch CI",
+            nextRunAt: "2026-10-11T09:10:00.000Z",
+          },
+        ],
+      );
+
+      // `create_heartbeat_prompt_message` in the fork's session engine.
+      const heartbeatPrompt = {
+        role: "custom",
+        customType: "heartbeat_prompt",
+        content: "[heartbeat: */10 * * * * run#1]\n\nCheck the CI run and report failures.",
+        display: true,
+        details: {
+          jobId: "hb-1",
+          schedule: "*/10 * * * *",
+          status: "active",
+          runCount: 1,
+          nextRunAt: "2026-10-11T09:20:00.000Z",
+        },
+        timestamp: 1_791_710_960_000,
+      };
+      yield* fake.emit({
+        type: "session_action_update",
+        actions: { queuedCount: 1, steering: [], followUps: ["Heartbeat prompt"] },
+      });
+      yield* fake.emit({ type: "agent_start" });
+      yield* fake.emit({ type: "turn_start" });
+      yield* fake.emit({ type: "message_start", message: heartbeatPrompt });
+      yield* fake.emit({ type: "message_end", message: heartbeatPrompt });
+      yield* fake.emit({
+        type: "message_start",
+        message: { role: "assistant", content: [], timestamp: 1_791_710_960_001 },
+      });
+      assert.deepEqual((yield* Queue.take(offers)).notification, {
+        source: { kind: "heartbeat", heartbeatId: "hb-1" },
+        outcome: "updated",
+        summary: "Heartbeat",
+        detail: "Check the CI run and report failures.",
+      });
     }).pipe(Effect.scoped, Effect.provide(layerTest)),
   );
 });
