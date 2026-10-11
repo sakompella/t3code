@@ -121,7 +121,7 @@ const primeAgentCli = (
 it.effect.each([
   {
     name: "the 0.10 fork, which cannot turn its tools off",
-    cli: { version: "0.10.0", help: PRIME_AGENT_FORK_HELP, helpExitCode: 0 },
+    cli: { version: "0.10.0+t3fork.1", help: PRIME_AGENT_FORK_HELP, helpExitCode: 0 },
     detail: "tools",
   },
   {

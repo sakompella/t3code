@@ -134,12 +134,10 @@ describe("PiProvider", () => {
       displayName: "Prime Agent",
       runtimeModes: supervisedOrFull,
     },
-    { version: "0.10.0", help: PRIME_AGENT_FORK_HELP, ...fork },
-    { version: "0.10.1-beta.3", help: PRIME_AGENT_FORK_HELP, ...fork },
-    { version: "0.10", help: PRIME_AGENT_FORK_HELP, ...fork },
-    { version: "nightly", help: PRIME_AGENT_FORK_HELP, ...fork },
+    { version: "0.10.0+t3fork.1", help: PRIME_AGENT_FORK_HELP, ...fork },
+    { version: "0.10.1-beta.3+t3fork.2", help: PRIME_AGENT_FORK_HELP, ...fork },
   ])(
-    "probes Prime Agent $version as $displayName from what its help offers",
+    "probes Prime Agent $version as $displayName",
     ({ version, help, displayName, runtimeModes }) =>
       Effect.gen(function* () {
         const snapshot = yield* checkPiProviderStatus(PRIME_AGENT_FLAVOR, {
@@ -167,7 +165,7 @@ describe("PiProvider", () => {
       const spawner = ChildProcessSpawner.make((command) => {
         const args = ChildProcess.isStandardCommand(command) ? command.args : [];
         if (args.includes("--version")) {
-          return Effect.succeed(processHandle({ stdout: "prime-agent 0.10.0\n" }));
+          return Effect.succeed(processHandle({ stdout: "prime-agent 0.10.0+t3fork.1\n" }));
         }
         if (args.includes("--help")) {
           return Effect.succeed(processHandle({ stdout: PRIME_AGENT_FORK_HELP }));
@@ -192,37 +190,58 @@ describe("PiProvider", () => {
   );
 
   const undetectable = [
-    { name: "a help run that fails", help: { stderr: "boom", exitCode: 2 } },
-    { name: "help that names no Prime Agent options", help: { stdout: "usage: something else\n" } },
+    { name: "a help run that fails", version: "0.9.8", help: { stderr: "boom", exitCode: 2 } },
+    {
+      name: "help that names no Prime Agent options",
+      version: "0.9.8",
+      help: { stdout: "usage: something else\n" },
+    },
+    {
+      name: "stock Prime Agent 0.10, which has no T3 fork marker",
+      version: "0.10.0",
+      help: { stdout: PRIME_AGENT_FORK_HELP },
+      reason: "stock Prime Agent 0.10 is not supported; install the T3 fork",
+    },
+    {
+      name: "a version T3 cannot read",
+      version: "nightly",
+      help: { stdout: PRIME_AGENT_FORK_HELP },
+    },
   ];
-  it.effect.each(undetectable)("refuses to guess the Prime Agent flavor from $name", ({ help }) =>
-    Effect.gen(function* () {
-      const exit = yield* detectPiFlavor(
-        PRIME_AGENT_FLAVOR,
-        { ...settings, binaryPath: "/opt/bin/prime-agent" },
-        {},
-      ).pipe(
-        Effect.provideService(
-          ChildProcessSpawner.ChildProcessSpawner,
-          piProbeSpawner("0.9.8", "prime-agent", help),
-        ),
-        Effect.exit,
-      );
-      assert.isTrue(Exit.isFailure(exit), "an unknown CLI must not launch as 0.9.8");
-      if (Exit.isFailure(exit)) assert.include(Cause.pretty(exit.cause), "/opt/bin/prime-agent");
+  it.effect.each(undetectable)(
+    "refuses to launch Prime Agent from $name",
+    ({ version, help, reason }) =>
+      Effect.gen(function* () {
+        const exit = yield* detectPiFlavor(
+          PRIME_AGENT_FLAVOR,
+          { ...settings, binaryPath: "/opt/bin/prime-agent" },
+          {},
+        ).pipe(
+          Effect.provideService(
+            ChildProcessSpawner.ChildProcessSpawner,
+            piProbeSpawner(version, "prime-agent", help),
+          ),
+          Effect.exit,
+        );
+        assert.isTrue(Exit.isFailure(exit), "an unknown CLI must not launch");
+        if (Exit.isFailure(exit)) {
+          assert.include(Cause.pretty(exit.cause), "/opt/bin/prime-agent");
+          if (reason !== undefined) assert.include(Cause.pretty(exit.cause), reason);
+        }
 
-      const snapshot = yield* checkPiProviderStatus(PRIME_AGENT_FLAVOR, {
-        ...settings,
-        binaryPath: "/opt/bin/prime-agent",
-      }).pipe(
-        Effect.provideService(
-          ChildProcessSpawner.ChildProcessSpawner,
-          piProbeSpawner("0.9.8", "prime-agent", help),
-        ),
-      );
-      assert.equal(snapshot.status, "error");
-      assert.include(snapshot.message ?? "", "/opt/bin/prime-agent");
-    }).pipe(Effect.provide(NodeServices.layer)),
+        const snapshot = yield* checkPiProviderStatus(PRIME_AGENT_FLAVOR, {
+          ...settings,
+          binaryPath: "/opt/bin/prime-agent",
+        }).pipe(
+          Effect.provideService(
+            ChildProcessSpawner.ChildProcessSpawner,
+            piProbeSpawner(version, "prime-agent", help),
+          ),
+        );
+        assert.equal(snapshot.status, "error");
+        assert.include(snapshot.message ?? "", "/opt/bin/prime-agent");
+        if (reason !== undefined) assert.include(snapshot.message ?? "", reason);
+      }).pipe(Effect.provide(NodeServices.layer)),
   );
 
   it.effect("refuses to guess the Prime Agent flavor from a help run that cannot start", () =>
