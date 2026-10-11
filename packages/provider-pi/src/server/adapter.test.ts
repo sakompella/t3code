@@ -111,6 +111,8 @@ interface FakePi {
   readonly setTranscript: (messages: ReadonlyArray<unknown>) => void;
   /** Data returned by the next `get_fork_messages` acks, consumed in order. */
   readonly queueForkMessages: (data: unknown) => void;
+  /** Make the next queued `get_fork_messages` ack an unsuccessful response. */
+  readonly failNextForkMessages: () => void;
   readonly vetoNextSwitch: () => void;
   /** Refuse the next `count` `switch_session` requests with `message`, as Prime Agent does while another worker holds the lease. */
   readonly rejectNextSwitches: (count: number, message: string) => void;
@@ -172,6 +174,7 @@ const makeFakePi: Effect.Effect<FakePi> = Effect.gen(function* () {
   const entriesQueue: Array<unknown> = [];
   const messagesQueue: Array<unknown> = [];
   const forkMessagesQueue: Array<unknown> = [];
+  const forkMessagesFailure = Symbol("get_fork_messages failure");
   const stateQueue: Array<Record<string, unknown>> = [];
   const statsQueue: Array<unknown> = [];
   const observedQueue: Array<ReadonlyArray<unknown>> = [];
@@ -256,8 +259,12 @@ const makeFakePi: Effect.Effect<FakePi> = Effect.gen(function* () {
         return { ...base, data: entriesQueue.shift() ?? { entries: [], leafId: null } };
       case "get_messages":
         return { ...base, data: messagesQueue.shift() ?? { messages: transcript } };
-      case "get_fork_messages":
-        return { ...base, data: forkMessagesQueue.shift() ?? { messages: [] } };
+      case "get_fork_messages": {
+        const data = forkMessagesQueue.shift() ?? { messages: [] };
+        return data === forkMessagesFailure
+          ? { ...base, success: false, error: "fork messages unavailable" }
+          : { ...base, data };
+      }
       case "observe":
         return { ...base, data: { messages: observedQueue.shift() ?? [] } };
       case "get_session_stats":
@@ -376,6 +383,7 @@ const makeFakePi: Effect.Effect<FakePi> = Effect.gen(function* () {
       transcript = messages;
     },
     queueForkMessages: (data) => forkMessagesQueue.push(data),
+    failNextForkMessages: () => forkMessagesQueue.push(forkMessagesFailure),
     deferNextState: () => {
       deferState = true;
     },
@@ -10020,16 +10028,28 @@ describe("PiAdapterV2 with the Prime Agent flavor", () => {
     }).pipe(Effect.scoped, Effect.provide(layerTest)),
   );
 
-  /** Reopens the thread after a T3 restart, on a process whose branch lists `activeBranch`. */
+  /** A `get_fork_messages` reply that says nothing about the active branch. */
+  type UnreadableBranch = "a failed listing" | "a listing without messages" | "an entry without id";
+
+  /**
+   * Reopens the thread after a T3 restart, on a process whose branch lists
+   * `activeBranch`, or whose listing is unreadable in the given way.
+   */
   const reopenForkThread = (
     stored: OrchestrationV2ProviderThread,
-    activeBranch: ReadonlyArray<string>,
+    activeBranch: ReadonlyArray<string> | UnreadableBranch,
   ) =>
     Effect.gen(function* () {
       const fake = yield* makeFakePi;
-      fake.queueForkMessages({
-        messages: activeBranch.map((entryId) => ({ entryId, text: entryId })),
-      });
+      if (activeBranch === "a failed listing") fake.failNextForkMessages();
+      else if (activeBranch === "a listing without messages") fake.queueForkMessages({});
+      else if (activeBranch === "an entry without id") {
+        fake.queueForkMessages({ messages: [{ entryId: "u1", text: "u1" }, { text: "u2" }] });
+      } else {
+        fake.queueForkMessages({
+          messages: activeBranch.map((entryId) => ({ entryId, text: entryId })),
+        });
+      }
       const { runtime, takeEvent } = yield* openRuntime(
         fake,
         "default",
@@ -10108,6 +10128,74 @@ describe("PiAdapterV2 with the Prime Agent flavor", () => {
         );
         assert.equal(lastPrompt(reopened.fake), `${T3_ROLLBACK_NOTICE}\n\nturn 3`);
       }).pipe(Effect.scoped, Effect.provide(layerTest)),
+  );
+
+  it.effect.each<{ readonly listing: UnreadableBranch }>([
+    { listing: "a failed listing" },
+    { listing: "a listing without messages" },
+    { listing: "an entry without id" },
+  ])("keeps the 0.10 fork rollback mark and warns when reopening reads $listing", ({ listing }) =>
+    Effect.gen(function* () {
+      const fake = yield* makeFakePi;
+      fake.queueForkMessages({ messages: [] });
+      const session = yield* openPrimeThread(fake, THREAD_ID, PRIME_AGENT_FORK_FLAVOR);
+      const first = yield* runPrimeTurn(session, fake, 1, ["u1"]);
+      const second = yield* runPrimeTurn(session, fake, 2, ["u1", "u2"]);
+      const { providerThread: stored } = yield* rollBackToFirstTurn(session, [first, second]);
+
+      const reopened = yield* reopenForkThread(stored, listing);
+      assert.deepEqual(navigations(reopened.fake), [], "a reopen must never move the leaf");
+      assert.equal(
+        reopened.session.providerThread.nativeConversationHeadRef?.nativeId,
+        "u2",
+        "an unreadable branch confirms nothing",
+      );
+      const notices: Array<string> = [];
+      yield* startTurn(
+        reopened.session.runtime,
+        reopened.session.providerThread,
+        "default",
+        [],
+        "turn 3",
+        undefined,
+        3,
+      );
+      yield* reopened.fake.takeRequest("prompt");
+      yield* reopened.fake.emit({
+        type: "response",
+        command: "prompt",
+        success: false,
+        error: "busy",
+      });
+      yield* reopened.session.takeEvent((event) => {
+        if (event.type === "turn_item.updated" && event.turnItem.type === "system_notice") {
+          notices.push(event.turnItem.message);
+        }
+        return event.type === "turn.terminal";
+      });
+      assert.isTrue(
+        notices.some((message) => message.includes("not confirmed")),
+        JSON.stringify(notices),
+      );
+
+      // T3 closes before any prompt is accepted; the next reopen still knows.
+      const again = yield* reopenForkThread(reopened.session.providerThread, listing);
+      assert.equal(again.session.providerThread.nativeConversationHeadRef?.nativeId, "u2");
+    }).pipe(Effect.scoped, Effect.provide(layerTest)),
+  );
+
+  it.effect("clears the 0.10 fork rollback mark on a readable branch with no user entries", () =>
+    Effect.gen(function* () {
+      const fake = yield* makeFakePi;
+      fake.queueForkMessages({ messages: [] });
+      const session = yield* openPrimeThread(fake, THREAD_ID, PRIME_AGENT_FORK_FLAVOR);
+      const first = yield* runPrimeTurn(session, fake, 1, ["u1"]);
+      const second = yield* runPrimeTurn(session, fake, 2, ["u1", "u2"]);
+      const { providerThread: stored } = yield* rollBackToFirstTurn(session, [first, second]);
+
+      const reopened = yield* reopenForkThread(stored, []);
+      assert.isNull(reopened.session.providerThread.nativeConversationHeadRef);
+    }).pipe(Effect.scoped, Effect.provide(layerTest)),
   );
 
   it.effect("keeps the 0.10 fork rollback mark and notice until a prompt is accepted", () =>
