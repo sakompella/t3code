@@ -54,7 +54,8 @@ import {
 import { makePiRpcConnection, type PiRpcRecord } from "./rpc.ts";
 import { loadMcpBridge } from "./mcpBridge.testkit.ts";
 import { turnItemOutputText } from "../../../client-runtime/src/work-log/itemDetail.ts";
-import { PI_FLAVOR, PRIME_AGENT_FLAVOR, type PiFlavor } from "./flavor.ts";
+import { PI_FLAVOR, PRIME_AGENT_FLAVOR, PRIME_AGENT_FORK_FLAVOR, type PiFlavor } from "./flavor.ts";
+import { T3_ROLLBACK_NOTICE } from "./mcpExtensionSource.ts";
 
 const layerTest = Layer.mergeAll(
   NodeServices.layer,
@@ -251,6 +252,8 @@ const makeFakePi: Effect.Effect<FakePi> = Effect.gen(function* () {
         return { ...base, ...(heartbeatsQueue.shift() ?? { data: { heartbeats: [] } }) };
       case "fork":
         return { ...base, data: { text: "Hello pi", cancelled: false } };
+      case "navigate_tree":
+        return { ...base, data: { cancelled: false, editorText: "Hello pi" } };
       default:
         return base;
     }
@@ -4653,14 +4656,18 @@ describe("PiRpc early process exit", () => {
 });
 
 describe("PiAdapterV2 with the Prime Agent flavor", () => {
-  const openPrimeThread = Effect.fnUntraced(function* (fake: FakePi, threadId = THREAD_ID) {
+  const openPrimeThread = Effect.fnUntraced(function* (
+    fake: FakePi,
+    threadId = THREAD_ID,
+    flavor: PiFlavor = PRIME_AGENT_FLAVOR,
+  ) {
     const { runtime, takeEvent } = yield* openRuntime(
       fake,
       "default",
       threadId,
       SESSION_ID,
       undefined,
-      PRIME_AGENT_FLAVOR,
+      flavor,
     );
     const providerThread = yield* runtime.ensureThread({
       threadId,
@@ -9933,6 +9940,47 @@ describe("PiAdapterV2 with the Prime Agent flavor", () => {
       const error = yield* Fiber.join(rollback);
       assert.include(String(error.cause), "cancelled the rollback");
       assert.isFalse(fake.allRequests().some((request) => request["type"] === "fork"));
+    }).pipe(Effect.scoped, Effect.provide(layerTest)),
+  );
+
+  it.effect("rolls the 0.10 fork back in place with its navigate_tree command", () =>
+    Effect.gen(function* () {
+      const fake = yield* makeFakePi;
+      fake.queueForkMessages({ messages: [] });
+      const session = yield* openPrimeThread(fake, THREAD_ID, PRIME_AGENT_FORK_FLAVOR);
+      const first = yield* runPrimeTurn(session, fake, 1, ["u1"]);
+      const second = yield* runPrimeTurn(session, fake, 2, ["u1", "u2"]);
+
+      const snapshot = yield* rollBackToFirstTurn(session, [first, second]);
+
+      const requests = fake.allRequests();
+      assert.deepEqual(
+        requests
+          .filter((request) => request.type === "navigate_tree")
+          .map(({ id: _id, ...request }) => request),
+        [{ type: "navigate_tree", targetId: "u2" }],
+      );
+      assert.isFalse(requests.some((request) => request.type === "fork"));
+      assert.isFalse(
+        requests.some((request) => String(request["message"]).startsWith("/t3-navigate-tree")),
+      );
+      assert.equal(
+        snapshot.providerThread.nativeThreadRef?.nativeId,
+        session.providerThread.nativeThreadRef?.nativeId,
+        "an in-place rollback keeps the same session file",
+      );
+
+      // The kernel kept its state, which only the next prompt can tell the agent.
+      const promptAfter = (ordinal: number) =>
+        runPrimeTurn(session, fake, ordinal, ["u1"]).pipe(
+          Effect.map(() =>
+            String(
+              fake.allRequests().findLast((request) => request.type === "prompt")?.["message"],
+            ),
+          ),
+        );
+      assert.equal(yield* promptAfter(3), `${T3_ROLLBACK_NOTICE}\n\nturn 3`);
+      assert.equal(yield* promptAfter(4), "turn 4");
     }).pipe(Effect.scoped, Effect.provide(layerTest)),
   );
 
