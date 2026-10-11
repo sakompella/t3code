@@ -1,7 +1,9 @@
 import {
   isNullableProjectSettingsOverride,
-  offeredRuntimeModes,
+  newThreadRuntimeMode,
+  type NewThreadDefaults,
   PROJECT_SCOPED_SERVER_SETTING_KEYS,
+  runtimeModesForNewThreads,
   type RuntimeMode,
   type EnvironmentId,
   type ProjectId,
@@ -103,21 +105,26 @@ export function uniformMobileSetting<K extends keyof ServerSettings>(
   return targets.every((target) => target.settings[key] === value) ? value : null;
 }
 
-/**
- * The permissions a new thread can run with on every target: those its
- * default provider offers. A target with no default model limits nothing.
- */
+const newThreadDefaults = (
+  target: Pick<ScopedMobileSettingsTarget, "environment" | "settings">,
+): NewThreadDefaults => ({
+  providers: target.environment.serverConfig.providers,
+  defaultModelSelection: target.settings.defaultModelSelection,
+  defaultRuntimeMode: target.settings.defaultRuntimeMode,
+});
+
+/** The default permissions new threads can run with on every target. */
 export function offeredDefaultRuntimeModes(
   targets: readonly Pick<ScopedMobileSettingsTarget, "environment" | "settings">[],
 ): ReadonlyArray<RuntimeMode> {
-  return targets.reduce<ReadonlyArray<RuntimeMode>>((offered, target) => {
-    const instanceId = target.settings.defaultModelSelection?.instanceId;
-    const provider = target.environment.serverConfig.providers.find(
-      (candidate) => candidate.instanceId === instanceId,
-    );
-    const targetOffers = offeredRuntimeModes(provider?.supportedRuntimeModes);
-    return offered.filter((mode) => targetOffers.includes(mode));
-  }, offeredRuntimeModes(undefined));
+  return runtimeModesForNewThreads(targets.map(newThreadDefaults));
+}
+
+/** The permissions new threads run with on every target, or null when they differ. */
+export function displayedDefaultRuntimeMode(
+  targets: readonly Pick<ScopedMobileSettingsTarget, "environment" | "settings">[],
+): RuntimeMode | null {
+  return newThreadRuntimeMode(targets.map(newThreadDefaults));
 }
 
 export function planMobileScopedSettingsClear(
