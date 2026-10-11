@@ -210,7 +210,8 @@ const primeAgent098 = {
  * The `sakompella/prime-agent` fork of the Rust Prime Agent 0.10. Its RPC
  * runs in the daemon (RLM children, agent messages, heartbeats, wakes),
  * speaks the 0.9.8 commands and frames, and adds `navigate_tree`. It has no
- * extensions, so T3 cannot gate tools before they run.
+ * extensions, so T3 cannot gate tools before they run. It reaches T3's tools
+ * through `kernelMcp` until its native `t3` module replaces that route.
  */
 export const PRIME_AGENT_FORK_FLAVOR: PiFlavor = {
   ...primeAgent098,

@@ -528,6 +528,8 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
       // An agent with its own MCP client never gets T3's tools natively. It
       // reaches T3 through the t3-code skill once the user declared the server
       // in its settings. Until then the user gets a setup notice.
+      // Seam: the 0.10 fork will get T3's tools from a native `t3` Python
+      // module (Prime fork slice 3). Until it lands, the fork uses this route.
       const kernelMcpAccess =
         mcpSession === undefined || flavor.kernelMcp === null
           ? undefined
