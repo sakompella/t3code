@@ -1,6 +1,10 @@
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, describe, it } from "@effect/vitest";
+import * as Cause from "effect/Cause";
 import * as Effect from "effect/Effect";
+import * as Exit from "effect/Exit";
+import * as Option from "effect/Option";
+import * as PlatformError from "effect/PlatformError";
 import * as Fiber from "effect/Fiber";
 import * as Sink from "effect/Sink";
 import * as Stream from "effect/Stream";
@@ -9,7 +13,8 @@ import * as ChildProcessSpawner from "effect/process/ChildProcessSpawner";
 import { TestClock } from "effect/testing";
 
 import { PI_FLAVOR, PRIME_AGENT_FLAVOR } from "./flavor.ts";
-import { checkPiProviderStatus } from "./status.ts";
+import { checkPiProviderStatus, detectPiFlavor } from "./status.ts";
+import { PRIME_AGENT_098_HELP, PRIME_AGENT_FORK_HELP } from "./primeAgentHelp.testkit.ts";
 
 const encoder = new TextEncoder();
 
@@ -37,13 +42,19 @@ function processHandle(input: {
   });
 }
 
-function piProbeSpawner(version: string, binary = "pi") {
+function piProbeSpawner(
+  version: string,
+  binary = "pi",
+  help: Parameters<typeof processHandle>[0] = { stdout: PRIME_AGENT_098_HELP },
+) {
   return ChildProcessSpawner.make((command) => {
     const args = ChildProcess.isStandardCommand(command) ? command.args : [];
     return Effect.succeed(
       args.includes("--version")
         ? processHandle({ stdout: `${binary} ${version}\n` })
-        : processHandle({ stderr: "RPC startup failed", exitCode: 1 }),
+        : args.includes("--help")
+          ? processHandle(help)
+          : processHandle({ stderr: "RPC startup failed", exitCode: 1 }),
     );
   });
 }
@@ -116,32 +127,124 @@ describe("PiProvider", () => {
   );
 
   const supervisedOrFull = ["approval-required", "full-access"];
+  const fork = { displayName: "Prime Agent (fork, 0.10)", runtimeModes: ["full-access"] };
   it.effect.each([
-    { version: "0.9.8", displayName: "Prime Agent", runtimeModes: supervisedOrFull },
-    { version: "0.10.0", displayName: "Prime Agent (fork, 0.10)", runtimeModes: ["full-access"] },
     {
-      version: "0.10.1-beta.3",
-      displayName: "Prime Agent (fork, 0.10)",
-      runtimeModes: ["full-access"],
+      version: "0.9.8",
+      help: PRIME_AGENT_098_HELP,
+      displayName: "Prime Agent",
+      runtimeModes: supervisedOrFull,
     },
-  ])("probes Prime Agent $version as $displayName", ({ version, displayName, runtimeModes }) =>
+    { version: "0.10.0", help: PRIME_AGENT_FORK_HELP, ...fork },
+    { version: "0.10.1-beta.3", help: PRIME_AGENT_FORK_HELP, ...fork },
+    { version: "0.10", help: PRIME_AGENT_FORK_HELP, ...fork },
+    { version: "nightly", help: PRIME_AGENT_FORK_HELP, ...fork },
+  ])(
+    "probes Prime Agent $version as $displayName from what its help offers",
+    ({ version, help, displayName, runtimeModes }) =>
+      Effect.gen(function* () {
+        const snapshot = yield* checkPiProviderStatus(PRIME_AGENT_FLAVOR, {
+          ...settings,
+          binaryPath: "",
+        }).pipe(
+          Effect.provideService(
+            ChildProcessSpawner.ChildProcessSpawner,
+            piProbeSpawner(version, "prime-agent", { stdout: help }),
+          ),
+        );
+        assert.equal(snapshot.status, "ready");
+        assert.equal(snapshot.displayName, displayName);
+        // The fork has no hook to ask before a tool runs.
+        assert.deepEqual<ReadonlyArray<string> | undefined>(
+          snapshot.supportedRuntimeModes,
+          runtimeModes,
+        );
+      }).pipe(Effect.provide(NodeServices.layer)),
+  );
+
+  const undetectable = [
+    { name: "a help run that fails", help: { stderr: "boom", exitCode: 2 } },
+    { name: "help that names no Prime Agent options", help: { stdout: "usage: something else\n" } },
+  ];
+  it.effect.each(undetectable)("refuses to guess the Prime Agent flavor from $name", ({ help }) =>
     Effect.gen(function* () {
+      const exit = yield* detectPiFlavor(
+        PRIME_AGENT_FLAVOR,
+        { ...settings, binaryPath: "/opt/bin/prime-agent" },
+        {},
+      ).pipe(
+        Effect.provideService(
+          ChildProcessSpawner.ChildProcessSpawner,
+          piProbeSpawner("0.9.8", "prime-agent", help),
+        ),
+        Effect.exit,
+      );
+      assert.isTrue(Exit.isFailure(exit), "an unknown CLI must not launch as 0.9.8");
+      assert.include(
+        Cause.pretty(exit.pipe(Exit.causeOption, Option.getOrThrow)),
+        "/opt/bin/prime-agent",
+      );
+
       const snapshot = yield* checkPiProviderStatus(PRIME_AGENT_FLAVOR, {
         ...settings,
-        binaryPath: "",
+        binaryPath: "/opt/bin/prime-agent",
       }).pipe(
         Effect.provideService(
           ChildProcessSpawner.ChildProcessSpawner,
-          piProbeSpawner(version, "prime-agent"),
+          piProbeSpawner("0.9.8", "prime-agent", help),
         ),
       );
-      assert.equal(snapshot.status, "ready");
-      assert.equal(snapshot.displayName, displayName);
-      // The fork has no hook to ask before a tool runs.
-      assert.deepEqual<ReadonlyArray<string> | undefined>(
-        snapshot.supportedRuntimeModes,
-        runtimeModes,
+      assert.equal(snapshot.status, "error");
+      assert.include(snapshot.message ?? "", "/opt/bin/prime-agent");
+    }).pipe(Effect.provide(NodeServices.layer)),
+  );
+
+  it.effect("refuses to guess the Prime Agent flavor from a help run that cannot start", () =>
+    Effect.gen(function* () {
+      const exit = yield* detectPiFlavor(
+        PRIME_AGENT_FLAVOR,
+        { ...settings, binaryPath: "" },
+        {},
+      ).pipe(
+        Effect.provideService(
+          ChildProcessSpawner.ChildProcessSpawner,
+          ChildProcessSpawner.make(() =>
+            Effect.fail(
+              PlatformError.systemError({
+                _tag: "NotFound",
+                module: "ChildProcess",
+                method: "spawn",
+                description: "prime-agent not found",
+              }),
+            ),
+          ),
+        ),
+        Effect.exit,
       );
+      assert.isTrue(Exit.isFailure(exit));
+    }).pipe(Effect.provide(NodeServices.layer)),
+  );
+
+  it.effect("refuses to guess the Prime Agent flavor from a help run that never finishes", () =>
+    Effect.gen(function* () {
+      const probe = yield* detectPiFlavor(
+        PRIME_AGENT_FLAVOR,
+        { ...settings, binaryPath: "" },
+        {},
+      ).pipe(
+        Effect.provideService(
+          ChildProcessSpawner.ChildProcessSpawner,
+          ChildProcessSpawner.make(() =>
+            Effect.succeed(
+              ChildProcessSpawner.makeHandle({ ...processHandle({}), stdout: Stream.never }),
+            ),
+          ),
+        ),
+        Effect.exit,
+        Effect.forkChild,
+      );
+      yield* TestClock.adjust("1 minute");
+      assert.isTrue(Exit.isFailure(yield* Fiber.join(probe)));
     }).pipe(Effect.provide(NodeServices.layer)),
   );
 
@@ -163,7 +266,9 @@ describe("PiProvider", () => {
                     ),
                   ),
                 })
-              : processHandle({ stderr: "RPC startup failed", exitCode: 1 }),
+              : args.includes("--help")
+                ? processHandle({ stdout: PRIME_AGENT_098_HELP })
+                : processHandle({ stderr: "RPC startup failed", exitCode: 1 }),
           );
         });
         const probe = yield* checkPiProviderStatus(flavor, {

@@ -12,6 +12,7 @@ import * as ChildProcessSpawner from "effect/process/ChildProcessSpawner";
 
 import { makePiTextGeneration } from "./textGeneration.ts";
 import { PI_FLAVOR, PRIME_AGENT_FLAVOR } from "./flavor.ts";
+import { PRIME_AGENT_FORK_HELP } from "./primeAgentHelp.testkit.ts";
 
 const decodeJsonLine = Schema.decodeUnknownSync(Schema.fromJsonString(Schema.Unknown));
 const encodeJsonLine = Schema.encodeSync(Schema.fromJsonString(Schema.Unknown));
@@ -87,52 +88,67 @@ it.effect("puts linked source control context in the Pi thread title prompt", ()
   }),
 );
 
-it.effect(
-  "refuses text generation on the Prime Agent 0.10 fork, which cannot turn its tools off",
-  () =>
-    Effect.gen(function* () {
-      const pi = yield* makeFakePi(encodeJsonLine({ title: "Unused" }));
-      const spawned: Array<ReadonlyArray<string>> = [];
-      const spawner = ChildProcessSpawner.make((command) => {
-        const args = ChildProcess.isStandardCommand(command) ? command.args : [];
-        spawned.push(args);
-        return args.includes("--version")
-          ? Effect.succeed(
-              ChildProcessSpawner.makeHandle({
-                pid: ChildProcessSpawner.ProcessId(999_999_999),
-                exitCode: Effect.succeed(ChildProcessSpawner.ExitCode(0)),
-                isRunning: Effect.succeed(false),
-                kill: () => Effect.void,
-                unref: Effect.succeed(Effect.void),
-                stdin: Sink.drain,
-                stdout: Stream.succeed(new TextEncoder().encode("0.10.0\n")),
-                stderr: Stream.empty,
-                all: Stream.empty,
-                getInputFd: () => Sink.drain,
-                getOutputFd: () => Stream.empty,
-              }),
-            )
-          : pi.spawner.spawn(command);
-      });
-      const textGeneration = yield* makePiTextGeneration(
-        PRIME_AGENT_FLAVOR,
-        { enabled: true, binaryPath: "prime-agent", launchArgs: "", customModels: [] },
-        {},
-      ).pipe(Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner));
+/** `pi` behind a `prime-agent` binary that answers `--version` and `--help` as given. */
+const primeAgentCli = (
+  pi: { readonly spawner: ChildProcessSpawner.ChildProcessSpawner["Service"] },
+  cli: { readonly version: string; readonly help: string; readonly helpExitCode: number },
+) => {
+  const spawned: Array<ReadonlyArray<string>> = [];
+  const output = (text: string, exitCode: number) =>
+    ChildProcessSpawner.makeHandle({
+      pid: ChildProcessSpawner.ProcessId(999_999_999),
+      exitCode: Effect.succeed(ChildProcessSpawner.ExitCode(exitCode)),
+      isRunning: Effect.succeed(false),
+      kill: () => Effect.void,
+      unref: Effect.succeed(Effect.void),
+      stdin: Sink.drain,
+      stdout: Stream.succeed(new TextEncoder().encode(text)),
+      stderr: Stream.empty,
+      all: Stream.empty,
+      getInputFd: () => Sink.drain,
+      getOutputFd: () => Stream.empty,
+    });
+  const spawner = ChildProcessSpawner.make((command) => {
+    const args = ChildProcess.isStandardCommand(command) ? command.args : [];
+    if (args.includes("--version")) return Effect.succeed(output(`${cli.version}\n`, 0));
+    if (args.includes("--help")) return Effect.succeed(output(cli.help, cli.helpExitCode));
+    spawned.push(args);
+    return pi.spawner.spawn(command);
+  });
+  return { spawner, rpcLaunches: () => spawned };
+};
 
-      const error = yield* textGeneration
-        .generateThreadTitle({
-          cwd: process.cwd(),
-          message: "Rename the settings page",
-          modelSelection: createModelSelection(ProviderInstanceId.make("primeAgent"), "default"),
-        })
-        .pipe(Effect.flip);
+it.effect.each([
+  {
+    name: "the 0.10 fork, which cannot turn its tools off",
+    cli: { version: "0.10.0", help: PRIME_AGENT_FORK_HELP, helpExitCode: 0 },
+    detail: "tools",
+  },
+  {
+    name: "a binary whose flavor T3 cannot tell",
+    cli: { version: "0.9.8", help: "", helpExitCode: 1 },
+    detail: "prime-agent",
+  },
+])("refuses Prime Agent text generation on $name", ({ cli, detail }) =>
+  Effect.gen(function* () {
+    const pi = yield* makeFakePi(encodeJsonLine({ title: "Unused" }));
+    const binary = primeAgentCli(pi, cli);
+    const textGeneration = yield* makePiTextGeneration(
+      PRIME_AGENT_FLAVOR,
+      { enabled: true, binaryPath: "prime-agent", launchArgs: "", customModels: [] },
+      {},
+    ).pipe(Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, binary.spawner));
 
-      assert.include(error.detail, "tools");
-      assert.deepEqual(
-        spawned.filter((args) => !args.includes("--version")),
-        [],
-      );
-      assert.deepEqual(pi.received, []);
-    }),
+    const error = yield* textGeneration
+      .generateThreadTitle({
+        cwd: process.cwd(),
+        message: "Rename the settings page",
+        modelSelection: createModelSelection(ProviderInstanceId.make("primeAgent"), "default"),
+      })
+      .pipe(Effect.flip);
+
+    assert.include(error.detail, detail);
+    assert.deepEqual(binary.rpcLaunches(), []);
+    assert.deepEqual(pi.received, []);
+  }),
 );
