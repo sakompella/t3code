@@ -256,7 +256,8 @@ it.layer(layerTest)("PiDriver workspace discovery", (it) => {
       );
       const probe = yield* instance.snapshotForCwd!("/pending").pipe(Effect.flip, Effect.forkChild);
       yield* Deferred.await(pendingCommand);
-      yield* TestClock.adjust("15 seconds");
+      // Discovery gets 30 s so a busy machine does not fail a working probe.
+      yield* TestClock.adjust("30 seconds");
       const error = yield* Fiber.join(probe);
       assert.equal(error._tag, "ProviderDriverError");
       assert.include(error.detail, "workspace commands");
