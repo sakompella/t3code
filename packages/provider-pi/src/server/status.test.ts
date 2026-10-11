@@ -114,10 +114,14 @@ describe("PiProvider", () => {
 
   it.effect("probes Prime Agent with its own binary, version floor, and runtime modes", () =>
     Effect.gen(function* () {
-      const tooOld = yield* checkPiProviderStatus(PRIME_AGENT_FLAVOR, {
-        ...settings,
-        binaryPath: "",
-      }).pipe(
+      const tooOld = yield* checkPiProviderStatus(
+        PRIME_AGENT_FLAVOR,
+        {
+          ...settings,
+          binaryPath: "",
+        },
+        {},
+      ).pipe(
         Effect.provideService(
           ChildProcessSpawner.ChildProcessSpawner,
           piProbeSpawner("0.9.5", "prime-agent"),
@@ -126,10 +130,14 @@ describe("PiProvider", () => {
       assert.equal(tooOld.status, "error");
       assert.include(tooOld.message ?? "", `Prime Agent ${PRIME_AGENT_FLAVOR.minimumVersion}`);
 
-      const current = yield* checkPiProviderStatus(PRIME_AGENT_FLAVOR, {
-        ...settings,
-        binaryPath: "",
-      }).pipe(
+      const current = yield* checkPiProviderStatus(
+        PRIME_AGENT_FLAVOR,
+        {
+          ...settings,
+          binaryPath: "",
+        },
+        {},
+      ).pipe(
         Effect.provideService(
           ChildProcessSpawner.ChildProcessSpawner,
           piProbeSpawner("0.9.8", "prime-agent"),
@@ -180,10 +188,14 @@ describe("PiProvider", () => {
     "probes Prime Agent $name as $displayName",
     ({ version, help, capabilities, displayName, runtimeModes }) =>
       Effect.gen(function* () {
-        const snapshot = yield* checkPiProviderStatus(PRIME_AGENT_FLAVOR, {
-          ...settings,
-          binaryPath: "",
-        }).pipe(
+        const snapshot = yield* checkPiProviderStatus(
+          PRIME_AGENT_FLAVOR,
+          {
+            ...settings,
+            binaryPath: "",
+          },
+          {},
+        ).pipe(
           Effect.provideService(
             ChildProcessSpawner.ChildProcessSpawner,
             piProbeSpawner(version, "prime-agent", { stdout: help }, capabilities),
@@ -254,11 +266,15 @@ describe("PiProvider", () => {
         launches.push(args);
         return Effect.succeed(processHandle({ stderr: "RPC startup failed", exitCode: 1 }));
       });
-      const snapshot = yield* checkPiProviderStatus(PRIME_AGENT_FLAVOR, {
-        ...settings,
-        binaryPath: "",
-        launchArgs: "--extension /tmp/user-extension.ts --no-tools --model openai/gpt-5",
-      }).pipe(Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner));
+      const snapshot = yield* checkPiProviderStatus(
+        PRIME_AGENT_FLAVOR,
+        {
+          ...settings,
+          binaryPath: "",
+          launchArgs: "--extension /tmp/user-extension.ts --no-tools --model openai/gpt-5",
+        },
+        {},
+      ).pipe(Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner));
       assert.equal(snapshot.status, "warning");
       assert.include(snapshot.message ?? "", "--extension /tmp/user-extension.ts --no-tools");
       assert.isAbove(launches.length, 0);

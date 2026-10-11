@@ -32,6 +32,7 @@ import {
   piRecordString as recordString,
 } from "./rpc.ts";
 import * as ProviderLatestVersions from "@t3tools/provider-core/server/ProviderLatestVersions";
+import { binaryFileKey } from "./binaryFileKey.ts";
 import {
   identifyForkPiCli,
   identifyStockPiCli,
@@ -268,10 +269,20 @@ export class PiCliUnsupportedError extends Schema.TaggedError<PiCliUnsupportedEr
 }
 
 /**
+ * Flavors already identified, by driver and binary file (real path, size,
+ * modification time). Identifying a binary costs two sequential runs, and a
+ * session open, a status check and a text-generation request each need the
+ * answer. Only a launchable answer is kept: a refusal may be a probe that
+ * failed for a moment, so it is asked again.
+ */
+const identifiedFlavors = new Map<string, PiFlavor>();
+
+/**
  * The flavor the configured binary speaks, from its `--version` and then its
  * `--help` (below 0.10) or `--capabilities` (0.10 on, the T3 fork). A CLI T3
  * cannot identify is never launched. A caller that already read `--version`
- * passes its output.
+ * passes its output. The binary file is checked on every call, so an upgraded
+ * binary is identified again.
  */
 export const detectPiFlavor = (
   flavor: PiFlavor,
@@ -305,7 +316,10 @@ export const detectPiFlavor = (
       ? Effect.succeed(identity.flavor)
       : Effect.fail(unsupported(identity.reason));
   const version = versionOutput === undefined ? output("--version") : Effect.succeed(versionOutput);
-  return version.pipe(
+  const fileKey = binaryFileKey(binary, environment).pipe(
+    Effect.map(Option.map((key) => `${flavor.driverKind}\0${key}`)),
+  );
+  const identify = version.pipe(
     Effect.flatMap((versionText) => {
       const probe = piCliProbeForVersion(versionText);
       switch (probe._tag) {
@@ -326,6 +340,18 @@ export const detectPiFlavor = (
       }
     }),
   );
+  return Effect.gen(function* () {
+    const key = yield* fileKey;
+    const known = Option.flatMapNullishOr(key, (name) => identifiedFlavors.get(name));
+    if (Option.isSome(known)) return known.value;
+    const detected = yield* identify;
+    // A file that changed while it was probed has no answer worth keeping.
+    const keyAfter = yield* fileKey;
+    if (Option.isSome(key) && Option.isSome(keyAfter) && keyAfter.value === key.value) {
+      identifiedFlavors.set(key.value, detected);
+    }
+    return detected;
+  });
 };
 
 export function buildInitialPiProviderSnapshot(
