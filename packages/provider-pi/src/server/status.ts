@@ -18,7 +18,12 @@ import * as HttpClient from "effect/http/HttpClient";
 import * as ChildProcess from "effect/process/ChildProcess";
 import * as ChildProcessSpawner from "effect/process/ChildProcessSpawner";
 
-import { buildPiRpcLaunch, resolvePiLaunchArgs } from "./mcpInjection.ts";
+import {
+  buildPiRpcLaunch,
+  piLaunchArgsForFlavor,
+  rejectedPiLaunchArgsNotice,
+  resolvePiLaunchArgs,
+} from "./mcpInjection.ts";
 import {
   makePiRpcConnection,
   PiRpcError,
@@ -32,6 +37,7 @@ import {
   buildServerProvider,
   isCommandMissingCause,
   parseGenericCliVersion,
+  type ProviderProbeResult,
   providerModelsFromSettings,
   spawnAndCollect,
   type ServerProviderDraft,
@@ -197,11 +203,14 @@ export const discoverPiCommandsForCwd = Effect.fn("discoverPiCommandsForCwd")(
     if (!launchArgs.ok) {
       return yield* new PiRpcError({ operation: "launch", detail: launchArgs.message });
     }
+    const cliFlavor = yield* detectPiFlavor(flavor, piSettings, environment).pipe(
+      Effect.mapError((error) => new PiRpcError({ operation: "launch", detail: error.message })),
+    );
     const connection = yield* makePiDiscoveryConnection(
       flavor,
       piSettings,
       environment,
-      launchArgs.args,
+      piLaunchArgsForFlavor(cliFlavor, launchArgs.args).accepted,
       cwd,
     );
     // A failed read must not replace a previously usable workspace catalog with an empty one.
@@ -480,11 +489,27 @@ export const checkPiProviderStatus = Effect.fn("checkPiProviderStatus")(function
     });
   }
 
+  const { accepted: launchArgs, rejected: rejectedLaunchArgs } = piLaunchArgsForFlavor(
+    cliFlavor,
+    resolvedLaunchArgs.args,
+  );
+  /** Launch args T3 left out are a setup problem only the user can fix. */
+  const withLaunchArgsWarning = (probe: ProviderProbeResult): ProviderProbeResult =>
+    rejectedLaunchArgs.length === 0
+      ? probe
+      : {
+          ...probe,
+          status: probe.status === "ready" ? "warning" : probe.status,
+          message: [rejectedPiLaunchArgsNotice(cliFlavor, rejectedLaunchArgs), probe.message]
+            .filter((part) => part !== undefined)
+            .join(" "),
+        };
+
   const discoveryExit = yield* discoverPiViaRpc(
     flavor,
     piSettings,
     environment,
-    resolvedLaunchArgs.args,
+    launchArgs,
     cwd,
   ).pipe(Effect.timeoutOption(PI_RPC_DISCOVERY_TIMEOUT_MS), Effect.exit);
   if (Exit.isFailure(discoveryExit)) {
@@ -496,13 +521,13 @@ export const checkPiProviderStatus = Effect.fn("checkPiProviderStatus")(function
       enabled: piSettings.enabled,
       checkedAt,
       models: fallbackModels,
-      probe: {
+      probe: withLaunchArgsWarning({
         installed: true,
         version,
         status: "ready",
         auth: { status: "unknown" },
         message: `${flavor.displayName} is available, but T3 Code could not refresh its models and commands. The live session will retry startup.`,
-      },
+      }),
     });
   }
   if (Option.isNone(discoveryExit.value)) {
@@ -511,13 +536,13 @@ export const checkPiProviderStatus = Effect.fn("checkPiProviderStatus")(function
       enabled: piSettings.enabled,
       checkedAt,
       models: fallbackModels,
-      probe: {
+      probe: withLaunchArgsWarning({
         installed: true,
         version,
         status: "ready",
         auth: { status: "unknown" },
         message: `${flavor.displayName} is available, but model and command discovery needs interactive input. The live session will handle it.`,
-      },
+      }),
     });
   }
 
@@ -530,7 +555,7 @@ export const checkPiProviderStatus = Effect.fn("checkPiProviderStatus")(function
     models,
     slashCommands: discovery.slashCommands,
     skills: discovery.skills,
-    probe: {
+    probe: withLaunchArgsWarning({
       installed: true,
       version,
       status: discovery.authenticated ? "ready" : "warning",
@@ -543,7 +568,7 @@ export const checkPiProviderStatus = Effect.fn("checkPiProviderStatus")(function
         : {
             message: flavor.loginHint,
           }),
-    },
+    }),
   });
 });
 
