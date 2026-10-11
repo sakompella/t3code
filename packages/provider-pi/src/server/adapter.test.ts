@@ -10881,6 +10881,7 @@ describe("PiAdapterV2 on the Prime Agent 0.10 fork", () => {
       readonly forkFake?: FakePi;
       readonly runtimeMode?: ProviderAdapter.ProviderAdapterV2RuntimePolicy["runtimeMode"];
       readonly environment?: NodeJS.ProcessEnv;
+      readonly launchArgs?: string;
     } = {},
   ) {
     const offers =
@@ -10904,7 +10905,12 @@ describe("PiAdapterV2 on the Prime Agent 0.10 fork", () => {
       displayName: undefined,
       enabled: true,
       environment: [],
-      config: { enabled: true, binaryPath: "prime-agent", launchArgs: "", customModels: [] },
+      config: {
+        enabled: true,
+        binaryPath: "prime-agent",
+        launchArgs: options.launchArgs ?? "",
+        customModels: [],
+      },
     }).pipe(
       Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner),
       Effect.provideService(HostProcess.Environment, options.environment ?? {}),
@@ -10995,6 +11001,59 @@ describe("PiAdapterV2 on the Prime Agent 0.10 fork", () => {
       assert.equal(args[args.indexOf("--fork") + 1], FAKE_SESSION_FILE);
       for (const flag of ["--extension", "--no-extensions", "--no-tools"]) {
         assert.notInclude(args, flag);
+      }
+    }).pipe(Effect.scoped, Effect.provide(layerTest)),
+  );
+  const USER_LAUNCH_ARGS = "--extension /tmp/user-extension.ts -ne --no-tools --model openai/gpt-5";
+
+  it.effect("leaves out launch args the fork rejects, and says so in the thread", () =>
+    Effect.gen(function* () {
+      const fake = yield* makeFakePi;
+      const forkFake = yield* makeFakePi;
+      const { runtime, takeEvent } = yield* openPrimeAgent(fake, {
+        forkFake,
+        launchArgs: USER_LAUNCH_ARGS,
+      });
+      const providerThread = yield* runtime.ensureThread({
+        threadId: THREAD_ID,
+        modelSelection: modelSelection("default"),
+        runtimePolicy,
+      });
+      forkFake.queueState({ sessionFile: "/fake/forked.jsonl" });
+      yield* runtime.forkThread({
+        sourceProviderThread: providerThread,
+        sourceProviderTurns: [],
+        targetThreadId: ThreadId.make("fork-target"),
+      });
+      for (const { args } of [fake.lastSpawn(), forkFake.lastSpawn()]) {
+        for (const rejected of ["--extension", "/tmp/user-extension.ts", "-ne", "--no-tools"]) {
+          assert.notInclude(args, rejected);
+        }
+        assert.include(args, "--model");
+      }
+
+      yield* startTurn(runtime, providerThread);
+      yield* fake.takeRequest("prompt");
+      const notice = yield* takeEvent(
+        (event) => event.type === "turn_item.updated" && event.turnItem.type === "system_notice",
+      );
+      assert.isTrue(notice.type === "turn_item.updated");
+      if (notice.type !== "turn_item.updated" || notice.turnItem.type !== "system_notice") return;
+      assert.equal(notice.turnItem.tone, "warning");
+      assert.include(notice.turnItem.message, "--extension /tmp/user-extension.ts -ne --no-tools");
+    }).pipe(Effect.scoped, Effect.provide(layerTest)),
+  );
+
+  it.effect("keeps the same launch args on Prime Agent 0.9.8", () =>
+    Effect.gen(function* () {
+      const fake = yield* makeFakePi;
+      yield* openPrimeAgent(fake, {
+        cli: { version: "0.9.8", help: PRIME_AGENT_098_HELP, helpExitCode: 0 },
+        launchArgs: USER_LAUNCH_ARGS,
+      });
+      const { args } = fake.lastSpawn();
+      for (const kept of ["/tmp/user-extension.ts", "-ne", "--no-tools", "--model"]) {
+        assert.include(args, kept);
       }
     }).pipe(Effect.scoped, Effect.provide(layerTest)),
   );

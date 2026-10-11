@@ -161,6 +161,36 @@ describe("PiProvider", () => {
       }).pipe(Effect.provide(NodeServices.layer)),
   );
 
+  it.effect("warns about launch args the fork rejects and probes without them", () =>
+    Effect.gen(function* () {
+      const launches: Array<ReadonlyArray<string>> = [];
+      const spawner = ChildProcessSpawner.make((command) => {
+        const args = ChildProcess.isStandardCommand(command) ? command.args : [];
+        if (args.includes("--version")) {
+          return Effect.succeed(processHandle({ stdout: "prime-agent 0.10.0\n" }));
+        }
+        if (args.includes("--help")) {
+          return Effect.succeed(processHandle({ stdout: PRIME_AGENT_FORK_HELP }));
+        }
+        launches.push(args);
+        return Effect.succeed(processHandle({ stderr: "RPC startup failed", exitCode: 1 }));
+      });
+      const snapshot = yield* checkPiProviderStatus(PRIME_AGENT_FLAVOR, {
+        ...settings,
+        binaryPath: "",
+        launchArgs: "--extension /tmp/user-extension.ts --no-tools --model openai/gpt-5",
+      }).pipe(Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner));
+      assert.equal(snapshot.status, "warning");
+      assert.include(snapshot.message ?? "", "--extension /tmp/user-extension.ts --no-tools");
+      assert.isAbove(launches.length, 0);
+      for (const args of launches) {
+        assert.notInclude(args, "--extension");
+        assert.notInclude(args, "--no-tools");
+        assert.include(args, "--model");
+      }
+    }).pipe(Effect.provide(NodeServices.layer)),
+  );
+
   const undetectable = [
     { name: "a help run that fails", help: { stderr: "boom", exitCode: 2 } },
     { name: "help that names no Prime Agent options", help: { stdout: "usage: something else\n" } },
