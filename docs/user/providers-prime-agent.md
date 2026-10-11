@@ -78,6 +78,18 @@ Open the thread to read what a check reported.
 **Auto-accept edits** is not offered. Prime Agent only reports an edit after its cell has run, so
 T3 Code cannot tell an edit from a command before approving it.
 
+## Prime Agent 0.10 (fork)
+
+T3 Code also runs the 0.10 fork of Prime Agent. It detects the fork from `prime-agent --version` and
+shows the provider as "Prime Agent (fork, 0.10)". Subagents, heartbeats, wakes, rollback and edit
+cards work as described above. The differences:
+
+- Only **Full access** is offered. The fork cannot ask before it runs a cell, so threads run with
+  full access whatever mode they stored.
+- The fork cannot generate thread titles, commit messages or branch names. Choose another text
+  generation model in Settings.
+- An edit too large to show in full is marked "edit (diff truncated)".
+
 ## Troubleshooting
 
 - If Prime Agent is unavailable, confirm that the configured binary runs on the server machine and
