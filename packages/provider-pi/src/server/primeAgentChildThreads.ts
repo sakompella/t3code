@@ -260,6 +260,7 @@ export function makePrimeAgentChildThreads(input: {
       observedSessionId: null,
       failedSessionIds: new Set(),
       finalReply: null,
+      agentMessageItemIds: new Map(),
     };
     rlmTranscripts.set(input.childId, transcript);
     // A nested child's thread names its parent child's thread as its parent,
@@ -315,8 +316,17 @@ export function makePrimeAgentChildThreads(input: {
     if (text.length === 0) return;
     const timestamp = recordNumber(message, "timestamp");
     // Timestamps keep a replayed history and the live stream from
-    // emitting the same message twice.
-    const nativeItemId = `${transcript.scope.idPrefix}:u${timestamp ?? transcript.nextItemOrdinal}`;
+    // emitting the same message twice. Where they differ in form, the
+    // message's own id does the same.
+    const agentMessageId = recordString(recordField(message, "details"), "id");
+    const nativeItemId =
+      (agentMessageId === undefined
+        ? undefined
+        : transcript.agentMessageItemIds.get(agentMessageId)) ??
+      `${transcript.scope.idPrefix}:u${timestamp ?? transcript.nextItemOrdinal}`;
+    if (agentMessageId !== undefined) {
+      transcript.agentMessageItemIds.set(agentMessageId, nativeItemId);
+    }
     const now = yield* DateTime.now;
     const artifacts = makeSubagentConversationArtifacts({
       messageId: idAllocator.derive.messageFromProviderItem({ driver, nativeItemId }),

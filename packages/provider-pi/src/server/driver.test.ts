@@ -1,5 +1,5 @@
 import * as NodeServices from "@effect/platform-node/NodeServices";
-import { assert, it } from "@effect/vitest";
+import { assert, describe, it } from "@effect/vitest";
 import { DEFAULT_SERVER_SETTINGS, ProviderInstanceId } from "@t3tools/contracts";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
@@ -18,8 +18,10 @@ import * as ProviderLatestVersions from "@t3tools/provider-core/server/ProviderL
 import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
 import * as McpProviderSessions from "@t3tools/provider-core/server/McpProviderSessions";
 import * as TestProviderHost from "@t3tools/provider-testing/TestProviderHost";
+import type { ServerProviderDraft } from "@t3tools/provider-core/server/snapshotProbe";
 import type { PiSettings } from "../settings.ts";
-import { PiDriver } from "./driver.ts";
+import { PiDriver, withInstanceIdentity } from "./driver.ts";
+import { PRIME_AGENT_FLAVOR, PRIME_AGENT_FORK_FLAVOR } from "./flavor.ts";
 
 const layerTest = Layer.mergeAll(
   TestProviderHost.layer({
@@ -263,4 +265,23 @@ it.layer(layerTest)("PiDriver workspace discovery", (it) => {
       assert.include(error.detail, "workspace commands");
     }).pipe(Effect.scoped),
   );
+});
+
+describe("Prime Agent instance identity", () => {
+  const stampedName = (instanceName: string | undefined) =>
+    withInstanceIdentity(PRIME_AGENT_FLAVOR.driverKind)({
+      instanceId: ProviderInstanceId.make("primeAgent"),
+      displayName: instanceName,
+      accentColor: undefined,
+      continuationGroupKey: "primeAgent",
+    })({ displayName: PRIME_AGENT_FORK_FLAVOR.displayName } as ServerProviderDraft).displayName;
+
+  it("keeps the fork's label when the instance carries the default name", () => {
+    assert.equal(stampedName(undefined), "Prime Agent (fork, 0.10)");
+    assert.equal(stampedName("Prime Agent"), "Prime Agent (fork, 0.10)");
+  });
+
+  it("lets a name the user chose win", () => {
+    assert.equal(stampedName("Work agent"), "Work agent");
+  });
 });
