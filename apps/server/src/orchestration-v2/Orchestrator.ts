@@ -3564,20 +3564,21 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
     function* (
       command: OrchestrationV2ServerCommand,
       threadId: ThreadId,
-      modes: {
+      thread: {
         readonly runtimeMode: RuntimeMode;
         readonly interactionMode: ProviderInteractionMode;
+        readonly modelSelection: ModelSelection;
       },
     ) {
       const limit = yield* DispatchModeLimit;
-      const exceeded = limit === undefined ? undefined : exceededDispatchModeLimit(limit, modes);
-      if (limit === undefined || exceeded === undefined) return;
-      const refusal = {
-        threadId,
-        mode: exceeded,
-        runtimeMode: modes.runtimeMode,
-        interactionMode: modes.interactionMode,
+      if (limit === undefined || threadId === limit.callerThreadId) return;
+      const modes = {
+        runtimeMode: yield* runtimePolicy.runtimeMode(thread),
+        interactionMode: thread.interactionMode,
       };
+      const exceeded = exceededDispatchModeLimit(limit, modes);
+      if (exceeded === undefined) return;
+      const refusal = { threadId, mode: exceeded, ...modes };
       if (limit.refused !== undefined) yield* Ref.set(limit.refused, refusal);
       return yield* new OrchestratorThreadAboveModeLimitError({
         commandId: command.commandId,
@@ -11093,6 +11094,10 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         .getThreadShell(threadId)
         .pipe(Effect.mapError((cause) => new OrchestratorProjectionError({ threadId, cause })));
       if (shell !== null) yield* refuseAboveDispatchModeLimit(command, threadId, shell);
+      // A new thread runs in the modes it is created with, on its provider.
+      if (shell === null && command.type === "thread.create") {
+        yield* refuseAboveDispatchModeLimit(command, threadId, command);
+      }
     }
 
     const plan = yield* dispatchOnce(command).pipe(
