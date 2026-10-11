@@ -33,6 +33,8 @@ import { SettingsSwitchRow } from "./components/SettingsSwitchRow";
 import { SettingsProjectOverridesSection } from "./components/SettingsProjectOverridesSection";
 import { useSettingsEnvironmentFilter } from "./settings-environment-filter";
 import {
+  displayedDefaultRuntimeMode,
+  offeredDefaultRuntimeModes,
   planMobileScopedSettingsClear,
   planMobileScopedSettingsPatch,
   resolveMobileSettingsTargets,
@@ -162,6 +164,12 @@ function ServerSettingsDetail(props: { readonly page: SettingsPage }) {
   const reference = displayTargets[0] ?? null;
   const uniform = <K extends keyof ServerSettings>(key: K) =>
     uniformMobileSetting(displayTargets, key);
+  // A default a provider does not offer runs as the mode shown here.
+  const offeredDefaultModes = offeredDefaultRuntimeModes(displayTargets);
+  const defaultRuntimeModeChoices = RUNTIME_MODE_CHOICES.filter((choice) =>
+    offeredDefaultModes.includes(choice.mode),
+  );
+  const shownDefaultRuntimeMode = displayedDefaultRuntimeMode(displayTargets);
   // `uniform` folds a real null into "mixed"; nullable keys need the distinction.
   const isMixed = (key: keyof ServerSettings) =>
     reference === null ||
@@ -326,17 +334,17 @@ function ServerSettingsDetail(props: { readonly page: SettingsPage }) {
                   <SettingsSection
                     title="Default permissions"
                     trailing={
-                      pendingWrites === 0 && uniform("defaultRuntimeMode") === null ? (
+                      pendingWrites === 0 && shownDefaultRuntimeMode === null ? (
                         <MixedValuesLabel projectSelected={projectSelected} />
                       ) : null
                     }
                   >
-                    {RUNTIME_MODE_CHOICES.map((choice, index) => (
+                    {defaultRuntimeModeChoices.map((choice, index) => (
                       <SettingsChoiceRow
                         key={choice.mode}
                         label={choice.label}
                         description={choice.description}
-                        selected={uniform("defaultRuntimeMode") === choice.mode}
+                        selected={shownDefaultRuntimeMode === choice.mode}
                         separated={index > 0}
                         disabled={disabledFor("defaultRuntimeMode")}
                         onPress={() => write({ defaultRuntimeMode: choice.mode })}

@@ -54,7 +54,20 @@ import {
 import { makePiRpcConnection, type PiRpcRecord } from "./rpc.ts";
 import { loadMcpBridge } from "./mcpBridge.testkit.ts";
 import { turnItemOutputText } from "../../../client-runtime/src/work-log/itemDetail.ts";
-import { PI_FLAVOR, PRIME_AGENT_FLAVOR, type PiFlavor } from "./flavor.ts";
+import { PI_FLAVOR, PRIME_AGENT_FLAVOR, PRIME_AGENT_FORK_FLAVOR, type PiFlavor } from "./flavor.ts";
+import { T3_ROLLBACK_NOTICE } from "./mcpExtensionSource.ts";
+import {
+  PRIME_AGENT_FORK_CHILD_WAKE_RECORDS,
+  PRIME_AGENT_FORK_OBSERVED_MESSAGES,
+} from "./primeAgentFork.testkit.ts";
+import {
+  forkCapabilitiesWith,
+  PRIME_AGENT_098_CAPABILITIES,
+  PRIME_AGENT_098_HELP,
+  PRIME_AGENT_FORK_CAPABILITIES,
+  PRIME_AGENT_FORK_HELP,
+  STOCK_PRIME_AGENT_010_CAPABILITIES,
+} from "./primeAgentHelp.testkit.ts";
 
 const layerTest = Layer.mergeAll(
   NodeServices.layer,
@@ -98,6 +111,8 @@ interface FakePi {
   readonly setTranscript: (messages: ReadonlyArray<unknown>) => void;
   /** Data returned by the next `get_fork_messages` acks, consumed in order. */
   readonly queueForkMessages: (data: unknown) => void;
+  /** Make the next queued `get_fork_messages` ack an unsuccessful response. */
+  readonly failNextForkMessages: () => void;
   readonly vetoNextSwitch: () => void;
   /** Refuse the next `count` `switch_session` requests with `message`, as Prime Agent does while another worker holds the lease. */
   readonly rejectNextSwitches: (count: number, message: string) => void;
@@ -127,6 +142,12 @@ interface FakePi {
     readonly args: ReadonlyArray<string>;
     readonly env: NodeJS.ProcessEnv;
   };
+  /** What a `--version` run of the fake binary prints from now on. */
+  readonly setVersion: (version: string) => void;
+  /** What a `--help` run of the fake binary prints, and its exit code, from now on. */
+  readonly setHelp: (help: string, exitCode?: number) => void;
+  /** What a `--capabilities` run of the fake binary prints, and its exit code, from now on. */
+  readonly setCapabilities: (output: string, exitCode?: number) => void;
 }
 
 /**
@@ -153,6 +174,7 @@ const makeFakePi: Effect.Effect<FakePi> = Effect.gen(function* () {
   const entriesQueue: Array<unknown> = [];
   const messagesQueue: Array<unknown> = [];
   const forkMessagesQueue: Array<unknown> = [];
+  const forkMessagesFailure = Symbol("get_fork_messages failure");
   const stateQueue: Array<Record<string, unknown>> = [];
   const statsQueue: Array<unknown> = [];
   const observedQueue: Array<ReadonlyArray<unknown>> = [];
@@ -237,8 +259,12 @@ const makeFakePi: Effect.Effect<FakePi> = Effect.gen(function* () {
         return { ...base, data: entriesQueue.shift() ?? { entries: [], leafId: null } };
       case "get_messages":
         return { ...base, data: messagesQueue.shift() ?? { messages: transcript } };
-      case "get_fork_messages":
-        return { ...base, data: forkMessagesQueue.shift() ?? { messages: [] } };
+      case "get_fork_messages": {
+        const data = forkMessagesQueue.shift() ?? { messages: [] };
+        return data === forkMessagesFailure
+          ? { ...base, success: false, error: "fork messages unavailable" }
+          : { ...base, data };
+      }
       case "observe":
         return { ...base, data: { messages: observedQueue.shift() ?? [] } };
       case "get_session_stats":
@@ -249,6 +275,8 @@ const makeFakePi: Effect.Effect<FakePi> = Effect.gen(function* () {
         return { ...base, ...(heartbeatsQueue.shift() ?? { data: { heartbeats: [] } }) };
       case "fork":
         return { ...base, data: { text: "Hello pi", cancelled: false } };
+      case "navigate_tree":
+        return { ...base, data: { cancelled: false, editorText: "Hello pi" } };
       default:
         return base;
     }
@@ -284,8 +312,37 @@ const makeFakePi: Effect.Effect<FakePi> = Effect.gen(function* () {
     args: [],
     env: {},
   };
+  let version = "0.9.8";
+  let help = { output: PRIME_AGENT_098_HELP, exitCode: 0 };
+  let capabilities = {
+    output: PRIME_AGENT_098_CAPABILITIES.stdout,
+    exitCode: PRIME_AGENT_098_CAPABILITIES.exitCode,
+  };
+  const cliOutput = (output: string, exitCode: number) =>
+    ChildProcessSpawner.makeHandle({
+      pid: ChildProcessSpawner.ProcessId(FAKE_PID),
+      exitCode: Effect.succeed(ChildProcessSpawner.ExitCode(exitCode)),
+      isRunning: Effect.succeed(false),
+      kill: () => Effect.void,
+      unref: Effect.succeed(Effect.void),
+      stdin: Sink.drain,
+      stdout: Stream.succeed(new TextEncoder().encode(output)),
+      stderr: Stream.empty,
+      all: Stream.empty,
+      getInputFd: () => Sink.drain,
+      getOutputFd: () => Stream.empty,
+    });
   const spawner = ChildProcessSpawner.make((command) =>
     Effect.sync(() => {
+      if (ChildProcess.isStandardCommand(command) && command.args.includes("--version")) {
+        return cliOutput(`${version}\n`, 0);
+      }
+      if (ChildProcess.isStandardCommand(command) && command.args.includes("--help")) {
+        return cliOutput(help.output, help.exitCode);
+      }
+      if (ChildProcess.isStandardCommand(command) && command.args.includes("--capabilities")) {
+        return cliOutput(capabilities.output, capabilities.exitCode);
+      }
       if (ChildProcess.isStandardCommand(command)) {
         lastSpawn = {
           args: command.args,
@@ -326,6 +383,7 @@ const makeFakePi: Effect.Effect<FakePi> = Effect.gen(function* () {
       transcript = messages;
     },
     queueForkMessages: (data) => forkMessagesQueue.push(data),
+    failNextForkMessages: () => forkMessagesQueue.push(forkMessagesFailure),
     deferNextState: () => {
       deferState = true;
     },
@@ -376,6 +434,15 @@ const makeFakePi: Effect.Effect<FakePi> = Effect.gen(function* () {
     failNextHeartbeats: () => heartbeatsQueue.push({ success: false }),
     closeStdout: Queue.end(stdout),
     lastSpawn: () => lastSpawn,
+    setVersion: (next) => {
+      version = next;
+    },
+    setHelp: (output, exitCode = 0) => {
+      help = { output, exitCode };
+    },
+    setCapabilities: (output, exitCode = 0) => {
+      capabilities = { output, exitCode };
+    },
   } satisfies FakePi;
 });
 
@@ -4632,14 +4699,18 @@ describe("PiRpc early process exit", () => {
 });
 
 describe("PiAdapterV2 with the Prime Agent flavor", () => {
-  const openPrimeThread = Effect.fnUntraced(function* (fake: FakePi, threadId = THREAD_ID) {
+  const openPrimeThread = Effect.fnUntraced(function* (
+    fake: FakePi,
+    threadId = THREAD_ID,
+    flavor: PiFlavor = PRIME_AGENT_FLAVOR,
+  ) {
     const { runtime, takeEvent } = yield* openRuntime(
       fake,
       "default",
       threadId,
       SESSION_ID,
       undefined,
-      PRIME_AGENT_FLAVOR,
+      flavor,
     );
     const providerThread = yield* runtime.ensureThread({
       threadId,
@@ -9760,6 +9831,7 @@ describe("PiAdapterV2 with the Prime Agent flavor", () => {
         runOrdinal,
       );
       yield* fake.takeRequest("prompt");
+      yield* fake.emit({ type: "response", command: "prompt", success: true });
       fake.queueForkMessages({
         messages: userEntries.map((entryId) => ({ entryId, text: entryId })),
       });
@@ -9912,6 +9984,293 @@ describe("PiAdapterV2 with the Prime Agent flavor", () => {
       const error = yield* Fiber.join(rollback);
       assert.include(String(error.cause), "cancelled the rollback");
       assert.isFalse(fake.allRequests().some((request) => request["type"] === "fork"));
+    }).pipe(Effect.scoped, Effect.provide(layerTest)),
+  );
+
+  it.effect("rolls the 0.10 fork back in place with its navigate_tree command", () =>
+    Effect.gen(function* () {
+      const fake = yield* makeFakePi;
+      fake.queueForkMessages({ messages: [] });
+      const session = yield* openPrimeThread(fake, THREAD_ID, PRIME_AGENT_FORK_FLAVOR);
+      const first = yield* runPrimeTurn(session, fake, 1, ["u1"]);
+      const second = yield* runPrimeTurn(session, fake, 2, ["u1", "u2"]);
+
+      const snapshot = yield* rollBackToFirstTurn(session, [first, second]);
+
+      const requests = fake.allRequests();
+      assert.deepEqual(
+        requests
+          .filter((request) => request.type === "navigate_tree")
+          .map(({ id: _id, ...request }) => request),
+        [{ type: "navigate_tree", targetId: "u2" }],
+      );
+      assert.isFalse(requests.some((request) => request.type === "fork"));
+      assert.isFalse(
+        requests.some((request) => String(request["message"]).startsWith("/t3-navigate-tree")),
+      );
+      assert.equal(
+        snapshot.providerThread.nativeThreadRef?.nativeId,
+        session.providerThread.nativeThreadRef?.nativeId,
+        "an in-place rollback keeps the same session file",
+      );
+
+      // The kernel kept its state, which only the next prompt can tell the agent.
+      const promptAfter = (ordinal: number) =>
+        runPrimeTurn(session, fake, ordinal, ["u1"]).pipe(
+          Effect.map(() =>
+            String(
+              fake.allRequests().findLast((request) => request.type === "prompt")?.["message"],
+            ),
+          ),
+        );
+      assert.equal(yield* promptAfter(3), `${T3_ROLLBACK_NOTICE}\n\nturn 3`);
+      assert.equal(yield* promptAfter(4), "turn 4");
+    }).pipe(Effect.scoped, Effect.provide(layerTest)),
+  );
+
+  /** A `get_fork_messages` reply that says nothing about the active branch. */
+  type UnreadableBranch = "a failed listing" | "a listing without messages" | "an entry without id";
+
+  /**
+   * Reopens the thread after a T3 restart, on a process whose branch lists
+   * `activeBranch`, or whose listing is unreadable in the given way.
+   */
+  const reopenForkThread = (
+    stored: OrchestrationV2ProviderThread,
+    activeBranch: ReadonlyArray<string> | UnreadableBranch,
+  ) =>
+    Effect.gen(function* () {
+      const fake = yield* makeFakePi;
+      if (activeBranch === "a failed listing") fake.failNextForkMessages();
+      else if (activeBranch === "a listing without messages") fake.queueForkMessages({});
+      else if (activeBranch === "an entry without id") {
+        fake.queueForkMessages({ messages: [{ entryId: "u1", text: "u1" }, { text: "u2" }] });
+      } else {
+        fake.queueForkMessages({
+          messages: activeBranch.map((entryId) => ({ entryId, text: entryId })),
+        });
+      }
+      const { runtime, takeEvent } = yield* openRuntime(
+        fake,
+        "default",
+        THREAD_ID,
+        SESSION_ID,
+        undefined,
+        PRIME_AGENT_FORK_FLAVOR,
+        undefined,
+        {},
+        stored.nativeThreadRef?.nativeId ?? undefined,
+      );
+      const providerThread = yield* runtime.resumeThread({ providerThread: stored });
+      return { fake, session: { runtime, takeEvent, providerThread } };
+    });
+
+  const lastPrompt = (fake: FakePi) =>
+    String(fake.allRequests().findLast((request) => request.type === "prompt")?.["message"]);
+
+  const navigations = (fake: FakePi) =>
+    fake.allRequests().filter((request) => request.type === "navigate_tree");
+
+  it.effect.each([
+    {
+      build: "a fork build that lost the move on resume",
+      activeBranch: ["u1", "u2"],
+      confirmed: false,
+    },
+    { build: "a fork build that kept the move", activeBranch: ["u1"], confirmed: true },
+  ])(
+    "never repeats a 0.10 fork rollback on reopen, and warns while it is unconfirmed, on $build",
+    ({ activeBranch, confirmed }) =>
+      Effect.gen(function* () {
+        const fake = yield* makeFakePi;
+        fake.queueForkMessages({ messages: [] });
+        const session = yield* openPrimeThread(fake, THREAD_ID, PRIME_AGENT_FORK_FLAVOR);
+        const first = yield* runPrimeTurn(session, fake, 1, ["u1"]);
+        const second = yield* runPrimeTurn(session, fake, 2, ["u1", "u2"]);
+        const { providerThread: stored } = yield* rollBackToFirstTurn(session, [first, second]);
+        assert.equal(stored.nativeConversationHeadRef?.nativeId, "u2");
+
+        const reopened = yield* reopenForkThread(stored, activeBranch);
+        assert.deepEqual(navigations(reopened.fake), [], "a reopen must never move the leaf");
+        assert.equal(
+          reopened.session.providerThread.nativeConversationHeadRef?.nativeId ?? null,
+          confirmed ? null : "u2",
+          "the mark stays until the fork confirms the move",
+        );
+
+        const notices: Array<string> = [];
+        yield* startTurn(
+          reopened.session.runtime,
+          reopened.session.providerThread,
+          "default",
+          [],
+          "turn 3",
+          undefined,
+          3,
+        );
+        yield* reopened.fake.takeRequest("prompt");
+        yield* reopened.fake.emit({ type: "response", command: "prompt", success: true });
+        reopened.fake.queueForkMessages({
+          messages: ["u1", "u3"].map((entryId) => ({ entryId, text: entryId })),
+        });
+        yield* reopened.fake.emit({ type: "agent_start" });
+        yield* reopened.fake.emit({ type: "agent_end", messages: [] });
+        yield* reopened.session.takeEvent((event) => {
+          if (event.type === "turn_item.updated" && event.turnItem.type === "system_notice") {
+            notices.push(event.turnItem.message);
+          }
+          return event.type === "turn.terminal";
+        });
+        assert.equal(
+          notices.some((message) => message.includes("not confirmed")),
+          !confirmed,
+          JSON.stringify(notices),
+        );
+        assert.equal(lastPrompt(reopened.fake), `${T3_ROLLBACK_NOTICE}\n\nturn 3`);
+      }).pipe(Effect.scoped, Effect.provide(layerTest)),
+  );
+
+  it.effect.each<{ readonly listing: UnreadableBranch }>([
+    { listing: "a failed listing" },
+    { listing: "a listing without messages" },
+    { listing: "an entry without id" },
+  ])("keeps the 0.10 fork rollback mark and warns when reopening reads $listing", ({ listing }) =>
+    Effect.gen(function* () {
+      const fake = yield* makeFakePi;
+      fake.queueForkMessages({ messages: [] });
+      const session = yield* openPrimeThread(fake, THREAD_ID, PRIME_AGENT_FORK_FLAVOR);
+      const first = yield* runPrimeTurn(session, fake, 1, ["u1"]);
+      const second = yield* runPrimeTurn(session, fake, 2, ["u1", "u2"]);
+      const { providerThread: stored } = yield* rollBackToFirstTurn(session, [first, second]);
+
+      const reopened = yield* reopenForkThread(stored, listing);
+      assert.deepEqual(navigations(reopened.fake), [], "a reopen must never move the leaf");
+      assert.equal(
+        reopened.session.providerThread.nativeConversationHeadRef?.nativeId,
+        "u2",
+        "an unreadable branch confirms nothing",
+      );
+      const notices: Array<string> = [];
+      yield* startTurn(
+        reopened.session.runtime,
+        reopened.session.providerThread,
+        "default",
+        [],
+        "turn 3",
+        undefined,
+        3,
+      );
+      yield* reopened.fake.takeRequest("prompt");
+      yield* reopened.fake.emit({
+        type: "response",
+        command: "prompt",
+        success: false,
+        error: "busy",
+      });
+      yield* reopened.session.takeEvent((event) => {
+        if (event.type === "turn_item.updated" && event.turnItem.type === "system_notice") {
+          notices.push(event.turnItem.message);
+        }
+        return event.type === "turn.terminal";
+      });
+      assert.isTrue(
+        notices.some((message) => message.includes("not confirmed")),
+        JSON.stringify(notices),
+      );
+
+      // T3 closes before any prompt is accepted; the next reopen still knows.
+      const again = yield* reopenForkThread(reopened.session.providerThread, listing);
+      assert.equal(again.session.providerThread.nativeConversationHeadRef?.nativeId, "u2");
+    }).pipe(Effect.scoped, Effect.provide(layerTest)),
+  );
+
+  it.effect("clears the 0.10 fork rollback mark on a readable branch with no user entries", () =>
+    Effect.gen(function* () {
+      const fake = yield* makeFakePi;
+      fake.queueForkMessages({ messages: [] });
+      const session = yield* openPrimeThread(fake, THREAD_ID, PRIME_AGENT_FORK_FLAVOR);
+      const first = yield* runPrimeTurn(session, fake, 1, ["u1"]);
+      const second = yield* runPrimeTurn(session, fake, 2, ["u1", "u2"]);
+      const { providerThread: stored } = yield* rollBackToFirstTurn(session, [first, second]);
+
+      const reopened = yield* reopenForkThread(stored, []);
+      assert.isNull(reopened.session.providerThread.nativeConversationHeadRef);
+    }).pipe(Effect.scoped, Effect.provide(layerTest)),
+  );
+
+  it.effect("keeps the 0.10 fork rollback mark and notice until a prompt is accepted", () =>
+    Effect.gen(function* () {
+      const fake = yield* makeFakePi;
+      fake.queueForkMessages({ messages: [] });
+      const session = yield* openPrimeThread(fake, THREAD_ID, PRIME_AGENT_FORK_FLAVOR);
+      const first = yield* runPrimeTurn(session, fake, 1, ["u1"]);
+      const second = yield* runPrimeTurn(session, fake, 2, ["u1", "u2"]);
+      const { providerThread: stored } = yield* rollBackToFirstTurn(session, [first, second]);
+
+      yield* session.takeEvent(
+        (event) =>
+          event.type === "provider_thread.updated" &&
+          event.providerThread.nativeConversationHeadRef?.nativeId === "u2",
+      );
+      const marks: Array<string | null> = [];
+      const recordMarks = (event: ProviderAdapter.ProviderAdapterV2Event) => {
+        if (event.type === "provider_thread.updated") {
+          marks.push(event.providerThread.nativeConversationHeadRef?.nativeId ?? null);
+        }
+      };
+      yield* startTurn(session.runtime, stored, "default", [], "turn 3", undefined, 3);
+      assert.include(String((yield* fake.takeRequest("prompt"))["message"]), T3_ROLLBACK_NOTICE);
+      yield* fake.emit({ type: "response", command: "prompt", success: false, error: "busy" });
+      yield* session.takeEvent((event) => {
+        recordMarks(event);
+        return event.type === "turn.terminal";
+      });
+      assert.notInclude(marks, null, "a rejected prompt must not clear the mark");
+
+      const reopened = yield* reopenForkThread(stored, ["u1", "u2"]);
+      assert.equal(reopened.session.providerThread.nativeConversationHeadRef?.nativeId, "u2");
+      yield* runPrimeTurn(reopened.session, reopened.fake, 4, ["u1", "u4"]);
+      assert.equal(lastPrompt(reopened.fake), `${T3_ROLLBACK_NOTICE}\n\nturn 4`);
+      yield* runPrimeTurn(reopened.session, reopened.fake, 5, ["u1", "u4", "u5"]);
+      assert.equal(lastPrompt(reopened.fake), "turn 5", "an accepted prompt clears the notice");
+    }).pipe(Effect.scoped, Effect.provide(layerTest)),
+  );
+
+  it.effect("does not move the 0.10 fork leaf on reopen after a wake ran on the new branch", () =>
+    Effect.gen(function* () {
+      const fake = yield* makeFakePi;
+      fake.queueForkMessages({ messages: [] });
+      const session = yield* openPrimeThread(fake, THREAD_ID, PRIME_AGENT_FORK_FLAVOR);
+      const first = yield* runPrimeTurn(session, fake, 1, ["u1"]);
+      const second = yield* runPrimeTurn(session, fake, 2, ["u1", "u2"]);
+      const { providerThread: stored } = yield* rollBackToFirstTurn(session, [first, second]);
+      yield* startTurn(
+        session.runtime,
+        stored,
+        "default",
+        [],
+        "wake",
+        undefined,
+        3,
+        THREAD_ID,
+        true,
+      );
+      fake.queueForkMessages({
+        messages: ["u1", "u2"].map((entryId) => ({ entryId, text: entryId })),
+      });
+      yield* fake.emit({ type: "agent_start" });
+      yield* fake.emit({ type: "agent_end", messages: [] });
+      const wakeEnd = yield* session.takeEvent(
+        (event) =>
+          event.type === "provider_thread.updated" &&
+          event.providerThread.status === "idle" &&
+          event.providerThread.lastRunOrdinal === 3,
+      );
+      assert.isTrue(wakeEnd.type === "provider_thread.updated");
+      if (wakeEnd.type !== "provider_thread.updated") return;
+
+      const reopened = yield* reopenForkThread(wakeEnd.providerThread, ["u1", "u2"]);
+      assert.deepEqual(navigations(reopened.fake), [], "the wake's conversation must survive");
     }).pipe(Effect.scoped, Effect.provide(layerTest)),
   );
 
@@ -10586,8 +10945,8 @@ describe("PiAdapterV2 reaching T3 through the kernel's MCP client", () => {
       return yield* effect.pipe(Effect.ensuring(sessions.clear(THREAD_ID)));
     });
 
-  const openPrime = (fake: FakePi, agentDir: string) =>
-    openRuntime(fake, "default", THREAD_ID, SESSION_ID, undefined, PRIME_AGENT_FLAVOR, undefined, {
+  const openPrime = (fake: FakePi, agentDir: string, flavor: PiFlavor = PRIME_AGENT_FLAVOR) =>
+    openRuntime(fake, "default", THREAD_ID, SESSION_ID, undefined, flavor, undefined, {
       PRIME_AGENT_CODING_AGENT_DIR: agentDir,
     });
 
@@ -10665,6 +11024,26 @@ describe("PiAdapterV2 reaching T3 through the kernel's MCP client", () => {
       ).pipe(Effect.scoped, Effect.provide(layerTest)),
   );
 
+  it.effect("gives the 0.10 fork the t3-code skill and credential without the extension", () =>
+    withMcpSession(
+      Effect.gen(function* () {
+        const agentDir = yield* makeAgentDir(declaredEntry);
+        const fake = yield* makeFakePi;
+        yield* openPrime(fake, agentDir, PRIME_AGENT_FORK_FLAVOR);
+        const { args, env } = fake.lastSpawn();
+        assert.notInclude(args, "--extension");
+        const skillIndex = args.indexOf("--skill");
+        assert.isAbove(skillIndex, -1);
+        assert.match(args[skillIndex + 1] ?? "", /\/pi-t3-skills\/t3-code$/);
+        assert.equal(env.T3_MCP_URL, ENDPOINT);
+        assert.equal(env.T3_MCP_BEARER_TOKEN, "secret-prime-token");
+        // Only T3's extension reads these.
+        assert.notProperty(env, "T3_PI_MCP_TOOLS");
+        assert.notProperty(env, "T3_PI_RUNTIME_MODE");
+      }),
+    ).pipe(Effect.scoped, Effect.provide(layerTest)),
+  );
+
   it.effect("treats a server declared for another port as undeclared", () =>
     withMcpSession(
       Effect.gen(function* () {
@@ -10703,5 +11082,457 @@ describe("PiAdapterV2 reaching T3 through the kernel's MCP client", () => {
         assert.notProperty(env, "T3_PI_MCP_TOOLS");
       }),
     ).pipe(Effect.scoped, Effect.provide(layerTest)),
+  );
+});
+
+describe("PiAdapterV2 on the Prime Agent 0.10 fork", () => {
+  /** How a Prime Agent CLI answers T3's identity probes. */
+  interface PrimeAgentCli {
+    readonly version: string;
+    readonly help: string;
+    readonly helpExitCode: number;
+    readonly capabilities: string;
+    readonly capabilitiesExitCode: number;
+  }
+  const FORK_CLI: PrimeAgentCli = {
+    version: "0.10.0",
+    help: PRIME_AGENT_FORK_HELP,
+    helpExitCode: 0,
+    capabilities: PRIME_AGENT_FORK_CAPABILITIES,
+    capabilitiesExitCode: 0,
+  };
+  const STOCK_098_CLI: PrimeAgentCli = {
+    version: "0.9.8",
+    help: PRIME_AGENT_098_HELP,
+    helpExitCode: 0,
+    capabilities: PRIME_AGENT_098_CAPABILITIES.stdout,
+    capabilitiesExitCode: PRIME_AGENT_098_CAPABILITIES.exitCode,
+  };
+  const STOCK_010_CLI: PrimeAgentCli = {
+    ...FORK_CLI,
+    capabilities: STOCK_PRIME_AGENT_010_CAPABILITIES.stderr,
+    capabilitiesExitCode: STOCK_PRIME_AGENT_010_CAPABILITIES.exitCode,
+  };
+
+  /**
+   * Opens a session through the Prime Agent driver, as production does, on a
+   * binary that answers `--version`, `--help` and `--capabilities` as `cli`
+   * says (the 0.10 fork by default). A `--fork` helper process goes to `forkFake` when one is given.
+   */
+  const openPrimeAgent = Effect.fnUntraced(function* (
+    fake: FakePi,
+    options: {
+      readonly cli?: PrimeAgentCli;
+      readonly forkFake?: FakePi;
+      readonly runtimeMode?: ProviderAdapter.ProviderAdapterV2RuntimePolicy["runtimeMode"];
+      readonly environment?: NodeJS.ProcessEnv;
+      readonly launchArgs?: string;
+    } = {},
+  ) {
+    const offers =
+      yield* Queue.unbounded<ProviderContinuationRequests.ProviderContinuationRequest>();
+    const cli = options.cli ?? FORK_CLI;
+    for (const binary of [fake, options.forkFake]) {
+      binary?.setVersion(cli.version);
+      binary?.setHelp(cli.help, cli.helpExitCode);
+      binary?.setCapabilities(cli.capabilities, cli.capabilitiesExitCode);
+    }
+    const { forkFake } = options;
+    const spawner =
+      forkFake === undefined
+        ? fake.spawner
+        : ChildProcessSpawner.make((command) =>
+            ChildProcess.isStandardCommand(command) && command.args.includes("--fork")
+              ? forkFake.spawner.spawn(command)
+              : fake.spawner.spawn(command),
+          );
+    const adapter = yield* PrimeAgentAdapterV2Driver.create({
+      instanceId: PI_INSTANCE_ID,
+      displayName: undefined,
+      enabled: true,
+      environment: [],
+      config: {
+        enabled: true,
+        binaryPath: "prime-agent",
+        launchArgs: options.launchArgs ?? "",
+        customModels: [],
+      },
+    }).pipe(
+      Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner),
+      Effect.provideService(HostProcess.Environment, options.environment ?? {}),
+      Effect.provideService(ProviderContinuationRequests.ProviderContinuationRequests, {
+        offer: (request) => Queue.offer(offers, request).pipe(Effect.asVoid),
+        take: Effect.never,
+      }),
+    );
+    const runtime = yield* adapter.openSession({
+      threadId: THREAD_ID,
+      providerSessionId: SESSION_ID,
+      modelSelection: modelSelection("default"),
+      runtimePolicy: ProviderAdapter.ProviderAdapterV2RuntimePolicy.make({
+        ...runtimePolicy,
+        runtimeMode: options.runtimeMode ?? "full-access",
+      }),
+    });
+    const emitted = yield* Queue.unbounded<ProviderAdapter.ProviderAdapterV2Event>();
+    yield* runtime.events.pipe(
+      Stream.runForEach((event) => Queue.offer(emitted, event)),
+      Effect.forkScoped,
+    );
+    const seen: Array<ProviderAdapter.ProviderAdapterV2Event> = [];
+    const takeEvent = (predicate: (event: ProviderAdapter.ProviderAdapterV2Event) => boolean) =>
+      Effect.gen(function* () {
+        while (true) {
+          const event = yield* Queue.take(emitted);
+          seen.push(event);
+          if (predicate(event)) return event;
+        }
+      });
+    return { runtime, takeEvent, seen, offers };
+  });
+
+  it.effect.each([
+    { name: "0.9.8", cli: STOCK_098_CLI, loadsExtension: true },
+    { name: "the slice-4 fork", cli: FORK_CLI, loadsExtension: false },
+    {
+      name: "a fork prerelease",
+      cli: { ...FORK_CLI, version: "0.10.1-beta.3" },
+      loadsExtension: false,
+    },
+  ])("launches $name with T3's extension: $loadsExtension", ({ cli, loadsExtension }) =>
+    Effect.gen(function* () {
+      const fake = yield* makeFakePi;
+      yield* openPrimeAgent(fake, { cli });
+      const { args } = fake.lastSpawn();
+      assert.deepEqual(args.slice(0, 2), ["--mode", "rpc"]);
+      assert.equal(args.includes("--extension"), loadsExtension);
+    }).pipe(Effect.scoped, Effect.provide(layerTest)),
+  );
+
+  it.effect.each<{ readonly name: string; readonly cli: PrimeAgentCli; readonly reason?: string }>([
+    { name: "a help run that fails", cli: { ...STOCK_098_CLI, help: "", helpExitCode: 1 } },
+    {
+      name: "help that names no Prime Agent options",
+      cli: { ...STOCK_098_CLI, help: "usage: tool [args]\n" },
+    },
+    {
+      name: "stock Prime Agent 0.10",
+      cli: STOCK_010_CLI,
+      reason: "stock Prime Agent 0.10 is not supported; install the T3 fork",
+    },
+    {
+      name: "a +t3fork version without the capabilities contract",
+      cli: { ...STOCK_010_CLI, version: "0.10.0+t3fork.1" },
+      reason: "stock Prime Agent 0.10 is not supported; install the T3 fork",
+    },
+    {
+      name: "a fork with an unknown contract",
+      cli: { ...FORK_CLI, capabilities: forkCapabilitiesWith({ contract: 2 }) },
+      reason: "contract 2",
+    },
+    { name: "a nightly label", cli: { ...FORK_CLI, version: "nightly" } },
+  ])("does not launch a binary it cannot identify, from $name", ({ cli, reason }) =>
+    Effect.gen(function* () {
+      const fake = yield* makeFakePi;
+      const error = yield* openPrimeAgent(fake, { cli }).pipe(Effect.flip);
+      assert.include(String(error.message), "prime-agent");
+      if (reason !== undefined) assert.include(String(error.message), reason);
+      assert.deepEqual(fake.lastSpawn().args, [], "no RPC process may start");
+    }).pipe(Effect.scoped, Effect.provide(layerTest)),
+  );
+
+  it.effect("forks a session without the extension flags the fork rejects", () =>
+    Effect.gen(function* () {
+      const fake = yield* makeFakePi;
+      const forkFake = yield* makeFakePi;
+      const { runtime } = yield* openPrimeAgent(fake, { forkFake });
+      const source = yield* runtime.ensureThread({
+        threadId: THREAD_ID,
+        modelSelection: modelSelection("default"),
+        runtimePolicy,
+      });
+      forkFake.queueState({ sessionFile: "/fake/forked.jsonl" });
+      yield* runtime.forkThread({
+        sourceProviderThread: source,
+        sourceProviderTurns: [],
+        targetThreadId: ThreadId.make("fork-target"),
+      });
+      const args = forkFake.lastSpawn().args;
+      assert.equal(args[args.indexOf("--fork") + 1], FAKE_SESSION_FILE);
+      for (const flag of ["--extension", "--no-extensions", "--no-tools"]) {
+        assert.notInclude(args, flag);
+      }
+    }).pipe(Effect.scoped, Effect.provide(layerTest)),
+  );
+  const USER_LAUNCH_ARGS = "--extension /tmp/user-extension.ts -ne --no-tools --model openai/gpt-5";
+
+  it.effect("leaves out launch args the fork rejects, and says so in the thread", () =>
+    Effect.gen(function* () {
+      const fake = yield* makeFakePi;
+      const forkFake = yield* makeFakePi;
+      const { runtime, takeEvent } = yield* openPrimeAgent(fake, {
+        forkFake,
+        launchArgs: USER_LAUNCH_ARGS,
+      });
+      const providerThread = yield* runtime.ensureThread({
+        threadId: THREAD_ID,
+        modelSelection: modelSelection("default"),
+        runtimePolicy,
+      });
+      forkFake.queueState({ sessionFile: "/fake/forked.jsonl" });
+      yield* runtime.forkThread({
+        sourceProviderThread: providerThread,
+        sourceProviderTurns: [],
+        targetThreadId: ThreadId.make("fork-target"),
+      });
+      for (const { args } of [fake.lastSpawn(), forkFake.lastSpawn()]) {
+        for (const rejected of ["--extension", "/tmp/user-extension.ts", "-ne", "--no-tools"]) {
+          assert.notInclude(args, rejected);
+        }
+        assert.include(args, "--model");
+      }
+
+      yield* startTurn(runtime, providerThread);
+      yield* fake.takeRequest("prompt");
+      const notice = yield* takeEvent(
+        (event) => event.type === "turn_item.updated" && event.turnItem.type === "system_notice",
+      );
+      assert.isTrue(notice.type === "turn_item.updated");
+      if (notice.type !== "turn_item.updated" || notice.turnItem.type !== "system_notice") return;
+      assert.equal(notice.turnItem.tone, "warning");
+      assert.include(notice.turnItem.message, "--extension /tmp/user-extension.ts -ne --no-tools");
+    }).pipe(Effect.scoped, Effect.provide(layerTest)),
+  );
+
+  it.effect("keeps the same launch args on Prime Agent 0.9.8", () =>
+    Effect.gen(function* () {
+      const fake = yield* makeFakePi;
+      yield* openPrimeAgent(fake, {
+        cli: STOCK_098_CLI,
+        launchArgs: USER_LAUNCH_ARGS,
+      });
+      const { args } = fake.lastSpawn();
+      for (const kept of ["/tmp/user-extension.ts", "-ne", "--no-tools", "--model"]) {
+        assert.include(args, kept);
+      }
+    }).pipe(Effect.scoped, Effect.provide(layerTest)),
+  );
+  it.effect("projects a child from the fork's recorded frames into its own thread", () =>
+    Effect.gen(function* () {
+      const fake = yield* makeFakePi;
+      const { runtime, takeEvent, seen, offers } = yield* openPrimeAgent(fake);
+      const providerThread = yield* runtime.ensureThread({
+        threadId: THREAD_ID,
+        modelSelection: modelSelection("default"),
+        runtimePolicy,
+      });
+      fake.queueObserved(PRIME_AGENT_FORK_OBSERVED_MESSAGES);
+      yield* startTurn(runtime, providerThread);
+      yield* fake.takeRequest("prompt");
+      // The parent's first run ends, and T3 settles it, while the child works.
+      const firstRunEnd = PRIME_AGENT_FORK_CHILD_WAKE_RECORDS.findIndex(
+        (record) => record["type"] === "agent_end",
+      );
+      for (const record of PRIME_AGENT_FORK_CHILD_WAKE_RECORDS.slice(0, firstRunEnd + 1)) {
+        yield* fake.emit(record);
+      }
+      yield* takeEvent((event) => event.type === "turn.terminal");
+      for (const record of PRIME_AGENT_FORK_CHILD_WAKE_RECORDS.slice(firstRunEnd + 1)) {
+        yield* fake.emit(record);
+      }
+
+      const done = yield* takeEvent(
+        (event) => event.type === "subagent.updated" && event.subagent.status === "completed",
+      );
+      assert.isTrue(done.type === "subagent.updated");
+      if (done.type !== "subagent.updated") return;
+      assert.equal(done.subagent.title, "adder");
+      assert.equal(done.subagent.result, "42");
+      assert.equal((yield* fake.takeRequest("observe"))["activeSessionId"], "f37cc57f87da");
+      const childReplies = seen.flatMap((event) =>
+        event.type === "message.updated" &&
+        event.message.threadId === done.subagent.childThreadId &&
+        event.message.role === "assistant"
+          ? [event.message.text]
+          : [],
+      );
+      assert.equal(childReplies.at(-1), "42");
+      assert.equal((yield* fake.takeRequest("unobserve"))["activeSessionId"], "f37cc57f87da");
+
+      // The child's message woke the parent, which the recorded wake names.
+      assert.deepEqual((yield* Queue.take(offers)).notification, {
+        source: { kind: "subagent" },
+        outcome: "updated",
+        summary: "Message from adder",
+        detail: "42",
+      });
+    }).pipe(Effect.scoped, Effect.provide(layerTest)),
+  );
+
+  /** A heartbeat job as the fork's `heartbeats_list` serializes it (`AgentCronJob`). */
+  const forkHeartbeatJob = {
+    id: "hb-1",
+    status: "active",
+    activeSessionId: "2a1193474648",
+    sessionId: "00000000-0000-4000-8000-000000000002",
+    sessionFile: FAKE_SESSION_FILE,
+    cwd: "/workspace",
+    label: "Watch CI",
+    prompt: "Check the CI run and report failures.",
+    schedule: { kind: "cron", expression: "*/10 * * * *" },
+    createdAt: "2026-10-11T09:00:00.000Z",
+    updatedAt: "2026-10-11T09:00:00.000Z",
+    nextRunAt: "2026-10-11T09:10:00.000Z",
+    runCount: 0,
+  };
+
+  it.effect("lists the fork's heartbeats and names a heartbeat wake", () =>
+    Effect.gen(function* () {
+      const fake = yield* makeFakePi;
+      fake.queueHeartbeats({ heartbeats: [{ job: forkHeartbeatJob, sessionName: "parent" }] });
+      const { runtime, takeEvent, offers } = yield* openPrimeAgent(fake);
+      yield* runtime.ensureThread({
+        threadId: THREAD_ID,
+        modelSelection: modelSelection("default"),
+        runtimePolicy,
+      });
+      const listed = yield* takeEvent(
+        (event) =>
+          event.type === "provider_thread.updated" &&
+          (event.providerThread.heartbeats?.length ?? 0) > 0,
+      );
+      assert.deepEqual(
+        listed.type === "provider_thread.updated" ? listed.providerThread.heartbeats : null,
+        [
+          {
+            id: "hb-1",
+            schedule: "*/10 * * * *",
+            paused: false,
+            description: "Watch CI",
+            nextRunAt: "2026-10-11T09:10:00.000Z",
+          },
+        ],
+      );
+
+      // `create_heartbeat_prompt_message` in the fork's session engine.
+      const heartbeatPrompt = {
+        role: "custom",
+        customType: "heartbeat_prompt",
+        content: "[heartbeat: */10 * * * * run#1]\n\nCheck the CI run and report failures.",
+        display: true,
+        details: {
+          jobId: "hb-1",
+          schedule: "*/10 * * * *",
+          status: "active",
+          runCount: 1,
+          nextRunAt: "2026-10-11T09:20:00.000Z",
+        },
+        timestamp: 1_791_710_960_000,
+      };
+      yield* fake.emit({
+        type: "session_action_update",
+        actions: { queuedCount: 1, steering: [], followUps: ["Heartbeat prompt"] },
+      });
+      yield* fake.emit({ type: "agent_start" });
+      yield* fake.emit({ type: "turn_start" });
+      yield* fake.emit({ type: "message_start", message: heartbeatPrompt });
+      yield* fake.emit({ type: "message_end", message: heartbeatPrompt });
+      yield* fake.emit({
+        type: "message_start",
+        message: { role: "assistant", content: [], timestamp: 1_791_710_960_001 },
+      });
+      assert.deepEqual((yield* Queue.take(offers)).notification, {
+        source: { kind: "heartbeat", heartbeatId: "hb-1" },
+        outcome: "updated",
+        summary: "Heartbeat",
+        detail: "Check the CI run and report failures.",
+      });
+    }).pipe(Effect.scoped, Effect.provide(layerTest)),
+  );
+  it.effect("marks an edit card whose diff the fork clipped", () =>
+    Effect.gen(function* () {
+      const fake = yield* makeFakePi;
+      const { runtime, takeEvent } = yield* openPrimeAgent(fake);
+      const providerThread = yield* runtime.ensureThread({
+        threadId: THREAD_ID,
+        modelSelection: modelSelection("default"),
+        runtimePolicy,
+      });
+      yield* startTurn(runtime, providerThread);
+      yield* fake.takeRequest("prompt");
+      yield* fake.emit({ type: "agent_start" });
+      const code = "await edit(path='big.txt', old_str=old, new_str=new)";
+      yield* fake.emit({
+        type: "tool_execution_start",
+        toolCallId: "cell_edit",
+        toolName: "ipython",
+        args: { code },
+      });
+      // The fork's edit skill clips each side of an oversized diff to 64 Ki
+      // characters, appends this marker, and flags the record.
+      const clipped = (text: string) =>
+        `${text}\n[... diff text truncated: 65536 of 9000000 characters shown ...]`;
+      yield* fake.emit({
+        type: "tool_execution_end",
+        toolCallId: "cell_edit",
+        toolName: "ipython",
+        result: {
+          content: [{ type: "text", text: "Edited big.txt" }],
+          details: {
+            status: "ok",
+            diffs: [
+              { path: `${process.cwd()}/small.txt`, oldStr: "a", newStr: "b", startLine: 1 },
+              {
+                path: `${process.cwd()}/big.txt`,
+                oldStr: clipped("AAAA"),
+                newStr: clipped("BBBB"),
+                startLine: 1,
+                truncated: true,
+              },
+            ],
+          },
+        },
+        isError: false,
+      });
+      const cards: Array<{ fileName: string; title: string | null | undefined; newStr?: string }> =
+        [];
+      while (cards.length < 2) {
+        const event = yield* takeEvent(
+          (candidate) =>
+            candidate.type === "turn_item.updated" && candidate.turnItem.type === "file_change",
+        );
+        if (event.type === "turn_item.updated" && event.turnItem.type === "file_change") {
+          cards.push({
+            fileName: event.turnItem.fileName,
+            title: event.turnItem.title,
+            ...(event.turnItem.newStr === undefined ? {} : { newStr: event.turnItem.newStr }),
+          });
+        }
+      }
+      assert.deepEqual(cards, [
+        { fileName: "small.txt", title: "edit", newStr: "b" },
+        { fileName: "big.txt", title: "edit (diff truncated)", newStr: clipped("BBBB") },
+      ]);
+    }).pipe(Effect.scoped, Effect.provide(layerTest)),
+  );
+  it.effect.each(["approval-required", "auto-accept-edits", "auto"] as const)(
+    "refuses to run the fork in %s, which it cannot enforce",
+    (runtimeMode) =>
+      Effect.gen(function* () {
+        const fake = yield* makeFakePi;
+        const error = yield* openPrimeAgent(fake, { runtimeMode }).pipe(Effect.flip);
+        assert.include(String(error.cause ?? error), "Full access");
+        assert.isFalse(fake.allRequests().some((request) => request.type === "prompt"));
+      }).pipe(Effect.scoped, Effect.provide(layerTest)),
+  );
+
+  it.effect("tells the orchestrator the fork raises no approvals", () =>
+    Effect.gen(function* () {
+      const fake = yield* makeFakePi;
+      const { runtime } = yield* openPrimeAgent(fake);
+      const { approvals } = runtime.providerSession.capabilities;
+      assert.isFalse(approvals.supportsCommandApproval);
+      assert.isFalse(approvals.supportsFileChangeApproval);
+    }).pipe(Effect.scoped, Effect.provide(layerTest)),
   );
 });

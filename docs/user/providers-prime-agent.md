@@ -78,9 +78,45 @@ Open the thread to read what a check reported.
 **Auto-accept edits** is not offered. Prime Agent only reports an edit after its cell has run, so
 T3 Code cannot tell an edit from a command before approving it.
 
+## Prime Agent 0.10 (fork)
+
+T3 Code also runs the T3 fork of Prime Agent 0.10 (`sakompella/prime-agent`). It recognizes the
+fork by its answer to `prime-agent --capabilities`, and shows the provider as "Prime Agent (fork,
+0.10)". Stock Prime Agent 0.10 and fork builds without that command are not supported: T3 Code
+does not launch them, and Settings says to install the fork. Subagents, heartbeats, wakes and edit cards
+work as described above. The differences:
+
+- Only **Full access** is offered, in the composer and in the default permissions setting. The
+  fork cannot ask before it runs a cell, so its threads run with full access whatever mode they
+  stored. The default permissions setting shows the mode new threads run in on the provider they
+  start on: the default model's provider, or, with no usable default, the first ready provider.
+  Across several environments it offers only the modes all of them run. An agent or MCP client approved
+  for narrower permissions cannot send work to fork threads, move a thread onto the fork, or fork
+  its own fork thread into a new one.
+- Rollback rewinds the session in place, and Prime Agent is told with the next message it
+  accepts. T3 Code never repeats the rewind when the session reopens, because a heartbeat or
+  message wake may have added conversation since. If T3 Code cannot confirm the rewind on reopen,
+  because the fork still lists the discarded message or its branch could not be read, the thread
+  warns "Rollback not confirmed" until the fork shows the rewind kept or accepts your next
+  message. A heartbeat or message wake that runs before your next message is not told about the
+  rollback.
+- T3 Code tools may not reach the kernel yet. The fork runs sessions in background workers that do
+  not receive T3 Code's per-session credential, so the setup above can still leave a session
+  without T3 Code tools.
+- Features of T3 Code's Prime Agent extension are not available: `$skill` mentions are not
+  expanded, and the output cap for OpenRouter models does not apply. T3 Code leaves extension and
+  tool launch arguments (`--extension`, `--no-extensions`, `--tools`, `--no-tools` and their
+  short forms) out of fork launches, and warns in Settings and in the thread.
+- The fork cannot generate thread titles, commit messages, pull request content or branch names.
+  Choose another text generation model in Settings.
+- An edit too large to show in full is marked "edit (diff truncated)".
+
 ## Troubleshooting
 
 - If Prime Agent is unavailable, confirm that the configured binary runs on the server machine and
-  reports version 0.9.6 or newer, then refresh the provider in Settings.
+  reports version 0.9.6 or newer, then refresh the provider in Settings. T3 Code does not launch a
+  binary whose `--version` it cannot read. Below 0.10, `--help` must offer `--mode rpc`. From 0.10
+  on, `prime-agent --capabilities` must print the T3 fork's contract 1 with every command T3 Code
+  uses; the Settings message names what is missing.
 - If no models appear, open Prime Agent directly and confirm its authentication and model
   configuration.

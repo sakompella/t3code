@@ -1,6 +1,10 @@
 import {
   isNullableProjectSettingsOverride,
+  newThreadRuntimeMode,
+  type NewThreadDefaults,
   PROJECT_SCOPED_SERVER_SETTING_KEYS,
+  runtimeModesForNewThreads,
+  type RuntimeMode,
   type EnvironmentId,
   type ProjectId,
   type ProjectScopedServerSettingKey,
@@ -99,6 +103,28 @@ export function uniformMobileSetting<K extends keyof ServerSettings>(
   if (!reference) return null;
   const value = reference.settings[key];
   return targets.every((target) => target.settings[key] === value) ? value : null;
+}
+
+const newThreadDefaults = (
+  target: Pick<ScopedMobileSettingsTarget, "environment" | "settings">,
+): NewThreadDefaults => ({
+  providers: target.environment.serverConfig.providers,
+  defaultModelSelection: target.settings.defaultModelSelection,
+  defaultRuntimeMode: target.settings.defaultRuntimeMode,
+});
+
+/** The default permissions new threads can run with on every target. */
+export function offeredDefaultRuntimeModes(
+  targets: readonly Pick<ScopedMobileSettingsTarget, "environment" | "settings">[],
+): ReadonlyArray<RuntimeMode> {
+  return runtimeModesForNewThreads(targets.map(newThreadDefaults));
+}
+
+/** The permissions new threads run with on every target, or null when they differ. */
+export function displayedDefaultRuntimeMode(
+  targets: readonly Pick<ScopedMobileSettingsTarget, "environment" | "settings">[],
+): RuntimeMode | null {
+  return newThreadRuntimeMode(targets.map(newThreadDefaults));
 }
 
 export function planMobileScopedSettingsClear(
