@@ -1,16 +1,21 @@
 import { assert, it } from "@effect/vitest";
 import {
   CommandId,
+  EventId,
+  MessageId,
   ProjectId,
   ProviderDriverKind,
   ProviderInstanceId,
+  RunId,
   ThreadId,
 } from "@t3tools/contracts";
+import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as SqlitePersistence from "../persistence/Sqlite.ts";
 import { CodexProviderCapabilitiesV2 } from "./Adapters/CodexAdapterV2.ts";
 import { DispatchModeLimit } from "./DispatchModeLimit.ts";
+import * as EventSink from "./EventSink.ts";
 import * as Orchestrator from "./Orchestrator.ts";
 import * as ProjectionStore from "./ProjectionStore.ts";
 import * as ProviderAdapterRegistry from "./ProviderAdapterRegistry.ts";
@@ -273,6 +278,67 @@ it.layer(layerFullAccessOnly)(
           (yield* projections.getThreadShell(threadId))?.modelSelection.model,
           "gpt-5-mini",
         );
+      }),
+    );
+    it.effect("refuses a caller a fork of its own thread, which would run above its limit", () =>
+      Effect.gen(function* () {
+        const orchestrator = yield* Orchestrator.OrchestratorV2;
+        const projections = yield* ProjectionStore.ProjectionStoreV2;
+        const eventSink = yield* EventSink.EventSinkV2;
+        const sourceThreadId = ThreadId.make("thread:limit-own-fork-source");
+        const targetThreadId = ThreadId.make("thread:limit-own-fork-target");
+        const runId = RunId.make("run:limit-own-fork-source");
+        yield* createThread(sourceThreadId);
+        const now = yield* DateTime.now;
+        yield* eventSink.write({
+          events: [
+            {
+              id: EventId.make("event:limit-own-fork-run"),
+              type: "run.created",
+              threadId: sourceThreadId,
+              runId,
+              occurredAt: now,
+              payload: {
+                id: runId,
+                threadId: sourceThreadId,
+                ordinal: 1,
+                providerInstanceId: instanceId,
+                modelSelection: { instanceId, model: "gpt-5" },
+                providerThreadId: null,
+                userMessageId: MessageId.make("message:limit-own-fork"),
+                rootNodeId: null,
+                activeAttemptId: null,
+                status: "completed",
+                queuePosition: null,
+                requestedAt: now,
+                startedAt: now,
+                completedAt: now,
+                checkpointId: null,
+                contextHandoffId: null,
+              },
+            },
+          ],
+        });
+        const refused = yield* orchestrator
+          .dispatch({
+            type: "thread.fork",
+            commandId: CommandId.make("own-fork"),
+            sourceThreadId,
+            targetThreadId,
+            sourcePoint: { type: "run", runId },
+            createdBy: "agent",
+            creationSource: "mcp",
+          })
+          .pipe(
+            Effect.provideService(DispatchModeLimit, {
+              ...supervised,
+              callerThreadId: sourceThreadId,
+            }),
+            Effect.flip,
+          );
+        assert.ok(refused._tag === "OrchestratorThreadAboveModeLimitError");
+        assert.equal(refused.threadId, targetThreadId);
+        assert.isNull(yield* projections.getThreadShell(targetThreadId));
       }),
     );
   },
