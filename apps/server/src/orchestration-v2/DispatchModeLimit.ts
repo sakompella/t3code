@@ -19,9 +19,10 @@ export interface DispatchModeRefusal extends DispatchModes {
  * the thread's command lock, where nothing else can change them. Unset for
  * the user's own commands, which have no limit.
  *
- * A thread's modes here are the modes it runs in: a provider that does not
- * offer its stored runtime mode runs it in another (see `RuntimePolicyV2`).
- * The calling thread is always within its own limit.
+ * A thread's modes here are the modes it runs in once the command applies: a
+ * provider that does not offer its stored runtime mode runs it in another
+ * (see `RuntimePolicyV2`), so a provider switch can broaden them. The calling
+ * thread may keep the modes it already runs in, but not broaden them.
  *
  * The orchestrator also records its refusal in `refused`, so the sender can
  * report it however the code in between wrapped the dispatch error.

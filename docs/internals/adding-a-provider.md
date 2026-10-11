@@ -33,7 +33,8 @@ capabilities, never the driver kind.
   the mode clients show for it (`providerRuntimeMode` in
   [`providerPolicy.ts`](../../packages/contracts/src/providerPolicy.ts)). When that mode is broader
   than the stored one, authorization must use it: MCP limits and the dispatch re-check compare a
-  caller with the mode the work runs in, never the stored mode
+  caller with the mode the work runs in, never the stored mode, and with the provider a command
+  leaves the thread on, since a provider switch changes that mode
   ([`DispatchModeLimit.ts`](../../apps/server/src/orchestration-v2/DispatchModeLimit.ts)).
 - **Approval and question options.** Pass the provider's own option IDs through unchanged. Every
   request needs a way to decline that the provider honors.
