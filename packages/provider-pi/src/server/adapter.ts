@@ -92,7 +92,7 @@ import {
   T3_ROLLBACK_NOTICE,
 } from "./mcpExtensionSource.ts";
 import { PI_FLAVOR, PRIME_AGENT_FLAVOR, type PiFlavor } from "./flavor.ts";
-import { detectPiFlavor, type PiFlavorUndetectedError } from "./status.ts";
+import { detectPiFlavor, type PiCliUnsupportedError } from "./status.ts";
 import { resolveKernelMcpAccess } from "./primeAgentT3Mcp.ts";
 
 import type {
@@ -261,9 +261,10 @@ export interface PiAdapterV2Options {
   readonly environment: NodeJS.ProcessEnv;
   /**
    * The flavor the binary speaks, read each time a session opens so a swapped
-   * binary is picked up. Defaults to `flavor`; the drivers read `--help`.
+   * binary is picked up. Defaults to `flavor`; the drivers read `--version`
+   * and `--help` (`detectPiFlavor`).
    */
-  readonly detectFlavor?: Effect.Effect<PiFlavor, PiFlavorUndetectedError>;
+  readonly detectFlavor?: Effect.Effect<PiFlavor, PiCliUnsupportedError>;
   readonly continuationRequests?: {
     readonly offer: (
       request: ProviderContinuationRequests.ProviderContinuationRequest,

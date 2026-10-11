@@ -32,7 +32,7 @@ import {
   piRecordString as recordString,
 } from "./rpc.ts";
 import * as ProviderLatestVersions from "@t3tools/provider-core/server/ProviderLatestVersions";
-import { piFlavorForHelp, type PiFlavor } from "./flavor.ts";
+import { identifyPiCli, type PiFlavor } from "./flavor.ts";
 import {
   buildServerProvider,
   isCommandMissingCause,
@@ -248,46 +248,59 @@ const runPiCliCommand = (
     );
   });
 
-/** The configured binary is a CLI of this driver whose flavor T3 could not tell. */
-export class PiFlavorUndetectedError extends Schema.TaggedError<PiFlavorUndetectedError>()(
-  "PiFlavorUndetectedError",
+/** The configured binary is a CLI of this driver that T3 could not identify or does not support. */
+export class PiCliUnsupportedError extends Schema.TaggedError<PiCliUnsupportedError>()(
+  "PiCliUnsupportedError",
   {
     binary: Schema.String,
     reason: Schema.String,
   },
 ) {
   override get message(): string {
-    return `T3 Code could not tell which CLI \`${this.binary}\` is (${this.reason}), so it did not launch it. Check that \`${this.binary} --help\` works.`;
+    return `T3 Code did not launch \`${this.binary}\`: ${this.reason}.`;
   }
 }
 
 /**
- * The flavor the configured binary speaks, read from what its `--help`
- * offers. Launch flags differ between flavors, so a CLI whose flavor cannot
- * be told is never launched with a guessed one.
+ * The flavor the configured binary speaks, from its `--version` and `--help`
+ * (see `identifyPiCli`). A CLI T3 cannot identify is never launched. A caller
+ * that already read `--version` passes its output.
  */
 export const detectPiFlavor = (
   flavor: PiFlavor,
   piSettings: PiSettings,
   environment: NodeJS.ProcessEnv,
-): Effect.Effect<PiFlavor, PiFlavorUndetectedError, ChildProcessSpawner.ChildProcessSpawner> => {
+  versionOutput?: string,
+): Effect.Effect<PiFlavor, PiCliUnsupportedError, ChildProcessSpawner.ChildProcessSpawner> => {
   if (flavor.successor === undefined) return Effect.succeed(flavor);
   const binary = piSettings.binaryPath || flavor.defaultBinary;
-  const undetected = (reason: string) => new PiFlavorUndetectedError({ binary, reason });
-  return runPiCliCommand(flavor, piSettings, environment, "--help").pipe(
-    Effect.mapError((error) => undetected(`\`--help\` failed to run: ${error.message}`)),
-    Effect.timeoutOption(VERSION_PROBE_TIMEOUT_MS),
-    Effect.flatMap((output) => {
-      if (Option.isNone(output)) {
-        return Effect.fail(undetected(`\`--help\` timed out after ${VERSION_PROBE_TIMEOUT_MS}ms`));
-      }
-      if (output.value.code !== 0) {
-        return Effect.fail(undetected(`\`--help\` exited with code ${output.value.code}`));
-      }
-      const detected = piFlavorForHelp(flavor, `${output.value.stdout}\n${output.value.stderr}`);
-      return detected === undefined
-        ? Effect.fail(undetected(`its \`--help\` lists no \`--mode\` option`))
-        : Effect.succeed(detected);
+  const unsupported = (reason: string) => new PiCliUnsupportedError({ binary, reason });
+  const readOutput = (flag: "--version" | "--help") =>
+    runPiCliCommand(flavor, piSettings, environment, flag).pipe(
+      Effect.mapError((error) => unsupported(`\`${flag}\` failed to run: ${error.message}`)),
+      Effect.timeoutOption(VERSION_PROBE_TIMEOUT_MS),
+      Effect.flatMap((output) => {
+        if (Option.isNone(output)) {
+          return Effect.fail(
+            unsupported(`\`${flag}\` timed out after ${VERSION_PROBE_TIMEOUT_MS}ms`),
+          );
+        }
+        if (output.value.code !== 0) {
+          return Effect.fail(unsupported(`\`${flag}\` exited with code ${output.value.code}`));
+        }
+        return Effect.succeed(`${output.value.stdout}\n${output.value.stderr}`);
+      }),
+    );
+  const version =
+    versionOutput === undefined ? readOutput("--version") : Effect.succeed(versionOutput);
+  return Effect.all([version, readOutput("--help")], {
+    concurrency: "unbounded",
+  }).pipe(
+    Effect.flatMap(([version, help]) => {
+      const identity = identifyPiCli(flavor, { version, help });
+      return identity._tag === "Supported"
+        ? Effect.succeed(identity.flavor)
+        : Effect.fail(unsupported(identity.reason));
     }),
   );
 };
@@ -416,7 +429,12 @@ export const checkPiProviderStatus = Effect.fn("checkPiProviderStatus")(function
     });
   }
 
-  const detection = yield* detectPiFlavor(flavor, piSettings, environment).pipe(Effect.result);
+  const detection = yield* detectPiFlavor(
+    flavor,
+    piSettings,
+    environment,
+    `${versionOutput.stdout}\n${versionOutput.stderr}`,
+  ).pipe(Effect.result);
   if (Result.isFailure(detection)) {
     return buildServerProvider({
       presentation: piPresentation(flavor),
@@ -434,9 +452,7 @@ export const checkPiProviderStatus = Effect.fn("checkPiProviderStatus")(function
   }
   const cliFlavor = detection.success;
 
-  // A successor is told apart by what its help offers, so its version is
-  // only a label; builds such as `nightly` need not parse.
-  if (cliFlavor === flavor && version === null) {
+  if (version === null) {
     return buildServerProvider({
       presentation: piPresentation(flavor),
       enabled: piSettings.enabled,
