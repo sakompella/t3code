@@ -3658,7 +3658,9 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       );
     // The source is not under this command's lock, so check the modes this
     // command copies, not an earlier read the source's user could outrun.
+    // The new thread runs in them too, and is never the calling thread.
     yield* refuseAboveDispatchModeLimit(command, command.sourceThreadId, sourceProjection.thread);
+    yield* refuseAboveDispatchModeLimit(command, command.targetThreadId, sourceProjection.thread);
 
     const sourceRun = runForSourcePoint(sourceProjection, command.sourcePoint);
 
