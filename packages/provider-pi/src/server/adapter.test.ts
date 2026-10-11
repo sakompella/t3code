@@ -11369,6 +11369,42 @@ describe("PiAdapterV2 on the Prime Agent 0.10 fork", () => {
     }).pipe(Effect.scoped, Effect.provide(layerTest)),
   );
 
+  it.effect("shows a fork child's task from the parent once", () =>
+    Effect.gen(function* () {
+      const fake = yield* makeFakePi;
+      const { runtime, takeEvent, seen } = yield* openPrimeAgent(fake);
+      const providerThread = yield* runtime.ensureThread({
+        threadId: THREAD_ID,
+        modelSelection: modelSelection("default"),
+        runtimePolicy,
+      });
+      fake.queueObserved(PRIME_AGENT_FORK_OBSERVED_MESSAGES);
+      yield* startTurn(runtime, providerThread);
+      yield* fake.takeRequest("prompt");
+      for (const record of PRIME_AGENT_FORK_CHILD_WAKE_RECORDS) {
+        yield* fake.emit(record);
+      }
+      const done = yield* takeEvent(
+        (event) => event.type === "subagent.updated" && event.subagent.status === "completed",
+      );
+      assert.isTrue(done.type === "subagent.updated");
+      if (done.type !== "subagent.updated") return;
+
+      // The stored history carries the task with an ISO timestamp, the live frame with epoch milliseconds.
+      const taskMessageIds = new Set(
+        seen.flatMap((event) =>
+          event.type === "message.updated" &&
+          event.message.threadId === done.subagent.childThreadId &&
+          event.message.role === "user" &&
+          event.message.text.startsWith("[task from parent]")
+            ? [event.message.id]
+            : [],
+        ),
+      );
+      assert.equal(taskMessageIds.size, 1);
+    }).pipe(Effect.scoped, Effect.provide(layerTest)),
+  );
+
   /** A heartbeat job as the fork's `heartbeats_list` serializes it (`AgentCronJob`). */
   const forkHeartbeatJob = {
     id: "hb-1",
