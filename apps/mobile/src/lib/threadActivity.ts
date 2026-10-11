@@ -827,8 +827,9 @@ function toFeedActivity(
       ? collectToolFilePaths(item)
       : null;
   const noticeText = noticeExpandedText(item);
-  const getFullDetail = memoizeValue(() =>
-    noticeText ??
+  const getFullDetail = memoizeValue(
+    () =>
+      noticeText ??
       (readPaths
         ? readPaths.join("\n") || null
         : item.type === "notification"

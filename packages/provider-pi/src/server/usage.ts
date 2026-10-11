@@ -159,10 +159,7 @@ type MutableUsageRecord = { -readonly [Key in keyof UsageRecord]: UsageRecord[Ke
  * The responses one parse of a file has produced so far, by entry id. They only
  * matter within that parse, so they sit beside the serializable scan state.
  */
-const parsedResponses = new WeakMap<
-  typeof PiScanState.Type,
-  Map<string, MutableUsageRecord>
->();
+const parsedResponses = new WeakMap<typeof PiScanState.Type, Map<string, MutableUsageRecord>>();
 /** Parses whose attribution named a response an earlier, cached parse produced. */
 const lateAttributions = new WeakSet<typeof PiScanState.Type>();
 
@@ -206,7 +203,10 @@ function restoreOwnUsage(parsed: unknown, state: typeof PiScanState.Type): boole
   // A raw line already holds these totals; keep its exact recorded cost.
   if (totalTokens(totals) === 0 || unchanged) return true;
   const ownCost = usageCost(aggregateUsage) - usageCost(childUsage);
-  record.totals = { ...totals, reasoningTokens: Math.min(totals.outputTokens, record.totals.reasoningTokens) };
+  record.totals = {
+    ...totals,
+    reasoningTokens: Math.min(totals.outputTokens, record.totals.reasoningTokens),
+  };
   record.reportedCostUsd = ownCost > 0 ? ownCost : null;
   return true;
 }
@@ -217,7 +217,8 @@ function parsePrimeAgentRecord(
 ): readonly UsageRecord[] {
   if (restoreOwnUsage(parsed, state)) return [];
   const records = parseRecord("primeAgent", parsed, state);
-  const entryId = Predicate.isObject(parsed) && typeof parsed["id"] === "string" ? parsed["id"] : "";
+  const entryId =
+    Predicate.isObject(parsed) && typeof parsed["id"] === "string" ? parsed["id"] : "";
   const [record] = records;
   if (entryId && record !== undefined && records.length === 1) {
     const responses = parsedResponses.get(state) ?? new Map<string, MutableUsageRecord>();
@@ -231,7 +232,12 @@ const piFormat = makePiUsageFormat("primeAgent");
 
 export const primeAgentUsageFormat: TranscriptUsageFormat<typeof PiScanState.Type> = {
   ...piFormat,
-  selectFields: { ...piFormat.selectFields, targetId: true, childUsage: true, aggregateUsage: true },
+  selectFields: {
+    ...piFormat.selectFields,
+    targetId: true,
+    childUsage: true,
+    aggregateUsage: true,
+  },
   mightCarryUsage: (line) =>
     piFormat.mightCarryUsage(line) || line.includes('"child_usage_attributed"'),
   parseLine: (line, state) => {

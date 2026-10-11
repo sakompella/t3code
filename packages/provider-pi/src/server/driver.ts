@@ -150,24 +150,26 @@ function makePiFlavorDriver(input: {
           ),
         );
 
-        const orchestrationAdapter = yield* adapterDriver.create({
-          instanceId,
-          displayName,
-          accentColor,
-          environment,
-          enabled,
-          config,
-        }).pipe(
-          Effect.mapError(
-            (cause) =>
-              new ProviderDriverError({
-                driver: DRIVER_KIND,
-                instanceId,
-                detail: `Failed to build ${flavor.displayName} orchestration adapter.`,
-                cause,
-              }),
-          ),
-        );
+        const orchestrationAdapter = yield* adapterDriver
+          .create({
+            instanceId,
+            displayName,
+            accentColor,
+            environment,
+            enabled,
+            config,
+          })
+          .pipe(
+            Effect.mapError(
+              (cause) =>
+                new ProviderDriverError({
+                  driver: DRIVER_KIND,
+                  instanceId,
+                  detail: `Failed to build ${flavor.displayName} orchestration adapter.`,
+                  cause,
+                }),
+            ),
+          );
         const textGeneration = yield* makePiTextGeneration(flavor, effectiveConfig, processEnv);
 
         const checkProvider = checkPiProviderStatus(flavor, effectiveConfig, processEnv, cwd).pipe(
@@ -182,7 +184,9 @@ function makePiFlavorDriver(input: {
           streamSettings: snapshotSettings.streamSettings,
           haveSettingsChanged: haveProviderSnapshotSettingsChanged,
           initialSnapshot: (settings) =>
-            buildInitialPiProviderSnapshot(flavor, settings.provider).pipe(Effect.map(stampIdentity)),
+            buildInitialPiProviderSnapshot(flavor, settings.provider).pipe(
+              Effect.map(stampIdentity),
+            ),
           checkProvider,
           enrichSnapshot: ({ settings, snapshot: currentSnapshot, publishSnapshot }) =>
             resolveMaintenance().pipe(
@@ -235,7 +239,10 @@ function makePiFlavorDriver(input: {
                     ),
                   ),
                 ]).pipe(
-                  Effect.map(([machineSnapshot, commands]) => ({ ...machineSnapshot, ...commands })),
+                  Effect.map(([machineSnapshot, commands]) => ({
+                    ...machineSnapshot,
+                    ...commands,
+                  })),
                 ),
           orchestrationAdapter,
           textGeneration,
