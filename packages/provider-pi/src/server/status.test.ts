@@ -697,7 +697,7 @@ describe("detectPiFlavor identity cache", () => {
       Effect.gen(function* () {
         const fileSystem = yield* FileSystem.FileSystem;
         const directory = yield* fileSystem.makeTempDirectoryScoped();
-        const archiveTime = new Date(1_700_000_000_000);
+        const archiveTime = 1_700_000_000; // whole seconds, as an archive stores them
         const binary = yield* installBinary(directory, "prime-agent", "#!/bin/sh\n# stock\n");
         yield* fileSystem.utimes(binary, archiveTime, archiveTime);
         const probes: Array<ReadonlyArray<string>> = [];

@@ -6,9 +6,18 @@ import { SpawnExecutableResolution } from "@t3tools/shared/shell";
 import * as NodeFS from "node:fs";
 
 /**
- * Names the file a command launches by its real path, size and modification
- * time, so a result learned about it holds only until the file changes. None
- * when the command does not resolve to a file T3 Code can stat.
+ * Names the file a command launches, so a result learned about it holds only
+ * until the file changes. The key has the path the command resolves to (so
+ * shims that share one real file, as mise and asdf make, keep their own
+ * answers), the real path, and the real file's size, modification time,
+ * change time and inode. Change time and inode catch an in-place replace that
+ * restores the size and mtime, as `tar -x`, `cp -p` and `rsync -t` do; user
+ * tools cannot set the change time. None when the command does not resolve to a
+ * file T3 Code can stat.
+ *
+ * Limit: a shim or wrapper script that picks its target at run time launches a
+ * file this key cannot see change. Such a command is identified once per
+ * server process, until the wrapper file itself changes.
  */
 export const binaryFileKey = (command: string, environment: NodeJS.ProcessEnv) =>
   Effect.gen(function* () {
@@ -18,7 +27,7 @@ export const binaryFileKey = (command: string, environment: NodeJS.ProcessEnv) =
     if (executable === undefined) return Option.none<string>();
     return yield* Effect.try(() => {
       const realPath = NodeFS.realpathSync(executable);
-      const { size, mtimeMs } = NodeFS.statSync(realPath);
-      return [realPath, size, mtimeMs].join("\0");
+      const { size, mtimeMs, ctimeMs, ino, dev } = NodeFS.statSync(realPath);
+      return [executable, realPath, size, mtimeMs, ctimeMs, ino, dev].join("\0");
     }).pipe(Effect.option);
   });
