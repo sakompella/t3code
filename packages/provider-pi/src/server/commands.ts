@@ -103,7 +103,6 @@ export function hasPiNavigateTreeCommand(data: unknown): boolean {
   );
 }
 
-
 function recordField(input: unknown, key: string): unknown {
   return Predicate.isObject(input) ? input[key] : undefined;
 }

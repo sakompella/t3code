@@ -553,13 +553,11 @@ export const layer: Layer.Layer<
           }
           case "app_thread.reparented": {
             const { threadId, parentThreadId } = input.event;
-            const thread = yield* projections
-              .getThread(threadId)
-              .pipe(
-                Effect.catchTags({
-                  ProjectionStoreThreadNotFoundError: () => Effect.succeed(null),
-                }),
-              );
+            const thread = yield* projections.getThread(threadId).pipe(
+              Effect.catchTags({
+                ProjectionStoreThreadNotFoundError: () => Effect.succeed(null),
+              }),
+            );
             if (thread === null || thread.lineage.parentThreadId === parentThreadId) return [];
             const now = yield* DateTime.now;
             return [

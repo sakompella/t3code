@@ -34,7 +34,13 @@ describe("Prime Agent usage scans", () => {
       const root = await NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "prime-late-attribution-"));
       const file = NodePath.join(root, "fork.jsonl");
       try {
-        const childUsage = { input: 10, output: 3, cacheRead: 0, cacheWrite: 0, cost: { total: 0.75 } };
+        const childUsage = {
+          input: 10,
+          output: 3,
+          cacheRead: 0,
+          cacheWrite: 0,
+          cost: { total: 0.75 },
+        };
         const aggregateUsage = {
           input: 12,
           output: 10,
@@ -53,7 +59,12 @@ describe("Prime Agent usage scans", () => {
         });
         await NodeFSP.writeFile(file, JSON.stringify(folded) + "\n" + attribution.slice(0, 45));
         const options = { streamingThresholdBytes: streaming ? 1 : Number.POSITIVE_INFINITY };
-        const first = (await readTranscriptRecords(file, primeAgentUsageFormat, undefined, options))!;
+        const first = (await readTranscriptRecords(
+          file,
+          primeAgentUsageFormat,
+          undefined,
+          options,
+        ))!;
         const stat = await NodeFSP.stat(file);
         const restored = decodeScanCache(
           encodeScanCache(

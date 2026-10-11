@@ -14,7 +14,11 @@ describe("resolvePiAgentDir", () => {
     ({ flavor, directory, variable }) => {
       for (const value of [undefined, "", "   "]) {
         assert.equal(
-          resolvePiAgentDir({ agentDir: flavor.agentDir, environment: { [variable]: value }, home }),
+          resolvePiAgentDir({
+            agentDir: flavor.agentDir,
+            environment: { [variable]: value },
+            home,
+          }),
           `${home}/${directory}/agent`,
         );
       }
