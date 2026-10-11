@@ -115,6 +115,26 @@ describe("PiProvider", () => {
     }).pipe(Effect.provide(NodeServices.layer)),
   );
 
+  it.effect.each([
+    { version: "0.9.8", displayName: "Prime Agent" },
+    { version: "0.10.0", displayName: "Prime Agent (fork, 0.10)" },
+    { version: "0.10.1-beta.3", displayName: "Prime Agent (fork, 0.10)" },
+  ])("probes Prime Agent $version as $displayName", ({ version, displayName }) =>
+    Effect.gen(function* () {
+      const snapshot = yield* checkPiProviderStatus(PRIME_AGENT_FLAVOR, {
+        ...settings,
+        binaryPath: "",
+      }).pipe(
+        Effect.provideService(
+          ChildProcessSpawner.ChildProcessSpawner,
+          piProbeSpawner(version, "prime-agent"),
+        ),
+      );
+      assert.equal(snapshot.status, "ready");
+      assert.equal(snapshot.displayName, displayName);
+    }).pipe(Effect.provide(NodeServices.layer)),
+  );
+
   it.effect.each([PI_FLAVOR, PRIME_AGENT_FLAVOR])(
     "waits out a $displayName --version that a busy machine slows down",
     (flavor) =>
