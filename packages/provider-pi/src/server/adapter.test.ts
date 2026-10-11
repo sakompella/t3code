@@ -10028,7 +10028,7 @@ describe("PiAdapterV2 with the Prime Agent flavor", () => {
           PRIME_AGENT_FORK_FLAVOR,
           undefined,
           {},
-          stored.nativeThreadRef?.nativeId,
+          stored.nativeThreadRef?.nativeId ?? undefined,
         );
         const providerThread = yield* runtime.resumeThread({ providerThread: stored });
 

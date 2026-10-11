@@ -3135,7 +3135,7 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
         yield* baselineSessionTree();
         const rolledBackBefore =
           flavor.rollback === "rpc_tree" && !needsNewSession
-            ? providerThread.nativeConversationHeadRef?.nativeId
+            ? (providerThread.nativeConversationHeadRef?.nativeId ?? undefined)
             : undefined;
         if (rolledBackBefore !== undefined) {
           rollbackNoticePending = true;
