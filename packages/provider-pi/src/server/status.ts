@@ -269,26 +269,41 @@ export class PiCliUnsupportedError extends Schema.TaggedError<PiCliUnsupportedEr
 }
 
 /**
- * Flavors already identified, by driver and binary file (real path, size,
- * modification time). Identifying a binary costs two sequential runs, and a
+ * Flavors already identified, by driver and binary file (see `binaryFileKey`). Identifying a binary costs two sequential runs, and a
  * session open, a status check and a text-generation request each need the
  * answer. Only a launchable answer is kept: a refusal may be a probe that
  * failed for a moment, so it is asked again.
  */
 const identifiedFlavors = new Map<string, PiFlavor>();
 
+/** The identity-cache key of the file the configured binary launches, if T3 Code can stat it. */
+const piBinaryKey = (flavor: PiFlavor, piSettings: PiSettings, environment: NodeJS.ProcessEnv) =>
+  binaryFileKey(piSettings.binaryPath || flavor.defaultBinary, environment).pipe(
+    Effect.map(Option.map((key) => `${flavor.driverKind}\0${key}`)),
+  );
+
+/**
+ * A `--version` run the caller made itself, with the key of the file taken
+ * before that run. The key must come first: a file replaced since then must not
+ * take an answer that was read from the old one.
+ */
+export interface PiVersionRead {
+  readonly output: string;
+  readonly fileKey: Option.Option<string>;
+}
+
 /**
  * The flavor the configured binary speaks, from its `--version` and then its
  * `--help` (below 0.10) or `--capabilities` (0.10 on, the T3 fork). A CLI T3
  * cannot identify is never launched. A caller that already read `--version`
- * passes its output. The binary file is checked on every call, so an upgraded
- * binary is identified again.
+ * passes it as a `PiVersionRead`. The binary file is checked on every call, so
+ * an upgraded binary is identified again.
  */
 export const detectPiFlavor = (
   flavor: PiFlavor,
   piSettings: PiSettings,
   environment: NodeJS.ProcessEnv,
-  versionOutput?: string,
+  versionRead?: PiVersionRead,
 ): Effect.Effect<PiFlavor, PiCliUnsupportedError, ChildProcessSpawner.ChildProcessSpawner> => {
   if (flavor.successor === undefined) return Effect.succeed(flavor);
   const binary = piSettings.binaryPath || flavor.defaultBinary;
@@ -315,10 +330,9 @@ export const detectPiFlavor = (
     identity._tag === "Supported"
       ? Effect.succeed(identity.flavor)
       : Effect.fail(unsupported(identity.reason));
-  const version = versionOutput === undefined ? output("--version") : Effect.succeed(versionOutput);
-  const fileKey = binaryFileKey(binary, environment).pipe(
-    Effect.map(Option.map((key) => `${flavor.driverKind}\0${key}`)),
-  );
+  const version =
+    versionRead === undefined ? output("--version") : Effect.succeed(versionRead.output);
+  const fileKey = piBinaryKey(flavor, piSettings, environment);
   const identify = version.pipe(
     Effect.flatMap((versionText) => {
       const probe = piCliProbeForVersion(versionText);
@@ -341,7 +355,7 @@ export const detectPiFlavor = (
     }),
   );
   return Effect.gen(function* () {
-    const key = yield* fileKey;
+    const key = versionRead === undefined ? yield* fileKey : versionRead.fileKey;
     const known = Option.flatMapNullishOr(key, (name) => identifiedFlavors.get(name));
     if (Option.isSome(known)) return known.value;
     const detected = yield* identify;
@@ -417,6 +431,7 @@ export const checkPiProviderStatus = Effect.fn("checkPiProviderStatus")(function
     });
   }
 
+  const fileKeyBeforeVersion = yield* piBinaryKey(flavor, piSettings, environment);
   const versionResult = yield* runPiCliCommand(flavor, piSettings, environment, "--version").pipe(
     Effect.timeoutOption(VERSION_PROBE_TIMEOUT_MS),
     Effect.result,
@@ -478,12 +493,10 @@ export const checkPiProviderStatus = Effect.fn("checkPiProviderStatus")(function
     });
   }
 
-  const detection = yield* detectPiFlavor(
-    flavor,
-    piSettings,
-    environment,
-    `${versionOutput.stdout}\n${versionOutput.stderr}`,
-  ).pipe(Effect.result);
+  const detection = yield* detectPiFlavor(flavor, piSettings, environment, {
+    output: `${versionOutput.stdout}\n${versionOutput.stderr}`,
+    fileKey: fileKeyBeforeVersion,
+  }).pipe(Effect.result);
   if (Result.isFailure(detection)) {
     return buildServerProvider({
       presentation: piPresentation(flavor),
