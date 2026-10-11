@@ -89,6 +89,7 @@ import * as GitVcsDriver from "../vcs/GitVcsDriver.ts";
 import { isSnoozed } from "../orchestration-v2/ThreadSettlementService.ts";
 import * as ProjectService from "../project/ProjectService.ts";
 import * as ProviderRegistry from "../provider/ProviderRegistry.ts";
+import { providerRuntimeMode } from "../orchestration-v2/RuntimePolicy.ts";
 import * as ScheduledTaskService from "../scheduledTasks/ScheduledTaskService.ts";
 import * as ServerSettings from "../serverSettings.ts";
 import {
@@ -1541,7 +1542,7 @@ const make = Effect.gen(function* () {
 
   const scheduledTaskRunModes = (task: ScheduledTask) =>
     Effect.gen(function* () {
-      const modes = [{ runtimeMode: task.runtimeMode, interactionMode: task.interactionMode }];
+      const modes = [task];
       if (task.threadId === null) return modes;
       const bound = yield* threadManagement
         .getThreadShell(task.threadId)
@@ -1558,6 +1559,46 @@ const make = Effect.gen(function* () {
   ) =>
     runtimeModeRank(modes.runtimeMode) <= runtimeModeRank(limits.runtimeMode) &&
     interactionModeRank(modes.interactionMode) <= interactionModeRank(limits.interactionMode);
+
+  const offeredRuntimeModes = (modelSelection: ModelSelection) =>
+    loadProviders.pipe(
+      Effect.map(
+        (providers) =>
+          providers.find((provider) => provider.instanceId === modelSelection.instanceId)
+            ?.supportedRuntimeModes,
+      ),
+    );
+
+  /**
+   * The modes work on these settings runs in. A provider that does not offer
+   * the stored runtime mode runs it in another (see `RuntimePolicyV2`), so
+   * that one is what a caller's limits are compared with.
+   */
+  const runModes = (settings: {
+    readonly runtimeMode: RuntimeMode;
+    readonly interactionMode: ProviderInteractionMode;
+    readonly modelSelection: ModelSelection;
+  }) =>
+    offeredRuntimeModes(settings.modelSelection).pipe(
+      Effect.map((offered) => ({
+        runtimeMode: providerRuntimeMode(settings.runtimeMode, offered),
+        interactionMode: settings.interactionMode,
+      })),
+    );
+
+  /** Fails unless work on these settings runs within `limits`. */
+  const assertRunsWithin = (
+    limits: {
+      readonly runtimeMode: RuntimeMode;
+      readonly interactionMode: ProviderInteractionMode;
+    },
+    settings: Parameters<typeof runModes>[0],
+  ) =>
+    Effect.gen(function* () {
+      const modes = yield* runModes(settings);
+      yield* resolveRuntimeMode(limits.runtimeMode, modes.runtimeMode);
+      yield* resolveInteractionMode(limits.interactionMode, modes.interactionMode);
+    });
 
   /**
    * Its webhook URL starts runs, so only a caller that may start one sees it: never a client
@@ -1580,7 +1621,10 @@ const make = Effect.gen(function* () {
         caller.parent === undefined
           ? scope.client?.access !== "read-only"
           : Exit.isSuccess(yield* Effect.exit(assertLiveCaller(scope, caller.parent)));
-      const modes = yield* scheduledTaskRunModes(task).pipe(Effect.option);
+      const modes = yield* scheduledTaskRunModes(task).pipe(
+        Effect.flatMap((settings) => Effect.forEach(settings, runModes)),
+        Effect.option,
+      );
       return scheduledTaskSummary(
         task,
         live &&
@@ -1613,9 +1657,8 @@ const make = Effect.gen(function* () {
       if (task === undefined) {
         return yield* failure("task_not_found", `Scheduled task ${scheduledTaskId} was not found.`);
       }
-      for (const modes of yield* scheduledTaskRunModes(task)) {
-        yield* resolveRuntimeMode(limits.runtimeMode, modes.runtimeMode);
-        yield* resolveInteractionMode(limits.interactionMode, modes.interactionMode);
+      for (const settings of yield* scheduledTaskRunModes(task)) {
+        yield* assertRunsWithin(limits, settings);
       }
       return task;
     });
@@ -1643,6 +1686,14 @@ const make = Effect.gen(function* () {
         }
         const modelSelection =
           parent?.thread.modelSelection ?? (yield* projectDefaultModelSelection(project));
+        // Runs bound to the caller's thread run there; the others start
+        // threads on this provider, which may run the caller's modes broader.
+        const runtimeMode = bindToCurrentThread
+          ? limits.runtimeMode
+          : yield* resolveRuntimeMode(limits.runtimeMode, undefined, {
+              modelSelection,
+              supportedRuntimeModes: yield* offeredRuntimeModes(modelSelection),
+            });
         const derivedTitle = input.prompt.split("\n")[0]?.trim() ?? "";
         const title =
           input.title ?? (derivedTitle.length > 0 ? derivedTitle.slice(0, 80) : "Scheduled task");
@@ -1655,7 +1706,7 @@ const make = Effect.gen(function* () {
           threadId: bindToCurrentThread && parent !== undefined ? parent.thread.id : null,
           workspaceStrategy: scheduledTaskWorkspaceStrategy(bindToCurrentThread),
           modelSelection,
-          runtimeMode: limits.runtimeMode,
+          runtimeMode,
           interactionMode: limits.interactionMode,
           createdBy: "agent",
           creationSource: "mcp",
@@ -2130,11 +2181,7 @@ const make = Effect.gen(function* () {
               .getThreadShell(threadId)
               .pipe(Effect.mapError(threadManagementFailure));
             if (shell !== null && shell.deletedAt === null) {
-              yield* resolveRuntimeMode(parentProjection.thread.runtimeMode, shell.runtimeMode);
-              yield* resolveInteractionMode(
-                parentProjection.thread.interactionMode,
-                shell.interactionMode,
-              );
+              yield* assertRunsWithin(parentProjection.thread, shell);
             }
             const { subagents } = yield* threadManagement
               .getThreadRecords(threadId, ["subagents"])
@@ -2208,6 +2255,7 @@ const make = Effect.gen(function* () {
           Effect.provideService(DispatchModeLimit, {
             runtimeMode: parentProjection.thread.runtimeMode,
             interactionMode: parentProjection.thread.interactionMode,
+            callerThreadId: parentProjection.thread.id,
             refused,
           }),
           Effect.catch((error) =>
@@ -2554,8 +2602,7 @@ const make = Effect.gen(function* () {
       Effect.gen(function* () {
         const { parent, limits, target } = yield* loadScopedThread(scope, input.threadId);
         yield* assertLiveCallerForOtherThread(scope, parent, target);
-        yield* resolveRuntimeMode(limits.runtimeMode, target.thread.runtimeMode);
-        yield* resolveInteractionMode(limits.interactionMode, target.thread.interactionMode);
+        if (target.thread.id !== parent?.thread.id) yield* assertRunsWithin(limits, target.thread);
 
         const mode = input.mode ?? "auto";
         const key = yield* requestKey(input.clientRequestId);
@@ -2627,8 +2674,7 @@ const make = Effect.gen(function* () {
       Effect.gen(function* () {
         const { parent, limits, target } = yield* loadScopedThread(scope, input.threadId);
         yield* assertLiveCallerForOtherThread(scope, parent, target);
-        yield* resolveRuntimeMode(limits.runtimeMode, target.thread.runtimeMode);
-        yield* resolveInteractionMode(limits.interactionMode, target.thread.interactionMode);
+        if (target.thread.id !== parent?.thread.id) yield* assertRunsWithin(limits, target.thread);
         const key = yield* requestKey(input.clientRequestId);
         const result = yield* threadManagement
           .interruptThread({

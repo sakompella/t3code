@@ -44,6 +44,11 @@ export interface RuntimePolicyV2Shape {
     readonly thread: OrchestrationV2AppThread;
     readonly modelSelection: ModelSelection;
   }) => Effect.Effect<ProviderAdapter.ProviderAdapterV2RuntimePolicy, RuntimePolicyV2Error>;
+  /** The runtime mode a thread with these settings runs in, as `resolve` gives it. */
+  readonly runtimeMode: (thread: {
+    readonly runtimeMode: RuntimeMode;
+    readonly modelSelection: ModelSelection;
+  }) => Effect.Effect<RuntimeMode>;
 }
 
 export class RuntimePolicyV2 extends Context.Service<RuntimePolicyV2, RuntimePolicyV2Shape>()(
@@ -57,6 +62,7 @@ export const layer: Layer.Layer<RuntimePolicyV2> = Layer.succeed(RuntimePolicyV2
       interactionMode: input.thread.interactionMode,
       cwd: input.thread.worktreePath,
     }),
+  runtimeMode: (thread) => Effect.succeed(thread.runtimeMode),
 });
 
 /**
@@ -66,7 +72,7 @@ export const layer: Layer.Layer<RuntimePolicyV2> = Layer.succeed(RuntimePolicyV2
  * for it, rather than having T3 imitate it. That is Supervised for every
  * provider that offers it.
  */
-function providerRuntimeMode(
+export function providerRuntimeMode(
   runtimeMode: RuntimeMode,
   supportedRuntimeModes: ReadonlyArray<RuntimeMode> | undefined,
 ): RuntimeMode {
@@ -91,13 +97,21 @@ export const layerFromProjectStore: Layer.Layer<
   Effect.gen(function* () {
     const projects = yield* ProjectStore.ProjectStoreV2;
     const providerInstances = yield* ProviderInstanceRegistry.ProviderInstanceRegistry;
+    const supportedRuntimeModes = Effect.fn("RuntimePolicyV2.supportedRuntimeModes")(function* (
+      modelSelection: ModelSelection,
+    ) {
+      const instance = yield* providerInstances.getInstance(modelSelection.instanceId);
+      return instance === undefined
+        ? undefined
+        : (yield* instance.snapshot.getSnapshot).supportedRuntimeModes;
+    });
     return RuntimePolicyV2.of({
+      runtimeMode: (thread) =>
+        supportedRuntimeModes(thread.modelSelection).pipe(
+          Effect.map((supported) => providerRuntimeMode(thread.runtimeMode, supported)),
+        ),
       resolve: Effect.fn("RuntimePolicyV2.resolve")(function* (input) {
-        const instance = yield* providerInstances.getInstance(input.modelSelection.instanceId);
-        const supportedRuntimeModes =
-          instance === undefined
-            ? undefined
-            : (yield* instance.snapshot.getSnapshot).supportedRuntimeModes;
+        const offered = yield* supportedRuntimeModes(input.modelSelection);
         const cwd =
           input.thread.worktreePath ??
           (yield* projects.get(input.thread.projectId).pipe(
@@ -124,7 +138,7 @@ export const layerFromProjectStore: Layer.Layer<
             ),
           ));
         return ProviderAdapter.ProviderAdapterV2RuntimePolicy.make({
-          runtimeMode: providerRuntimeMode(input.thread.runtimeMode, supportedRuntimeModes),
+          runtimeMode: providerRuntimeMode(input.thread.runtimeMode, offered),
           interactionMode: input.thread.interactionMode,
           cwd,
         });
@@ -141,6 +155,7 @@ export function layerWithOverride(
     Effect.gen(function* () {
       const base = yield* RuntimePolicyV2;
       return {
+        runtimeMode: base.runtimeMode,
         resolve: (input) =>
           base.resolve(input).pipe(
             Effect.map((policy) =>

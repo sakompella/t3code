@@ -271,7 +271,10 @@ export function layerWithRegistry<Error>(
     readonly recoverOnStartup?: boolean;
     readonly continueThreadsAfterServerUpdate?: boolean;
     // The policy that decides the modes threads run in; the scenario's by default.
-    readonly runtimePolicyLayer?: Layer.Layer<RuntimePolicy.RuntimePolicyV2>;
+    readonly runtimePolicyLayer?: Layer.Layer<
+      RuntimePolicy.RuntimePolicyV2,
+      MigrationError | PlatformError.PlatformError | SqlError
+    >;
   } = {},
 ): Layer.Layer<
   | Orchestrator.OrchestratorV2
