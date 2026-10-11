@@ -80,14 +80,26 @@ T3 Code cannot tell an edit from a command before approving it.
 
 ## Prime Agent 0.10 (fork)
 
-T3 Code also runs the 0.10 fork of Prime Agent. It detects the fork from what `prime-agent --help` offers and
-shows the provider as "Prime Agent (fork, 0.10)". Subagents, heartbeats, wakes, rollback and edit
-cards work as described above. The differences:
+T3 Code also runs the 0.10 fork of Prime Agent. It tells the fork apart by what
+`prime-agent --help` offers, and shows the provider as "Prime Agent (fork, 0.10)". Subagents,
+heartbeats, wakes and edit cards work as described above. The differences:
 
-- Only **Full access** is offered. The fork cannot ask before it runs a cell, so threads run with
-  full access whatever mode they stored.
-- The fork cannot generate thread titles, commit messages or branch names. Choose another text
-  generation model in Settings.
+- Only **Full access** is offered, in the composer and in the default permissions setting. The
+  fork cannot ask before it runs a cell, so its threads run with full access whatever mode they
+  stored. An agent or MCP client approved for narrower permissions cannot send work to them.
+- Rollback rewinds the session in place, and Prime Agent is told on your next message. Older fork
+  builds lose the rewind when the session reopens; T3 Code repeats it when the thread reopens
+  before your next message. A heartbeat or message wake that runs before your next message is not
+  told about the rollback.
+- T3 Code tools may not reach the kernel yet. The fork runs sessions in background workers that do
+  not receive T3 Code's per-session credential, so the setup above can still leave a session
+  without T3 Code tools.
+- Features of T3 Code's Prime Agent extension are not available: `$skill` mentions are not
+  expanded, and the output cap for OpenRouter models does not apply. T3 Code leaves extension and
+  tool launch arguments (`--extension`, `--no-extensions`, `--tools`, `--no-tools` and their
+  short forms) out of fork launches, and warns in Settings and in the thread.
+- The fork cannot generate thread titles, commit messages, pull request content or branch names.
+  Choose another text generation model in Settings.
 - An edit too large to show in full is marked "edit (diff truncated)".
 
 ## Troubleshooting
