@@ -14,6 +14,9 @@ import { DispatchModeLimit } from "./DispatchModeLimit.ts";
 import * as Orchestrator from "./Orchestrator.ts";
 import * as ProjectionStore from "./ProjectionStore.ts";
 import * as ProviderAdapterRegistry from "./ProviderAdapterRegistry.ts";
+import * as ProviderInstanceRegistry from "../provider/ProviderInstanceRegistry.ts";
+import * as ProjectStore from "./ProjectStore.ts";
+import * as RuntimePolicy from "./RuntimePolicy.ts";
 import * as ProviderReplayHarness from "./testkit/ProviderReplayHarness.ts";
 import type * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
 
@@ -160,3 +163,94 @@ it.layer(layerTest)("DispatchModeLimit", (it) => {
     }),
   );
 });
+
+// Like the Prime Agent 0.10 fork: the provider offers only Full access, so it
+// runs a thread stored Supervised in full access.
+const layerFullAccessOnly = Layer.mergeAll(
+  layerDatabase,
+  ProjectionStore.layer.pipe(Layer.provide(layerDatabase)),
+  ProviderReplayHarness.layerWithRegistry(
+    { name: "dispatch-mode-limit-full-access-only" },
+    ProviderAdapterRegistry.layerFromAdapters([adapter]),
+    {
+      databaseLayer: layerDatabase,
+      runEffectWorker: false,
+      runtimePolicyLayer: RuntimePolicy.layerFromProjectStore.pipe(
+        Layer.provide(
+          Layer.mergeAll(
+            ProjectStore.layer.pipe(Layer.provide(layerDatabase)),
+            Layer.mock(ProviderInstanceRegistry.ProviderInstanceRegistry)({
+              getInstance: () =>
+                Effect.succeed({
+                  snapshot: {
+                    getSnapshot: Effect.succeed({ supportedRuntimeModes: ["full-access"] }),
+                  },
+                } as never),
+            }),
+          ),
+        ),
+      ),
+    },
+  ),
+);
+
+it.layer(layerFullAccessOnly)(
+  "DispatchModeLimit on a provider that runs only Full access",
+  (it) => {
+    it.effect(
+      "refuses a limited command on a thread stored Supervised that runs in full access",
+      () =>
+        Effect.gen(function* () {
+          const orchestrator = yield* Orchestrator.OrchestratorV2;
+          const projections = yield* ProjectionStore.ProjectionStoreV2;
+          const threadId = ThreadId.make("thread:limit-full-access-only");
+          yield* createThread(threadId);
+          const rename = {
+            type: "thread.metadata.update",
+            commandId: CommandId.make("rename-full-access-only"),
+            threadId,
+            title: "After",
+          } as const;
+          const refused = yield* orchestrator
+            .dispatch(rename)
+            .pipe(Effect.provideService(DispatchModeLimit, supervised), Effect.flip);
+          assert.ok(refused._tag === "OrchestratorThreadAboveModeLimitError");
+          assert.equal(refused.runtimeMode, "full-access");
+          assert.equal((yield* projections.getThreadShell(threadId))?.title, "Before");
+        }),
+    );
+
+    it.effect("lets a caller change its own thread, whatever mode that runs in", () =>
+      Effect.gen(function* () {
+        const orchestrator = yield* Orchestrator.OrchestratorV2;
+        const projections = yield* ProjectionStore.ProjectionStoreV2;
+        const threadId = ThreadId.make("thread:limit-own-thread");
+        yield* createThread(threadId);
+        yield* orchestrator
+          .dispatch({
+            type: "thread.metadata.update",
+            commandId: CommandId.make("rename-own-thread"),
+            threadId,
+            title: "After",
+          })
+          .pipe(
+            Effect.provideService(DispatchModeLimit, { ...supervised, callerThreadId: threadId }),
+          );
+        assert.equal((yield* projections.getThreadShell(threadId))?.title, "After");
+      }),
+    );
+
+    it.effect("refuses a limited caller a new thread that would run in full access", () =>
+      Effect.gen(function* () {
+        const projections = yield* ProjectionStore.ProjectionStoreV2;
+        const threadId = ThreadId.make("thread:limit-create-full-access-only");
+        const refused = yield* createThread(threadId).pipe(
+          Effect.provideService(DispatchModeLimit, supervised),
+          Effect.flip,
+        );
+        assert.ok(refused._tag === "OrchestratorThreadAboveModeLimitError");
+        assert.isNull(yield* projections.getThreadShell(threadId));
+      }),
+    );
+  },
+);
