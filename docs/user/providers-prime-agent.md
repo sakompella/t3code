@@ -93,9 +93,10 @@ work as described above. The differences:
   for narrower permissions cannot send work to fork threads, move a thread onto the fork, or fork
   its own fork thread into a new one.
 - Rollback rewinds the session in place, and Prime Agent is told with the next message it
-  accepts. Older fork builds can lose the rewind when the session reopens. T3 Code never repeats
-  the rewind, because a heartbeat or message wake may have added conversation since. Instead, the
-  thread warns "Rollback not confirmed" until the fork shows the rewind kept or accepts your next
+  accepts. T3 Code never repeats the rewind when the session reopens, because a heartbeat or
+  message wake may have added conversation since. If T3 Code cannot confirm the rewind on reopen,
+  because the fork still lists the discarded message or its branch could not be read, the thread
+  warns "Rollback not confirmed" until the fork shows the rewind kept or accepts your next
   message. A heartbeat or message wake that runs before your next message is not told about the
   rollback.
 - T3 Code tools may not reach the kernel yet. The fork runs sessions in background workers that do
