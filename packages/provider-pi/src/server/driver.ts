@@ -82,7 +82,7 @@ export type PiDriverEnv =
   | ProviderLatestVersions.ProviderLatestVersions
   | Path.Path;
 
-const withInstanceIdentity =
+export const withInstanceIdentity =
   (driverKind: PiFlavor["driverKind"]) =>
   (input: {
     readonly instanceId: ProviderInstance["instanceId"];
