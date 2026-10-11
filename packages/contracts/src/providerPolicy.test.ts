@@ -52,19 +52,28 @@ describe("the runtime mode a provider runs", () => {
 });
 
 describe("the runtime modes new threads can run in", () => {
-  const codex = { instanceId: "codex", enabled: true };
+  const codex = { instanceId: "codex", enabled: true, status: "ready" } as const;
   const fork = {
     instanceId: "primeAgent",
     enabled: true,
+    status: "ready",
     supportedRuntimeModes: ["full-access"],
   } as const;
   const off = {
     instanceId: "off",
     enabled: false,
+    status: "ready",
     supportedRuntimeModes: ["approval-required"],
   } as const;
+  type Provider = {
+    readonly instanceId: string;
+    readonly enabled: boolean;
+    readonly status: "ready" | "warning" | "error" | "disabled";
+    readonly availability?: "available" | "unavailable";
+    readonly supportedRuntimeModes?: ReadonlyArray<RuntimeMode>;
+  };
   const target = (
-    providers: ReadonlyArray<typeof codex | typeof fork | typeof off>,
+    providers: ReadonlyArray<Provider>,
     instanceId: string | null,
     defaultRuntimeMode: RuntimeMode = "approval-required",
   ) => ({
@@ -80,13 +89,21 @@ describe("the runtime modes new threads can run in", () => {
     expect(runtimeModesForNewThreads([target([codex, fork], "codex")])).toEqual(MODES);
   });
 
-  it("are what every enabled provider offers when the default is unset or unusable", () => {
+  it("are the modes of the provider a new thread falls back to when the default is unset or unusable", () => {
     for (const instanceId of [null, "missing", "off"]) {
       expect(runtimeModesForNewThreads([target([fork], instanceId)])).toEqual(["full-access"]);
-      expect(runtimeModesForNewThreads([target([codex, fork, off], instanceId)])).toEqual([
+      expect(runtimeModesForNewThreads([target([codex, fork, off], instanceId)])).toEqual(MODES);
+      expect(runtimeModesForNewThreads([target([fork, codex], instanceId)])).toEqual([
         "full-access",
       ]);
-      expect(runtimeModesForNewThreads([target([codex, off], instanceId)])).toEqual(MODES);
+      expect(
+        runtimeModesForNewThreads([target([{ ...codex, status: "error" }, fork], instanceId)]),
+      ).toEqual(["full-access"]);
+      expect(
+        runtimeModesForNewThreads([
+          target([{ ...codex, availability: "unavailable" }, fork], instanceId),
+        ]),
+      ).toEqual(["full-access"]);
     }
   });
 
@@ -100,6 +117,17 @@ describe("the runtime modes new threads can run in", () => {
     }
   });
 
+  it("show the mode of the provider a new thread starts on", () => {
+    for (const instanceId of [null, "missing"]) {
+      expect(newThreadRuntimeMode([target([codex, fork], instanceId)])).toBe("approval-required");
+      expect(newThreadRuntimeMode([target([fork, codex], instanceId)])).toBe("full-access");
+      expect(
+        newThreadRuntimeMode([target([{ ...codex, status: "warning" }, fork], instanceId)]),
+      ).toBe("full-access");
+    }
+    expect(newThreadRuntimeMode([target([], null)])).toBe("approval-required");
+  });
+
   it("show one mode only when every target runs the same one", () => {
     expect(newThreadRuntimeMode([target([codex], "codex"), target([codex], null)])).toBe(
       "approval-required",
@@ -107,6 +135,9 @@ describe("the runtime modes new threads can run in", () => {
     expect(newThreadRuntimeMode([target([fork], "primeAgent")])).toBe("full-access");
     expect(
       newThreadRuntimeMode([target([codex], "codex"), target([fork], "primeAgent")]),
+    ).toBeNull();
+    expect(
+      newThreadRuntimeMode([target([codex, fork], null), target([fork, codex], null)]),
     ).toBeNull();
     expect(
       newThreadRuntimeMode([
