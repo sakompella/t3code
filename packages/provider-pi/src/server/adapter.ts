@@ -87,6 +87,7 @@ import {
   PI_FILE_CHANGE_TOOLS,
   T3_NAVIGATE_TREE_COMMAND,
   T3_NAVIGATE_TREE_RESULT_MARKER,
+  T3_ROLLBACK_NOTICE,
 } from "./mcpExtensionSource.ts";
 import { PI_FLAVOR, PRIME_AGENT_FLAVOR, type PiFlavor } from "./flavor.ts";
 import { detectPiFlavor } from "./status.ts";
@@ -629,6 +630,11 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
             );
       /** Whether T3's extension command for in-place rollback is loaded; null until discovered. */
       let navigateTreeAvailable: boolean | null = null;
+      /**
+       * Set by an in-place rollback the RPC did itself. T3's extension tells the
+       * agent that its kernel kept its state; without one, the next prompt does.
+       */
+      let rollbackNoticePending = false;
       /** In-place rollbacks waiting for the extension command's reported outcome. */
       const pendingTreeNavigations = new Map<string, Deferred.Deferred<unknown>>();
       let treeNavigationCounter = 0;
@@ -3229,6 +3235,18 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
         );
       });
 
+      /** Rolls the conversation back to just before `entryId` with the RPC's `navigate_tree`. */
+      const navigateTreeByRpc = Effect.fnUntraced(function* (entryId: string) {
+        const result = yield* request(
+          { type: "navigate_tree", targetId: entryId },
+          PI_SESSION_TIMEOUT_MS,
+        );
+        if (recordField(result, "cancelled") === true) {
+          return yield* protocolError(`${name} cancelled the rollback`);
+        }
+        rollbackNoticePending = true;
+      });
+
       const runtime: ProviderAdapter.ProviderAdapterV2SessionRuntime = {
         instanceId: options.instanceId,
         driver,
@@ -3416,9 +3434,13 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
                   kind: "turn_start",
                 });
               } else if (payload !== null) {
+                const message = rollbackNoticePending
+                  ? `${T3_ROLLBACK_NOTICE}\n\n${payload.message}`
+                  : payload.message;
+                rollbackNoticePending = false;
                 yield* connection.send({
                   type: "prompt",
-                  message: payload.message,
+                  message,
                   streamingBehavior: "steer",
                   ...(payload.images.length === 0 ? {} : { images: payload.images }),
                 });
@@ -3859,27 +3881,29 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
                         }),
                       );
                     });
-                  if (flavor.rollback === "tree") {
-                    const available =
-                      navigateTreeAvailable ??
-                      (yield* request({ type: "get_commands" }).pipe(
-                        Effect.map(hasPiNavigateTreeCommand),
-                        Effect.orElseSucceed(() => false),
-                      ));
-                    navigateTreeAvailable = available;
-                    if (available) {
-                      yield* navigateTreeInPlace(forkEntryId);
-                      const treeBaseline = yield* readSessionTreeBaseline();
-                      return yield* commitAfterDrain(
-                        Effect.gen(function* () {
-                          // Same session file and model; only the branch head moved.
-                          applySessionTreeBaseline(treeBaseline);
-                          cacheMissState = resetCacheBaseline(cacheMissState);
-                          yield* updateProviderThread(state, { nativeConversationHeadRef: null });
-                          return piThreadSnapshot(state.providerThread);
-                        }),
-                      );
-                    }
+                  if (flavor.rollback === "tree" && navigateTreeAvailable === null) {
+                    navigateTreeAvailable = yield* request({ type: "get_commands" }).pipe(
+                      Effect.map(hasPiNavigateTreeCommand),
+                      Effect.orElseSucceed(() => false),
+                    );
+                  }
+                  if (
+                    flavor.rollback === "rpc_tree" ||
+                    (flavor.rollback === "tree" && navigateTreeAvailable === true)
+                  ) {
+                    yield* flavor.rollback === "rpc_tree"
+                      ? navigateTreeByRpc(forkEntryId)
+                      : navigateTreeInPlace(forkEntryId);
+                    const treeBaseline = yield* readSessionTreeBaseline();
+                    return yield* commitAfterDrain(
+                      Effect.gen(function* () {
+                        // Same session file and model; only the branch head moved.
+                        applySessionTreeBaseline(treeBaseline);
+                        cacheMissState = resetCacheBaseline(cacheMissState);
+                        yield* updateProviderThread(state, { nativeConversationHeadRef: null });
+                        return piThreadSnapshot(state.providerThread);
+                      }),
+                    );
                   }
                   liveSession = null;
                   const forkData = yield* lifecycleRequest({ type: "fork", entryId: forkEntryId });
