@@ -213,4 +213,17 @@ describe("mobile default permissions", () => {
     expect(offeredDefaultRuntimeModes(targets)).toEqual(["full-access"]);
     expect(offeredDefaultRuntimeModes(targets.slice(1))).toEqual(RuntimeMode.literals);
   });
+
+  it("offers only Full access when the default is unset and the fork is the only provider", () => {
+    const targets = resolveMobileSettingsTargets(
+      [
+        withProviders(
+          environment(firstId, { ...DEFAULT_SERVER_SETTINGS, defaultModelSelection: null }),
+          [{ instanceId: primeAgent, supportedRuntimeModes: ["full-access"] }],
+        ),
+      ],
+      null,
+    );
+    expect(offeredDefaultRuntimeModes(targets)).toEqual(["full-access"]);
+  });
 });
