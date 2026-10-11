@@ -55,6 +55,7 @@ export const makePiTextGeneration = Effect.fn("makePiTextGeneration")(function* 
     return Effect.gen(function* () {
       const cliFlavor = yield* detectPiFlavor(flavor, piSettings, environment).pipe(
         Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner),
+        Effect.mapError((error) => new TextGenerationError({ operation, detail: error.message })),
       );
       if (!cliFlavor.extensions) {
         return yield* new TextGenerationError({

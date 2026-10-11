@@ -13,6 +13,7 @@ import * as Stream from "effect/Stream";
 import * as Exit from "effect/Exit";
 import * as Option from "effect/Option";
 import * as Result from "effect/Result";
+import * as Schema from "effect/Schema";
 import * as HttpClient from "effect/http/HttpClient";
 import * as ChildProcess from "effect/process/ChildProcess";
 import * as ChildProcessSpawner from "effect/process/ChildProcessSpawner";
@@ -26,7 +27,7 @@ import {
   piRecordString as recordString,
 } from "./rpc.ts";
 import * as ProviderLatestVersions from "@t3tools/provider-core/server/ProviderLatestVersions";
-import { piFlavorForVersion, type PiFlavor } from "./flavor.ts";
+import { piFlavorForHelp, type PiFlavor } from "./flavor.ts";
 import {
   buildServerProvider,
   isCommandMissingCause,
@@ -218,14 +219,15 @@ export const discoverPiCommandsForCwd = Effect.fn("discoverPiCommandsForCwd")(
   }),
 );
 
-const runPiVersionCommand = (
+const runPiCliCommand = (
   flavor: PiFlavor,
   piSettings: PiSettings,
   environment: NodeJS.ProcessEnv,
+  flag: "--version" | "--help",
 ) =>
   Effect.gen(function* () {
     const command = piSettings.binaryPath || flavor.defaultBinary;
-    const spawnCommand = yield* resolveSpawnCommand(command, ["--version"], {
+    const spawnCommand = yield* resolveSpawnCommand(command, [flag], {
       env: environment,
     });
     return yield* spawnAndCollect(
@@ -237,30 +239,49 @@ const runPiVersionCommand = (
     );
   });
 
+/** The configured binary is a CLI of this driver whose flavor T3 could not tell. */
+export class PiFlavorUndetectedError extends Schema.TaggedError<PiFlavorUndetectedError>()(
+  "PiFlavorUndetectedError",
+  {
+    binary: Schema.String,
+    reason: Schema.String,
+  },
+) {
+  override get message(): string {
+    return `T3 Code could not tell which CLI \`${this.binary}\` is (${this.reason}), so it did not launch it. Check that \`${this.binary} --help\` works.`;
+  }
+}
+
 /**
- * The flavor the configured binary speaks, read from its `--version`. A read
- * that fails or times out keeps the driver's own flavor, whose launch then
- * reports what went wrong.
+ * The flavor the configured binary speaks, read from what its `--help`
+ * offers. Launch flags differ between flavors, so a CLI whose flavor cannot
+ * be told is never launched with a guessed one.
  */
 export const detectPiFlavor = (
   flavor: PiFlavor,
   piSettings: PiSettings,
   environment: NodeJS.ProcessEnv,
-): Effect.Effect<PiFlavor, never, ChildProcessSpawner.ChildProcessSpawner> =>
-  flavor.successor === undefined
-    ? Effect.succeed(flavor)
-    : runPiVersionCommand(flavor, piSettings, environment).pipe(
-        Effect.timeoutOption(VERSION_PROBE_TIMEOUT_MS),
-        Effect.map((output) =>
-          Option.isSome(output) && output.value.code === 0
-            ? piFlavorForVersion(
-                flavor,
-                parseGenericCliVersion(`${output.value.stdout}\n${output.value.stderr}`),
-              )
-            : flavor,
-        ),
-        Effect.orElseSucceed(() => flavor),
-      );
+): Effect.Effect<PiFlavor, PiFlavorUndetectedError, ChildProcessSpawner.ChildProcessSpawner> => {
+  if (flavor.successor === undefined) return Effect.succeed(flavor);
+  const binary = piSettings.binaryPath || flavor.defaultBinary;
+  const undetected = (reason: string) => new PiFlavorUndetectedError({ binary, reason });
+  return runPiCliCommand(flavor, piSettings, environment, "--help").pipe(
+    Effect.mapError((error) => undetected(`\`--help\` failed to run: ${error.message}`)),
+    Effect.timeoutOption(VERSION_PROBE_TIMEOUT_MS),
+    Effect.flatMap((output) => {
+      if (Option.isNone(output)) {
+        return Effect.fail(undetected(`\`--help\` timed out after ${VERSION_PROBE_TIMEOUT_MS}ms`));
+      }
+      if (output.value.code !== 0) {
+        return Effect.fail(undetected(`\`--help\` exited with code ${output.value.code}`));
+      }
+      const detected = piFlavorForHelp(flavor, `${output.value.stdout}\n${output.value.stderr}`);
+      return detected === undefined
+        ? Effect.fail(undetected(`its \`--help\` lists no \`--mode\` option`))
+        : Effect.succeed(detected);
+    }),
+  );
+};
 
 export function buildInitialPiProviderSnapshot(
   flavor: PiFlavor,
@@ -325,7 +346,7 @@ export const checkPiProviderStatus = Effect.fn("checkPiProviderStatus")(function
     });
   }
 
-  const versionResult = yield* runPiVersionCommand(flavor, piSettings, environment).pipe(
+  const versionResult = yield* runPiCliCommand(flavor, piSettings, environment, "--version").pipe(
     Effect.timeoutOption(VERSION_PROBE_TIMEOUT_MS),
     Effect.result,
   );
@@ -386,7 +407,27 @@ export const checkPiProviderStatus = Effect.fn("checkPiProviderStatus")(function
     });
   }
 
-  if (version === null) {
+  const detection = yield* detectPiFlavor(flavor, piSettings, environment).pipe(Effect.result);
+  if (Result.isFailure(detection)) {
+    return buildServerProvider({
+      presentation: piPresentation(flavor),
+      enabled: piSettings.enabled,
+      checkedAt,
+      models: fallbackModels,
+      probe: {
+        installed: true,
+        version,
+        status: "error",
+        auth: { status: "unknown" },
+        message: detection.failure.message,
+      },
+    });
+  }
+  const cliFlavor = detection.success;
+
+  // A successor is told apart by what its help offers, so its version is
+  // only a label; builds such as `nightly` need not parse.
+  if (cliFlavor === flavor && version === null) {
     return buildServerProvider({
       presentation: piPresentation(flavor),
       enabled: piSettings.enabled,
@@ -402,7 +443,11 @@ export const checkPiProviderStatus = Effect.fn("checkPiProviderStatus")(function
     });
   }
 
-  if (compareSemverVersions(version, flavor.minimumVersion) < 0) {
+  if (
+    cliFlavor === flavor &&
+    version !== null &&
+    compareSemverVersions(version, flavor.minimumVersion) < 0
+  ) {
     return buildServerProvider({
       presentation: piPresentation(flavor),
       enabled: piSettings.enabled,
@@ -418,7 +463,6 @@ export const checkPiProviderStatus = Effect.fn("checkPiProviderStatus")(function
     });
   }
 
-  const cliFlavor = piFlavorForVersion(flavor, version);
   const resolvedLaunchArgs = resolvePiLaunchArgs(piSettings.launchArgs);
   if (!resolvedLaunchArgs.ok) {
     return buildServerProvider({
