@@ -1304,23 +1304,37 @@ describe("ThreadSettlementServiceV2 single-thread sweeps", () => {
 });
 
 describe("isSnoozed", () => {
+  // The fork overrides upstream, which woke a snoozed thread early on a pending
+  // request, a failure or a completed run. Here a snooze ends only at its
+  // deadline, like the client's `effectiveSnoozed` (FORK.md, "Snooze is strict").
   const snoozed = { snoozedAt: at(-2 * DAY_MS), snoozedUntil: at(DAY_MS) };
-  it("wakes for completed work after the snooze, but not an interrupted run", () => {
-    expect(ThreadSettlementService.isSnoozed(shell(snoozed), NOW_MS)).toBe(true);
+  const duringSnooze = at(-DAY_MS);
+
+  it("stays snoozed whatever the thread did since the snooze began", () => {
+    const activity: ReadonlyArray<Partial<SettlementShell>> = [
+      {},
+      { status: "completed", latestRunCompletedAt: duringSnooze },
+      { status: "failed", latestRunCompletedAt: duringSnooze },
+      { status: "failed", latestRunCompletedAt: null },
+      { status: "interrupted", latestRunCompletedAt: duringSnooze },
+      { pendingRuntimeRequest: { kind: "approval" } as never },
+    ];
+    for (const overrides of activity) {
+      expect(ThreadSettlementService.isSnoozed(shell({ ...snoozed, ...overrides }), NOW_MS)).toBe(
+        true,
+      );
+    }
+  });
+
+  it("ends at the deadline, and is never set without one", () => {
     expect(
-      ThreadSettlementService.isSnoozed(
-        shell({ ...snoozed, status: "interrupted", latestRunCompletedAt: at(-DAY_MS) }),
-        NOW_MS,
-      ),
-    ).toBe(true);
-    expect(
-      ThreadSettlementService.isSnoozed(
-        shell({ ...snoozed, status: "completed", latestRunCompletedAt: at(-DAY_MS) }),
-        NOW_MS,
-      ),
+      ThreadSettlementService.isSnoozed(shell({ ...snoozed, snoozedUntil: at(0) }), NOW_MS),
     ).toBe(false);
     expect(
       ThreadSettlementService.isSnoozed(shell({ ...snoozed, snoozedUntil: at(-1) }), NOW_MS),
+    ).toBe(false);
+    expect(
+      ThreadSettlementService.isSnoozed(shell({ snoozedUntil: null, snoozedAt: null }), NOW_MS),
     ).toBe(false);
   });
 });
