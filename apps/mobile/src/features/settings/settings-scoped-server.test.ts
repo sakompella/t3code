@@ -183,7 +183,7 @@ describe("mobile default permissions", () => {
         ...target.serverConfig,
         providers: providers.map((provider) => ({ enabled: true, status: "ready", ...provider })),
       },
-    }) as SettingsTarget;
+    }) as unknown as SettingsTarget;
   const forkDefault: ServerSettings = {
     ...DEFAULT_SERVER_SETTINGS,
     defaultRuntimeMode: "approval-required",

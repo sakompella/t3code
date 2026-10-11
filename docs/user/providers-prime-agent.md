@@ -88,8 +88,9 @@ work as described above. The differences:
 
 - Only **Full access** is offered, in the composer and in the default permissions setting. The
   fork cannot ask before it runs a cell, so its threads run with full access whatever mode they
-  stored. When the default permissions setting covers several environments, or no default model
-  is set, it offers only the modes every possible provider runs. An agent or MCP client approved
+  stored. The default permissions setting shows the mode new threads run in on the provider they
+  start on: the default model's provider, or, with no usable default, the first ready provider.
+  Across several environments it offers only the modes all of them run. An agent or MCP client approved
   for narrower permissions cannot send work to fork threads, move a thread onto the fork, or fork
   its own fork thread into a new one.
 - Rollback rewinds the session in place, and Prime Agent is told with the next message it
