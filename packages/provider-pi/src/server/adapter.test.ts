@@ -11082,4 +11082,24 @@ describe("PiAdapterV2 on the Prime Agent 0.10 fork", () => {
       ]);
     }).pipe(Effect.scoped, Effect.provide(layerTest)),
   );
+  it.effect.each(["approval-required", "auto-accept-edits", "auto"] as const)(
+    "refuses to run the fork in %s, which it cannot enforce",
+    (runtimeMode) =>
+      Effect.gen(function* () {
+        const fake = yield* makeFakePi;
+        const error = yield* openPrimeAgent(fake, { runtimeMode }).pipe(Effect.flip);
+        assert.include(String(error.cause ?? error), "Full access");
+        assert.isFalse(fake.allRequests().some((request) => request.type === "prompt"));
+      }).pipe(Effect.scoped, Effect.provide(layerTest)),
+  );
+
+  it.effect("tells the orchestrator the fork raises no approvals", () =>
+    Effect.gen(function* () {
+      const fake = yield* makeFakePi;
+      const { runtime } = yield* openPrimeAgent(fake);
+      const { approvals } = runtime.providerSession.capabilities;
+      assert.isFalse(approvals.supportsCommandApproval);
+      assert.isFalse(approvals.supportsFileChangeApproval);
+    }).pipe(Effect.scoped, Effect.provide(layerTest)),
+  );
 });

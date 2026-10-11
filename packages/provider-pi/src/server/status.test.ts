@@ -115,11 +115,16 @@ describe("PiProvider", () => {
     }).pipe(Effect.provide(NodeServices.layer)),
   );
 
+  const supervisedOrFull = ["approval-required", "full-access"];
   it.effect.each([
-    { version: "0.9.8", displayName: "Prime Agent" },
-    { version: "0.10.0", displayName: "Prime Agent (fork, 0.10)" },
-    { version: "0.10.1-beta.3", displayName: "Prime Agent (fork, 0.10)" },
-  ])("probes Prime Agent $version as $displayName", ({ version, displayName }) =>
+    { version: "0.9.8", displayName: "Prime Agent", runtimeModes: supervisedOrFull },
+    { version: "0.10.0", displayName: "Prime Agent (fork, 0.10)", runtimeModes: ["full-access"] },
+    {
+      version: "0.10.1-beta.3",
+      displayName: "Prime Agent (fork, 0.10)",
+      runtimeModes: ["full-access"],
+    },
+  ])("probes Prime Agent $version as $displayName", ({ version, displayName, runtimeModes }) =>
     Effect.gen(function* () {
       const snapshot = yield* checkPiProviderStatus(PRIME_AGENT_FLAVOR, {
         ...settings,
@@ -132,6 +137,11 @@ describe("PiProvider", () => {
       );
       assert.equal(snapshot.status, "ready");
       assert.equal(snapshot.displayName, displayName);
+      // The fork has no hook to ask before a tool runs.
+      assert.deepEqual<ReadonlyArray<string> | undefined>(
+        snapshot.supportedRuntimeModes,
+        runtimeModes,
+      );
     }).pipe(Effect.provide(NodeServices.layer)),
   );
 

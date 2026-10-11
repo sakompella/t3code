@@ -2169,5 +2169,22 @@ describe("OrchestratorMcpService provider resolution", () => {
         );
       }),
     );
+
+    it.effect("refuses an inherited mode when every mode the provider offers is broader", () =>
+      Effect.gen(function* () {
+        // The Prime Agent 0.10 fork cannot ask before a tool runs.
+        const fullAccessOnly = {
+          modelSelection: { instanceId: ProviderInstanceId.make("primeAgent"), model: "default" },
+          supportedRuntimeModes: ["full-access"] as const,
+        };
+        const error = yield* OrchestratorMcpService.resolveRuntimeMode(
+          "approval-required",
+          "inherit",
+          fullAccessOnly,
+        ).pipe(Effect.flip);
+        assert.equal(error.code, "runtime_mode_escalation_denied");
+        assert.include(error.message, "full-access");
+      }),
+    );
   });
 });
