@@ -55,10 +55,12 @@ const piPresentation = (flavor: PiFlavor): ServerProviderPresentation => ({
   // Pi left early access upstream; Prime Agent is still new here.
   ...(flavor.tools === "ipython" ? { badgeLabel: "Early Access" } : {}),
   showInteractionModeToggle: false,
-  // Prime Agent runs every tool as one ipython cell, so the approval hook
-  // cannot tell an edit from a command before it runs.
-  supportedRuntimeModes:
-    flavor.tools === "ipython"
+  // Approvals come only from T3's extension, so a CLI without extensions
+  // runs every tool unasked. Prime Agent runs every tool as one ipython cell,
+  // so the approval hook cannot tell an edit from a command before it runs.
+  supportedRuntimeModes: !flavor.extensions
+    ? ["full-access"]
+    : flavor.tools === "ipython"
       ? ["approval-required", "full-access"]
       : ["approval-required", "auto-accept-edits", "full-access"],
   reportsContextWindow: true,
