@@ -10100,6 +10100,11 @@ describe("PiAdapterV2 with the Prime Agent flavor", () => {
       const second = yield* runPrimeTurn(session, fake, 2, ["u1", "u2"]);
       const { providerThread: stored } = yield* rollBackToFirstTurn(session, [first, second]);
 
+      yield* session.takeEvent(
+        (event) =>
+          event.type === "provider_thread.updated" &&
+          event.providerThread.nativeConversationHeadRef?.nativeId === "u2",
+      );
       const marks: Array<string | null> = [];
       const recordMarks = (event: ProviderAdapter.ProviderAdapterV2Event) => {
         if (event.type === "provider_thread.updated") {
