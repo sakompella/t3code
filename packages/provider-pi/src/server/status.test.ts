@@ -692,6 +692,93 @@ describe("detectPiFlavor identity cache", () => {
     ).pipe(Effect.provide(NodeServices.layer)),
   );
 
+  it.effect("probes again when same-size content replaces the file under a restored mtime", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const fileSystem = yield* FileSystem.FileSystem;
+        const directory = yield* fileSystem.makeTempDirectoryScoped();
+        const archiveTime = new Date(1_700_000_000_000);
+        const binary = yield* installBinary(directory, "prime-agent", "#!/bin/sh\n# stock\n");
+        yield* fileSystem.utimes(binary, archiveTime, archiveTime);
+        const probes: Array<ReadonlyArray<string>> = [];
+
+        const stock = yield* detect(binary, stockSpawner(probes));
+        assert.isTrue(stock.extensions);
+        const afterFirst = probes.length;
+
+        // What `tar -x`, `cp -p` and `rsync -t` do: new bytes, same size, same mtime.
+        yield* fileSystem.writeFileString(binary, "#!/bin/sh\n# forks\n");
+        yield* fileSystem.utimes(binary, archiveTime, archiveTime);
+        const fork = yield* detect(binary, forkSpawner(probes));
+
+        assert.isAbove(probes.length, afterFirst, "the replaced file must be probed again");
+        assert.isFalse(fork.extensions);
+      }),
+    ).pipe(Effect.provide(NodeServices.layer)),
+  );
+
+  it.effect("keeps two shim names for one real file apart", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const fileSystem = yield* FileSystem.FileSystem;
+        const directory = yield* fileSystem.makeTempDirectoryScoped();
+        const manager = yield* installBinary(directory, "version-manager", "#!/bin/sh\n");
+        const stockShim = `${directory}/stock-shim`;
+        const forkShim = `${directory}/fork-shim`;
+        yield* fileSystem.symlink(manager, stockShim);
+        yield* fileSystem.symlink(manager, forkShim);
+        const probes: Array<ReadonlyArray<string>> = [];
+
+        const stock = yield* detect(stockShim, stockSpawner(probes));
+        assert.isTrue(stock.extensions);
+        const afterFirst = probes.length;
+        const fork = yield* detect(forkShim, forkSpawner(probes));
+
+        assert.isAbove(probes.length, afterFirst, "another shim name is another answer");
+        assert.isFalse(fork.extensions);
+      }),
+    ).pipe(Effect.provide(NodeServices.layer)),
+  );
+
+  it.effect(
+    "keeps no answer when the file was replaced after the status check read its version",
+    () =>
+      Effect.scoped(
+        Effect.gen(function* () {
+          const fileSystem = yield* FileSystem.FileSystem;
+          const directory = yield* fileSystem.makeTempDirectoryScoped();
+          const binary = yield* installBinary(directory, "prime-agent", "#!/bin/sh\n");
+          const stock = stockSpawner([]);
+          const replacedDuringVersionRead = ChildProcessSpawner.make((command) =>
+            (ChildProcess.isStandardCommand(command) && command.args.includes("--version")
+              ? fileSystem.writeFileString(binary, "#!/bin/sh\n# the fork replaced it\n")
+              : Effect.void
+            ).pipe(Effect.flatMap(() => stock.spawn(command))),
+          );
+          yield* checkPiProviderStatus(
+            PRIME_AGENT_FLAVOR,
+            { ...settings, binaryPath: binary },
+            {},
+          ).pipe(
+            Effect.provideService(
+              ChildProcessSpawner.ChildProcessSpawner,
+              replacedDuringVersionRead,
+            ),
+          );
+
+          const probes: Array<ReadonlyArray<string>> = [];
+          const fork = yield* detect(binary, forkSpawner(probes));
+
+          assert.isAbove(
+            probes.length,
+            0,
+            "the replaced file is probed, not answered from the old version",
+          );
+          assert.isFalse(fork.extensions);
+        }),
+      ).pipe(Effect.provide(NodeServices.layer)),
+  );
+
   it.effect("never keeps a refusal: a binary that gets fixed in place is launched", () =>
     Effect.scoped(
       Effect.gen(function* () {
