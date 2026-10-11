@@ -10000,6 +10000,57 @@ describe("PiAdapterV2 with the Prime Agent flavor", () => {
     }).pipe(Effect.scoped, Effect.provide(layerTest)),
   );
 
+  it.effect.each([
+    { build: "a fork build that lost it on resume", activeBranch: ["u1", "u2"], renavigates: true },
+    { build: "a fork build that kept it", activeBranch: ["u1"], renavigates: false },
+  ])(
+    "keeps a 0.10 fork rollback and its notice across a reopen, on $build",
+    ({ activeBranch, renavigates }) =>
+      Effect.gen(function* () {
+        const fake = yield* makeFakePi;
+        fake.queueForkMessages({ messages: [] });
+        const session = yield* openPrimeThread(fake, THREAD_ID, PRIME_AGENT_FORK_FLAVOR);
+        const first = yield* runPrimeTurn(session, fake, 1, ["u1"]);
+        const second = yield* runPrimeTurn(session, fake, 2, ["u1", "u2"]);
+        const { providerThread: stored } = yield* rollBackToFirstTurn(session, [first, second]);
+
+        // T3 restarts before the next prompt and reopens the thread on its session.
+        const reopenedFake = yield* makeFakePi;
+        reopenedFake.queueForkMessages({
+          messages: activeBranch.map((entryId) => ({ entryId, text: entryId })),
+        });
+        const { runtime, takeEvent } = yield* openRuntime(
+          reopenedFake,
+          "default",
+          THREAD_ID,
+          SESSION_ID,
+          undefined,
+          PRIME_AGENT_FORK_FLAVOR,
+          undefined,
+          {},
+          stored.nativeThreadRef?.nativeId,
+        );
+        const providerThread = yield* runtime.resumeThread({ providerThread: stored });
+
+        assert.deepEqual(
+          reopenedFake
+            .allRequests()
+            .filter((request) => request.type === "navigate_tree")
+            .map(({ id: _id, ...request }) => request),
+          renavigates ? [{ type: "navigate_tree", targetId: "u2" }] : [],
+        );
+        yield* runPrimeTurn({ runtime, takeEvent, providerThread }, reopenedFake, 3, ["u1", "u3"]);
+        assert.equal(
+          String(
+            reopenedFake.allRequests().findLast((request) => request.type === "prompt")?.[
+              "message"
+            ],
+          ),
+          `${T3_ROLLBACK_NOTICE}\n\nturn 3`,
+        );
+      }).pipe(Effect.scoped, Effect.provide(layerTest)),
+  );
+
   describe("prompt-cache miss notices", () => {
     const MINUTE = 60_000;
 
