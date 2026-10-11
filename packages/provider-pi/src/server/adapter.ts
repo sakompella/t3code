@@ -649,6 +649,9 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
       /**
        * Set by an in-place rollback the RPC did itself. T3's extension tells the
        * agent that its kernel kept its state; without one, the next prompt does.
+       * The 0.10 fork reports no leaf id, so its provider thread's head ref
+       * keeps this durable: it names the user entry the conversation was rolled
+       * back before, until a prompt carries the notice (see `registerThread`).
        */
       let rollbackNoticePending = false;
       /** In-place rollbacks waiting for the extension command's reported outcome. */
@@ -2040,7 +2043,8 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
           state,
           {
             status: "idle",
-            ...(treeRefs === null
+            // A wake that ran before the notice's prompt keeps the rollback mark.
+            ...(treeRefs === null || rollbackNoticePending
               ? {}
               : {
                   nativeConversationHeadRef:
@@ -3129,6 +3133,19 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
         // Baseline the session tree so the first turn's user entry can be
         // located without a full scan.
         yield* baselineSessionTree();
+        const rolledBackBefore =
+          flavor.rollback === "rpc_tree" && !needsNewSession
+            ? providerThread.nativeConversationHeadRef?.nativeId
+            : undefined;
+        if (rolledBackBefore !== undefined) {
+          rollbackNoticePending = true;
+          // A fork build that does not persist the move reopens on the
+          // discarded branch. Moving again is a no-op where it did persist.
+          if (knownUserEntryIds.has(rolledBackBefore)) {
+            yield* navigateTreeByRpc(rolledBackBefore);
+            yield* baselineSessionTree();
+          }
+        }
         // What is stored now predates this view of the session.
         yield* reconciler.baseline(nativeId);
         if (publish)
@@ -3453,7 +3470,10 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
                 const message = rollbackNoticePending
                   ? `${T3_ROLLBACK_NOTICE}\n\n${payload.message}`
                   : payload.message;
-                rollbackNoticePending = false;
+                if (rollbackNoticePending) {
+                  rollbackNoticePending = false;
+                  yield* updateProviderThread(state, { nativeConversationHeadRef: null });
+                }
                 yield* connection.send({
                   type: "prompt",
                   message,
@@ -3916,7 +3936,10 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
                         // Same session file and model; only the branch head moved.
                         applySessionTreeBaseline(treeBaseline);
                         cacheMissState = resetCacheBaseline(cacheMissState);
-                        yield* updateProviderThread(state, { nativeConversationHeadRef: null });
+                        yield* updateProviderThread(state, {
+                          nativeConversationHeadRef:
+                            flavor.rollback === "rpc_tree" ? providerRef(forkEntryId) : null,
+                        });
                         return piThreadSnapshot(state.providerThread);
                       }),
                     );
