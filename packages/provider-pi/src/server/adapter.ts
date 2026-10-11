@@ -81,6 +81,8 @@ import {
   buildPiRpcLaunch,
   materializePiT3McpExtension,
   materializePiT3Skill,
+  piLaunchArgsForFlavor,
+  rejectedPiLaunchArgsNotice,
   resolvePiLaunchArgs,
 } from "./mcpInjection.ts";
 import {
@@ -548,15 +550,33 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
         kernelMcpAccess !== undefined && !kernelMcpAccess.declared
           ? kernelMcpAccess.hint
           : undefined;
-      let mcpSetupHintShown = false;
       const resolvedLaunchArgs = resolvePiLaunchArgs(options.settings.launchArgs);
       if (!resolvedLaunchArgs.ok) {
         return yield* protocolError(resolvedLaunchArgs.message);
       }
+      const { accepted: launchArgs, rejected: rejectedLaunchArgs } = piLaunchArgsForFlavor(
+        flavor,
+        resolvedLaunchArgs.args,
+      );
+      const sessionNotices = [
+        ...(mcpSetupHint === undefined
+          ? []
+          : [{ key: "t3-mcp-setup", title: "T3 Code MCP setup", message: mcpSetupHint }]),
+        ...(rejectedLaunchArgs.length === 0
+          ? []
+          : [
+              {
+                key: "t3-launch-args",
+                title: "Launch arguments left out",
+                message: rejectedPiLaunchArgsNotice(flavor, rejectedLaunchArgs),
+              },
+            ]),
+      ];
+      let sessionNoticesShown = false;
       const launchProcess = (processScope: Scope.Scope, resumeSessionFile?: string) =>
         Effect.gen(function* () {
           const launch = buildPiRpcLaunch({
-            launchArgs: resolvedLaunchArgs.args,
+            launchArgs,
             environment: options.environment,
             mcpSession,
             extensionPath,
@@ -1703,9 +1723,13 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
         }
       });
 
-      const emitMcpSetupHint = Effect.fnUntraced(function* (turn: ActivePiTurn, hint: string) {
+      /** A warning about this session's setup, shown once in its first turn. */
+      const emitSessionNotice = Effect.fnUntraced(function* (
+        turn: ActivePiTurn,
+        notice: { readonly key: string; readonly title: string; readonly message: string },
+      ) {
         const emittedAt = yield* DateTime.now;
-        const nativeItemId = `${turn.providerTurn.id}:t3-mcp-setup`;
+        const nativeItemId = `${turn.providerTurn.id}:${notice.key}`;
         yield* emitItemNode(turn, nativeItemId, "system", "completed", emittedAt, emittedAt);
         yield* emit({
           type: "turn_item.updated",
@@ -1713,10 +1737,10 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
           turnItem: {
             ...baseItemFields(turn, nativeItemId, emittedAt, emittedAt),
             status: "completed",
-            title: "T3 Code MCP setup",
+            title: notice.title,
             completedAt: emittedAt,
             type: "system_notice",
-            message: hint,
+            message: notice.message,
             tone: "warning",
           },
         });
@@ -3497,9 +3521,9 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
                 lastRunOrdinal: turnInput.runOrdinal,
               });
               yield* updateProviderSession("running", null);
-              if (mcpSetupHint !== undefined && !mcpSetupHintShown) {
-                mcpSetupHintShown = true;
-                yield* emitMcpSetupHint(activeTurn, mcpSetupHint);
+              if (!sessionNoticesShown) {
+                sessionNoticesShown = true;
+                for (const notice of sessionNotices) yield* emitSessionNotice(activeTurn, notice);
               }
               if (wake !== null) {
                 if (continuation) activeTurn.wakeTrigger = piWakeTrigger(wake.events)?.message;
@@ -4027,7 +4051,7 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
             // CLI --fork uses Pi's own session format and sets the destination cwd. RPC
             // switch_session/clone alone would retain the source cwd.
             const forkLaunch = buildPiRpcLaunch({
-              launchArgs: resolvedLaunchArgs.args,
+              launchArgs,
               environment: options.environment,
               mcpSession: undefined,
               extensionPath: undefined,

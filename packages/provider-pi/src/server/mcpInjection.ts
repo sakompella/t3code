@@ -3,6 +3,8 @@ import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 
 import type { McpProviderSessionConfig } from "@t3tools/provider-core/server/mcpSession";
+
+import type { PiFlavor } from "./flavor.ts";
 import {
   PI_T3_MCP_EXTENSION_FILENAME,
   PI_T3_MCP_EXTENSION_SOURCE,
@@ -85,6 +87,61 @@ const PI_ARGUMENTS_WITHOUT_VALUES = new Set([
   "--offline",
   "--verbose",
 ]);
+
+/** Extension and tool-selection options, which a CLI without extensions rejects. */
+const PI_EXTENSION_ARGUMENTS = new Set([
+  "--extension",
+  "-e",
+  "--no-extensions",
+  "-ne",
+  "--tools",
+  "-t",
+  "--exclude-tools",
+  "-xt",
+  "--no-tools",
+  "-nt",
+  "--no-builtin-tools",
+  "-nbt",
+]);
+
+/**
+ * Resolved launch args split into those a CLI without extensions accepts and
+ * those it rejects, each rejected option with its value.
+ */
+export function partitionPiExtensionArgs(args: ReadonlyArray<string>): {
+  readonly accepted: ReadonlyArray<string>;
+  readonly rejected: ReadonlyArray<string>;
+} {
+  const accepted: string[] = [];
+  const rejected: string[] = [];
+  for (let index = 0; index < args.length; index += 1) {
+    const arg = args[index]!;
+    if (!PI_EXTENSION_ARGUMENTS.has(arg)) {
+      accepted.push(arg);
+      continue;
+    }
+    rejected.push(arg);
+    const value = args[index + 1];
+    if (PI_ARGUMENTS_WITH_VALUES.has(arg) && value !== undefined) {
+      rejected.push(value);
+      index += 1;
+    }
+  }
+  return { accepted, rejected };
+}
+
+/** The launch args `flavor`'s CLI accepts, and the configured ones it would reject. */
+export const piLaunchArgsForFlavor = (
+  flavor: Pick<PiFlavor, "extensions">,
+  args: ReadonlyArray<string>,
+) => (flavor.extensions ? { accepted: args, rejected: [] } : partitionPiExtensionArgs(args));
+
+/** Tells the user which configured launch args T3 left out for a CLI without extensions. */
+export const rejectedPiLaunchArgsNotice = (
+  flavor: Pick<PiFlavor, "displayName">,
+  rejected: ReadonlyArray<string>,
+) =>
+  `${flavor.displayName} has no extensions or tool selection, so T3 Code left out these launch arguments: ${rejected.join(" ")}. Remove them from the provider's launch arguments in Settings.`;
 
 export type PiLaunchArgsResolution =
   | { readonly ok: true; readonly args: ReadonlyArray<string> }
