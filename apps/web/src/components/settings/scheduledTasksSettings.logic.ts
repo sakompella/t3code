@@ -183,9 +183,11 @@ export function scheduledTaskDefaultModel(
   );
   const configured = resolveProjectSettings(settings, project?.id ?? null, project).settings
     .defaultModelSelection;
+  const startProvider = providerForNewThread(entries, configured?.instanceId);
   for (const selection of [configured, settings.defaultModelSelection]) {
     if (
       selection &&
+      selection.instanceId === startProvider?.instanceId &&
       available.some(
         (entry) =>
           entry.instanceId === selection.instanceId &&
@@ -194,7 +196,6 @@ export function scheduledTaskDefaultModel(
     )
       return selection;
   }
-  const startProvider = providerForNewThread(entries, configured?.instanceId);
   const models = available
     .filter((entry) => startProvider === undefined || entry.instanceId === startProvider.instanceId)
     .flatMap((entry) =>
