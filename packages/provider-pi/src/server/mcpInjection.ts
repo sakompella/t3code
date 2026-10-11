@@ -283,7 +283,9 @@ export function buildPiRpcLaunch(input: {
   readonly hasT3Mcp: boolean;
 } {
   const hasT3Extension = input.disableExtensions !== true && input.extensionPath !== undefined;
-  const hasT3Mcp = hasT3Extension && input.mcpSession !== undefined;
+  const kernelMcp = input.disableExtensions === true ? undefined : input.kernelMcp;
+  // T3's tools are reached through the extension's bridge or the kernel's own MCP client.
+  const hasT3Mcp = input.mcpSession !== undefined && (hasT3Extension || kernelMcp !== undefined);
   const extensionSafeArgs =
     input.disableExtensions === true
       ? withoutExplicitExtensions(input.launchArgs)
@@ -308,7 +310,6 @@ export function buildPiRpcLaunch(input: {
   ) {
     args.push("--extension", input.extensionPath);
   }
-  const kernelMcp = hasT3Extension ? input.kernelMcp : undefined;
   // The skill describes tools that only work with a T3 credential.
   const skillPath = hasT3Mcp ? kernelMcp?.skillPath : undefined;
   if (skillPath !== undefined) args.push("--skill", skillPath);
@@ -333,7 +334,9 @@ export function buildPiRpcLaunch(input: {
               input.runtimeMode === "auto" ? "approval-required" : input.runtimeMode,
           }
         : {}),
-      ...(kernelMcp !== undefined ? { [T3_PI_MCP_TOOLS_ENV]: T3_PI_MCP_TOOLS_KERNEL } : {}),
+      ...(hasT3Extension && kernelMcp !== undefined
+        ? { [T3_PI_MCP_TOOLS_ENV]: T3_PI_MCP_TOOLS_KERNEL }
+        : {}),
       ...(hasT3Mcp && input.mcpSession !== undefined
         ? {
             [T3_MCP_URL_ENV]: input.mcpSession.endpoint,
