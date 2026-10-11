@@ -21,6 +21,8 @@ export function makePrimeAgentTools(input: {
    * Prime Agent's edit helper reports each change on the cell result as
    * `details.diffs: [{ path, oldStr, newStr }]`. Surface them as file
    * changes under the cell so the diff view works like other providers'.
+   * The 0.10 fork clips an oversized diff, marks each clipped side in its
+   * text, and sets `truncated: true`; the card's title says so too.
    */
   const emitIpythonFileChanges = Effect.fnUntraced(function* (
     turn: PiItemSink,
@@ -47,7 +49,7 @@ export function makePrimeAgentTools(input: {
           ...baseItemFields(turn, nativeItemId, startedAt, emittedAt),
           status: "completed",
           completedAt: emittedAt,
-          title: "edit",
+          title: recordField(diff, "truncated") === true ? "edit (diff truncated)" : "edit",
           type: "file_change",
           fileName,
           oldStr,
