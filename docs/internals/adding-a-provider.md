@@ -30,8 +30,11 @@ capabilities, never the driver kind.
   and [Pi](../../packages/provider-pi/src/server/status.ts) are examples). Do not imitate a missing
   mode by answering approvals in T3: T3's check is weaker than the agent's own enforcement. The
   server runs an unoffered stored mode in the most restrictive mode the provider offers, which is
-  the mode clients show for it
-  ([`RuntimePolicy.ts`](../../apps/server/src/orchestration-v2/RuntimePolicy.ts)).
+  the mode clients show for it (`providerRuntimeMode` in
+  [`providerPolicy.ts`](../../packages/contracts/src/providerPolicy.ts)). When that mode is broader
+  than the stored one, authorization must use it: MCP limits and the dispatch re-check compare a
+  caller with the mode the work runs in, never the stored mode
+  ([`DispatchModeLimit.ts`](../../apps/server/src/orchestration-v2/DispatchModeLimit.ts)).
 - **Approval and question options.** Pass the provider's own option IDs through unchanged. Every
   request needs a way to decline that the provider honors.
 - **Interaction modes.** Hide the plan toggle (`showInteractionModeToggle: false`) unless the
