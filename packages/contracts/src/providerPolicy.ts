@@ -31,6 +31,29 @@ export const RuntimeMode = Schema.Literals([
 export type RuntimeMode = typeof RuntimeMode.Type;
 export const DEFAULT_RUNTIME_MODE: RuntimeMode = "full-access";
 
+/** The runtime modes a provider offers, in `RuntimeMode` order; every mode when it states none. */
+export function offeredRuntimeModes(
+  supportedRuntimeModes: ReadonlyArray<RuntimeMode> | undefined,
+): ReadonlyArray<RuntimeMode> {
+  return supportedRuntimeModes === undefined || supportedRuntimeModes.length === 0
+    ? RuntimeMode.literals
+    : RuntimeMode.literals.filter((mode) => supportedRuntimeModes.includes(mode));
+}
+
+/**
+ * The mode a provider runs a thread in. A mode the provider does not offer
+ * (a thread set before it stopped offering it, or a stale client) runs in the
+ * most restrictive mode it does offer, rather than having T3 imitate it.
+ * Clients show this mode, and the server runs and authorizes it.
+ */
+export function providerRuntimeMode(
+  runtimeMode: RuntimeMode,
+  supportedRuntimeModes: ReadonlyArray<RuntimeMode> | undefined,
+): RuntimeMode {
+  const offered = offeredRuntimeModes(supportedRuntimeModes);
+  return offered.includes(runtimeMode) ? runtimeMode : (offered[0] ?? runtimeMode);
+}
+
 export const ProviderInteractionMode = Schema.Literals(["default", "plan"]);
 export type ProviderInteractionMode = typeof ProviderInteractionMode.Type;
 export const DEFAULT_PROVIDER_INTERACTION_MODE: ProviderInteractionMode = "default";

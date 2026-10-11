@@ -1,6 +1,8 @@
 import {
   isNullableProjectSettingsOverride,
+  offeredRuntimeModes,
   PROJECT_SCOPED_SERVER_SETTING_KEYS,
+  type RuntimeMode,
   type EnvironmentId,
   type ProjectId,
   type ProjectScopedServerSettingKey,
@@ -99,6 +101,23 @@ export function uniformMobileSetting<K extends keyof ServerSettings>(
   if (!reference) return null;
   const value = reference.settings[key];
   return targets.every((target) => target.settings[key] === value) ? value : null;
+}
+
+/**
+ * The permissions a new thread can run with on every target: those its
+ * default provider offers. A target with no default model limits nothing.
+ */
+export function offeredDefaultRuntimeModes(
+  targets: readonly Pick<ScopedMobileSettingsTarget, "environment" | "settings">[],
+): ReadonlyArray<RuntimeMode> {
+  return targets.reduce<ReadonlyArray<RuntimeMode>>((offered, target) => {
+    const instanceId = target.settings.defaultModelSelection?.instanceId;
+    const provider = target.environment.serverConfig.providers.find(
+      (candidate) => candidate.instanceId === instanceId,
+    );
+    const targetOffers = offeredRuntimeModes(provider?.supportedRuntimeModes);
+    return offered.filter((mode) => targetOffers.includes(mode));
+  }, offeredRuntimeModes(undefined));
 }
 
 export function planMobileScopedSettingsClear(

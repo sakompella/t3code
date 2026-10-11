@@ -1,7 +1,9 @@
 import {
   DEFAULT_SERVER_SETTINGS,
   type ModelSelection,
+  offeredRuntimeModes,
   type ProviderInstanceId,
+  providerRuntimeMode,
   type WorktreeSubmodules,
 } from "@t3tools/contracts";
 import { createModelSelection } from "@t3tools/shared/model";
@@ -20,7 +22,7 @@ import { useEnvironmentProviders, useEnvironments } from "../../state/environmen
 import { EMPTY_SERVER_PROVIDERS } from "../../state/server";
 import { resolveEnvModeLabel, WORKTREE_SUBMODULES_LABELS } from "../BranchToolbar.logic";
 import { ProviderModelPicker } from "../chat/ProviderModelPicker";
-import { runtimeModeConfig, runtimeModeOptions } from "../chat/runtimeModeConfig";
+import { runtimeModeConfig } from "../chat/runtimeModeConfig";
 import { PULL_REQUEST_MERGE_METHOD_LABELS } from "../pullRequest/pullRequestDetail.logic";
 import { TraitsPicker } from "../chat/TraitsPicker";
 import { Select, SelectItem, SelectPopup, SelectTrigger, SelectValue } from "../ui/select";
@@ -78,7 +80,13 @@ export function ProjectDefaultsSettings({ category }: { category: ProjectSetting
   const activeEntry = entries.find((entry) => entry.instanceId === selection?.instanceId);
   const mixedModel = useScopedSettingsMixed(["defaultModelSelection"]);
   const mixedPermissions = useScopedSettingsMixed(["defaultRuntimeMode"]);
-  const PermissionIcon = runtimeModeConfig[settings.defaultRuntimeMode].icon;
+  // A default the default provider does not offer runs as the mode shown here.
+  const defaultRuntimeModes = offeredRuntimeModes(activeEntry?.snapshot.supportedRuntimeModes);
+  const defaultRuntimeMode = providerRuntimeMode(
+    settings.defaultRuntimeMode,
+    activeEntry?.snapshot.supportedRuntimeModes,
+  );
+  const PermissionIcon = runtimeModeConfig[defaultRuntimeMode].icon;
   const mixedWorkspace = useScopedSettingsMixed(["defaultThreadEnvMode"]);
   const mixedSubmodules = useScopedSettingsMixed(["worktreeSubmodules"]);
   const mixedBrowser = useScopedSettingsMixed(["enableAgentBrowserAccess"]);
@@ -298,7 +306,7 @@ export function ProjectDefaultsSettings({ category }: { category: ProjectSetting
             }
             control={
               <Select
-                value={mixedPermissions ? null : settings.defaultRuntimeMode}
+                value={mixedPermissions ? null : defaultRuntimeMode}
                 onValueChange={(value) => {
                   if (value) updateSettings({ defaultRuntimeMode: value });
                 }}
@@ -308,13 +316,11 @@ export function ProjectDefaultsSettings({ category }: { category: ProjectSetting
                     <PermissionIcon className="size-3.5 shrink-0 text-muted-foreground" />
                   )}
                   <SelectValue>
-                    {mixedPermissions
-                      ? "Mixed"
-                      : runtimeModeConfig[settings.defaultRuntimeMode].label}
+                    {mixedPermissions ? "Mixed" : runtimeModeConfig[defaultRuntimeMode].label}
                   </SelectValue>
                 </SelectTrigger>
                 <SelectPopup align="end" alignItemWithTrigger={false}>
-                  {runtimeModeOptions.map((mode) => {
+                  {defaultRuntimeModes.map((mode) => {
                     const option = runtimeModeConfig[mode];
                     const Icon = option.icon;
                     return (

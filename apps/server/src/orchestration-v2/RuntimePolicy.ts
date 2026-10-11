@@ -4,6 +4,7 @@ import {
   ProjectId,
   ProviderInstanceId,
   RuntimeMode,
+  providerRuntimeMode,
 } from "@t3tools/contracts";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
@@ -64,29 +65,6 @@ export const layer: Layer.Layer<RuntimePolicyV2> = Layer.succeed(RuntimePolicyV2
     }),
   runtimeMode: (thread) => Effect.succeed(thread.runtimeMode),
 });
-
-/**
- * The mode a provider runs a thread in. A mode the provider does not offer
- * (a thread set before it stopped offering it, or a stale client) runs in the
- * most restrictive mode it does offer, which is the mode web and mobile show
- * for it, rather than having T3 imitate it. That is Supervised for every
- * provider that offers it.
- */
-export function providerRuntimeMode(
-  runtimeMode: RuntimeMode,
-  supportedRuntimeModes: ReadonlyArray<RuntimeMode> | undefined,
-): RuntimeMode {
-  if (
-    supportedRuntimeModes === undefined ||
-    supportedRuntimeModes.length === 0 ||
-    supportedRuntimeModes.includes(runtimeMode)
-  ) {
-    return runtimeMode;
-  }
-  return (
-    RuntimeMode.literals.find((mode) => supportedRuntimeModes.includes(mode)) ?? "approval-required"
-  );
-}
 
 export const layerFromProjectStore: Layer.Layer<
   RuntimePolicyV2,
