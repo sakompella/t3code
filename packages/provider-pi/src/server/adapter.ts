@@ -89,6 +89,7 @@ import {
   T3_NAVIGATE_TREE_RESULT_MARKER,
 } from "./mcpExtensionSource.ts";
 import { PI_FLAVOR, PRIME_AGENT_FLAVOR, type PiFlavor } from "./flavor.ts";
+import { detectPiFlavor } from "./status.ts";
 import { resolveKernelMcpAccess } from "./primeAgentT3Mcp.ts";
 
 import type {
@@ -255,6 +256,11 @@ export interface PiAdapterV2Options {
   readonly instanceId: ProviderInstanceId;
   readonly settings: PiSettings;
   readonly environment: NodeJS.ProcessEnv;
+  /**
+   * The flavor the binary speaks, read each time a session opens so a swapped
+   * binary is picked up. Defaults to `flavor`; the drivers read `--version`.
+   */
+  readonly detectFlavor?: Effect.Effect<PiFlavor>;
   readonly continuationRequests?: {
     readonly offer: (
       request: ProviderContinuationRequests.ProviderContinuationRequest,
@@ -474,6 +480,7 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
     openSession: Effect.fn("PiAdapterV2.openSession")(function* (
       input: ProviderAdapter.ProviderAdapterV2OpenSessionInput,
     ) {
+      const flavor = yield* options.detectFlavor ?? Effect.succeed(options.flavor);
       const scope = yield* Effect.scope;
       const cwd = input.runtimePolicy.cwd ?? host.paths.cwd;
       // Prime Agent reports edited paths through realpath (/tmp is /private/tmp
@@ -502,9 +509,9 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
       // The extension owns both the optional MCP bridge and Pi's permission
       // hook. Materialize it even when this session has no MCP credential so
       // Supervised never silently degrades to unrestricted tool execution.
-      const extensionPath = yield* provideCacheFs(
-        materializePiT3McpExtension(host.paths.providerStatusCacheDir),
-      );
+      const extensionPath = flavor.extensions
+        ? yield* provideCacheFs(materializePiT3McpExtension(host.paths.providerStatusCacheDir))
+        : undefined;
       // An agent with its own MCP client never gets T3's tools natively. It
       // reaches T3 through the t3-code skill once the user declared the server
       // in its settings. Until then the user gets a setup notice.
@@ -3961,8 +3968,8 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
               environment: options.environment,
               mcpSession: undefined,
               extensionPath: undefined,
-              disableExtensions: true,
-              disableTools: true,
+              // A CLI without extensions has neither flag and rejects both.
+              ...(flavor.extensions ? { disableExtensions: true, disableTools: true } : {}),
             });
             const nativeId = yield* Effect.scoped(
               Effect.gen(function* () {
@@ -4217,11 +4224,20 @@ function makePiFlavorAdapterV2Driver(
         const hostEnvironment = yield* HostProcess.Environment;
         const continuationRequests =
           yield* ProviderContinuationRequests.ProviderContinuationRequests;
+        const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
+        const settings = { ...input.config, enabled: input.enabled };
+        const environment = yield* mergeProviderInstanceEnvironment(
+          input.environment,
+          hostEnvironment,
+        );
         return yield* makePiAdapterV2({
           flavor,
+          detectFlavor: detectPiFlavor(flavor, settings, environment).pipe(
+            Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner),
+          ),
           instanceId: input.instanceId,
-          settings: { ...input.config, enabled: input.enabled },
-          environment: yield* mergeProviderInstanceEnvironment(input.environment, hostEnvironment),
+          settings,
+          environment,
           continuationRequests,
         });
       },

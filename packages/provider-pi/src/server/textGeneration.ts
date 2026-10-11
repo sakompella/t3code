@@ -16,6 +16,7 @@ import {
   type PiRpcConnection,
 } from "./rpc.ts";
 import { buildPiRpcLaunch, resolvePiLaunchArgs } from "./mcpInjection.ts";
+import { detectPiFlavor } from "./status.ts";
 import * as TextGenerationOperations from "@t3tools/provider-core/server/textGenerationOperations";
 
 const PI_TIMEOUT_MS = 180_000;
@@ -52,6 +53,15 @@ export const makePiTextGeneration = Effect.fn("makePiTextGeneration")(function* 
   const runPiJson: TextGenerationOperations.Runner = (request) => {
     const { operation, cwd, prompt, modelSelection } = request;
     return Effect.gen(function* () {
+      const cliFlavor = yield* detectPiFlavor(flavor, piSettings, environment).pipe(
+        Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner),
+      );
+      if (!cliFlavor.extensions) {
+        return yield* new TextGenerationError({
+          operation,
+          detail: `${cliFlavor.displayName} cannot turn its tools off, and text generation never runs tools. Choose another text generation model in Settings.`,
+        });
+      }
       const resolvedLaunchArgs = resolvePiLaunchArgs(piSettings.launchArgs);
       if (!resolvedLaunchArgs.ok) {
         return yield* new TextGenerationError({
