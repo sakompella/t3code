@@ -127,6 +127,8 @@ interface FakePi {
     readonly args: ReadonlyArray<string>;
     readonly env: NodeJS.ProcessEnv;
   };
+  /** What a `--version` run of the fake binary prints from now on. */
+  readonly setVersion: (version: string) => void;
 }
 
 /**
@@ -284,8 +286,24 @@ const makeFakePi: Effect.Effect<FakePi> = Effect.gen(function* () {
     args: [],
     env: {},
   };
+  let version = "0.9.8";
   const spawner = ChildProcessSpawner.make((command) =>
     Effect.sync(() => {
+      if (ChildProcess.isStandardCommand(command) && command.args.includes("--version")) {
+        return ChildProcessSpawner.makeHandle({
+          pid: ChildProcessSpawner.ProcessId(FAKE_PID),
+          exitCode: Effect.succeed(ChildProcessSpawner.ExitCode(0)),
+          isRunning: Effect.succeed(false),
+          kill: () => Effect.void,
+          unref: Effect.succeed(Effect.void),
+          stdin: Sink.drain,
+          stdout: Stream.succeed(new TextEncoder().encode(`${version}\n`)),
+          stderr: Stream.empty,
+          all: Stream.empty,
+          getInputFd: () => Sink.drain,
+          getOutputFd: () => Stream.empty,
+        });
+      }
       if (ChildProcess.isStandardCommand(command)) {
         lastSpawn = {
           args: command.args,
@@ -376,6 +394,9 @@ const makeFakePi: Effect.Effect<FakePi> = Effect.gen(function* () {
     failNextHeartbeats: () => heartbeatsQueue.push({ success: false }),
     closeStdout: Queue.end(stdout),
     lastSpawn: () => lastSpawn,
+    setVersion: (next) => {
+      version = next;
+    },
   } satisfies FakePi;
 });
 
@@ -10703,5 +10724,114 @@ describe("PiAdapterV2 reaching T3 through the kernel's MCP client", () => {
         assert.notProperty(env, "T3_PI_MCP_TOOLS");
       }),
     ).pipe(Effect.scoped, Effect.provide(layerTest)),
+  );
+});
+
+describe("PiAdapterV2 on the Prime Agent 0.10 fork", () => {
+  /**
+   * Opens a session through the Prime Agent driver, as production does, on a
+   * binary whose `--version` reports `version`. A `--fork` helper process goes
+   * to `forkFake` when one is given.
+   */
+  const openPrimeAgent = Effect.fnUntraced(function* (
+    fake: FakePi,
+    options: {
+      readonly version?: string;
+      readonly forkFake?: FakePi;
+      readonly runtimeMode?: ProviderAdapter.ProviderAdapterV2RuntimePolicy["runtimeMode"];
+      readonly environment?: NodeJS.ProcessEnv;
+      readonly offers?: Array<ProviderContinuationRequests.ProviderContinuationRequest>;
+    } = {},
+  ) {
+    fake.setVersion(options.version ?? "0.10.0");
+    options.forkFake?.setVersion(options.version ?? "0.10.0");
+    const { forkFake } = options;
+    const spawner =
+      forkFake === undefined
+        ? fake.spawner
+        : ChildProcessSpawner.make((command) =>
+            ChildProcess.isStandardCommand(command) && command.args.includes("--fork")
+              ? forkFake.spawner.spawn(command)
+              : fake.spawner.spawn(command),
+          );
+    const adapter = yield* PrimeAgentAdapterV2Driver.create({
+      instanceId: PI_INSTANCE_ID,
+      displayName: undefined,
+      enabled: true,
+      environment: [],
+      config: { enabled: true, binaryPath: "prime-agent", launchArgs: "", customModels: [] },
+    }).pipe(
+      Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner),
+      Effect.provideService(HostProcess.Environment, options.environment ?? {}),
+      Effect.provideService(ProviderContinuationRequests.ProviderContinuationRequests, {
+        offer: (request) =>
+          Effect.sync(() => {
+            options.offers?.push(request);
+          }),
+        take: Effect.never,
+      }),
+    );
+    const runtime = yield* adapter.openSession({
+      threadId: THREAD_ID,
+      providerSessionId: SESSION_ID,
+      modelSelection: modelSelection("default"),
+      runtimePolicy: ProviderAdapter.ProviderAdapterV2RuntimePolicy.make({
+        ...runtimePolicy,
+        runtimeMode: options.runtimeMode ?? "full-access",
+      }),
+    });
+    const emitted = yield* Queue.unbounded<ProviderAdapter.ProviderAdapterV2Event>();
+    yield* runtime.events.pipe(
+      Stream.runForEach((event) => Queue.offer(emitted, event)),
+      Effect.forkScoped,
+    );
+    const seen: Array<ProviderAdapter.ProviderAdapterV2Event> = [];
+    const takeEvent = (predicate: (event: ProviderAdapter.ProviderAdapterV2Event) => boolean) =>
+      Effect.gen(function* () {
+        while (true) {
+          const event = yield* Queue.take(emitted);
+          seen.push(event);
+          if (predicate(event)) return event;
+        }
+      });
+    return { runtime, takeEvent, seen };
+  });
+
+  it.effect.each([
+    { version: "0.9.8", loadsExtension: true },
+    { version: "0.10.0", loadsExtension: false },
+    { version: "0.10.1-beta.3", loadsExtension: false },
+  ])("launches $version with T3's extension: $loadsExtension", ({ version, loadsExtension }) =>
+    Effect.gen(function* () {
+      const fake = yield* makeFakePi;
+      yield* openPrimeAgent(fake, { version });
+      const { args } = fake.lastSpawn();
+      assert.deepEqual(args.slice(0, 2), ["--mode", "rpc"]);
+      assert.equal(args.includes("--extension"), loadsExtension);
+    }).pipe(Effect.scoped, Effect.provide(layerTest)),
+  );
+
+  it.effect("forks a session without the extension flags the fork rejects", () =>
+    Effect.gen(function* () {
+      const fake = yield* makeFakePi;
+      const forkFake = yield* makeFakePi;
+      const { runtime } = yield* openPrimeAgent(fake, { forkFake });
+      const source = yield* runtime.ensureThread({
+        threadId: THREAD_ID,
+        modelSelection: modelSelection("default"),
+        runtimePolicy,
+      });
+      forkFake.queueState({ sessionFile: "/fake/forked.jsonl" });
+      yield* runtime.forkThread({
+        sourceProviderThread: source,
+        sourceProviderTurns: [],
+        targetThreadId: ThreadId.make("fork-target"),
+      });
+      const args = forkFake.lastSpawn().args;
+      assert.equal(args[args.indexOf("--fork") + 1], FAKE_SESSION_FILE);
+      for (const flag of ["--extension", "--no-extensions", "--no-tools"]) {
+        assert.notInclude(args, flag);
+      }
+    }).pipe(Effect.scoped, Effect.provide(layerTest)),
   );
 });
