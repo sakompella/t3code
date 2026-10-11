@@ -11016,4 +11016,70 @@ describe("PiAdapterV2 on the Prime Agent 0.10 fork", () => {
       });
     }).pipe(Effect.scoped, Effect.provide(layerTest)),
   );
+  it.effect("marks an edit card whose diff the fork clipped", () =>
+    Effect.gen(function* () {
+      const fake = yield* makeFakePi;
+      const { runtime, takeEvent } = yield* openPrimeAgent(fake);
+      const providerThread = yield* runtime.ensureThread({
+        threadId: THREAD_ID,
+        modelSelection: modelSelection("default"),
+        runtimePolicy,
+      });
+      yield* startTurn(runtime, providerThread);
+      yield* fake.takeRequest("prompt");
+      yield* fake.emit({ type: "agent_start" });
+      const code = "await edit(path='big.txt', old_str=old, new_str=new)";
+      yield* fake.emit({
+        type: "tool_execution_start",
+        toolCallId: "cell_edit",
+        toolName: "ipython",
+        args: { code },
+      });
+      // The fork's edit skill clips each side of an oversized diff to 64 Ki
+      // characters, appends this marker, and flags the record.
+      const clipped = (text: string) =>
+        `${text}\n[... diff text truncated: 65536 of 9000000 characters shown ...]`;
+      yield* fake.emit({
+        type: "tool_execution_end",
+        toolCallId: "cell_edit",
+        toolName: "ipython",
+        result: {
+          content: [{ type: "text", text: "Edited big.txt" }],
+          details: {
+            status: "ok",
+            diffs: [
+              { path: `${process.cwd()}/small.txt`, oldStr: "a", newStr: "b", startLine: 1 },
+              {
+                path: `${process.cwd()}/big.txt`,
+                oldStr: clipped("AAAA"),
+                newStr: clipped("BBBB"),
+                startLine: 1,
+                truncated: true,
+              },
+            ],
+          },
+        },
+        isError: false,
+      });
+      const cards: Array<{ fileName: string; title: string | null | undefined; newStr?: string }> =
+        [];
+      while (cards.length < 2) {
+        const event = yield* takeEvent(
+          (candidate) =>
+            candidate.type === "turn_item.updated" && candidate.turnItem.type === "file_change",
+        );
+        if (event.type === "turn_item.updated" && event.turnItem.type === "file_change") {
+          cards.push({
+            fileName: event.turnItem.fileName,
+            title: event.turnItem.title,
+            ...(event.turnItem.newStr === undefined ? {} : { newStr: event.turnItem.newStr }),
+          });
+        }
+      }
+      assert.deepEqual(cards, [
+        { fileName: "small.txt", title: "edit", newStr: "b" },
+        { fileName: "big.txt", title: "edit (diff truncated)", newStr: clipped("BBBB") },
+      ]);
+    }).pipe(Effect.scoped, Effect.provide(layerTest)),
+  );
 });
