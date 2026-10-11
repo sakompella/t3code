@@ -1540,9 +1540,11 @@ const make = Effect.gen(function* () {
       );
     }).pipe(Effect.timeoutOption(Duration.millis(timeoutMs)), Effect.map(Option.flatten));
 
-  const scheduledTaskRunModes = (task: ScheduledTask) =>
+  const scheduledTaskRunModes = (
+    task: Pick<ScheduledTask, "threadId" | "modelSelection" | "runtimeMode" | "interactionMode">,
+  ) =>
     Effect.gen(function* () {
-      const modes = [task];
+      const modes: Array<Parameters<typeof runModes>[0]> = [task];
       if (task.threadId === null) return modes;
       const bound = yield* threadManagement
         .getThreadShell(task.threadId)
@@ -1634,16 +1636,36 @@ const make = Effect.gen(function* () {
     });
 
   /**
-   * A scheduled task the caller may change: one whose runs execute at modes no
-   * broader than the caller's own, so editing its prompt cannot run work above
-   * the caller's limits.
+   * Fails unless the caller may manage `task`, by the rule that let it create
+   * one: every mode the task's runs execute at is within the caller's limits,
+   * or the task is bound to the caller's own thread and runs no broader than
+   * that thread already does.
    */
+  const assertMayManageScheduledTask = (
+    caller: {
+      readonly parent: Pick<OrchestrationV2ThreadProjection, "thread"> | undefined;
+      readonly limits: {
+        readonly runtimeMode: RuntimeMode;
+        readonly interactionMode: ProviderInteractionMode;
+      };
+    },
+    task: Pick<ScheduledTask, "threadId" | "modelSelection" | "runtimeMode" | "interactionMode">,
+  ) =>
+    Effect.gen(function* () {
+      const ownModes =
+        caller.parent !== undefined && task.threadId === caller.parent.thread.id
+          ? yield* runModes(caller.parent.thread)
+          : undefined;
+      for (const settings of yield* scheduledTaskRunModes(task)) {
+        if (ownModes !== undefined && withinLimits(ownModes, yield* runModes(settings))) continue;
+        yield* assertRunsWithin(caller.limits, settings);
+      }
+    });
+
+  /** A scheduled task the caller may change (see `assertMayManageScheduledTask`). */
   const loadScheduledTask = (
     scheduledTaskId: ScheduledTask["id"],
-    limits: {
-      readonly runtimeMode: RuntimeMode;
-      readonly interactionMode: ProviderInteractionMode;
-    },
+    caller: Parameters<typeof assertMayManageScheduledTask>[0],
   ): Effect.Effect<ScheduledTask, OrchestratorMcpFailure> =>
     Effect.gen(function* () {
       const { tasks } = yield* scheduledTasks
@@ -1657,9 +1679,7 @@ const make = Effect.gen(function* () {
       if (task === undefined) {
         return yield* failure("task_not_found", `Scheduled task ${scheduledTaskId} was not found.`);
       }
-      for (const settings of yield* scheduledTaskRunModes(task)) {
-        yield* assertRunsWithin(limits, settings);
-      }
+      yield* assertMayManageScheduledTask(caller, task);
       return task;
     });
 
@@ -1752,7 +1772,7 @@ const make = Effect.gen(function* () {
     updateScheduledTask: (scope, input) =>
       Effect.gen(function* () {
         const { parent, limits } = yield* loadCaller(scope);
-        const existing = yield* loadScheduledTask(input.scheduledTaskId, limits);
+        const existing = yield* loadScheduledTask(input.scheduledTaskId, { parent, limits });
         yield* assertLiveCallerForOtherProject(scope, parent, existing.projectId);
         if (
           input.bindToCurrentThread === true &&
@@ -1778,6 +1798,10 @@ const make = Effect.gen(function* () {
           input.bindToCurrentThread === undefined
             ? existing.workspaceStrategy
             : scheduledTaskWorkspaceStrategy(input.bindToCurrentThread);
+        // A new binding changes where runs execute, so it must pass the same rule.
+        if (threadId !== existing.threadId) {
+          yield* assertMayManageScheduledTask({ parent, limits }, { ...existing, threadId });
+        }
         const upsertInput: ScheduledTaskUpsertInput = {
           id: existing.id,
           title: input.title ?? existing.title,
@@ -1805,7 +1829,7 @@ const make = Effect.gen(function* () {
     deleteScheduledTask: (scope, input) =>
       Effect.gen(function* () {
         const { parent, limits } = yield* loadCaller(scope);
-        const existing = yield* loadScheduledTask(input.scheduledTaskId, limits);
+        const existing = yield* loadScheduledTask(input.scheduledTaskId, { parent, limits });
         yield* assertLiveCallerForOtherProject(scope, parent, existing.projectId);
         yield* scheduledTasks
           .delete({ id: existing.id })
