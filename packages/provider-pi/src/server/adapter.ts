@@ -382,7 +382,12 @@ function piProviderCapabilities(flavor: PiFlavor): OrchestrationV2ProviderCapabi
   if (flavor.tools === "pi") return PiProviderCapabilitiesV2;
   return {
     ...PiProviderCapabilitiesV2,
-    approvals: { ...PiProviderCapabilitiesV2.approvals, supportsFileChangeApproval: false },
+    approvals: {
+      ...PiProviderCapabilitiesV2.approvals,
+      // Without T3's extension nothing can ask before a tool runs.
+      supportsCommandApproval: flavor.extensions,
+      supportsFileChangeApproval: false,
+    },
     subagents: {
       ...PiProviderCapabilitiesV2.subagents,
       // Observed `rlm_child_update` children get their own T3 thread.
@@ -476,12 +481,19 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
   return ProviderAdapter.ProviderAdapterV2.of({
     instanceId: options.instanceId,
     driver,
+    // The driver's own flavor. An open session reports what its binary supports.
     getCapabilities: () => Effect.succeed(capabilities),
     planSelectionTransition: () => Effect.succeed(turnScopedSelectionTransition()),
     openSession: Effect.fn("PiAdapterV2.openSession")(function* (
       input: ProviderAdapter.ProviderAdapterV2OpenSessionInput,
     ) {
       const flavor = yield* options.detectFlavor ?? Effect.succeed(options.flavor);
+      if (!flavor.extensions && input.runtimePolicy.runtimeMode !== "full-access") {
+        return yield* protocolError(
+          `${flavor.displayName} cannot ask before it runs a tool, so it runs only with Full access. Switch this thread to Full access.`,
+        );
+      }
+      const sessionCapabilities = piProviderCapabilities(flavor);
       const scope = yield* Effect.scope;
       const cwd = input.runtimePolicy.cwd ?? host.paths.cwd;
       // Prime Agent reports edited paths through realpath (/tmp is /private/tmp
@@ -647,7 +659,7 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
         status: "ready",
         cwd,
         model: input.modelSelection.model,
-        capabilities,
+        capabilities: sessionCapabilities,
         createdAt: now,
         updatedAt: now,
         lastError: null,

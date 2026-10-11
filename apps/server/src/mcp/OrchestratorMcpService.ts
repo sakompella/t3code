@@ -544,6 +544,14 @@ function interactionModeRank(mode: ProviderInteractionMode): number {
   return mode === "plan" ? 0 : 1;
 }
 
+/**
+ * The mode a new thread runs in: the requested mode, else the parent's, never
+ * broader than the parent's. Pass `target` when the thread runs on a known
+ * provider. A provider runs a mode it does not offer in another one, so an
+ * explicit request for one is refused, and an inherited one steps down to the
+ * broadest mode the provider offers. A provider whose every mode is broader
+ * than the parent's is refused.
+ */
 export function resolveRuntimeMode(
   parentMode: RuntimeMode,
   requested: OrchestratorMcpRuntimeMode | undefined,
@@ -567,16 +575,21 @@ export function resolveRuntimeMode(
     return Effect.fail(
       failure(
         "invalid_request",
-        `Provider ${target?.modelSelection.instanceId} does not offer runtime mode ${resolved}, so it would run as approval-required. Use one of: ${supported.join(", ")}.`,
+        `Provider ${target?.modelSelection.instanceId} does not offer runtime mode ${resolved}. Use one of: ${supported.join(", ")}.`,
       ),
     );
   }
-  return Effect.succeed(
-    supported
-      .filter((mode) => runtimeModeRank(mode) <= runtimeModeRank(resolved))
-      .toSorted((left, right) => runtimeModeRank(right) - runtimeModeRank(left))[0] ??
-      "approval-required",
-  );
+  const broadestAllowed = supported
+    .filter((mode) => runtimeModeRank(mode) <= runtimeModeRank(resolved))
+    .toSorted((left, right) => runtimeModeRank(right) - runtimeModeRank(left))[0];
+  return broadestAllowed === undefined
+    ? Effect.fail(
+        failure(
+          "runtime_mode_escalation_denied",
+          `Provider ${target?.modelSelection.instanceId} offers only ${supported.join(", ")}, which is broader than parent mode ${parentMode}.`,
+        ),
+      )
+    : Effect.succeed(broadestAllowed);
 }
 
 export function resolveInteractionMode(
