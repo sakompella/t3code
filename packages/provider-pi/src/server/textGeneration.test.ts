@@ -12,7 +12,11 @@ import * as ChildProcessSpawner from "effect/process/ChildProcessSpawner";
 
 import { makePiTextGeneration } from "./textGeneration.ts";
 import { PI_FLAVOR, PRIME_AGENT_FLAVOR } from "./flavor.ts";
-import { PRIME_AGENT_FORK_HELP } from "./primeAgentHelp.testkit.ts";
+import {
+  PRIME_AGENT_098_CAPABILITIES,
+  PRIME_AGENT_FORK_CAPABILITIES,
+  PRIME_AGENT_FORK_HELP,
+} from "./primeAgentHelp.testkit.ts";
 
 const decodeJsonLine = Schema.decodeUnknownSync(Schema.fromJsonString(Schema.Unknown));
 const encodeJsonLine = Schema.encodeSync(Schema.fromJsonString(Schema.Unknown));
@@ -88,10 +92,18 @@ it.effect("puts linked source control context in the Pi thread title prompt", ()
   }),
 );
 
-/** `pi` behind a `prime-agent` binary that answers `--version` and `--help` as given. */
+/**
+ * `pi` behind a `prime-agent` binary that answers `--version`, `--help` and
+ * `--capabilities` as given.
+ */
 const primeAgentCli = (
   pi: { readonly spawner: ChildProcessSpawner.ChildProcessSpawner["Service"] },
-  cli: { readonly version: string; readonly help: string; readonly helpExitCode: number },
+  cli: {
+    readonly version: string;
+    readonly help: string;
+    readonly helpExitCode: number;
+    readonly capabilities: string;
+  },
 ) => {
   const spawned: Array<ReadonlyArray<string>> = [];
   const output = (text: string, exitCode: number) =>
@@ -112,6 +124,7 @@ const primeAgentCli = (
     const args = ChildProcess.isStandardCommand(command) ? command.args : [];
     if (args.includes("--version")) return Effect.succeed(output(`${cli.version}\n`, 0));
     if (args.includes("--help")) return Effect.succeed(output(cli.help, cli.helpExitCode));
+    if (args.includes("--capabilities")) return Effect.succeed(output(cli.capabilities, 0));
     spawned.push(args);
     return pi.spawner.spawn(command);
   });
@@ -121,12 +134,22 @@ const primeAgentCli = (
 it.effect.each([
   {
     name: "the 0.10 fork, which cannot turn its tools off",
-    cli: { version: "0.10.0+t3fork.1", help: PRIME_AGENT_FORK_HELP, helpExitCode: 0 },
+    cli: {
+      version: "0.10.0",
+      help: PRIME_AGENT_FORK_HELP,
+      helpExitCode: 0,
+      capabilities: PRIME_AGENT_FORK_CAPABILITIES,
+    },
     detail: "tools",
   },
   {
     name: "a binary whose flavor T3 cannot tell",
-    cli: { version: "0.9.8", help: "", helpExitCode: 1 },
+    cli: {
+      version: "0.9.8",
+      help: "",
+      helpExitCode: 1,
+      capabilities: PRIME_AGENT_098_CAPABILITIES.stdout,
+    },
     detail: "prime-agent",
   },
 ])("refuses Prime Agent text generation on $name", ({ cli, detail }) =>

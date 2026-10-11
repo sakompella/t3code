@@ -2,6 +2,7 @@
  * `prime-agent --help` as each Prime Agent CLI prints it, captured on
  * 2026-10-11: 0.9.8 (TypeScript) on the Mac and the 0.10 fork's slice-2 build
  * on the VM. The fork has no extensions, so its help lists no `--extension`.
+ * Below them, what each CLI does with `--capabilities`.
  */
 export const PRIME_AGENT_098_HELP = `prime-agent - AI coding assistant with a Python REPL tool
 
@@ -176,3 +177,26 @@ Commands:
 
 Run "prime-agent help <command>" for command details.
 `;
+
+/**
+ * `prime-agent --capabilities` from the 0.10 fork at Prime commit `b514fa587`
+ * (slice 4), exactly as it prints it: one JSON line, exit 0.
+ */
+export const PRIME_AGENT_FORK_CAPABILITIES = `{"fork":"t3fork","contract":1,"version":"0.10.0","rpc":["prompt","steer","follow_up","abort","new_session","switch_session","get_state","set_model","cycle_model","get_available_models","set_thinking_level","cycle_thinking_level","set_steering_mode","set_follow_up_mode","compact","refine","set_auto_compaction","set_auto_retry","abort_retry","bash","abort_bash","get_session_stats","export_html","fork","navigate_tree","clone","get_fork_messages","get_last_assistant_text","set_session_name","get_messages","get_commands","get_rlm_children","send_message","agent_messages_status","agent_messages_pause","agent_messages_resume","agent_messages_clear","list_schedules","add_schedule","cancel_schedule","list_heartbeats","get_heartbeat","set_heartbeat","update_heartbeat","manage_heartbeat","observe","unobserve"]}\n`;
+
+/** The slice-4 capabilities line with some fields replaced, for contract checks. */
+export const forkCapabilitiesWith = (fields: Record<string, unknown>): string =>
+  `${JSON.stringify({ ...JSON.parse(PRIME_AGENT_FORK_CAPABILITIES), ...fields })}\n`;
+
+/** Stock Prime Agent 0.10 and fork builds before slice 4 refuse the flag. */
+export const STOCK_PRIME_AGENT_010_CAPABILITIES = {
+  stderr: "Error: Unknown option: --capabilities\n",
+  exitCode: 1,
+};
+
+/**
+ * What 0.9.8 does with `--capabilities`, checked on the Mac: it takes an
+ * unknown long flag as an extension flag, runs print mode on the empty
+ * stdin, and exits 0 without output.
+ */
+export const PRIME_AGENT_098_CAPABILITIES = { stdout: "", exitCode: 0 };
