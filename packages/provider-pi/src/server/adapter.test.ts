@@ -60,6 +60,7 @@ import {
   PRIME_AGENT_FORK_CHILD_WAKE_RECORDS,
   PRIME_AGENT_FORK_OBSERVED_MESSAGES,
 } from "./primeAgentFork.testkit.ts";
+import { PRIME_AGENT_098_HELP, PRIME_AGENT_FORK_HELP } from "./primeAgentHelp.testkit.ts";
 
 const layerTest = Layer.mergeAll(
   NodeServices.layer,
@@ -134,6 +135,8 @@ interface FakePi {
   };
   /** What a `--version` run of the fake binary prints from now on. */
   readonly setVersion: (version: string) => void;
+  /** What a `--help` run of the fake binary prints, and its exit code, from now on. */
+  readonly setHelp: (help: string, exitCode?: number) => void;
 }
 
 /**
@@ -294,22 +297,28 @@ const makeFakePi: Effect.Effect<FakePi> = Effect.gen(function* () {
     env: {},
   };
   let version = "0.9.8";
+  let help = { output: PRIME_AGENT_098_HELP, exitCode: 0 };
+  const cliOutput = (output: string, exitCode: number) =>
+    ChildProcessSpawner.makeHandle({
+      pid: ChildProcessSpawner.ProcessId(FAKE_PID),
+      exitCode: Effect.succeed(ChildProcessSpawner.ExitCode(exitCode)),
+      isRunning: Effect.succeed(false),
+      kill: () => Effect.void,
+      unref: Effect.succeed(Effect.void),
+      stdin: Sink.drain,
+      stdout: Stream.succeed(new TextEncoder().encode(output)),
+      stderr: Stream.empty,
+      all: Stream.empty,
+      getInputFd: () => Sink.drain,
+      getOutputFd: () => Stream.empty,
+    });
   const spawner = ChildProcessSpawner.make((command) =>
     Effect.sync(() => {
       if (ChildProcess.isStandardCommand(command) && command.args.includes("--version")) {
-        return ChildProcessSpawner.makeHandle({
-          pid: ChildProcessSpawner.ProcessId(FAKE_PID),
-          exitCode: Effect.succeed(ChildProcessSpawner.ExitCode(0)),
-          isRunning: Effect.succeed(false),
-          kill: () => Effect.void,
-          unref: Effect.succeed(Effect.void),
-          stdin: Sink.drain,
-          stdout: Stream.succeed(new TextEncoder().encode(`${version}\n`)),
-          stderr: Stream.empty,
-          all: Stream.empty,
-          getInputFd: () => Sink.drain,
-          getOutputFd: () => Stream.empty,
-        });
+        return cliOutput(`${version}\n`, 0);
+      }
+      if (ChildProcess.isStandardCommand(command) && command.args.includes("--help")) {
+        return cliOutput(help.output, help.exitCode);
       }
       if (ChildProcess.isStandardCommand(command)) {
         lastSpawn = {
@@ -403,6 +412,9 @@ const makeFakePi: Effect.Effect<FakePi> = Effect.gen(function* () {
     lastSpawn: () => lastSpawn,
     setVersion: (next) => {
       version = next;
+    },
+    setHelp: (output, exitCode = 0) => {
+      help = { output, exitCode };
     },
   } satisfies FakePi;
 });
@@ -10800,15 +10812,21 @@ describe("PiAdapterV2 reaching T3 through the kernel's MCP client", () => {
 });
 
 describe("PiAdapterV2 on the Prime Agent 0.10 fork", () => {
+  const FORK_CLI = { version: "0.10.0", help: PRIME_AGENT_FORK_HELP, helpExitCode: 0 };
+
   /**
    * Opens a session through the Prime Agent driver, as production does, on a
-   * binary whose `--version` reports `version`. A `--fork` helper process goes
-   * to `forkFake` when one is given.
+   * binary that answers `--version` and `--help` as `cli` says (the 0.10 fork
+   * by default). A `--fork` helper process goes to `forkFake` when one is given.
    */
   const openPrimeAgent = Effect.fnUntraced(function* (
     fake: FakePi,
     options: {
-      readonly version?: string;
+      readonly cli?: {
+        readonly version: string;
+        readonly help: string;
+        readonly helpExitCode: number;
+      };
       readonly forkFake?: FakePi;
       readonly runtimeMode?: ProviderAdapter.ProviderAdapterV2RuntimePolicy["runtimeMode"];
       readonly environment?: NodeJS.ProcessEnv;
@@ -10816,8 +10834,11 @@ describe("PiAdapterV2 on the Prime Agent 0.10 fork", () => {
   ) {
     const offers =
       yield* Queue.unbounded<ProviderContinuationRequests.ProviderContinuationRequest>();
-    fake.setVersion(options.version ?? "0.10.0");
-    options.forkFake?.setVersion(options.version ?? "0.10.0");
+    const cli = options.cli ?? FORK_CLI;
+    for (const binary of [fake, options.forkFake]) {
+      binary?.setVersion(cli.version);
+      binary?.setHelp(cli.help, cli.helpExitCode);
+    }
     const { forkFake } = options;
     const spawner =
       forkFake === undefined
@@ -10868,16 +10889,38 @@ describe("PiAdapterV2 on the Prime Agent 0.10 fork", () => {
   });
 
   it.effect.each([
-    { version: "0.9.8", loadsExtension: true },
-    { version: "0.10.0", loadsExtension: false },
-    { version: "0.10.1-beta.3", loadsExtension: false },
-  ])("launches $version with T3's extension: $loadsExtension", ({ version, loadsExtension }) =>
+    { version: "0.9.8", help: PRIME_AGENT_098_HELP, loadsExtension: true },
+    { version: "0.10.0", help: PRIME_AGENT_FORK_HELP, loadsExtension: false },
+    { version: "0.10.1-beta.3", help: PRIME_AGENT_FORK_HELP, loadsExtension: false },
+    { version: "0.10", help: PRIME_AGENT_FORK_HELP, loadsExtension: false },
+    { version: "nightly", help: PRIME_AGENT_FORK_HELP, loadsExtension: false },
+  ])(
+    "launches $version with T3's extension: $loadsExtension",
+    ({ version, help, loadsExtension }) =>
+      Effect.gen(function* () {
+        const fake = yield* makeFakePi;
+        yield* openPrimeAgent(fake, { cli: { version, help, helpExitCode: 0 } });
+        const { args } = fake.lastSpawn();
+        assert.deepEqual(args.slice(0, 2), ["--mode", "rpc"]);
+        assert.equal(args.includes("--extension"), loadsExtension);
+      }).pipe(Effect.scoped, Effect.provide(layerTest)),
+  );
+
+  it.effect.each([
+    { name: "a help run that fails", help: "", helpExitCode: 1 },
+    {
+      name: "help that names no Prime Agent options",
+      help: "usage: tool [args]\n",
+      helpExitCode: 0,
+    },
+  ])("does not launch a binary whose flavor it cannot tell, from $name", ({ help, helpExitCode }) =>
     Effect.gen(function* () {
       const fake = yield* makeFakePi;
-      yield* openPrimeAgent(fake, { version });
-      const { args } = fake.lastSpawn();
-      assert.deepEqual(args.slice(0, 2), ["--mode", "rpc"]);
-      assert.equal(args.includes("--extension"), loadsExtension);
+      const error = yield* openPrimeAgent(fake, {
+        cli: { version: "0.9.8", help, helpExitCode },
+      }).pipe(Effect.flip);
+      assert.include(String(error.message), "prime-agent");
+      assert.deepEqual(fake.lastSpawn().args, [], "no RPC process may start");
     }).pipe(Effect.scoped, Effect.provide(layerTest)),
   );
 
