@@ -1,5 +1,6 @@
 import { backgroundWorkHoldsCompletion } from "@t3tools/shared/orchestrationV2PendingBackgroundWork";
 import { resolveProjectSettings } from "@t3tools/shared/projectSettings";
+import { isSnoozeActive } from "@t3tools/shared/threadSnooze";
 import { visibleThreadPullRequests } from "@t3tools/shared/threadPullRequests";
 import {
   CommandId,
@@ -173,35 +174,20 @@ export function isAutoSettlementCandidate(
   if (threadHasQueuedTurnStart(thread, nowMs)) return false;
   // A snoozed thread keeps its stronger statement until the wake time passes,
   // whatever the thread did meanwhile; nothing wakes it early.
-  const snoozedUntilMs = toMillis(thread.snoozedUntil);
-  return snoozedUntilMs === null || snoozedUntilMs <= nowMs;
+  return !isSnoozed(thread, nowMs);
 }
 
 /**
- * Server twin of the client's `effectiveSnoozed`, so agents and the sidebar agree on what is
- * snoozed.
+ * Whether a thread is parked on its snooze: the wake time is still ahead.
+ * Strict like the clients' `effectiveSnoozed` (both use `isSnoozeActive`), so
+ * agents and the sidebar agree. This overrides upstream, which woke a thread
+ * early on a pending request, a failure or a completed run.
  */
 export function isSnoozed(
-  thread: Pick<
-    ProjectionStore.ProjectionSettlementCandidate,
-    "snoozedUntil" | "snoozedAt" | "latestRunCompletedAt" | "status" | "pendingRuntimeRequest"
-  >,
+  thread: Pick<ProjectionStore.ProjectionSettlementCandidate, "snoozedUntil">,
   nowMs: number,
 ): boolean {
-  const snoozedUntilMs = toMillis(thread.snoozedUntil);
-  if (snoozedUntilMs === null || snoozedUntilMs <= nowMs) return false;
-  if (thread.pendingRuntimeRequest !== null) return false;
-  const snoozedAtMs = toMillis(thread.snoozedAt);
-  const completedAtMs = toMillis(thread.latestRunCompletedAt);
-  const wokeOnError =
-    thread.status === "failed" &&
-    (snoozedAtMs === null || (completedAtMs !== null && completedAtMs > snoozedAtMs));
-  const wokeOnCompletion =
-    thread.status === "completed" &&
-    snoozedAtMs !== null &&
-    completedAtMs !== null &&
-    completedAtMs > snoozedAtMs;
-  return !wokeOnError && !wokeOnCompletion;
+  return isSnoozeActive(toMillis(thread.snoozedUntil), nowMs);
 }
 
 export function resolveAutoSettlementAt(input: {

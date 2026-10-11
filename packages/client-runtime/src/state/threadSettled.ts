@@ -1,4 +1,5 @@
 // @effect-diagnostics globalDate:off -- UI snooze presets use local calendar boundaries and Intl labels.
+import { isSnoozeActive } from "@t3tools/shared/threadSnooze";
 import * as DateTime from "effect/DateTime";
 
 import type { PendingSubagentRequest } from "./models.ts";
@@ -146,9 +147,7 @@ export function effectiveSnoozed(
   options: { readonly now: string },
 ): boolean {
   if (shell.snoozedUntil == null) return false;
-  const wakeAtMs = Date.parse(shell.snoozedUntil);
-  if (Number.isNaN(wakeAtMs)) return false;
-  return wakeAtMs > Date.parse(options.now);
+  return isSnoozeActive(Date.parse(shell.snoozedUntil), Date.parse(options.now));
 }
 
 /**
