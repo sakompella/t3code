@@ -140,6 +140,8 @@ export interface ActivePiTurn {
   failure: ReturnType<typeof makeProviderFailure> | null;
   /** Native retry can recover its work without accepting a rejected joining prompt. */
   rejectedPromptFailure: ReturnType<typeof makeProviderFailure> | null;
+  /** The agent refused the turn's prompt, so nothing of it is in the session tree. */
+  promptRejected: boolean;
   /** Session-tree refs read just before Stop terminates Pi, when no read is possible later. */
   stopTreeRefs?: PiTurnTreeRefs | null;
   /**
