@@ -10026,11 +10026,6 @@ describe("PiAdapterV2 with the Prime Agent flavor", () => {
 
     it.effect.each([
       {
-        name: "forks before the first user entry after the target",
-        branch: ["u1", "u2", "u3"],
-        forkedAt: ["u2"],
-      },
-      {
         name: "forks the whole session when no user entry follows the target",
         branch: ["u1"],
         forkedAt: [],
@@ -10057,10 +10052,10 @@ describe("PiAdapterV2 with the Prime Agent flavor", () => {
       }).pipe(Effect.scoped, Effect.provide(layerTest)),
     );
 
-    it.effect("still fails when the target's own entry is not on the forked session's branch", () =>
+    it.effect("refuses ambiguous later user entries that may be steers inside the target", () =>
       Effect.gen(function* () {
         const { runtime, source, forkFake } = yield* openForkable;
-        forkFake.queueForkMessages({ messages: [{ entryId: "elsewhere" }] });
+        forkFake.queueForkMessages({ messages: [{ entryId: "u1" }, { entryId: "steer" }] });
         const turns = [
           providerTurn(source, 1, strongRef("u1")),
           providerTurn(source, 2, placeholderRef(2)),
@@ -10104,14 +10099,14 @@ describe("PiAdapterV2 with the Prime Agent flavor", () => {
         }).pipe(Effect.scoped, Effect.provide(layerTest)),
     );
 
-    it.effect("rolls back at the first user entry after the target the live session lists", () =>
+    it.effect("keeps the complete target when rejected turns left no later user entry", () =>
       Effect.gen(function* () {
         const { runtime, source, fake } = yield* openForkable;
         const turns = [
           providerTurn(source, 1, strongRef("u1")),
           providerTurn(source, 2, placeholderRef(2)),
         ];
-        fake.queueForkMessages({ messages: [{ entryId: "u1" }, { entryId: "u2" }] });
+        fake.queueForkMessages({ messages: [{ entryId: "u1" }] });
 
         yield* runtime.rollbackThread({
           providerThread: source,
@@ -10124,7 +10119,7 @@ describe("PiAdapterV2 with the Prime Agent flavor", () => {
           providerThreadTurns: turns,
         });
 
-        assert.deepEqual(forkEntries(fake), ["u2"]);
+        assert.deepEqual(forkEntries(fake), []);
       }).pipe(Effect.scoped, Effect.provide(layerTest)),
     );
   });
@@ -10132,18 +10127,18 @@ describe("PiAdapterV2 with the Prime Agent flavor", () => {
   describe("when the Prime Agent daemon loses the session its process is bound to", () => {
     const LOST_SESSION_ID = "e8c7fdcbd6f2";
 
-    it.effect("keeps the process when the daemon does not know a different session", () =>
+    it.effect("keeps the process for unrelated prompt failures", () =>
       Effect.gen(function* () {
         const fake = yield* makeFakePi;
         fake.queueState({ sessionId: LOST_SESSION_ID });
         const session = yield* openPrimeThread(fake);
         yield* startTurn(session.runtime, session.providerThread);
         yield* fake.takeRequest("prompt");
-        yield* rejectPrompt(fake, "Unknown active session: 0123456789ab");
+        yield* rejectPrompt(fake, "Prompt exceeded context limit");
         const terminal = yield* session.takeEvent((event) => event.type === "turn.terminal");
         assert.isTrue(
           terminal.type === "turn.terminal" &&
-            terminal.failure?.message === "Unknown active session: 0123456789ab",
+            terminal.failure?.message === "Prompt exceeded context limit",
         );
 
         // The same process takes the next turn.
@@ -10168,7 +10163,7 @@ describe("PiAdapterV2 with the Prime Agent flavor", () => {
     it.effect("retires the process when the daemon lost its session, and the thread resumes", () =>
       Effect.gen(function* () {
         const fake = yield* makeFakePi;
-        fake.queueState({ sessionId: LOST_SESSION_ID });
+        fake.queueState({ sessionId: "persisted-session-uuid" });
         const session = yield* openPrimeThread(fake);
         yield* startTurn(session.runtime, session.providerThread);
         yield* fake.takeRequest("prompt");
