@@ -9926,6 +9926,197 @@ describe("PiAdapterV2 with the Prime Agent flavor", () => {
     }).pipe(Effect.scoped, Effect.provide(layerTest)),
   );
 
+  /** Prime Agent refuses a prompt in an id-less response, after the request was sent. */
+  const rejectPrompt = (fake: FakePi, error: string) =>
+    fake.emit({ type: "response", command: "prompt", success: false, error });
+
+  it.effect("settles a turn whose prompt was rejected without a native ref", () =>
+    Effect.gen(function* () {
+      const fake = yield* makeFakePi;
+      const session = yield* openPrimeThread(fake);
+      yield* startTurn(session.runtime, session.providerThread);
+      yield* fake.takeRequest("prompt");
+      const started = yield* session.takeEvent(
+        (event) =>
+          event.type === "provider_turn.updated" && event.providerTurn.status === "running",
+      );
+      yield* rejectPrompt(fake, "Prompt was refused");
+      const failed = yield* session.takeEvent(
+        (event) => event.type === "provider_turn.updated" && event.providerTurn.status === "failed",
+      );
+
+      assert.isTrue(started.type === "provider_turn.updated");
+      assert.isTrue(failed.type === "provider_turn.updated");
+      if (started.type !== "provider_turn.updated" || failed.type !== "provider_turn.updated") {
+        return;
+      }
+      // The placeholder is the only ref a turn has before its entry is known.
+      assert.equal(started.providerTurn.nativeTurnRef?.strength, "weak");
+      assert.isNull(failed.providerTurn.nativeTurnRef);
+    }).pipe(Effect.scoped, Effect.provide(layerTest)),
+  );
+
+  describe("a fork or rollback past turns whose prompts Prime rejected", () => {
+    const FORK_FILE = "/fake/forked.jsonl";
+    const providerTurn = (
+      source: OrchestrationV2ProviderThread,
+      ordinal: number,
+      nativeTurnRef: OrchestrationV2ProviderTurn["nativeTurnRef"],
+    ): OrchestrationV2ProviderTurn => ({
+      id: ProviderTurnId.make(`turn-${ordinal}`),
+      providerThreadId: source.id,
+      nodeId: NodeId.make(`node-${ordinal}`),
+      runAttemptId: null,
+      nativeTurnRef,
+      ordinal,
+      status: "completed",
+      startedAt: null,
+      completedAt: null,
+    });
+    const strongRef = (nativeId: string) => ({
+      driver: PRIME_AGENT_FLAVOR.driverKind,
+      nativeId,
+      strength: "strong" as const,
+    });
+    /** What a turn that failed before its prompt landed was persisted with. */
+    const placeholderRef = (ordinal: number) => ({
+      driver: PRIME_AGENT_FLAVOR.driverKind,
+      nativeId: `provider-thread:native-thread:pending:attempt:run-attempt:ordinal:${ordinal}:attempt:1`,
+      strength: "weak" as const,
+    });
+
+    const openForkable = Effect.gen(function* () {
+      const fake = yield* makeFakePi;
+      const forkFake = yield* makeFakePi;
+      const { runtime } = yield* openRuntime(
+        fake,
+        "default",
+        THREAD_ID,
+        SESSION_ID,
+        forkFake,
+        PRIME_AGENT_FLAVOR,
+      );
+      const source = yield* runtime.ensureThread({
+        threadId: THREAD_ID,
+        modelSelection: modelSelection("default"),
+        runtimePolicy,
+      });
+      forkFake.queueState({ sessionFile: FORK_FILE });
+      fake.queueState({ sessionFile: FORK_FILE });
+      return { runtime, source, fake, forkFake };
+    });
+
+    const forkEntries = (fake: FakePi) =>
+      fake
+        .allRequests()
+        .filter((request) => request["type"] === "fork")
+        .map((request) => request["entryId"]);
+
+    it.effect.each([
+      {
+        name: "forks before the first user entry after the target",
+        branch: ["u1", "u2", "u3"],
+        forkedAt: ["u2"],
+      },
+      {
+        name: "forks the whole session when no user entry follows the target",
+        branch: ["u1"],
+        forkedAt: [],
+      },
+    ])("$name", ({ branch, forkedAt }) =>
+      Effect.gen(function* () {
+        const { runtime, source, forkFake } = yield* openForkable;
+        forkFake.queueForkMessages({ messages: branch.map((entryId) => ({ entryId })) });
+        const turns = [
+          providerTurn(source, 1, strongRef("u1")),
+          providerTurn(source, 2, placeholderRef(2)),
+          providerTurn(source, 3, placeholderRef(3)),
+        ];
+
+        const forked = yield* runtime.forkThread({
+          sourceProviderTurns: turns,
+          sourceProviderThread: source,
+          providerTurnId: turns[0]!.id,
+          targetThreadId: ThreadId.make("fork-target"),
+        });
+
+        assert.equal(forked.nativeThreadRef?.nativeId, FORK_FILE);
+        assert.deepEqual(forkEntries(forkFake), forkedAt);
+      }).pipe(Effect.scoped, Effect.provide(layerTest)),
+    );
+
+    it.effect("still fails when the target's own entry is not on the forked session's branch", () =>
+      Effect.gen(function* () {
+        const { runtime, source, forkFake } = yield* openForkable;
+        forkFake.queueForkMessages({ messages: [{ entryId: "elsewhere" }] });
+        const turns = [
+          providerTurn(source, 1, strongRef("u1")),
+          providerTurn(source, 2, placeholderRef(2)),
+        ];
+
+        const error = yield* runtime
+          .forkThread({
+            sourceProviderTurns: turns,
+            sourceProviderThread: source,
+            providerTurnId: turns[0]!.id,
+            targetThreadId: ThreadId.make("fork-target"),
+          })
+          .pipe(Effect.flip);
+
+        assert.include(String(error.cause), "no captured session-tree entry");
+        assert.deepEqual(forkEntries(forkFake), []);
+      }).pipe(Effect.scoped, Effect.provide(layerTest)),
+    );
+
+    it.effect(
+      "still fails without starting a process when the target's own ref is a placeholder",
+      () =>
+        Effect.gen(function* () {
+          const { runtime, source, forkFake } = yield* openForkable;
+          const turns = [
+            providerTurn(source, 1, placeholderRef(1)),
+            providerTurn(source, 2, placeholderRef(2)),
+          ];
+
+          const error = yield* runtime
+            .forkThread({
+              sourceProviderTurns: turns,
+              sourceProviderThread: source,
+              providerTurnId: turns[0]!.id,
+              targetThreadId: ThreadId.make("fork-target"),
+            })
+            .pipe(Effect.flip);
+
+          assert.include(String(error.cause), "no captured session-tree entry");
+          assert.deepEqual(forkFake.allRequests(), []);
+        }).pipe(Effect.scoped, Effect.provide(layerTest)),
+    );
+
+    it.effect("rolls back at the first user entry after the target the live session lists", () =>
+      Effect.gen(function* () {
+        const { runtime, source, fake } = yield* openForkable;
+        const turns = [
+          providerTurn(source, 1, strongRef("u1")),
+          providerTurn(source, 2, placeholderRef(2)),
+        ];
+        fake.queueForkMessages({ messages: [{ entryId: "u1" }, { entryId: "u2" }] });
+
+        yield* runtime.rollbackThread({
+          providerThread: source,
+          target: {
+            type: "provider_turn",
+            checkpointId: CheckpointId.make("checkpoint-1"),
+            appRunOrdinal: 1,
+            providerTurn: turns[0]!,
+          },
+          providerThreadTurns: turns,
+        });
+
+        assert.deepEqual(forkEntries(fake), ["u2"]);
+      }).pipe(Effect.scoped, Effect.provide(layerTest)),
+    );
+  });
+
   const T3_COMMANDS = { commands: [{ name: "t3-navigate-tree", source: "extension" }] };
 
   /** Answers the next in-place rollback command the way T3's extension reports it. */

@@ -1866,8 +1866,11 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
        * `None` when the read failed or a listed message has no entry id, since
        * such a listing cannot show which entries are on the branch.
        */
-      const readUserEntryIds = (timeoutMs = PI_REQUEST_TIMEOUT_MS) =>
-        request({ type: "get_fork_messages" }, timeoutMs).pipe(
+      const readUserEntryIds = (
+        timeoutMs = PI_REQUEST_TIMEOUT_MS,
+        send: PiRpcConnection["request"] = request,
+      ) =>
+        send({ type: "get_fork_messages" }, timeoutMs).pipe(
           Effect.option,
           Effect.map(
             Option.flatMap((data): Option.Option<ReadonlyArray<string>> => {
@@ -2057,8 +2060,11 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
         const treeRefs =
           turn.stopTreeRefs !== undefined ? turn.stopTreeRefs : yield* captureTurnTreeRefs();
         // A null ref means the turn left nothing on the active branch.
-        const nativeTurnRef =
-          turn.startTurnRef != null ? turn.startTurnRef : treeRefs?.nativeTurnRef;
+        const nativeTurnRef = turn.promptRejected
+          ? null
+          : turn.startTurnRef != null
+            ? turn.startTurnRef
+            : treeRefs?.nativeTurnRef;
         const tokenUsage = processAlive
           ? yield* readTokenUsage(turn.latestCompactionAfterTokens, completedAt)
           : undefined;
@@ -2844,6 +2850,9 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
                 yield* scheduleSettleProbe(failedTurn, true);
               } else {
                 failedTurn.failure = failure;
+                // The prompt was refused outright, so no user entry landed in
+                // the session. A fork or rollback past this turn must skip it.
+                failedTurn.promptRejected = command === "prompt";
                 if (state !== null) yield* finalizeTurn(state);
               }
             }
@@ -3492,6 +3501,7 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
               noticeCount: 0,
               failure: null,
               rejectedPromptFailure: null,
+              promptRejected: false,
             };
             // Only the install/send/start-event boundary excludes the event
             // pump. Earlier correlated requests must leave the pump free so
@@ -3904,7 +3914,15 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
             if (pendingWake !== null) {
               return yield* protocolError("Cannot roll back while native Pi work awaits a turn");
             }
-            const forkEntryId = piRollbackForkEntry(rollbackInput);
+            let forkEntryId = piRollbackForkEntry(rollbackInput);
+            if (forkEntryId === undefined && flavor.sessionTree === "fork_messages") {
+              // A failed turn's placeholder ref marks no entry; the session's
+              // own tree says where the target ends.
+              forkEntryId = piBoundaryAfterTarget(
+                rollbackInput.target,
+                Option.getOrUndefined(yield* readUserEntryIds()),
+              );
+            }
             if (forkEntryId === null) {
               return piThreadSnapshot(state.providerThread);
             }
@@ -4073,7 +4091,17 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
                     target: { type: "provider_turn", providerTurn: target },
                     providerThreadTurns: sourceTurns,
                   });
-            if (beforeEntry === undefined) {
+            // A weak boundary is a failed turn's placeholder ref. The forked
+            // session's own tree then says where the target turn ends, but only
+            // when the target itself is a strong ref to look up.
+            const weakBoundaryTarget =
+              beforeEntry === undefined &&
+              flavor.sessionTree === "fork_messages" &&
+              target !== undefined &&
+              piStrongEntryId(target.nativeTurnRef) !== undefined
+                ? target
+                : undefined;
+            if (beforeEntry === undefined && weakBoundaryTarget === undefined) {
               return yield* protocolError(
                 `${name} fork boundary has no captured session-tree entry`,
               );
@@ -4101,10 +4129,24 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
                   Effect.ignore,
                   Effect.forkScoped,
                 );
-                if (beforeEntry !== null) {
+                const forkBefore =
+                  weakBoundaryTarget === undefined
+                    ? beforeEntry
+                    : piBoundaryAfterTarget(
+                        { type: "provider_turn", providerTurn: weakBoundaryTarget },
+                        Option.getOrUndefined(
+                          yield* readUserEntryIds(PI_REQUEST_TIMEOUT_MS, forkConnection.request),
+                        ),
+                      );
+                if (forkBefore === undefined) {
+                  return yield* protocolError(
+                    `${name} fork boundary has no captured session-tree entry`,
+                  );
+                }
+                if (forkBefore !== null) {
                   const result = yield* forkConnection.request({
                     type: "fork",
-                    entryId: beforeEntry,
+                    entryId: forkBefore,
                   });
                   if (recordField(result, "cancelled") === true) {
                     return yield* protocolError("A Pi extension cancelled the session fork");
@@ -4236,6 +4278,30 @@ function piRollbackForkEntry(input: {
   if (ref == null) return null;
   if (ref.strength !== "strong" || ref.nativeId === null) return undefined;
   return ref.nativeId;
+}
+
+function piStrongEntryId(ref: OrchestrationV2ProviderRef | null | undefined): string | undefined {
+  return ref?.strength === "strong" && ref.nativeId !== null ? ref.nativeId : undefined;
+}
+
+/**
+ * Resolve a rollback boundary from the active branch's user entry ids, oldest
+ * first, when the turns after the target hold only placeholder refs (they
+ * failed before their prompt landed). The boundary is the first user entry
+ * after the target's own, or `null` when none follows. Returns `undefined`
+ * when the listing failed, or the target's own entry is not a strong ref on
+ * the branch. A steer inside the target turn is also a user entry, so a
+ * boundary found this way can fall inside a target that took steers.
+ */
+function piBoundaryAfterTarget(
+  target: Parameters<typeof piRollbackForkEntry>[0]["target"],
+  userEntryIds: ReadonlyArray<string> | undefined,
+): string | null | undefined {
+  if (userEntryIds === undefined) return undefined;
+  if (target.type === "thread_start") return userEntryIds[0] ?? null;
+  const targetEntryId = piStrongEntryId(target.providerTurn.nativeTurnRef);
+  const targetIndex = targetEntryId === undefined ? -1 : userEntryIds.indexOf(targetEntryId);
+  return targetIndex < 0 ? undefined : (userEntryIds[targetIndex + 1] ?? null);
 }
 
 function piSubagentOutput(result: unknown): string {
