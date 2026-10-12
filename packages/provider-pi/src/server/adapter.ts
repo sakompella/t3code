@@ -724,11 +724,8 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
       let cacheMissState = emptyCacheMissState;
       let registrationAttempted = false;
       let lastNativeThreadId: string | null = null;
-      /**
-       * Prime Agent's id for the session the process is bound to. It keys the
-       * session's heartbeats and names the session in the daemon's errors.
-       */
-      let activeSessionId: string | null = null;
+      /** Prime Agent's persisted session id; it keys the session's heartbeats. */
+      let heartbeatSessionId: string | null = null;
       let stopRequested = false;
       /** The daemon reported it lost the session; `retireLostDaemonSession` set `stopRequested` for it. */
       let daemonLostSession = false;
@@ -836,13 +833,13 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
 
       const lostDaemonSessionDetail = `${name}'s daemon lost this session. T3 is restarting it; send your message again`;
       /**
-       * Whether a failed response says the daemon no longer hosts the session
-       * this process is bound to. A child session the daemon dropped names its
-       * own id, which is not the bound one.
+       * These RPC requests address the connection's bound session. Prime's
+       * error names its daemon id, which differs from get_state.sessionId.
+       * Child tool failures arrive as tool events, not failed RPC responses.
        */
       const isLostDaemonSession = (errorText: unknown) => {
         const id = unknownActiveSessionId(errorText);
-        return flavor.restartsOnLostDaemonSession && id !== undefined && id === activeSessionId;
+        return flavor.restartsOnLostDaemonSession && id !== undefined;
       };
       /**
        * The daemon lost the session but the process stays alive, so every
@@ -884,7 +881,7 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
        * the agent cannot say. A failed read keeps what clients already show.
        */
       const readHeartbeats = () => {
-        const sessionId = activeSessionId;
+        const sessionId = heartbeatSessionId;
         if (!flavor.heartbeats || sessionId === null) return Effect.succeed(undefined);
         return request({ type: "list_heartbeats" }, 2_000).pipe(
           Effect.map((listing) => primeAgentHeartbeats(listing, sessionId)),
@@ -3198,7 +3195,7 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
         }
         lastNativeThreadId = nativeId;
         liveSession = nativeId;
-        activeSessionId = recordString(stateData, "sessionId") ?? null;
+        heartbeatSessionId = recordString(stateData, "sessionId") ?? null;
         // A persisted list says what ran before this process; read it afresh.
         const heartbeats = flavor.heartbeats ? ((yield* readHeartbeats()) ?? []) : undefined;
         const createdAt = yield* DateTime.now;
@@ -4344,13 +4341,9 @@ function piStrongEntryId(ref: OrchestrationV2ProviderRef | null | undefined): st
 }
 
 /**
- * Resolve a rollback boundary from the active branch's user entry ids, oldest
- * first, when the turns after the target hold only placeholder refs (they
- * failed before their prompt landed). The boundary is the first user entry
- * after the target's own, or `null` when none follows. Returns `undefined`
- * when the listing failed, or the target's own entry is not a strong ref on
- * the branch. A steer inside the target turn is also a user entry, so a
- * boundary found this way can fall inside a target that took steers.
+ * Legacy rejected turns have weak refs, so the session must prove the target
+ * is already its last user entry. A later user entry could be a steer inside
+ * the target turn; cutting there would silently discard part of that turn.
  */
 function piBoundaryAfterTarget(
   target: Parameters<typeof piRollbackForkEntry>[0]["target"],
@@ -4359,8 +4352,7 @@ function piBoundaryAfterTarget(
   if (userEntryIds === undefined) return undefined;
   if (target.type === "thread_start") return userEntryIds[0] ?? null;
   const targetEntryId = piStrongEntryId(target.providerTurn.nativeTurnRef);
-  const targetIndex = targetEntryId === undefined ? -1 : userEntryIds.indexOf(targetEntryId);
-  return targetIndex < 0 ? undefined : (userEntryIds[targetIndex + 1] ?? null);
+  return targetEntryId !== undefined && userEntryIds.at(-1) === targetEntryId ? null : undefined;
 }
 
 function piSubagentOutput(result: unknown): string {
