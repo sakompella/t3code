@@ -80,6 +80,20 @@ export function isPiSessionLeaseContention(error: unknown): boolean {
   );
 }
 
+const UNKNOWN_ACTIVE_SESSION_PREFIX = "Unknown active session: ";
+
+/**
+ * The active session id a Prime Agent daemon answers a request with when it
+ * does not host that session, read from the failed response's error text.
+ */
+export function unknownActiveSessionId(errorText: unknown): string | undefined {
+  if (typeof errorText !== "string" || !errorText.startsWith(UNKNOWN_ACTIVE_SESSION_PREFIX)) {
+    return undefined;
+  }
+  const id = errorText.slice(UNKNOWN_ACTIVE_SESSION_PREFIX.length).trim();
+  return id.length === 0 ? undefined : id;
+}
+
 export class PiRpcRecordTooLargeError extends Schema.TaggedError<PiRpcRecordTooLargeError>()(
   "PiRpcRecordTooLargeError",
   {

@@ -73,9 +73,10 @@ import {
   piRecordNumber as recordNumber,
   piRecordString as recordString,
   piStateIsIdle,
+  PiRpcError,
   type PiRpcConnection,
-  type PiRpcError,
   type PiRpcRecord,
+  unknownActiveSessionId,
 } from "./rpc.ts";
 import {
   buildPiRpcLaunch,
@@ -723,9 +724,14 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
       let cacheMissState = emptyCacheMissState;
       let registrationAttempted = false;
       let lastNativeThreadId: string | null = null;
-      /** Prime Agent's id for the open session; it keys the session's heartbeats. */
-      let heartbeatSessionId: string | null = null;
+      /**
+       * Prime Agent's id for the session the process is bound to. It keys the
+       * session's heartbeats and names the session in the daemon's errors.
+       */
+      let activeSessionId: string | null = null;
       let stopRequested = false;
+      /** The daemon reported it lost the session; `retireLostDaemonSession` set `stopRequested` for it. */
+      let daemonLostSession = false;
       let unsolicitedActivityDetected = false;
       let pendingWake: PiWake | null = null;
       let rollbackBarrier: Deferred.Deferred<
@@ -828,15 +834,57 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
         return ordinal;
       };
 
+      const lostDaemonSessionDetail = `${name}'s daemon lost this session. T3 is restarting it; send your message again`;
+      /**
+       * Whether a failed response says the daemon no longer hosts the session
+       * this process is bound to. A child session the daemon dropped names its
+       * own id, which is not the bound one.
+       */
+      const isLostDaemonSession = (errorText: unknown) => {
+        const id = unknownActiveSessionId(errorText);
+        return flavor.restartsOnLostDaemonSession && id !== undefined && id === activeSessionId;
+      };
+      /**
+       * The daemon lost the session but the process stays alive, so every
+       * request through it fails. End it the way Stop does: the session stops
+       * cleanly, and the next turn launches a fresh process on the session
+       * file (see `resumesAtLaunch`), retrying a lease the old worker still holds.
+       */
+      const retireLostDaemonSession = Effect.suspend(() => {
+        if (stopRequested) return Effect.void;
+        daemonLostSession = true;
+        stopRequested = true;
+        return Effect.logWarning(`${name} daemon lost the session this process is bound to`, {
+          providerSessionId: input.providerSessionId,
+        }).pipe(Effect.andThen(connection.terminate), Effect.forkIn(scope), Effect.asVoid);
+      });
+
       const request = (record: PiRpcRecord, timeoutMs = PI_REQUEST_TIMEOUT_MS) =>
-        connection.request(record, timeoutMs);
+        connection.request(record, timeoutMs).pipe(
+          Effect.catchTags({
+            PiRpcError: (error) =>
+              isLostDaemonSession(error.cause)
+                ? retireLostDaemonSession.pipe(
+                    Effect.andThen(
+                      Effect.fail(
+                        new PiRpcError({
+                          operation: error.operation,
+                          detail: lostDaemonSessionDetail,
+                          cause: error.cause,
+                        }),
+                      ),
+                    ),
+                  )
+                : Effect.fail(error),
+          }),
+        );
 
       /**
        * The session's heartbeats, or undefined when the flavor has none or
        * the agent cannot say. A failed read keeps what clients already show.
        */
       const readHeartbeats = () => {
-        const sessionId = heartbeatSessionId;
+        const sessionId = activeSessionId;
         if (!flavor.heartbeats || sessionId === null) return Effect.succeed(undefined);
         return request({ type: "list_heartbeats" }, 2_000).pipe(
           Effect.map((listing) => primeAgentHeartbeats(listing, sessionId)),
@@ -2761,6 +2809,12 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
           }
           case "response": {
             const command = recordString(event, "command");
+            const rejection = event["success"] === false ? recordString(event, "error") : undefined;
+            if (isLostDaemonSession(rejection)) yield* retireLostDaemonSession;
+            const rejectionMessage = (fallback: string) =>
+              isLostDaemonSession(rejection)
+                ? `${lostDaemonSessionDetail}.`
+                : (rejection ?? fallback);
             if (command === "compact") {
               const pendingCompact = pendingCompactResponses.shift();
               const compactTurn =
@@ -2788,7 +2842,7 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
               }
               if (!compactTurn.sawCompaction) {
                 compactTurn.failure = makeProviderFailure({
-                  message: recordString(event, "error") ?? `${name} compact failed.`,
+                  message: rejectionMessage(`${name} compact failed.`),
                   class: "provider_error",
                 });
                 if (state !== null) yield* finalizeTurn(state);
@@ -2841,7 +2895,7 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
                   : null;
             if (failedTurn !== null) {
               const failure = makeProviderFailure({
-                message: recordString(event, "error") ?? `${name} rejected the prompt.`,
+                message: rejectionMessage(`${name} rejected the prompt.`),
                 class: "provider_error",
               });
               if (failedTurn.adoptedWake && command === "prompt") {
@@ -3000,11 +3054,16 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
               if (state?.activeTurn != null) {
                 state.activeTurn.failure = interrupted
                   ? null
-                  : makeProviderFailure({
-                      cause,
-                      message: `${name} process exited unexpectedly.`,
-                      class: "transport_error",
-                    });
+                  : daemonLostSession
+                    ? makeProviderFailure({
+                        message: `${lostDaemonSessionDetail}.`,
+                        class: "provider_error",
+                      })
+                    : makeProviderFailure({
+                        cause,
+                        message: `${name} process exited unexpectedly.`,
+                        class: "transport_error",
+                      });
                 yield* finalizeTurn(state, false);
               } else {
                 yield* cancelPendingPrompts(yield* DateTime.now);
@@ -3139,7 +3198,7 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
         }
         lastNativeThreadId = nativeId;
         liveSession = nativeId;
-        heartbeatSessionId = recordString(stateData, "sessionId") ?? null;
+        activeSessionId = recordString(stateData, "sessionId") ?? null;
         // A persisted list says what ran before this process; read it afresh.
         const heartbeats = flavor.heartbeats ? ((yield* readHeartbeats()) ?? []) : undefined;
         const createdAt = yield* DateTime.now;

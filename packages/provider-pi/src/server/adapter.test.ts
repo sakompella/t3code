@@ -113,6 +113,11 @@ interface FakePi {
   readonly queueForkMessages: (data: unknown) => void;
   /** Make the next queued `get_fork_messages` ack an unsuccessful response. */
   readonly failNextForkMessages: () => void;
+  /**
+   * From now on, fail every request but `get_state` the way a Prime Agent
+   * daemon does once it no longer hosts the process's session.
+   */
+  readonly loseDaemonSession: (activeSessionId: string) => void;
   readonly vetoNextSwitch: () => void;
   /** Refuse the next `count` `switch_session` requests with `message`, as Prime Agent does while another worker holds the lease. */
   readonly rejectNextSwitches: (count: number, message: string) => void;
@@ -185,6 +190,7 @@ const makeFakePi: Effect.Effect<FakePi> = Effect.gen(function* () {
   let deferredStateRequest: PiRpcRecord | undefined;
   let failState = false;
   let vetoSwitch = false;
+  let lostSessionId: string | undefined;
   let rejectedSwitches = { remaining: 0, message: "" };
   let vetoNewSession = false;
   let deferredLifecycle: string | undefined;
@@ -213,6 +219,9 @@ const makeFakePi: Effect.Effect<FakePi> = Effect.gen(function* () {
       command: String(record["type"]),
       success: true,
     };
+    if (lostSessionId !== undefined && record["type"] !== "get_state") {
+      return { ...base, success: false, error: `Unknown active session: ${lostSessionId}` };
+    }
     switch (record["type"]) {
       case "get_state":
         if (failState) {
@@ -416,6 +425,9 @@ const makeFakePi: Effect.Effect<FakePi> = Effect.gen(function* () {
       vetoNewSession = true;
     },
     allRequests: () => allRequests,
+    loseDaemonSession: (activeSessionId) => {
+      lostSessionId = activeSessionId;
+    },
     vetoNextSwitch: () => {
       vetoSwitch = true;
     },
@@ -10113,6 +10125,134 @@ describe("PiAdapterV2 with the Prime Agent flavor", () => {
         });
 
         assert.deepEqual(forkEntries(fake), ["u2"]);
+      }).pipe(Effect.scoped, Effect.provide(layerTest)),
+    );
+  });
+
+  describe("when the Prime Agent daemon loses the session its process is bound to", () => {
+    const LOST_SESSION_ID = "e8c7fdcbd6f2";
+
+    it.effect("keeps the process when the daemon does not know a different session", () =>
+      Effect.gen(function* () {
+        const fake = yield* makeFakePi;
+        fake.queueState({ sessionId: LOST_SESSION_ID });
+        const session = yield* openPrimeThread(fake);
+        yield* startTurn(session.runtime, session.providerThread);
+        yield* fake.takeRequest("prompt");
+        yield* rejectPrompt(fake, "Unknown active session: 0123456789ab");
+        const terminal = yield* session.takeEvent((event) => event.type === "turn.terminal");
+        assert.isTrue(
+          terminal.type === "turn.terminal" &&
+            terminal.failure?.message === "Unknown active session: 0123456789ab",
+        );
+
+        // The same process takes the next turn.
+        yield* startTurn(
+          session.runtime,
+          session.providerThread,
+          "default",
+          [],
+          "again",
+          undefined,
+          2,
+        );
+        yield* fake.takeRequest("prompt");
+        yield* fake.emit({ type: "response", command: "prompt", success: true });
+        yield* fake.emit({ type: "agent_start" });
+        yield* fake.emit({ type: "agent_end", messages: [] });
+        const second = yield* session.takeEvent((event) => event.type === "turn.terminal");
+        assert.isTrue(second.type === "turn.terminal" && second.status === "completed");
+      }).pipe(Effect.scoped, Effect.provide(layerTest)),
+    );
+
+    it.effect("retires the process when the daemon lost its session, and the thread resumes", () =>
+      Effect.gen(function* () {
+        const fake = yield* makeFakePi;
+        fake.queueState({ sessionId: LOST_SESSION_ID });
+        const session = yield* openPrimeThread(fake);
+        yield* startTurn(session.runtime, session.providerThread);
+        yield* fake.takeRequest("prompt");
+        // Every request after the first failure is refused the same way,
+        // including the reads that settle the failed turn.
+        fake.loseDaemonSession(LOST_SESSION_ID);
+        yield* rejectPrompt(fake, `Unknown active session: ${LOST_SESSION_ID}`);
+
+        const failed = yield* session.takeEvent(
+          (event) =>
+            event.type === "provider_turn.updated" && event.providerTurn.status === "failed",
+        );
+        const terminal = yield* session.takeEvent((event) => event.type === "turn.terminal");
+        const stopped = yield* session.takeEvent(
+          (event) =>
+            event.type === "provider_session.updated" && event.providerSession.status === "stopped",
+        );
+
+        assert.isTrue(failed.type === "provider_turn.updated");
+        assert.isNull(failed.type === "provider_turn.updated" && failed.providerTurn.nativeTurnRef);
+        assert.isTrue(terminal.type === "turn.terminal" && terminal.status === "failed");
+        if (terminal.type === "turn.terminal") {
+          assert.include(terminal.failure?.message, "daemon lost this session");
+          assert.notInclude(terminal.failure?.message, "Unknown active session");
+        }
+        assert.isTrue(stopped.type === "provider_session.updated");
+
+        // The orchestrator opens the next session on the thread's session file.
+        const sessionFile = session.providerThread.nativeThreadRef?.nativeId;
+        assert.isDefined(sessionFile);
+        const fresh = yield* makeFakePi;
+        const adapter = yield* makeAdapter(fresh, "", undefined, PRIME_AGENT_FLAVOR);
+        yield* adapter.openSession({
+          threadId: THREAD_ID,
+          providerSessionId: SESSION_ID,
+          modelSelection: modelSelection("default"),
+          runtimePolicy,
+          initialNativeThreadId: sessionFile!,
+        });
+        const { args } = fresh.lastSpawn();
+        assert.equal(args[args.indexOf("--resume") + 1], sessionFile);
+      }).pipe(Effect.scoped, Effect.provide(layerTest)),
+    );
+
+    it.effect("retires the process when a read in an idle session names the lost session", () =>
+      Effect.gen(function* () {
+        const fake = yield* makeFakePi;
+        fake.queueState({ sessionId: LOST_SESSION_ID });
+        const session = yield* openPrimeThread(fake);
+        fake.loseDaemonSession(LOST_SESSION_ID);
+
+        // A rollback reads the active branch through the process.
+        yield* session.runtime
+          .rollbackThread({
+            providerThread: session.providerThread,
+            target: {
+              type: "thread_start",
+              checkpointId: CheckpointId.make("checkpoint-0"),
+              appRunOrdinal: 0,
+            },
+            providerThreadTurns: [
+              {
+                id: ProviderTurnId.make("turn-weak"),
+                providerThreadId: session.providerThread.id,
+                nodeId: NodeId.make("node-weak"),
+                runAttemptId: null,
+                nativeTurnRef: {
+                  driver: PRIME_AGENT_FLAVOR.driverKind,
+                  nativeId: "w",
+                  strength: "weak",
+                },
+                ordinal: 1,
+                status: "failed",
+                startedAt: null,
+                completedAt: null,
+              },
+            ],
+          })
+          .pipe(Effect.flip);
+        const stopped = yield* session.takeEvent(
+          (event) =>
+            event.type === "provider_session.updated" && event.providerSession.status === "stopped",
+        );
+        assert.isTrue(stopped.type === "provider_session.updated");
       }).pipe(Effect.scoped, Effect.provide(layerTest)),
     );
   });
