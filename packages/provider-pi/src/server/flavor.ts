@@ -132,6 +132,13 @@ export interface PiFlavor {
    * controllers, and its `--resume` opens a picker, so it keeps the swap.
    */
   readonly resumesAtLaunch: boolean;
+  /**
+   * Whether the adapter retires its process when the daemon reports that it
+   * no longer hosts the session the process is bound to. The daemon can lose
+   * a session (a crashed worker) while the process stays alive, and every
+   * request through it then fails; a fresh process on the session file works.
+   */
+  readonly restartsOnLostDaemonSession: boolean;
 }
 
 /** The agent's config directory: its environment override, else the default under `home`. */
@@ -178,6 +185,7 @@ export const PI_FLAVOR: PiFlavor = {
   heartbeats: false,
   terminationGrace: Duration.seconds(1),
   resumesAtLaunch: false,
+  restartsOnLostDaemonSession: false,
 };
 
 /** Prime Agent 0.9.8, the TypeScript release. */
@@ -206,6 +214,7 @@ const primeAgent098 = {
   heartbeats: true,
   terminationGrace: Duration.seconds(15),
   resumesAtLaunch: true,
+  restartsOnLostDaemonSession: true,
 } satisfies PiFlavor;
 
 /**
