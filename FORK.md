@@ -118,4 +118,6 @@ These aren't Prime Agent-specific.
 - **Startup.** Requests that arrive after the port is bound, but before the server is ready, get `503` with `Retry-After` instead of hanging.
 - **Preview.** Evaluating a void expression, like `click()`, returns `null` instead of failing.
 - **Rollback.** A fork no longer brings back turns that were rolled back first.
+- **Image attachments are scaled for Claude and Pi/Prime Agent.** A long side over 2000 px is scaled down to 2000 when the server inlines the image (`apps/server/src/provider/providerImage.ts`, reached from the Claude adapter and `ProviderHost.readImageForProvider`). The stored file and the path shown to the agent stay the original.
+  - Why: once a conversation held more than 20 images, Anthropic rejected every request because one image was over 2000 px, and the history kept resending it. Uses `@napi-rs/image`, loaded on first use; an image it cannot decode is sent as stored. Codex, ACP, Cursor, OpenCode and Muse are not scaled. Images already in a Pi or Claude session keep their size.
 - **Provider switching.** Agent instructions say to delegate to another provider only for a capability the current one lacks (for example Codex computer use), not to reach a model family. Prime Agent can run GPT models itself.
