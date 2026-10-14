@@ -259,4 +259,28 @@ describe("mobile default permissions", () => {
       displayedDefaultRuntimeMode(resolveMobileSettingsTargets([codexFirst, forkFirst], null)),
     ).toBeNull();
   });
+
+  it("follows a project's own provider switches to the provider its new threads start on", () => {
+    const settings: ServerSettings = {
+      ...DEFAULT_SERVER_SETTINGS,
+      defaultRuntimeMode: "approval-required",
+      defaultModelSelection: { instanceId: codex, model: "gpt-5" },
+      projectSettingsOverrides: {
+        // Codex is off here, so new threads start on the fork.
+        [firstProject]: { providerInstances: { [codex]: { enabled: false } } },
+      },
+    };
+    const target = withProviders(environment(firstId, settings), [
+      { instanceId: codex },
+      { instanceId: primeAgent, supportedRuntimeModes: ["full-access"] },
+    ]);
+    const members = [firstProject, secondProject].map((id) => ({ environmentId: firstId, id }));
+    const [codexOff, codexOn] = resolveMobileSettingsTargets([target], members);
+
+    expect(offeredDefaultRuntimeModes([codexOff!])).toEqual(["full-access"]);
+    expect(displayedDefaultRuntimeMode([codexOff!])).toBe("full-access");
+    expect(offeredDefaultRuntimeModes([codexOn!])).toEqual(RuntimeMode.literals);
+    expect(displayedDefaultRuntimeMode([codexOn!])).toBe("approval-required");
+    expect(displayedDefaultRuntimeMode([codexOff!, codexOn!])).toBeNull();
+  });
 });
