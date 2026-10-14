@@ -1,4 +1,5 @@
 import {
+  applyProjectProviderEnablement,
   DEFAULT_SERVER_SETTINGS,
   type ModelSelection,
   newThreadRuntimeMode,
@@ -85,7 +86,11 @@ export function ProjectDefaultsSettings({ category }: { category: ProjectSetting
     return config
       ? [
           {
-            providers: config.providers,
+            providers: applyProjectProviderEnablement(
+              config.providers,
+              candidate.settings,
+              candidate.projectId,
+            ),
             defaultModelSelection: candidate.settings.defaultModelSelection,
             defaultRuntimeMode: candidate.settings.defaultRuntimeMode,
           },
