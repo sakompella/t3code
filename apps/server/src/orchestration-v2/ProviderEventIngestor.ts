@@ -660,7 +660,9 @@ export const layer: Layer.Layer<
                     yield* makeDomainEvent(input, {
                       type: "turn-item.updated",
                       threadId: movedFromThreadId,
-                      payload: boundFileChangeForStorage(stripUnservedToolOutputImageBytes(turnItem)),
+                      payload: boundFileChangeForStorage(
+                        stripUnservedToolOutputImageBytes(turnItem),
+                      ),
                       runId: turnItem.runId,
                       nodeId: turnItem.nodeId,
                     }),
