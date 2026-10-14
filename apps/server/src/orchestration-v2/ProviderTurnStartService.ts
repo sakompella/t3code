@@ -67,6 +67,11 @@ const refusedBeforePrompt = (error: unknown): boolean =>
   Predicate.isTagged(error, "ClaudeBackgroundWorkBlocksQueryReplacementError") ||
   (Predicate.hasProperty(error, "cause") && refusedBeforePrompt(error.cause));
 
+/** A fork an adapter refuses for a protocol reason (no boundary, no session file) fails the same way every time. */
+const isRefusedFork = (error: ProviderAdapter.ProviderAdapterV2Error): boolean =>
+  error._tag === "ProviderAdapterForkThreadError" &&
+  Predicate.isTagged(error.cause, "ProviderAdapterProtocolError");
+
 export interface ProviderTurnStartServiceV2Shape {
   readonly start: (input: {
     readonly threadId: ThreadId;
@@ -581,7 +586,8 @@ export const layer: Layer.Layer<
         Effect.gen(function* () {
           const loaded = yield* Effect.result(load);
           if (loaded._tag === "Success") return loaded.success;
-          if (input.willRetry === true) return yield* loaded.failure;
+          if (input.willRetry === true && !isRefusedFork(loaded.failure))
+            return yield* loaded.failure;
           yield* settleStartFailure({
             signal: "provider-thread-load-failure",
             title: "Provider turn failed to start",
