@@ -114,7 +114,7 @@ These aren't Prime Agent-specific.
 - **A steer sent to a turn that just ended is no longer lost.** If the turn failed, the steer runs as the next run. If it was stopped, the steer goes back to the held queue.
 - **`ELECTRON_RUN_AS_NODE` is passed only to children that run Electron as Node.**
   - Why: it leaked into every spawned process. Agents and tools that launch Electron apps then started bare Node instead.
-- **Faster quit.** Server shutdown releases provider sessions concurrently. Stopping a Pi session returns as soon as the process exits. The desktop app gives the backend 3 s before a forced kill. On macOS and Linux that kill does not cut Prime Agent's 15 s close, because Prime Agent runs in its own process group and already has SIGTERM.
+- **Faster quit.** Stopping a Pi session returns as soon as the process exits. When the desktop app force-kills the backend after its grace, the kill does not cut Prime Agent's 15 s close on macOS and Linux, because Prime Agent runs in its own process group and already has SIGTERM.
 - **Startup.** Requests that arrive after the port is bound, but before the server is ready, get `503` with `Retry-After` instead of hanging.
 - **Preview.** Evaluating a void expression, like `click()`, returns `null` instead of failing.
 - **Rollback.** A fork no longer brings back turns that were rolled back first.
