@@ -73,8 +73,12 @@ function startOfFreshDraft(
   defaultModelSelection: ModelSelection | null,
   stickySelection: ModelSelection | null = null,
 ) {
-  const projectDefaultSelection = resolveDefaultableModelSelection(config, defaultModelSelection);
-  const sticky = resolveDefaultableModelSelection(config, stickySelection);
+  const projectDefaultSelection = resolveDefaultableModelSelection(
+    config,
+    defaultModelSelection,
+    null,
+  );
+  const sticky = resolveDefaultableModelSelection(config, stickySelection, null);
   return resolveNewTaskModelSelection({
     draftSelection: null,
     projectDefaultSelection,
@@ -82,7 +86,7 @@ function startOfFreshDraft(
     stickySelection: sticky,
     config,
     projectId: null,
-    modelOptions: buildModelOptions(config, projectDefaultSelection ?? sticky),
+    modelOptions: buildModelOptions(config, projectDefaultSelection ?? sticky, undefined, null),
   });
 }
 
@@ -195,7 +199,17 @@ describe("the provider a fresh mobile thread starts on", () => {
     ({ providers, defaultModelSelection }) => {
       const config = {
         ...configOf(providers),
-        settings: { defaultModelSelection, projectSettingsOverrides: {}, providerInstances: {} },
+        settings: {
+          defaultModelSelection,
+          projectSettingsOverrides: {},
+          // Settings record every provider the snapshot reports as enabled.
+          providerInstances: Object.fromEntries(
+            providers.map((provider) => [
+              provider.instanceId,
+              { driver: provider.driver, enabled: provider.enabled },
+            ]),
+          ),
+        },
       } as unknown as ServerConfig;
 
       expect(scheduledTaskDefaultModel(config, null)?.instanceId).toBe(
@@ -224,7 +238,7 @@ describe("the provider a fresh mobile thread starts on", () => {
         stickySelection: null,
         config,
         projectId: null,
-        modelOptions: buildModelOptions(config, draft),
+        modelOptions: buildModelOptions(config, draft, undefined, null),
       }),
     ).toBe(draft);
   });

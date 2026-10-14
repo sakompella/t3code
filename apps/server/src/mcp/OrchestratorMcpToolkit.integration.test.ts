@@ -4200,7 +4200,11 @@ describe("html_render", () => {
       { name, runtimePolicyOverride: { cwd } },
       layerRegistry,
     );
-    const layerThreads = ThreadManagementService.layer.pipe(Layer.provide(layerOrchestrator));
+    const layerThreads = ThreadManagementService.layer.pipe(
+      Layer.provide(layerOrchestrator),
+      Layer.provide(ServerSettings.layerTest()),
+      Layer.provide(CommandReceiptStore.layer.pipe(Layer.provide(SqlitePersistence.layerMemory))),
+    );
     const layerRecordingThreads =
       recordStep === undefined && getTurnItem === undefined
         ? layerThreads
