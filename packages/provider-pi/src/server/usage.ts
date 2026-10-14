@@ -238,8 +238,7 @@ export const primeAgentUsageFormat: TranscriptUsageFormat<typeof PiScanState.Typ
     childUsage: true,
     aggregateUsage: true,
   },
-  mightCarryUsage: (line) =>
-    piFormat.mightCarryUsage(line) || line.includes('"child_usage_attributed"'),
+  usageMarkers: [...piFormat.usageMarkers, '"child_usage_attributed"'],
   parseLine: (line, state) => {
     let parsed: unknown;
     try {

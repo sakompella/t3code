@@ -2249,10 +2249,11 @@ describe("OrchestratorMcpService provider resolution", () => {
       issuedAt: 1,
     });
     const service = (writes: Ref.Ref<ReadonlyArray<string>>) =>
-      OrchestratorMcpService.layer.pipe(
+      layerOrchestratorService.pipe(
         Layer.provide(
           Layer.mergeAll(
             NodeServices.layer,
+            ServerSettings.layerTest(),
             Layer.mock(ThreadManagementService.ThreadManagementService)({
               getThreadShell: () => Effect.succeed(forkThread),
               getProjectThreadRecords: () => Effect.succeed(idleThreadProjection(forkThread)),
@@ -2332,7 +2333,7 @@ describe("OrchestratorMcpService provider resolution", () => {
           Effect.provide(service(writes)),
           Effect.flip,
         );
-        assert.equal(error.code, "runtime_mode_escalation_denied");
+        assert.include(error, { code: "runtime_mode_escalation_denied" });
         assert.deepEqual(yield* Ref.get(writes), []);
       }),
     );
@@ -2391,10 +2392,11 @@ describe("OrchestratorMcpService provider resolution", () => {
         };
         const mcp = yield* OrchestratorMcpService.OrchestratorMcpService.pipe(
           Effect.provide(
-            OrchestratorMcpService.layer.pipe(
+            layerOrchestratorService.pipe(
               Layer.provide(
                 Layer.mergeAll(
                   NodeServices.layer,
+                  ServerSettings.layerTest(),
                   Layer.mock(ThreadManagementService.ThreadManagementService)({
                     getThreadShell: () => Effect.succeed(ownThread),
                     getProjectThreadRecords: () => Effect.succeed(ownProjection),
