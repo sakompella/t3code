@@ -113,6 +113,7 @@ function settingsAndServerModes(
 ) {
   const target = {
     environment: { serverConfig: configOf(providers) },
+    projectId: null,
     settings: { defaultModelSelection, defaultRuntimeMode: stored },
   };
   const actualProvider = providers.find(

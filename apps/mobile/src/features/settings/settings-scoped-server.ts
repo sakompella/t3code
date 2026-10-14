@@ -1,4 +1,5 @@
 import {
+  applyProjectProviderEnablement,
   isNullableProjectSettingsOverride,
   newThreadRuntimeMode,
   type NewThreadDefaults,
@@ -106,23 +107,27 @@ export function uniformMobileSetting<K extends keyof ServerSettings>(
 }
 
 const newThreadDefaults = (
-  target: Pick<ScopedMobileSettingsTarget, "environment" | "settings">,
+  target: Pick<ScopedMobileSettingsTarget, "environment" | "projectId" | "settings">,
 ): NewThreadDefaults => ({
-  providers: target.environment.serverConfig.providers,
+  providers: applyProjectProviderEnablement(
+    target.environment.serverConfig.providers,
+    target.environment.serverConfig.settings,
+    target.projectId,
+  ),
   defaultModelSelection: target.settings.defaultModelSelection,
   defaultRuntimeMode: target.settings.defaultRuntimeMode,
 });
 
 /** The default permissions new threads can run with on every target. */
 export function offeredDefaultRuntimeModes(
-  targets: readonly Pick<ScopedMobileSettingsTarget, "environment" | "settings">[],
+  targets: readonly Pick<ScopedMobileSettingsTarget, "environment" | "projectId" | "settings">[],
 ): ReadonlyArray<RuntimeMode> {
   return runtimeModesForNewThreads(targets.map(newThreadDefaults));
 }
 
 /** The permissions new threads run with on every target, or null when they differ. */
 export function displayedDefaultRuntimeMode(
-  targets: readonly Pick<ScopedMobileSettingsTarget, "environment" | "settings">[],
+  targets: readonly Pick<ScopedMobileSettingsTarget, "environment" | "projectId" | "settings">[],
 ): RuntimeMode | null {
   return newThreadRuntimeMode(targets.map(newThreadDefaults));
 }
