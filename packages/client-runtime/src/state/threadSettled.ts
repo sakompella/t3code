@@ -89,19 +89,22 @@ export interface ThreadSettleShell {
   readonly latestRun?: SettlementRunLike | null;
   readonly hasPendingApprovals: boolean;
   readonly hasPendingUserInput: boolean;
+  readonly pendingSubagentRequest?: PendingSubagentRequest | null;
 }
 
 /**
  * Settled resolution. The agent's own wakes (finished background commands,
  * heartbeats, subagent messages) run on a settled thread without un-settling
- * it, so a thread still raises its hand when such a run needs the user: it is
- * blocked on an approval or a question, or a run failed after the settle.
+ * it, so a thread still raises its hand when such a run needs the user: it or
+ * one of its subagents is blocked on an approval or a question, or a run
+ * failed after the settle.
  * Its completion does not: the user said they were done with it. Like snooze,
  * the server fields stay set; the thread only stops classifying as settled.
  */
 export function effectiveSettled(shell: ThreadSettleShell): boolean {
   if (shell.settledOverride !== "settled") return false;
   if (shell.hasPendingApprovals || shell.hasPendingUserInput) return false;
+  if (shell.pendingSubagentRequest != null) return false;
   const latestRun = shell.latestRun ?? shell.latestTurn ?? null;
   const failedAfterSettle =
     (latestRun?.status === "failed" || latestRun?.state === "failed") &&

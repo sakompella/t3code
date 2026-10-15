@@ -30,6 +30,8 @@ describe("effectiveSettled", () => {
   it("raises the hand of a settled thread blocked on the user", () => {
     expect(effectiveSettled(settledShell({ hasPendingApprovals: true }))).toBe(false);
     expect(effectiveSettled(settledShell({ hasPendingUserInput: true }))).toBe(false);
+    expect(effectiveSettled(settledShell({ pendingSubagentRequest: "approval" }))).toBe(false);
+    expect(effectiveSettled(settledShell({ pendingSubagentRequest: "user_input" }))).toBe(false);
   });
 
   it("raises the hand only for a failure newer than the settle", () => {
