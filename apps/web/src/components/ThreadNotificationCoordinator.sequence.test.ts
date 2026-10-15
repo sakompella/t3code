@@ -29,6 +29,7 @@ const working = (runId: string, trigger: "heartbeat" | null = null): ObservedThr
   },
   hasPendingApprovals: false,
   hasPendingUserInput: false,
+  snoozedUntil: null,
 });
 
 const ended = (
@@ -68,7 +69,7 @@ function alertsFor(
       memory = undefined;
       continue;
     }
-    const observation = observeThreadForNotification(snapshot, memory);
+    const observation = observeThreadForNotification(snapshot, memory, "2026-10-05T10:00:00.000Z");
     memory = observation.memory;
     alerts.push(observation.kind);
   }
@@ -76,6 +77,31 @@ function alertsFor(
 }
 
 describe("thread alerts across user runs and heartbeat checks", () => {
+  it("does not replay a coalesced task completion when a snooze expires", () => {
+    const initial = observeThreadForNotification(
+      working("run-user"),
+      undefined,
+      "2026-10-05T10:00:00.000Z",
+    );
+    const check = {
+      ...afterTask(
+        ended(working("run-check", "heartbeat"), "completed", "2026-10-05T10:01:30.000Z"),
+        "2026-10-05T10:01:00.000Z",
+        "completed",
+      ),
+      snoozedUntil: "2026-10-05T10:10:00.000Z",
+    };
+    const hidden = observeThreadForNotification(check, initial.memory, "2026-10-05T10:02:00.000Z");
+    expect(hidden.kind).toBeNull();
+    const awake = observeThreadForNotification(check, hidden.memory, "2026-10-05T10:11:00.000Z");
+    expect(awake.kind).toBeNull();
+    const fresh = observeThreadForNotification(
+      ended(working("run-next"), "completed", "2026-10-05T10:12:00.000Z"),
+      awake.memory,
+      "2026-10-05T10:12:00.000Z",
+    );
+    expect(fresh.kind).toBe("completion");
+  });
   it("announces the user's completion once and stays quiet through routine checks", () => {
     const userRun = working("run-user");
     const userDone = ended(userRun, "completed", "2026-10-05T10:01:00.000Z");
