@@ -36,7 +36,7 @@ import {
   latestExecutedRun,
   latestRootProviderFailure,
 } from "@t3tools/shared/orchestrationV2ThreadError";
-import type { UsageLimitSourceSnapshots } from "@t3tools/contracts";
+import type { OrchestrationV2RollbackSummary, UsageLimitSourceSnapshots } from "@t3tools/contracts";
 import { isUsageLimitsCommand } from "@t3tools/shared/usageLimits";
 import { feedbackBannerItem } from "./chat/ComposerFeedback";
 import { useUsageLimitsPanel } from "./chat/useUsageLimitsPanel";
@@ -101,7 +101,10 @@ import {
   presentPendingBackgroundWork,
   presentProviderGoal,
 } from "@t3tools/client-runtime/state/thread-execution";
-import { threadSupportsProviderHandoff } from "@t3tools/client-runtime/state/thread-workflows";
+import {
+  threadSupportsProviderHandoff,
+  threadSupportsRollbackSummary,
+} from "@t3tools/client-runtime/state/thread-workflows";
 import { resolvePendingHandoff } from "@t3tools/client-runtime/handoff";
 import { HandoffRow } from "./chat/V2LifecycleRow";
 import {
@@ -762,6 +765,7 @@ async function rewindToMessage(input: {
   readonly threadId: ThreadId;
   readonly turnCount: number;
   readonly restoreFiles: boolean;
+  readonly summary: OrchestrationV2RollbackSummary | undefined;
   readonly draftTarget: ScopedThreadRef | DraftId;
   readonly composerHasPendingAttachments: boolean;
   readonly createAssetUrl: Parameters<
@@ -769,7 +773,13 @@ async function rewindToMessage(input: {
   >[0]["createAssetUrl"];
   readonly revertThreadCheckpoint: (value: {
     environmentId: EnvironmentId;
-    input: { commandId: CommandId; threadId: ThreadId; turnCount: number; restoreFiles: boolean };
+    input: {
+      commandId: CommandId;
+      threadId: ThreadId;
+      turnCount: number;
+      restoreFiles: boolean;
+      summary?: OrchestrationV2RollbackSummary;
+    };
   }) => Promise<AtomCommandResult<unknown, unknown>>;
 }): Promise<
   | { readonly error: string; readonly prompt?: never }
@@ -810,6 +820,7 @@ async function rewindToMessage(input: {
             threadId: input.threadId,
             turnCount: input.turnCount,
             restoreFiles: input.restoreFiles,
+            ...(input.summary === undefined ? {} : { summary: input.summary }),
           },
         });
         if (result._tag === "Failure") throw squashAtomCommandFailure(result);
@@ -1472,6 +1483,7 @@ export default function ChatView(props: ChatViewProps) {
   const isProviderSubagent =
     serverThread !== null && isProviderNativeSubagentThread(serverThread.source);
   const supportsProviderSwitchingViaHandoff = threadSupportsProviderHandoff(serverProjection);
+  const supportsRollbackSummary = threadSupportsRollbackSummary(serverProjection);
   const activeLatestRun = isServerThread ? serverLatestRun : (activeThread?.latestRun ?? null);
   const activeActivityRun = isServerThread ? serverActivityRun : (activeThread?.latestRun ?? null);
   const activeRuntime = isServerThread ? serverRuntime : (activeThread?.runtime ?? null);
@@ -5760,6 +5772,7 @@ export default function ChatView(props: ChatViewProps) {
     turnCount: number,
     messageId: MessageId,
     restoreFiles?: boolean,
+    summary?: OrchestrationV2RollbackSummary,
   ) => {
     const localApi = readLocalApi();
     if (
@@ -5819,6 +5832,7 @@ export default function ChatView(props: ChatViewProps) {
       threadId: activeThread.id,
       turnCount,
       restoreFiles,
+      summary,
       draftTarget: composerDraftTarget,
       composerHasPendingAttachments: composerRef.current?.hasPendingAttachments() === true,
       createAssetUrl: createAttachmentAssetUrl,
@@ -5843,8 +5857,13 @@ export default function ChatView(props: ChatViewProps) {
     }
   };
   const onRevertToTurnCountStable = useStableCallback(onRevertToTurnCount);
-  const onConfirmRevert = (turnCount: number, messageId: MessageId, restoreFiles: boolean) => {
-    void onRevertToTurnCount(turnCount, messageId, restoreFiles);
+  const onConfirmRevert = (
+    turnCount: number,
+    messageId: MessageId,
+    restoreFiles: boolean,
+    summary: OrchestrationV2RollbackSummary | undefined,
+  ) => {
+    void onRevertToTurnCount(turnCount, messageId, restoreFiles, summary);
   };
   const onConfirmRevertStable = useStableCallback(onConfirmRevert);
 
@@ -8675,7 +8694,11 @@ export default function ChatView(props: ChatViewProps) {
         </RightPanelSheet>
       ) : null}
 
-      <RevertConfirmHost threadKey={routeThreadKey} onConfirm={onConfirmRevertStable} />
+      <RevertConfirmHost
+        threadKey={routeThreadKey}
+        canSummarize={supportsRollbackSummary}
+        onConfirm={onConfirmRevertStable}
+      />
       <LinkPullRequestDialogHost />
       <ThreadVisitWatermark threadRef={routeThreadRef} />
       <ExpandedImageDialogHost threadKey={routeThreadKey} />

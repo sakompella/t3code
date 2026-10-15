@@ -1,4 +1,7 @@
-import type { OrchestrationV2HistoricalMessage } from "@t3tools/contracts";
+import type {
+  OrchestrationV2HistoricalMessage,
+  OrchestrationV2RollbackSummary,
+} from "@t3tools/contracts";
 import {
   ChatAttachment,
   CheckpointId,
@@ -482,6 +485,8 @@ export interface ProviderAdapterV2RollbackThreadInput {
   readonly providerThread: OrchestrationV2ProviderThread;
   readonly target: ProviderAdapterV2RollbackTarget;
   readonly providerThreadTurns: ReadonlyArray<OrchestrationV2ProviderTurn>;
+  /** Only sent when the capabilities declare `providerCanSummarizeRollback`. */
+  readonly summary?: OrchestrationV2RollbackSummary;
 }
 
 export interface ProviderAdapterV2ForkThreadInput {

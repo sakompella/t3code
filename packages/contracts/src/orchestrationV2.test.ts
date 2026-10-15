@@ -404,7 +404,7 @@ describe("orchestration V2 contracts", () => {
     ).toThrow();
   });
 
-  it("decodes persisted capability snapshots that predate runtimePolicy", () => {
+  it("decodes persisted capability snapshots that predate runtimePolicy and rollback summaries", () => {
     const legacyCapabilities = {
       sessions: {
         supportsMultipleProviderThreadsPerSession: false,
@@ -498,6 +498,7 @@ describe("orchestration V2 contracts", () => {
 
     const decoded = decodeOrchestrationV2ProviderCapabilities(legacyCapabilities);
     expect(decoded.runtimePolicy).toEqual({ enforcement: "client-boundary" });
+    expect(decoded.checkpointing.providerCanSummarizeRollback).toBe(false);
 
     const explicit = decodeOrchestrationV2ProviderCapabilities({
       ...legacyCapabilities,
