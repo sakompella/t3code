@@ -116,6 +116,8 @@ These aren't Prime Agent-specific.
 - **`ELECTRON_RUN_AS_NODE` is passed only to children that run Electron as Node.**
   - Why: it leaked into every spawned process. Agents and tools that launch Electron apps then started bare Node instead.
 - **Faster quit.** Stopping a Pi session returns as soon as the process exits. When the desktop app force-kills the backend after its grace, the kill does not cut Prime Agent's 15 s close on macOS and Linux, because Prime Agent runs in its own process group and already has SIGTERM.
+- **A failed turn does not start a worktree cleanup sweep.** With worktree cleanup on thread deletion turned on, upstream sweeps when a session reports `stopped` or `error`. Pi, Prime Agent and OpenCode report every failed turn as `error` on a session that stays live, and the sweep's own check counts an `error` session as open, so that sweep could never free its worktree. Only `stopped` and thread deletion start one now.
+  - Why: each sweep runs git in every worktree (6.9 s median on the owner's data), and a usage-limit or provider error fails turns in bursts.
 - **Startup.** Requests that arrive after the port is bound, but before the server is ready, get `503` with `Retry-After` instead of hanging.
 - **Preview.** Evaluating a void expression, like `click()`, returns `null` instead of failing.
 - **Rollback.** A fork no longer brings back turns that were rolled back first.
