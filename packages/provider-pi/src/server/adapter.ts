@@ -3013,8 +3013,10 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
           case "t3.reconcile_idle": {
             // A turn that started since the read owns what it found.
             const messages = event["messages"];
+            const historyMark = event["historyMark"];
             if (turn !== null || state === null || !Array.isArray(messages)) return;
-            yield* reconciler.applyIdleTranscript(messages);
+            if (typeof historyMark !== "string" && typeof historyMark !== "number") return;
+            yield* reconciler.applyIdleTranscript(messages, historyMark);
             return;
           }
           default:

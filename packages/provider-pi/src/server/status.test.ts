@@ -13,7 +13,7 @@ import * as ChildProcessSpawner from "effect/process/ChildProcessSpawner";
 import { TestClock } from "effect/testing";
 import type { ServerProviderModel } from "@t3tools/contracts";
 
-import { PI_FLAVOR, PRIME_AGENT_FLAVOR } from "./flavor.ts";
+import { PI_FLAVOR, PRIME_AGENT_FLAVOR, PRIME_AGENT_FORK_FLAVOR } from "./flavor.ts";
 import { checkPiProviderStatus, detectPiFlavor, parseDiscoveredModels } from "./status.ts";
 import {
   forkCapabilitiesWith,
@@ -609,6 +609,7 @@ describe("parseDiscoveredModels", () => {
         ],
       },
       { model: { provider: "cpa", id: "active" }, thinkingLevel: "high" },
+      PRIME_AGENT_FLAVOR,
     );
     assert.deepEqual(
       models.map((model) => [model.slug, defaultLevelOf(model)]),
@@ -629,6 +630,7 @@ describe("parseDiscoveredModels", () => {
         ],
       },
       { model: { provider: "cpa", id: "active" }, thinkingLevel: "off" },
+      PRIME_AGENT_FLAVOR,
     );
     assert.deepEqual(
       models.map((model) => defaultLevelOf(model)),
@@ -642,10 +644,50 @@ describe("parseDiscoveredModels", () => {
         models: [{ provider: "cpa", id: "plain", reasoning: false }, reasoningModel("thinker")],
       },
       { model: { provider: "cpa", id: "plain" }, thinkingLevel: "off" },
+      PRIME_AGENT_FLAVOR,
     );
     assert.deepEqual(
       models.map((model) => defaultLevelOf(model)),
       [undefined, undefined],
+    );
+  });
+  it("declares a 0.10 default only where every level the report could stand for agrees", () => {
+    // 0.10 remembers Extra High on a model capped at High and reports High.
+    const models = parseDiscoveredModels(
+      {
+        models: [
+          reasoningModel("haiku"),
+          reasoningModel("sol", { off: null, minimal: null, xhigh: "xhigh", max: "max" }),
+          reasoningModel("capped", { off: null }),
+        ],
+      },
+      { model: { provider: "cpa", id: "haiku" }, thinkingLevel: "high" },
+      PRIME_AGENT_FORK_FLAVOR,
+    );
+    assert.deepEqual(
+      models.map((model) => [model.slug, defaultLevelOf(model)]),
+      [
+        ["cpa/haiku", "high"],
+        ["cpa/sol", undefined],
+        ["cpa/capped", "high"],
+      ],
+    );
+  });
+
+  it("keeps a 0.10 level the active model supports below its top as every default", () => {
+    const models = parseDiscoveredModels(
+      {
+        models: [
+          reasoningModel("haiku"),
+          reasoningModel("sol", { off: null, minimal: null, xhigh: "xhigh", max: "max" }),
+        ],
+      },
+      { model: { provider: "cpa", id: "haiku" }, thinkingLevel: "medium" },
+      PRIME_AGENT_FORK_FLAVOR,
+    );
+    assert.deepEqual(
+      models.map((model) => defaultLevelOf(model)),
+      ["medium", "medium"],
     );
   });
 });
