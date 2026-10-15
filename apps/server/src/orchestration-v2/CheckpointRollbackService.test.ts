@@ -562,9 +562,10 @@ it.effect.each([
   { restoreFiles: true, shared: "historical" },
   { restoreFiles: false, shared: "none", targetOrdinal: 1 },
   { restoreFiles: false, shared: "none", targetOrdinal: 1, multipleTurns: true },
+  { restoreFiles: false, shared: "none", summary: { instructions: "Keep decisions." } },
 ])(
   "rewinds safely with %s",
-  ({ restoreFiles, shared, targetOrdinal = 0, multipleTurns = false }) => {
+  ({ restoreFiles, shared, targetOrdinal = 0, multipleTurns = false, summary }) => {
     const threadId = ThreadId.make("rewind-files");
     const providerThreadId = ProviderThreadId.make("rewind-provider");
     const providerSessionId = ProviderSessionId.make("rewind-session");
@@ -686,6 +687,7 @@ it.effect.each([
                   Effect.gen(function* () {
                     const count = yield* resolveCodexRollbackTurnCount(input);
                     assert.equal(count, 2 - targetOrdinal);
+                    assert.deepEqual(input.summary, summary);
                     calls.push("provider");
                     return { providerThread };
                   }),
@@ -705,7 +707,14 @@ it.effect.each([
         assert.deepEqual(calls, []);
         return;
       }
-      yield* service.execute({ threadId, providerThreadId, checkpointId, scopeId, restoreFiles });
+      yield* service.execute({
+        threadId,
+        providerThreadId,
+        checkpointId,
+        scopeId,
+        restoreFiles,
+        ...(summary === undefined ? {} : { summary }),
+      });
       assert.deepEqual(
         calls,
         restoreFiles ? ["provider", "files", "projection"] : ["provider", "projection"],

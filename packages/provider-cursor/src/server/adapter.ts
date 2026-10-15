@@ -162,6 +162,7 @@ export const CursorProviderCapabilitiesV2 = {
     providerCanRollbackConversation: false,
     providerRollbackReturnsSnapshot: false,
     providerCanReadConversationSnapshot: true,
+    providerCanSummarizeRollback: false,
   },
   identity: {
     nativeThreadIds: "strong",

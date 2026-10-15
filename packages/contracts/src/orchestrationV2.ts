@@ -285,12 +285,28 @@ export const OrchestrationV2ContextCapabilities = Schema.Struct({
 });
 export type OrchestrationV2ContextCapabilities = typeof OrchestrationV2ContextCapabilities.Type;
 
+/**
+ * Asks the provider to summarize the turns a rollback discards, so the agent
+ * keeps what it learned. `instructions` steer the summary.
+ */
+export const OrchestrationV2RollbackSummary = Schema.Struct({
+  instructions: Schema.optional(TrimmedNonEmptyString),
+});
+export type OrchestrationV2RollbackSummary = typeof OrchestrationV2RollbackSummary.Type;
+
 export const OrchestrationV2CheckpointCapabilities = Schema.Struct({
   appCanCheckpointFilesystem: Schema.Boolean,
   supportsNestedCheckpointScopes: Schema.Boolean,
   providerCanRollbackConversation: Schema.Boolean,
   providerRollbackReturnsSnapshot: Schema.Boolean,
   providerCanReadConversationSnapshot: Schema.Boolean,
+  /**
+   * Rollback can leave the agent a summary of the turns it discards.
+   * Sessions persisted before this field existed decode to unsupported.
+   */
+  providerCanSummarizeRollback: Schema.Boolean.pipe(
+    Schema.withDecodingDefault(Effect.succeed(false)),
+  ),
 });
 export type OrchestrationV2CheckpointCapabilities =
   typeof OrchestrationV2CheckpointCapabilities.Type;
@@ -3020,6 +3036,8 @@ export const OrchestrationV2Command = Schema.Union([
   Schema.Struct({
     type: Schema.Literal("checkpoint.rollback"),
     restoreFiles: Schema.optional(Schema.Boolean),
+    /** Omitted means the discarded turns leave no summary behind. */
+    summary: Schema.optional(OrchestrationV2RollbackSummary),
     commandId: CommandId,
     threadId: ThreadId,
     scopeId: CheckpointScopeId,

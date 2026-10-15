@@ -31,7 +31,7 @@ import {
   latestExecutedRun,
   latestRootProviderFailure,
 } from "@t3tools/shared/orchestrationV2ThreadError";
-import type { UsageLimitSourceSnapshots } from "@t3tools/contracts";
+import type { OrchestrationV2RollbackSummary, UsageLimitSourceSnapshots } from "@t3tools/contracts";
 import {
   collectProviderUsageLimits,
   hasProviderUsageLimits,
@@ -110,7 +110,10 @@ import {
   presentPendingBackgroundWork,
   presentProviderGoal,
 } from "@t3tools/client-runtime/state/thread-execution";
-import { threadSupportsProviderHandoff } from "@t3tools/client-runtime/state/thread-workflows";
+import {
+  threadSupportsProviderHandoff,
+  threadSupportsRollbackSummary,
+} from "@t3tools/client-runtime/state/thread-workflows";
 import { resolvePendingHandoff } from "@t3tools/client-runtime/handoff";
 import { HandoffRow } from "./chat/V2LifecycleRow";
 import {
@@ -603,6 +606,7 @@ import { useAtomCommand } from "../state/use-atom-command";
 import { useOrchestrationCommand } from "../state/use-orchestration-command";
 import { useAtomQueryRunner } from "../state/use-atom-query-runner";
 import { Button, InlineButton } from "./ui/button";
+import { EditFromHereActions } from "./chat/EditFromHereActions";
 import { SubagentTreeList } from "./chat/SubagentTree";
 import {
   AlertDialog,
@@ -2199,6 +2203,10 @@ export default function ChatView(props: ChatViewProps) {
     serverThread !== null && isProviderNativeSubagentThread(serverThread.source);
   const supportsProviderSwitchingViaHandoff = useMemo(
     () => threadSupportsProviderHandoff(serverProjection),
+    [serverProjection],
+  );
+  const supportsRollbackSummary = useMemo(
+    () => threadSupportsRollbackSummary(serverProjection),
     [serverProjection],
   );
   const activeLatestRun = isServerThread ? serverLatestRun : (activeThread?.latestRun ?? null);
@@ -8155,6 +8163,7 @@ export default function ChatView(props: ChatViewProps) {
     turnCount: number,
     messageId: MessageId,
     restoreFiles?: boolean,
+    summary?: OrchestrationV2RollbackSummary,
   ) => {
     const localApi = readLocalApi();
     if (
@@ -8233,7 +8242,13 @@ export default function ChatView(props: ChatViewProps) {
       await waitForRevertedMessage(routeThreadRef, messageId, turnCount, commandId, async () => {
         const result = await revertThreadCheckpoint({
           environmentId,
-          input: { commandId, threadId: activeThread.id, turnCount, restoreFiles },
+          input: {
+            commandId,
+            threadId: activeThread.id,
+            turnCount,
+            restoreFiles,
+            ...(summary === undefined ? {} : { summary }),
+          },
         });
         if (result._tag === "Failure") throw squashAtomCommandFailure(result);
       });
@@ -8284,6 +8299,19 @@ export default function ChatView(props: ChatViewProps) {
         return { rewindingThreadKeys: remaining };
       });
     }
+  };
+  const confirmPendingRevert = (
+    restoreFiles: boolean,
+    summary: OrchestrationV2RollbackSummary | undefined,
+  ) => {
+    if (!pendingRevert || pendingRevert.routeThreadKey !== routeThreadKey) return;
+    setPendingRevert(null);
+    void onRevertToTurnCount(
+      pendingRevert.turnCount,
+      pendingRevert.messageId,
+      restoreFiles,
+      summary,
+    );
   };
   const onRevertToTurnCountStable = useStableCallback(onRevertToTurnCount);
 
@@ -11723,28 +11751,11 @@ export default function ChatView(props: ChatViewProps) {
               composer.
             </AlertDialogDescription>
           </AlertDialogHeader>
-          <AlertDialogFooter>
-            <AlertDialogClose render={<Button variant="outline" />}>Cancel</AlertDialogClose>
-            <Button
-              variant="destructive"
-              onClick={() => {
-                if (!pendingRevert || pendingRevert.routeThreadKey !== routeThreadKey) return;
-                setPendingRevert(null);
-                void onRevertToTurnCount(pendingRevert.turnCount, pendingRevert.messageId, true);
-              }}
-            >
-              Revert files too
-            </Button>
-            <Button
-              onClick={() => {
-                if (!pendingRevert || pendingRevert.routeThreadKey !== routeThreadKey) return;
-                setPendingRevert(null);
-                void onRevertToTurnCount(pendingRevert.turnCount, pendingRevert.messageId, false);
-              }}
-            >
-              Revert and keep changes
-            </Button>
-          </AlertDialogFooter>
+          <EditFromHereActions
+            key={pendingRevert?.messageId}
+            canSummarize={supportsRollbackSummary}
+            onConfirm={confirmPendingRevert}
+          />
         </AlertDialogPopup>
       </AlertDialog>
       <LinkPullRequestDialogHost />

@@ -86,6 +86,13 @@ function resolveThreadProviderSession(projection: Projection): ProviderSession |
   );
 }
 
+/** Whether a rollback on this thread can leave the agent a summary of the discarded turns. */
+export function threadSupportsRollbackSummary(projection: Projection | null | undefined): boolean {
+  if (projection == null) return false;
+  const session = resolveThreadProviderSession(projection);
+  return session?.capabilities.checkpointing.providerCanSummarizeRollback === true;
+}
+
 export function threadSupportsProviderHandoff(projection: Projection | null | undefined): boolean {
   if (projection == null) return false;
   const session = resolveThreadProviderSession(projection);

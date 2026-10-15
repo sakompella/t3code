@@ -47,6 +47,11 @@ branch that Prime Agent's `/tree` view can still show. Rolling back does not res
 Python kernel, so variables and background jobs from the discarded turns can still exist; Prime
 Agent is told this on its next turn.
 
+With the Prime Agent fork (0.10), the **Edit from here** dialog also offers **Summarize the
+discarded turns**. Prime Agent then summarizes the turns you rewind past and keeps that summary in
+its context. The optional instructions say what the summary should keep. The summary uses the
+thread's model, so the rewind takes longer.
+
 ## Subagents
 
 Child agents that Prime Agent starts with `rlm.spawn` appear as subagent cards with their task,

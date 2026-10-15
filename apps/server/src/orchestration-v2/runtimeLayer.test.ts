@@ -668,6 +668,124 @@ it.layer(layerTest)("OrchestrationV2LayerLive", (it) => {
     }),
   );
 
+  it.effect("passes a rollback summary on only when the provider's session can summarize", () =>
+    Effect.gen(function* () {
+      const orchestrator = yield* Orchestrator.OrchestratorV2;
+      const eventSink = yield* EventSink.EventSinkV2;
+      const outbox = yield* EffectOutbox.EffectOutboxV2;
+      const threadId = ThreadId.make("runtime-rollback-summary");
+      yield* orchestrator.dispatch({
+        type: "thread.create",
+        createdBy: "user",
+        creationSource: "web",
+        commandId: CommandId.make("runtime-rollback-summary-create"),
+        threadId,
+        projectId: ProjectId.make("runtime-rollback-summary-project"),
+        title: "Rollback summary",
+        modelSelection,
+        runtimeMode: "full-access",
+        interactionMode: "default",
+        branch: null,
+        worktreePath: process.cwd(),
+      });
+      yield* orchestrator.dispatch({
+        type: "message.dispatch",
+        createdBy: "user",
+        creationSource: "web",
+        commandId: CommandId.make("runtime-rollback-summary-message"),
+        threadId,
+        messageId: MessageId.make("runtime-rollback-summary-message"),
+        text: "Create the provider thread and checkpoint scope.",
+        attachments: [],
+        dispatchMode: { type: "start_immediately" },
+      });
+      const projection = yield* orchestrator.getThreadProjection(threadId);
+      const scope = projection.checkpointScopes[0]!;
+      const providerThread = projection.providerThreads[0]!;
+      const checkpointId = CheckpointId.make("runtime-rollback-summary-checkpoint");
+      const now = yield* DateTime.now;
+      yield* eventSink.write({
+        commandId: CommandId.make("runtime-rollback-summary-seed"),
+        events: [
+          {
+            id: EventId.make("runtime-rollback-summary-checkpoint-event"),
+            type: "checkpoint.captured",
+            threadId,
+            occurredAt: now,
+            payload: {
+              id: checkpointId,
+              threadId,
+              scopeId: scope.id,
+              runId: null,
+              nodeId: scope.nodeId,
+              parentCheckpointId: null,
+              ordinalWithinScope: 0,
+              appRunOrdinal: null,
+              ref: CheckpointRef.make("refs/t3/runtime-rollback-summary"),
+              status: "ready",
+              files: [],
+              capturedAt: now,
+            },
+          },
+        ],
+      });
+      const rollBack = (commandId: CommandId) =>
+        orchestrator.dispatch({
+          type: "checkpoint.rollback",
+          commandId,
+          threadId,
+          checkpointId,
+          scopeId: scope.id,
+          restoreFiles: false,
+          summary: { instructions: "Keep the decisions." },
+        });
+
+      const refusedCommandId = CommandId.make("runtime-rollback-summary-refused");
+      const refused = yield* rollBack(refusedCommandId).pipe(Effect.flip);
+      assert.match(String(refused.cause), /cannot summarize/);
+      assert.deepEqual(yield* outbox.listByCommandId(refusedCommandId), []);
+
+      // The adapter's own capabilities still say no; the hosting session says yes.
+      yield* eventSink.write({
+        commandId: CommandId.make("runtime-rollback-summary-session"),
+        events: [
+          {
+            id: EventId.make("runtime-rollback-summary-session-event"),
+            type: "provider-session.attached",
+            threadId,
+            occurredAt: now,
+            payload: {
+              id: providerThread.providerSessionId!,
+              driver,
+              providerInstanceId: modelSelection.instanceId,
+              status: "ready",
+              cwd: process.cwd(),
+              model: modelSelection.model,
+              capabilities: {
+                ...CodexProviderCapabilitiesV2,
+                checkpointing: {
+                  ...CodexProviderCapabilitiesV2.checkpointing,
+                  providerCanSummarizeRollback: true,
+                },
+              },
+              createdAt: now,
+              updatedAt: now,
+              lastError: null,
+            },
+          },
+        ],
+      });
+      const acceptedCommandId = CommandId.make("runtime-rollback-summary-accepted");
+      yield* rollBack(acceptedCommandId);
+      const [effect] = yield* outbox.listByCommandId(acceptedCommandId);
+      assert.equal(effect?.request.type, "provider-thread.rollback");
+      assert.deepEqual(
+        effect?.request.type === "provider-thread.rollback" ? effect.request.summary : undefined,
+        { instructions: "Keep the decisions." },
+      );
+    }).pipe(Effect.provide(Layer.fresh(layerTest))),
+  );
+
   it.effect("rejects non-ready rollback targets before persisting events or effects", () =>
     Effect.gen(function* () {
       const orchestrator = yield* Orchestrator.OrchestratorV2;
