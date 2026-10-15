@@ -113,6 +113,11 @@ interface FakePi {
   readonly queueForkMessages: (data: unknown) => void;
   /** Make the next queued `get_fork_messages` ack an unsuccessful response. */
   readonly failNextForkMessages: () => void;
+  /**
+   * From now on, fail every request but `get_state` the way a Prime Agent
+   * daemon does once it no longer hosts the process's session.
+   */
+  readonly loseDaemonSession: (activeSessionId: string) => void;
   readonly vetoNextSwitch: () => void;
   /** Refuse the next `count` `switch_session` requests with `message`, as Prime Agent does while another worker holds the lease. */
   readonly rejectNextSwitches: (count: number, message: string) => void;
@@ -185,6 +190,7 @@ const makeFakePi: Effect.Effect<FakePi> = Effect.gen(function* () {
   let deferredStateRequest: PiRpcRecord | undefined;
   let failState = false;
   let vetoSwitch = false;
+  let lostSessionId: string | undefined;
   let rejectedSwitches = { remaining: 0, message: "" };
   let vetoNewSession = false;
   let deferredLifecycle: string | undefined;
@@ -213,6 +219,9 @@ const makeFakePi: Effect.Effect<FakePi> = Effect.gen(function* () {
       command: String(record["type"]),
       success: true,
     };
+    if (lostSessionId !== undefined && record["type"] !== "get_state") {
+      return { ...base, success: false, error: `Unknown active session: ${lostSessionId}` };
+    }
     switch (record["type"]) {
       case "get_state":
         if (failState) {
@@ -416,6 +425,9 @@ const makeFakePi: Effect.Effect<FakePi> = Effect.gen(function* () {
       vetoNewSession = true;
     },
     allRequests: () => allRequests,
+    loseDaemonSession: (activeSessionId) => {
+      lostSessionId = activeSessionId;
+    },
     vetoNextSwitch: () => {
       vetoSwitch = true;
     },
@@ -9925,6 +9937,320 @@ describe("PiAdapterV2 with the Prime Agent flavor", () => {
       }
     }).pipe(Effect.scoped, Effect.provide(layerTest)),
   );
+
+  /** Prime Agent refuses a prompt in an id-less response, after the request was sent. */
+  const rejectPrompt = (fake: FakePi, error: string) =>
+    fake.emit({ type: "response", command: "prompt", success: false, error });
+
+  it.effect("settles a turn whose prompt was rejected without a native ref", () =>
+    Effect.gen(function* () {
+      const fake = yield* makeFakePi;
+      const session = yield* openPrimeThread(fake);
+      yield* startTurn(session.runtime, session.providerThread);
+      yield* fake.takeRequest("prompt");
+      const started = yield* session.takeEvent(
+        (event) =>
+          event.type === "provider_turn.updated" && event.providerTurn.status === "running",
+      );
+      yield* rejectPrompt(fake, "Prompt was refused");
+      const failed = yield* session.takeEvent(
+        (event) => event.type === "provider_turn.updated" && event.providerTurn.status === "failed",
+      );
+
+      assert.isTrue(started.type === "provider_turn.updated");
+      assert.isTrue(failed.type === "provider_turn.updated");
+      if (started.type !== "provider_turn.updated" || failed.type !== "provider_turn.updated") {
+        return;
+      }
+      // The placeholder is the only ref a turn has before its entry is known.
+      assert.equal(started.providerTurn.nativeTurnRef?.strength, "weak");
+      assert.isNull(failed.providerTurn.nativeTurnRef);
+    }).pipe(Effect.scoped, Effect.provide(layerTest)),
+  );
+
+  describe("a fork or rollback past turns whose prompts Prime rejected", () => {
+    const FORK_FILE = "/fake/forked.jsonl";
+    const providerTurn = (
+      source: OrchestrationV2ProviderThread,
+      ordinal: number,
+      nativeTurnRef: OrchestrationV2ProviderTurn["nativeTurnRef"],
+    ): OrchestrationV2ProviderTurn => ({
+      id: ProviderTurnId.make(`turn-${ordinal}`),
+      providerThreadId: source.id,
+      nodeId: NodeId.make(`node-${ordinal}`),
+      runAttemptId: null,
+      nativeTurnRef,
+      ordinal,
+      status: "completed",
+      startedAt: null,
+      completedAt: null,
+    });
+    const strongRef = (nativeId: string) => ({
+      driver: PRIME_AGENT_FLAVOR.driverKind,
+      nativeId,
+      strength: "strong" as const,
+    });
+    /** What a turn that failed before its prompt landed was persisted with. */
+    const placeholderRef = (ordinal: number) => ({
+      driver: PRIME_AGENT_FLAVOR.driverKind,
+      nativeId: `provider-thread:native-thread:pending:attempt:run-attempt:ordinal:${ordinal}:attempt:1`,
+      strength: "weak" as const,
+    });
+
+    const openForkable = Effect.gen(function* () {
+      const fake = yield* makeFakePi;
+      const forkFake = yield* makeFakePi;
+      const { runtime } = yield* openRuntime(
+        fake,
+        "default",
+        THREAD_ID,
+        SESSION_ID,
+        forkFake,
+        PRIME_AGENT_FLAVOR,
+      );
+      const source = yield* runtime.ensureThread({
+        threadId: THREAD_ID,
+        modelSelection: modelSelection("default"),
+        runtimePolicy,
+      });
+      forkFake.queueState({ sessionFile: FORK_FILE });
+      fake.queueState({ sessionFile: FORK_FILE });
+      return { runtime, source, fake, forkFake };
+    });
+
+    const forkEntries = (fake: FakePi) =>
+      fake
+        .allRequests()
+        .filter((request) => request["type"] === "fork")
+        .map((request) => request["entryId"]);
+
+    it.effect.each([
+      {
+        name: "forks the whole session when no user entry follows the target",
+        branch: ["u1"],
+        forkedAt: [],
+      },
+    ])("$name", ({ branch, forkedAt }) =>
+      Effect.gen(function* () {
+        const { runtime, source, forkFake } = yield* openForkable;
+        forkFake.queueForkMessages({ messages: branch.map((entryId) => ({ entryId })) });
+        const turns = [
+          providerTurn(source, 1, strongRef("u1")),
+          providerTurn(source, 2, placeholderRef(2)),
+          providerTurn(source, 3, placeholderRef(3)),
+        ];
+
+        const forked = yield* runtime.forkThread({
+          sourceProviderTurns: turns,
+          sourceProviderThread: source,
+          providerTurnId: turns[0]!.id,
+          targetThreadId: ThreadId.make("fork-target"),
+        });
+
+        assert.equal(forked.nativeThreadRef?.nativeId, FORK_FILE);
+        assert.deepEqual(forkEntries(forkFake), forkedAt);
+      }).pipe(Effect.scoped, Effect.provide(layerTest)),
+    );
+
+    it.effect("refuses ambiguous later user entries that may be steers inside the target", () =>
+      Effect.gen(function* () {
+        const { runtime, source, forkFake } = yield* openForkable;
+        forkFake.queueForkMessages({ messages: [{ entryId: "u1" }, { entryId: "steer" }] });
+        const turns = [
+          providerTurn(source, 1, strongRef("u1")),
+          providerTurn(source, 2, placeholderRef(2)),
+        ];
+
+        const error = yield* runtime
+          .forkThread({
+            sourceProviderTurns: turns,
+            sourceProviderThread: source,
+            providerTurnId: turns[0]!.id,
+            targetThreadId: ThreadId.make("fork-target"),
+          })
+          .pipe(Effect.flip);
+
+        assert.include(String(error.cause), "no captured session-tree entry");
+        assert.deepEqual(forkEntries(forkFake), []);
+      }).pipe(Effect.scoped, Effect.provide(layerTest)),
+    );
+
+    it.effect(
+      "still fails without starting a process when the target's own ref is a placeholder",
+      () =>
+        Effect.gen(function* () {
+          const { runtime, source, forkFake } = yield* openForkable;
+          const turns = [
+            providerTurn(source, 1, placeholderRef(1)),
+            providerTurn(source, 2, placeholderRef(2)),
+          ];
+
+          const error = yield* runtime
+            .forkThread({
+              sourceProviderTurns: turns,
+              sourceProviderThread: source,
+              providerTurnId: turns[0]!.id,
+              targetThreadId: ThreadId.make("fork-target"),
+            })
+            .pipe(Effect.flip);
+
+          assert.include(String(error.cause), "no captured session-tree entry");
+          assert.deepEqual(forkFake.allRequests(), []);
+        }).pipe(Effect.scoped, Effect.provide(layerTest)),
+    );
+
+    it.effect("keeps the complete target when rejected turns left no later user entry", () =>
+      Effect.gen(function* () {
+        const { runtime, source, fake } = yield* openForkable;
+        const turns = [
+          providerTurn(source, 1, strongRef("u1")),
+          providerTurn(source, 2, placeholderRef(2)),
+        ];
+        fake.queueForkMessages({ messages: [{ entryId: "u1" }] });
+
+        yield* runtime.rollbackThread({
+          providerThread: source,
+          target: {
+            type: "provider_turn",
+            checkpointId: CheckpointId.make("checkpoint-1"),
+            appRunOrdinal: 1,
+            providerTurn: turns[0]!,
+          },
+          providerThreadTurns: turns,
+        });
+
+        assert.deepEqual(forkEntries(fake), []);
+      }).pipe(Effect.scoped, Effect.provide(layerTest)),
+    );
+  });
+
+  describe("when the Prime Agent daemon loses the session its process is bound to", () => {
+    const LOST_SESSION_ID = "e8c7fdcbd6f2";
+
+    it.effect("keeps the process for unrelated prompt failures", () =>
+      Effect.gen(function* () {
+        const fake = yield* makeFakePi;
+        fake.queueState({ sessionId: LOST_SESSION_ID });
+        const session = yield* openPrimeThread(fake);
+        yield* startTurn(session.runtime, session.providerThread);
+        yield* fake.takeRequest("prompt");
+        yield* rejectPrompt(fake, "Prompt exceeded context limit");
+        const terminal = yield* session.takeEvent((event) => event.type === "turn.terminal");
+        assert.isTrue(
+          terminal.type === "turn.terminal" &&
+            terminal.failure?.message === "Prompt exceeded context limit",
+        );
+
+        // The same process takes the next turn.
+        yield* startTurn(
+          session.runtime,
+          session.providerThread,
+          "default",
+          [],
+          "again",
+          undefined,
+          2,
+        );
+        yield* fake.takeRequest("prompt");
+        yield* fake.emit({ type: "response", command: "prompt", success: true });
+        yield* fake.emit({ type: "agent_start" });
+        yield* fake.emit({ type: "agent_end", messages: [] });
+        const second = yield* session.takeEvent((event) => event.type === "turn.terminal");
+        assert.isTrue(second.type === "turn.terminal" && second.status === "completed");
+      }).pipe(Effect.scoped, Effect.provide(layerTest)),
+    );
+
+    it.effect("retires the process when the daemon lost its session, and the thread resumes", () =>
+      Effect.gen(function* () {
+        const fake = yield* makeFakePi;
+        fake.queueState({ sessionId: "persisted-session-uuid" });
+        const session = yield* openPrimeThread(fake);
+        yield* startTurn(session.runtime, session.providerThread);
+        yield* fake.takeRequest("prompt");
+        // Every request after the first failure is refused the same way,
+        // including the reads that settle the failed turn.
+        fake.loseDaemonSession(LOST_SESSION_ID);
+        yield* rejectPrompt(fake, `Unknown active session: ${LOST_SESSION_ID}`);
+
+        const failed = yield* session.takeEvent(
+          (event) =>
+            event.type === "provider_turn.updated" && event.providerTurn.status === "failed",
+        );
+        const terminal = yield* session.takeEvent((event) => event.type === "turn.terminal");
+        const stopped = yield* session.takeEvent(
+          (event) =>
+            event.type === "provider_session.updated" && event.providerSession.status === "stopped",
+        );
+
+        assert.isTrue(failed.type === "provider_turn.updated");
+        assert.isNull(failed.type === "provider_turn.updated" && failed.providerTurn.nativeTurnRef);
+        assert.isTrue(terminal.type === "turn.terminal" && terminal.status === "failed");
+        if (terminal.type === "turn.terminal") {
+          assert.include(terminal.failure?.message, "daemon lost this session");
+          assert.notInclude(terminal.failure?.message, "Unknown active session");
+        }
+        assert.isTrue(stopped.type === "provider_session.updated");
+
+        // The orchestrator opens the next session on the thread's session file.
+        const sessionFile = session.providerThread.nativeThreadRef?.nativeId;
+        assert.isDefined(sessionFile);
+        const fresh = yield* makeFakePi;
+        const adapter = yield* makeAdapter(fresh, "", undefined, PRIME_AGENT_FLAVOR);
+        yield* adapter.openSession({
+          threadId: THREAD_ID,
+          providerSessionId: SESSION_ID,
+          modelSelection: modelSelection("default"),
+          runtimePolicy,
+          initialNativeThreadId: sessionFile!,
+        });
+        const { args } = fresh.lastSpawn();
+        assert.equal(args[args.indexOf("--resume") + 1], sessionFile);
+      }).pipe(Effect.scoped, Effect.provide(layerTest)),
+    );
+
+    it.effect("retires the process when a read in an idle session names the lost session", () =>
+      Effect.gen(function* () {
+        const fake = yield* makeFakePi;
+        fake.queueState({ sessionId: LOST_SESSION_ID });
+        const session = yield* openPrimeThread(fake);
+        fake.loseDaemonSession(LOST_SESSION_ID);
+
+        // A rollback reads the active branch through the process.
+        yield* session.runtime
+          .rollbackThread({
+            providerThread: session.providerThread,
+            target: {
+              type: "thread_start",
+              checkpointId: CheckpointId.make("checkpoint-0"),
+              appRunOrdinal: 0,
+            },
+            providerThreadTurns: [
+              {
+                id: ProviderTurnId.make("turn-weak"),
+                providerThreadId: session.providerThread.id,
+                nodeId: NodeId.make("node-weak"),
+                runAttemptId: null,
+                nativeTurnRef: {
+                  driver: PRIME_AGENT_FLAVOR.driverKind,
+                  nativeId: "w",
+                  strength: "weak",
+                },
+                ordinal: 1,
+                status: "failed",
+                startedAt: null,
+                completedAt: null,
+              },
+            ],
+          })
+          .pipe(Effect.flip);
+        const stopped = yield* session.takeEvent(
+          (event) =>
+            event.type === "provider_session.updated" && event.providerSession.status === "stopped",
+        );
+        assert.isTrue(stopped.type === "provider_session.updated");
+      }).pipe(Effect.scoped, Effect.provide(layerTest)),
+    );
+  });
 
   const T3_COMMANDS = { commands: [{ name: "t3-navigate-tree", source: "extension" }] };
 
