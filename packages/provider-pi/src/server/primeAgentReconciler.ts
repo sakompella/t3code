@@ -182,8 +182,25 @@ export function matchStoppedCopies(input: {
   return matches;
 }
 
+/**
+ * What `get_state` says about the stored conversation, so two reads show
+ * whether it changed. The 0.10 fork reports its tree leaf, which every stored
+ * entry moves. Its `messageCount` counts every branch's messages and not the
+ * stored notices `get_messages` returns, so after a rollback or a notice it
+ * never matches the history. 0.9.8 reports no leaf, and its count is the
+ * length of the history `get_messages` returns.
+ */
+type PiHistoryMark = string | number;
+
+const historyMarkOf = (state: unknown): PiHistoryMark | undefined =>
+  recordString(state, "leafId") ?? recordNumber(state, "messageCount");
+
 type TranscriptRead =
-  | { readonly _tag: "read"; readonly messages: ReadonlyArray<unknown> }
+  | {
+      readonly _tag: "read";
+      readonly messages: ReadonlyArray<unknown>;
+      readonly historyMark: PiHistoryMark;
+    }
   /** The agent started new work while its history was read. */
   | { readonly _tag: "busy" }
   /** No read, or a history from another moment than the idle state. */
@@ -214,11 +231,11 @@ const readSettledTranscript = Effect.fnUntraced(function* (
   const after = yield* request({ type: "get_state" }, STATE_READ_TIMEOUT_MS).pipe(Effect.option);
   if (Option.isNone(after) || messages === undefined) return { _tag: "unconfirmed" };
   if (!piStateIsIdle(after.value)) return { _tag: "busy" };
-  const counted = (state: unknown) => recordNumber(state, "messageCount") ?? messages.length;
-  if (counted(idleState) !== messages.length || counted(after.value) !== messages.length) {
-    return { _tag: "unconfirmed" };
-  }
-  return { _tag: "read", messages };
+  const historyMark = historyMarkOf(idleState) ?? messages.length;
+  const unchanged = (historyMarkOf(after.value) ?? messages.length) === historyMark;
+  const counts = typeof historyMark === "string" || historyMark === messages.length;
+  if (!unchanged || !counts) return { _tag: "unconfirmed" };
+  return { _tag: "read", messages, historyMark };
 });
 
 interface TranscriptLedger {
@@ -226,8 +243,8 @@ interface TranscriptLedger {
   readonly keys: Set<string>;
   /** Tool calls whose outcome T3 already shows. */
   readonly toolCalls: Set<string>;
-  /** How many messages the last confirmed read held, to tell when the history changed. */
-  messageCount: number;
+  /** The history mark of the last confirmed read, to tell when the history changed. */
+  historyMark: PiHistoryMark;
   /**
    * Messages stored before this time are history T3 did not stream. Set
    * when the first read failed, so no key list says what came before.
@@ -314,15 +331,21 @@ export function makePrimeAgentReconciler<E>(input: {
       );
     });
 
-  /** Marks a whole confirmed history as accounted for. */
-  const commit = (messages: ReadonlyArray<unknown>) => {
+  /**
+   * Marks a whole confirmed history as accounted for. A read without a state
+   * read knows only its length, which a fork's leaf never matches.
+   */
+  const commit = (
+    messages: ReadonlyArray<unknown>,
+    historyMark: PiHistoryMark = messages.length,
+  ) => {
     if (ledger === null) return;
     for (const message of messages) {
       const key = transcriptMessageKey(message);
       if (key !== undefined) ledger.keys.add(key);
     }
     for (const toolCallId of toolCallIdsOf(messages)) ledger.toolCalls.add(toolCallId);
-    ledger.messageCount = messages.length;
+    ledger.historyMark = historyMark;
   };
 
   /** The session the ledger was seeded from. */
@@ -344,7 +367,7 @@ export function makePrimeAgentReconciler<E>(input: {
     ledger = {
       keys: new Set(),
       toolCalls: new Set(),
-      messageCount: 0,
+      historyMark: 0,
       storedBefore: messages === undefined ? readAt : 0,
     };
     if (messages !== undefined) commit(messages);
@@ -627,7 +650,7 @@ export function makePrimeAgentReconciler<E>(input: {
       return true;
     }
     yield* projectHistory(turn, read.messages);
-    commit(read.messages);
+    commit(read.messages, read.historyMark);
     turn.transcript = "reconciled";
     return true;
   });
@@ -668,10 +691,13 @@ export function makePrimeAgentReconciler<E>(input: {
    * applied now, and a continuation run is offered to show them. They stay
    * unaccounted, so the run that adopts the wake projects them.
    */
-  const applyIdleTranscript = Effect.fnUntraced(function* (messages: ReadonlyArray<unknown>) {
+  const applyIdleTranscript = Effect.fnUntraced(function* (
+    messages: ReadonlyArray<unknown>,
+    historyMark: PiHistoryMark,
+  ) {
     if (!enabled || ledger === null) return;
     const lost = unaccounted(messages);
-    ledger.messageCount = messages.length;
+    ledger.historyMark = historyMark;
     if (lost.length === 0 && !input.hasUnofferedWake()) return;
     yield* logOutcome(null, "recovered-wake");
     yield* input.recoverWake(
@@ -688,13 +714,20 @@ export function makePrimeAgentReconciler<E>(input: {
     if (Option.isNone(state)) return false;
     // A busy agent's events, or a later check, will show the work.
     if (!piStateIsIdle(state.value)) return true;
-    const messageCount = recordNumber(state.value, "messageCount");
-    if (ledger !== null && messageCount === ledger.messageCount && !input.hasUnofferedWake()) {
+    if (
+      ledger !== null &&
+      historyMarkOf(state.value) === ledger.historyMark &&
+      !input.hasUnofferedWake()
+    ) {
       return false;
     }
     const read = yield* readSettledTranscript(request, state.value);
     if (read._tag === "read") {
-      yield* input.enqueue({ type: "t3.reconcile_idle", messages: read.messages });
+      yield* input.enqueue({
+        type: "t3.reconcile_idle",
+        messages: read.messages,
+        historyMark: read.historyMark,
+      });
     }
     return true;
   });
