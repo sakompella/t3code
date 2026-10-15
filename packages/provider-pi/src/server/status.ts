@@ -56,6 +56,7 @@ import {
 } from "@t3tools/provider-core/server/maintenanceResolver";
 import {
   EMPTY_PI_MODEL_CAPABILITIES,
+  piThinkingLevelsReportedAs,
   thinkingCapabilitiesForPiModel,
 } from "./thinkingCapabilities.ts";
 import {
@@ -113,25 +114,34 @@ function piModelsFromSettings(
 export function parseDiscoveredModels(
   data: unknown,
   state: unknown,
+  flavor: Pick<PiFlavor, "remembersThinkingRequest">,
 ): ReadonlyArray<ServerProviderModel> {
   const models = recordField(data, "models");
   if (!Array.isArray(models)) return [];
-  // `set_model` keeps the session's thinking level and clamps it into the new
-  // model, so the active model's level is every model's default. A model that
-  // cannot think reports "off", and switching from it restores a setting we
-  // cannot see, so that level says nothing.
+  // The session's thinking level carries to the next model, clamped into it.
+  // A model that cannot think reports "off", and switching from it restores a
+  // setting we cannot see, so that level says nothing.
   const activeModel = recordField(state, "model");
   const activeProvider = recordString(activeModel, "provider");
   const activeModelId = recordString(activeModel, "id");
-  const activeModelThinks = models.some(
+  const activeModelEntry = models.find(
     (model) =>
       recordString(model, "provider") === activeProvider &&
-      recordString(model, "id") === activeModelId &&
-      recordField(model, "reasoning") === true,
+      recordString(model, "id") === activeModelId,
   );
-  const configuredThinkingLevel = activeModelThinks
-    ? recordString(state, "thinkingLevel")
-    : undefined;
+  const reportedThinkingLevel =
+    recordField(activeModelEntry, "reasoning") === true
+      ? recordString(state, "thinkingLevel")
+      : undefined;
+  // Pi and 0.9.8 store the clamped level. The 0.10 fork keeps the level asked
+  // for and reports it clamped, so any level that clamps to the report may be
+  // what the next model gets.
+  const sessionThinkingLevels =
+    reportedThinkingLevel === undefined
+      ? []
+      : flavor.remembersThinkingRequest
+        ? piThinkingLevelsReportedAs(reportedThinkingLevel, activeModelEntry)
+        : [reportedThinkingLevel];
   const seen = new Set<string>();
   const parsed: Array<ServerProviderModel> = [];
   for (const model of models) {
@@ -146,7 +156,7 @@ export function parseDiscoveredModels(
       name: recordString(model, "name") ?? slug,
       subProvider: provider,
       isCustom: false,
-      capabilities: thinkingCapabilitiesForPiModel(model, configuredThinkingLevel),
+      capabilities: thinkingCapabilitiesForPiModel(model, sessionThinkingLevels),
     });
   }
   return parsed;
@@ -200,7 +210,7 @@ const discoverPiViaRpc = (
     const commandsData = yield* connection
       .request({ type: "get_commands" })
       .pipe(Effect.orElseSucceed(() => undefined));
-    const discoveredModels = parseDiscoveredModels(modelsData, stateData);
+    const discoveredModels = parseDiscoveredModels(modelsData, stateData, flavor);
     const { slashCommands, skills } = parsePiDiscoveredCommands(commandsData);
     return {
       models: discoveredModels,
@@ -595,7 +605,7 @@ export const checkPiProviderStatus = Effect.fn("checkPiProviderStatus")(function
         };
 
   const discoveryExit = yield* discoverPiViaRpc(
-    flavor,
+    cliFlavor,
     piSettings,
     environment,
     launchArgs,
