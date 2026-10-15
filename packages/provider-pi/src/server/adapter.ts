@@ -863,7 +863,7 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
         }).pipe(Effect.andThen(connection.terminate), Effect.forkIn(scope), Effect.asVoid);
       });
 
-      const request = (record: PiRpcRecord, timeoutMs = PI_REQUEST_TIMEOUT_MS) =>
+      const request = (record: PiRpcRecord, timeoutMs: number | null = PI_REQUEST_TIMEOUT_MS) =>
         connection.request(record, timeoutMs).pipe(
           Effect.catchTags({
             PiRpcError: (error) =>
@@ -3402,23 +3402,31 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
         entryId: string,
         summary: OrchestrationV2RollbackSummary | undefined,
       ) {
-        const result = yield* request(
-          {
-            type: "navigate_tree",
-            targetId: entryId,
-            ...(summary === undefined
-              ? {}
-              : {
-                  summarize: true,
-                  ...(summary.instructions === undefined
-                    ? {}
-                    : { customInstructions: summary.instructions }),
-                }),
-          },
-          PI_SESSION_TIMEOUT_MS,
-        );
-        if (recordField(result, "cancelled") === true) {
-          return yield* protocolError(`${name} cancelled the rollback`);
+        // A retried rollback finds the entry already off the active branch.
+        // Navigating again would add a second summary.
+        const activeBranch = yield* readUserEntryIds();
+        const alreadyMoved = Option.exists(activeBranch, (entryIds) => !entryIds.includes(entryId));
+        if (!alreadyMoved) {
+          // No timeout: abandoning the request would not stop the move or its
+          // summary model call.
+          const result = yield* request(
+            {
+              type: "navigate_tree",
+              targetId: entryId,
+              ...(summary === undefined
+                ? {}
+                : {
+                    summarize: true,
+                    ...(summary.instructions === undefined
+                      ? {}
+                      : { customInstructions: summary.instructions }),
+                  }),
+            },
+            null,
+          );
+          if (recordField(result, "cancelled") === true) {
+            return yield* protocolError(`${name} cancelled the rollback`);
+          }
         }
         rollbackNoticePending = true;
       });
