@@ -175,6 +175,25 @@ export const layer: Layer.Layer<
       const rolledBackRunIds = new Set(
         projection.runs.filter((run) => run.status === "rolled_back").map((run) => run.id),
       );
+      // A rollback that dropped this provider thread's native conversation
+      // (see the other provider threads below) restarted it at
+      // `firstRunOrdinal`. Turns of earlier runs belong to the dropped one.
+      const conversationStart = providerThread.firstRunOrdinal ?? 0;
+      const outsideRunIds = new Set(
+        projection.runs
+          .filter((run) => rolledBackRunIds.has(run.id) || run.ordinal < conversationStart)
+          .map((run) => run.id),
+      );
+      const outsideAttemptIds = new Set(
+        projection.attempts
+          .filter((attempt) => outsideRunIds.has(attempt.runId))
+          .map((attempt) => attempt.id),
+      );
+      const providerThreadTurns = projection.providerTurns.filter(
+        (turn) =>
+          turn.providerThreadId === providerThread.id &&
+          (turn.runAttemptId === null || !outsideAttemptIds.has(turn.runAttemptId)),
+      );
       // A goal run can span several native turns; roll back to its last.
       const providerTurnForRun = (run: (typeof projection.runs)[number]) =>
         latestProviderTurnForAttempt(projection.providerTurns, run.activeAttemptId) ??
@@ -201,7 +220,7 @@ export const layer: Layer.Layer<
       // context handoff, so a target among them rewinds it to its last earlier
       // turn, or to its start.
       const boundary = projection.runs
-        .filter((run) => run.ordinal <= targetOrdinal && !rolledBackRunIds.has(run.id))
+        .filter((run) => run.ordinal <= targetOrdinal && !outsideRunIds.has(run.id))
         .toSorted((left, right) => left.ordinal - right.ordinal)
         .flatMap((run) => {
           const providerTurn = providerTurnForRun(run);
@@ -282,16 +301,6 @@ export const layer: Layer.Layer<
             run.status === "failed" ||
             run.status === "cancelled"),
       );
-      const rolledBackAttemptIds = new Set(
-        projection.attempts
-          .filter((attempt) => rolledBackRunIds.has(attempt.runId))
-          .map((attempt) => attempt.id),
-      );
-      const providerThreadTurns = projection.providerTurns.filter(
-        (turn) =>
-          turn.providerThreadId === providerThread.id &&
-          (turn.runAttemptId === null || !rolledBackAttemptIds.has(turn.runAttemptId)),
-      );
 
       const snapshot =
         runsToRollback.length === 0
@@ -331,6 +340,43 @@ export const layer: Layer.Layer<
                 }) as Event,
             );
           const events: Array<OrchestrationV2DomainEvent> = [];
+          // Other provider threads this rollback discarded turns from cannot be
+          // rewound without their sessions. Dropping their native conversation
+          // makes the next switch back start a fresh one with the kept history,
+          // and that run sets `firstRunOrdinal` again. These go first: the last provider-thread.updated becomes the active one.
+          for (const otherProviderThread of projection.providerThreads) {
+            if (
+              otherProviderThread.id === providerThread.id ||
+              otherProviderThread.ownerNodeId !== null ||
+              otherProviderThread.nativeThreadRef === null ||
+              !runsToRollback.some((run) => run.providerThreadId === otherProviderThread.id)
+            ) {
+              continue;
+            }
+            const lastKeptRun = projection.runs.findLast(
+              (run) =>
+                run.providerThreadId === otherProviderThread.id &&
+                run.ordinal <= targetOrdinal &&
+                !rolledBackRunIds.has(run.id),
+            );
+            events.push(
+              yield* makeEvent({
+                type: "provider-thread.updated",
+                threadId: input.threadId,
+                driver: otherProviderThread.driver,
+                providerInstanceId: otherProviderThread.providerInstanceId,
+                occurredAt: now,
+                payload: {
+                  ...otherProviderThread,
+                  nativeThreadRef: null,
+                  nativeConversationHeadRef: null,
+                  firstRunOrdinal: null,
+                  lastRunOrdinal: lastKeptRun?.ordinal ?? null,
+                  updatedAt: now,
+                },
+              }),
+            );
+          }
           events.push(
             yield* makeEvent({
               type: "provider-thread.updated",

@@ -610,14 +610,30 @@ export const layer: Layer.Layer<
               .filter((candidate) => candidate.status === "rolled_back")
               .map((candidate) => candidate.id),
           );
-          const rolledBackAttemptIds = new Set(
-            sourceProjection.attempts
-              .filter((attempt) => rolledBackRunIds.has(attempt.runId))
-              .map((attempt) => attempt.id),
+          // Nor can the source provider thread's turns from runs before its
+          // `firstRunOrdinal`: a rollback dropped the native conversation they
+          // belong to (see CheckpointRollbackService).
+          const droppedRunIds = new Set(
+            sourceProjection.runs
+              .filter(
+                (candidate) => candidate.ordinal < (sourceProviderThread.firstRunOrdinal ?? 0),
+              )
+              .map((candidate) => candidate.id),
           );
-          const sourceProviderTurns = sourceProjection.providerTurns.filter(
-            (turn) => turn.runAttemptId === null || !rolledBackAttemptIds.has(turn.runAttemptId),
+          const attemptRunIds = new Map(
+            sourceProjection.attempts.map((attempt) => [attempt.id, attempt.runId] as const),
           );
+          const sourceProviderTurns = sourceProjection.providerTurns.filter((turn) => {
+            const turnRunId =
+              turn.runAttemptId === null ? undefined : attemptRunIds.get(turn.runAttemptId);
+            return (
+              turnRunId === undefined ||
+              (!rolledBackRunIds.has(turnRunId) &&
+                !(
+                  turn.providerThreadId === sourceProviderThread.id && droppedRunIds.has(turnRunId)
+                ))
+            );
+          });
           return yield* loadFromProvider(
             session.forkThread({
               sourceProviderThread,
