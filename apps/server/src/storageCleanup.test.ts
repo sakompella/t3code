@@ -1298,7 +1298,8 @@ describe("storage cleanup reports and local file policies", () => {
   );
   it.live.each([
     ["running", "ready", 1],
-    ["stopped", "error", 2],
+    ["ready", "error", 1],
+    ["stopped", "ready", 2],
   ] as const)(
     "session updates to %s or %s during a sweep make %i sweep(s) in total",
     ([first, second, sweeps]) =>
