@@ -123,6 +123,8 @@ interface FakePi {
   /** Refuse the next `count` `switch_session` requests with `message`, as Prime Agent does while another worker holds the lease. */
   readonly rejectNextSwitches: (count: number, message: string) => void;
   readonly queueState: (data: Record<string, unknown>) => void;
+  /** Fields overriding the recorded idle state in every later `get_state` ack, under queued ones. */
+  readonly setStateFields: (data: Record<string, unknown>) => void;
   readonly setStreaming: (streaming: boolean) => void;
   readonly deferNextState: () => void;
   readonly resolveDeferredState: (data: unknown) => Effect.Effect<void>;
@@ -182,6 +184,7 @@ const makeFakePi: Effect.Effect<FakePi> = Effect.gen(function* () {
   const forkMessagesQueue: Array<unknown> = [];
   const forkMessagesFailure = Symbol("get_fork_messages failure");
   const stateQueue: Array<Record<string, unknown>> = [];
+  let stateFields: Record<string, unknown> = {};
   const statsQueue: Array<unknown> = [];
   const observedQueue: Array<ReadonlyArray<unknown>> = [];
   const commandsQueue: Array<{ readonly success: boolean; readonly data?: unknown }> = [];
@@ -252,6 +255,7 @@ const makeFakePi: Effect.Effect<FakePi> = Effect.gen(function* () {
             ...recordedIdleState(sessionFile),
             isStreaming: isStreaming ?? false,
             messageCount: transcript.length,
+            ...stateFields,
             ...stateQueue.shift(),
           },
         };
@@ -453,6 +457,9 @@ const makeFakePi: Effect.Effect<FakePi> = Effect.gen(function* () {
       rejectedSwitches = { remaining: count, message };
     },
     queueState: (data) => stateQueue.push(data),
+    setStateFields: (data) => {
+      stateFields = data;
+    },
     setStreaming: (streaming) => {
       isStreaming = streaming;
     },
@@ -5157,6 +5164,31 @@ describe("PiAdapterV2 with the Prime Agent flavor", () => {
     Effect.gen(function* () {
       const fake = yield* makeFakePi;
       const { runtime, takeEvent, providerThread } = yield* openPrimeThread(fake);
+      yield* startTurn(runtime, providerThread);
+      yield* fake.takeRequest("prompt");
+      yield* fake.emit({ type: "agent_start" });
+      fake.setTranscript(recordedTurn);
+      yield* fake.emit({ type: "agent_end", messages: [] });
+
+      assert.deepEqual(yield* takeRepliesAndOutcome(takeEvent), {
+        texts: [fullReply],
+        status: "completed",
+      });
+    }).pipe(Effect.scoped, Effect.provide(layerTest)),
+  );
+
+  // 0.10 counts every branch's messages but not stored notices, and reports
+  // the tree leaf instead, so its count never matches the history after a
+  // rollback.
+  it.effect("recovers a dropped reply on the 0.10 fork after a rollback by its leaf", () =>
+    Effect.gen(function* () {
+      const fake = yield* makeFakePi;
+      fake.setStateFields({ leafId: "leaf-after-rollback", messageCount: 7 });
+      const { runtime, takeEvent, providerThread } = yield* openPrimeThread(
+        fake,
+        THREAD_ID,
+        PRIME_AGENT_FORK_FLAVOR,
+      );
       yield* startTurn(runtime, providerThread);
       yield* fake.takeRequest("prompt");
       yield* fake.emit({ type: "agent_start" });
