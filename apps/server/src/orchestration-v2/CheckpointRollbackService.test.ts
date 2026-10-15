@@ -433,6 +433,7 @@ it.effect.each([
       attempts: [],
       nodes: [],
       providerTurns: [],
+      contextHandoffs: [],
     } as unknown as OrchestrationV2ThreadProjection;
     const testLayer = CheckpointRollbackService.layer.pipe(
       Layer.provide(
