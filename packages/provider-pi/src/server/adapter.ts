@@ -14,6 +14,7 @@ import {
   type OrchestrationV2ProviderSession,
   type OrchestrationV2ProviderThread,
   type OrchestrationV2ProviderTurn,
+  type OrchestrationV2RollbackSummary,
   type OrchestrationV2RuntimeRequest,
   type OrchestrationV2TurnItem,
   type OrchestrationV2UserInputQuestion,
@@ -246,6 +247,7 @@ const PiProviderCapabilitiesV2 = {
     // rollback is enabled; rollbackThread returns the updated provider thread.
     providerRollbackReturnsSnapshot: true,
     providerCanReadConversationSnapshot: true,
+    providerCanSummarizeRollback: false,
   },
   identity: {
     nativeThreadIds: "strong",
@@ -396,6 +398,11 @@ function piProviderCapabilities(flavor: PiFlavor): OrchestrationV2ProviderCapabi
       ...PiProviderCapabilitiesV2.subagents,
       // Observed `rlm_child_update` children get their own T3 thread.
       exposesSubagentThreadIds: flavor.childThreads,
+    },
+    checkpointing: {
+      ...PiProviderCapabilitiesV2.checkpointing,
+      // The RPC's `navigate_tree` can summarize the branch it leaves.
+      providerCanSummarizeRollback: flavor.rollback === "rpc_tree",
     },
   };
 }
@@ -3387,10 +3394,27 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
         );
       });
 
-      /** Rolls the conversation back to just before `entryId` with the RPC's `navigate_tree`. */
-      const navigateTreeByRpc = Effect.fnUntraced(function* (entryId: string) {
+      /**
+       * Rolls the conversation back to just before `entryId` with the RPC's
+       * `navigate_tree`, which can also leave a summary of the turns it leaves.
+       */
+      const navigateTreeByRpc = Effect.fnUntraced(function* (
+        entryId: string,
+        summary: OrchestrationV2RollbackSummary | undefined,
+      ) {
         const result = yield* request(
-          { type: "navigate_tree", targetId: entryId },
+          {
+            type: "navigate_tree",
+            targetId: entryId,
+            ...(summary === undefined
+              ? {}
+              : {
+                  summarize: true,
+                  ...(summary.instructions === undefined
+                    ? {}
+                    : { customInstructions: summary.instructions }),
+                }),
+          },
           PI_SESSION_TIMEOUT_MS,
         );
         if (recordField(result, "cancelled") === true) {
@@ -4049,7 +4073,7 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
                     (flavor.rollback === "tree" && navigateTreeAvailable === true)
                   ) {
                     yield* flavor.rollback === "rpc_tree"
-                      ? navigateTreeByRpc(forkEntryId)
+                      ? navigateTreeByRpc(forkEntryId, rollbackInput.summary)
                       : navigateTreeInPlace(forkEntryId);
                     const treeBaseline = yield* readSessionTreeBaseline();
                     return yield* commitAfterDrain(

@@ -3,6 +3,7 @@ import {
   CheckpointScopeId,
   latestProviderTurnForAttempt,
   type OrchestrationV2DomainEvent,
+  type OrchestrationV2RollbackSummary,
   ProviderThreadId,
   ThreadId,
 } from "@t3tools/contracts";
@@ -75,6 +76,7 @@ export interface CheckpointRollbackServiceV2Shape {
     readonly checkpointId: CheckpointId;
     readonly scopeId: CheckpointScopeId;
     readonly restoreFiles?: boolean;
+    readonly summary?: OrchestrationV2RollbackSummary;
   }) => Effect.Effect<void, CheckpointRollbackExecutionError>;
 }
 
@@ -118,6 +120,7 @@ export const layer: Layer.Layer<
       readonly checkpointId: CheckpointId;
       readonly scopeId: CheckpointScopeId;
       readonly restoreFiles?: boolean;
+      readonly summary?: OrchestrationV2RollbackSummary;
     }) {
       const projection = yield* projections.getThreadRecords(input.threadId, [
         "providerThreads",
@@ -280,6 +283,7 @@ export const layer: Layer.Layer<
               providerThread,
               target: rollbackTarget,
               providerThreadTurns,
+              ...(input.summary === undefined ? {} : { summary: input.summary }),
             });
       if (input.restoreFiles !== false) yield* checkpoints.restore({ scope, checkpoint });
       const staleCheckpoints = projection.checkpoints.filter(
