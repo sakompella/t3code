@@ -1642,11 +1642,14 @@ describe("settled worktree retention", () => {
     "project-off",
     "project-custom",
     "inactive-settling",
+    "woken",
   ] as const)("applies retention and safety checks (%s)", (scenario) =>
     Effect.gen(function* () {
       yield* TestClock.setTime(NOW_MS);
       const fixture = yield* cleanupFixture();
-      const days = ["wait", "boundary", "expired", "recent-update"].includes(scenario) ? 8 : 0;
+      const days = ["wait", "boundary", "expired", "recent-update", "woken"].includes(scenario)
+        ? 8
+        : 0;
       const rules = {
         ...DEFAULT_SERVER_SETTINGS.storageCleanup,
         worktreeSettledAfterDays:
@@ -1678,7 +1681,8 @@ describe("settled worktree retention", () => {
             : at(
                 scenario === "expired" ||
                   scenario === "recent-update" ||
-                  scenario === "inactive-settling"
+                  scenario === "inactive-settling" ||
+                  scenario === "woken"
                   ? -20 * DAY_MS
                   : scenario === "boundary"
                     ? -8 * DAY_MS
@@ -1695,6 +1699,8 @@ describe("settled worktree retention", () => {
             ? 0
             : -10 * DAY_MS,
         ),
+        // A heartbeat ran after the settle without un-settling the thread.
+        latestRunCompletedAt: scenario === "woken" ? at(-3 * DAY_MS) : null,
       });
       fixture.setThreads([thread]);
       if (scenario === "dirty")
@@ -1709,11 +1715,13 @@ describe("settled worktree retention", () => {
             ? "Not settled"
             : scenario === "wait"
               ? "Settled for 7 of 8 days"
-              : ["settle-script", "recent-update", "inactive-settling"].includes(scenario)
-                ? "Settled moments ago"
-                : scenario === "dirty"
-                  ? "Has uncommitted changes (1 file)"
-                  : `Settled for ${scenario === "expired" ? 20 : scenario === "boundary" ? 8 : 0} days`;
+              : scenario === "woken"
+                ? "Settled for 3 of 8 days"
+                : ["settle-script", "recent-update", "inactive-settling"].includes(scenario)
+                  ? "Settled moments ago"
+                  : scenario === "dirty"
+                    ? "Has uncommitted changes (1 file)"
+                    : `Settled for ${scenario === "expired" ? 20 : scenario === "boundary" ? 8 : 0} days`;
         expect(report.entries[0]).toMatchObject({ outcome: removed ? "removed" : "kept", reason });
       }
       expect(thread.branch).toBe("feature");
