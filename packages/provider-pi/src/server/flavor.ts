@@ -139,6 +139,14 @@ export interface PiFlavor {
    * request through it then fails; a fresh process on the session file works.
    */
   readonly restartsOnLostDaemonSession: boolean;
+  /**
+   * Whether the session keeps the thinking level asked for and `get_state`
+   * reports it clamped to the current model, so a switch to a model with more
+   * levels gets the requested one back (the 0.10 fork: Extra High reads as
+   * High on a model without it). Pi and 0.9.8 store the clamped level, and
+   * that is what the next model gets.
+   */
+  readonly remembersThinkingRequest: boolean;
 }
 
 /** The agent's config directory: its environment override, else the default under `home`. */
@@ -186,6 +194,7 @@ export const PI_FLAVOR: PiFlavor = {
   terminationGrace: Duration.seconds(1),
   resumesAtLaunch: false,
   restartsOnLostDaemonSession: false,
+  remembersThinkingRequest: false,
 };
 
 /** Prime Agent 0.9.8, the TypeScript release. */
@@ -215,6 +224,7 @@ const primeAgent098 = {
   terminationGrace: Duration.seconds(15),
   resumesAtLaunch: true,
   restartsOnLostDaemonSession: true,
+  remembersThinkingRequest: false,
 } satisfies PiFlavor;
 
 /**
@@ -230,6 +240,7 @@ export const PRIME_AGENT_FORK_FLAVOR: PiFlavor = {
   minimumVersion: "0.10.0",
   rollback: "rpc_tree",
   extensions: false,
+  remembersThinkingRequest: true,
 };
 
 export const PRIME_AGENT_FLAVOR: PiFlavor = {
