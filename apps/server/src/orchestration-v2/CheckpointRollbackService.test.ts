@@ -747,13 +747,16 @@ it.effect.each([
 /**
  * Runs 1..n alternate provider threads as `providers` lists them; `p` is the
  * active one. The handoff `p` received with run `carrierOrdinal` holds one
- * message from each run in `handoffRuns`.
+ * message from each run in `handoffRuns`. Runs in `rolledBack` were rolled
+ * back earlier.
  */
 const rollbackAcrossProviders = (input: {
   readonly providers: ReadonlyArray<"c" | "p">;
   readonly targetOrdinal: number;
   readonly carrierOrdinal: number;
   readonly handoffRuns: ReadonlyArray<number>;
+  readonly rolledBack?: ReadonlyArray<number>;
+  readonly firstRunOrdinal?: number;
 }) => {
   const threadId = ThreadId.make("rollback-across-providers");
   const providerSessionId = ProviderSessionId.make("rollback-across-providers-session");
@@ -764,6 +767,7 @@ const rollbackAcrossProviders = (input: {
     id: ProviderThreadId.make("p"),
     providerSessionId,
     providerInstanceId: instanceId,
+    firstRunOrdinal: input.firstRunOrdinal ?? input.providers.indexOf("p") + 1,
   };
   const ordinals = input.providers.map((_, index) => index + 1);
   const providerTurns = ordinals.map((ordinal) => ({
@@ -805,7 +809,7 @@ const rollbackAcrossProviders = (input: {
     runs: ordinals.map((ordinal) => ({
       id: `run-${ordinal}`,
       ordinal,
-      status: "completed",
+      status: input.rolledBack?.includes(ordinal) ? "rolled_back" : "completed",
       rootNodeId: null,
       activeAttemptId: `attempt-${ordinal}`,
     })),
@@ -926,6 +930,30 @@ it.effect.each([
     }),
 );
 
+it.effect(
+  "ignores turns of a native conversation an earlier rollback dropped from the active provider thread",
+  () =>
+    Effect.gen(function* () {
+      // `p` ran 1 and 2, `c` ran 3, a rollback to 1 dropped `p`'s native
+      // conversation, and run 4 rebuilt it from a full handoff of run 1.
+      const result = yield* rollbackAcrossProviders({
+        providers: ["p", "p", "c", "p"],
+        rolledBack: [2, 3],
+        firstRunOrdinal: 4,
+        targetOrdinal: 1,
+        carrierOrdinal: 4,
+        handoffRuns: [1],
+      });
+      assert.equal(result.rollback.target.type, "thread_start");
+      assert.deepEqual(
+        result.rollback.providerThreadTurns.map((turn) => String(turn.id)),
+        ["turn-4"],
+      );
+      assert.deepEqual(result.rolledBackRunIds, ["run-4"]);
+      assert.equal(result.handoff?.status, "ready");
+      assert.isUndefined(result.handoff?.delivery);
+    }),
+);
 
 it.effect.skipIf(!symlinksSupported)(
   "rejects an archived thread sharing a worktree through a symlink",
