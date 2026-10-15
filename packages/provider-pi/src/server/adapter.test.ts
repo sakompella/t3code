@@ -198,6 +198,7 @@ const makeFakePi: Effect.Effect<FakePi> = Effect.gen(function* () {
   let sessionGeneration = 0;
   let models: ReadonlyArray<unknown> = [];
   let isStreaming: boolean | null = null;
+  let inputSuspended = false;
   let transcript: ReadonlyArray<unknown> = [];
   let stdinBuffer = "";
 
@@ -211,6 +212,22 @@ const makeFakePi: Effect.Effect<FakePi> = Effect.gen(function* () {
     });
 
   const respondTo = (record: PiRpcRecord): PiRpcRecord | null => {
+    // Prime Agent suspends queued input on a manual compact, even one that
+    // succeeds. On an idle session only a prompt that names a
+    // streamingBehavior lifts it; a plain prompt is refused.
+    if (record["type"] === "compact") inputSuspended = true;
+    if (record["type"] === "prompt" && inputSuspended && !isStreaming) {
+      if (record["streamingBehavior"] === undefined) {
+        return {
+          type: "response",
+          id: record["id"],
+          command: "prompt",
+          success: false,
+          error: "Cannot admit a session action while queued session input is suspended.",
+        };
+      }
+      inputSuspended = false;
+    }
     if (typeof record["id"] !== "string" && !(record["type"] === "prompt" && isStreaming !== null))
       return null;
     const base = {
@@ -3488,6 +3505,41 @@ describe("PiAdapterV2", () => {
       yield* fake.takeRequest("get_state");
       const terminal = yield* takeEvent((event) => event.type === "turn.terminal");
       assert.isTrue(terminal.type === "turn.terminal" && terminal.status === "completed");
+    }).pipe(Effect.scoped, Effect.provide(layerTest)),
+  );
+
+  it.effect("accepts the next prompt after a /compact with instructions", () =>
+    Effect.gen(function* () {
+      const fake = yield* makeFakePi;
+      const { runtime, takeEvent } = yield* openRuntime(fake);
+      const providerThread = yield* runtime.ensureThread({
+        threadId: THREAD_ID,
+        modelSelection: modelSelection("default"),
+        runtimePolicy,
+      });
+      yield* startTurn(runtime, providerThread, "default", [], "/compact keep the tests");
+      yield* fake.takeRequest("compact");
+      yield* fake.emit({ type: "compaction_start", reason: "manual" });
+      yield* fake.emit({
+        type: "compaction_end",
+        reason: "manual",
+        result: { summary: "smaller", tokensBefore: 10_000, estimatedTokensAfter: 2_000 },
+        aborted: false,
+        willRetry: false,
+      });
+      yield* fake.emit({ type: "response", command: "compact", success: true });
+      yield* fake.emit({ type: "agent_settled" });
+      const compacted = yield* takeEvent((event) => event.type === "turn.terminal");
+      assert.isTrue(compacted.type === "turn.terminal" && compacted.status === "completed");
+
+      yield* startTurn(runtime, providerThread, "default", [], "next", undefined, 2);
+      yield* fake.takeRequest("prompt");
+      yield* fake.emit({ type: "response", command: "prompt", success: true });
+      yield* fake.emit({ type: "agent_start" });
+      yield* fake.emit({ type: "agent_end", messages: [] });
+      yield* fake.emit({ type: "agent_settled" });
+      const next = yield* takeEvent((event) => event.type === "turn.terminal");
+      assert.isTrue(next.type === "turn.terminal" && next.status === "completed");
     }).pipe(Effect.scoped, Effect.provide(layerTest)),
   );
 
@@ -7704,6 +7756,7 @@ describe("PiAdapterV2 with the Prime Agent flavor", () => {
       yield* fake.emit({ type: "agent_start" });
       yield* fake.emit(rlmChild("cancelled", { error: "Deleted by parent orchestrator" }));
       yield* fake.emit({ type: "agent_end", messages: [] });
+      yield* fake.emit({ type: "agent_settled" });
       const next = yield* session.takeEvent(
         (event) => event.type === "turn.terminal" || event.type === "subagent.updated",
       );

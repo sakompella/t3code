@@ -3588,6 +3588,9 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
                 });
               } else if (payload !== null) {
                 const carriesRollbackNotice = rollbackNoticePending;
+                // Prime Agent also refuses a prompt without streamingBehavior
+                // on an idle session after a manual compact or an abort, until
+                // a prompt that names one lifts that suspension.
                 yield* connection.send({
                   type: "prompt",
                   message: carriesRollbackNotice
