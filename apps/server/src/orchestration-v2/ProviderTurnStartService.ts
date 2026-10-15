@@ -42,7 +42,7 @@ import {
   historicalMessage,
   latestNativeContextUsage,
 } from "@t3tools/provider-core/server/handoffBudget";
-import { deliverContextHandoffs } from "./ContextHandoffDelivery.ts";
+import { deliverContextHandoffs, handoffsForRun } from "./ContextHandoffDelivery.ts";
 import * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
 import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
 import * as ProjectionStore from "./ProjectionStore.ts";
@@ -250,26 +250,7 @@ export const layer: Layer.Layer<
       const checkpointScope = projection.checkpointScopes.find(
         (candidate) => candidate.id === rootNode?.checkpointScopeId,
       );
-      const handoffs = projection.contextHandoffs.filter(
-        (handoff) =>
-          handoff.status === "ready" &&
-          (handoff.targetRunId === run.id ||
-            (handoff.toProviderThreadId === run.providerThreadId &&
-              projection.runs.some(
-                (source) =>
-                  source.id === handoff.targetRunId &&
-                  (source.status === "failed" ||
-                    source.status === "interrupted" ||
-                    (source.status === "completed" &&
-                      handoff.delivery === undefined &&
-                      projection.messages.some(
-                        (message) =>
-                          message.id === source.userMessageId &&
-                          message.attachments.length === 0 &&
-                          message.text.trim().toLowerCase() === "/compact",
-                      ))),
-              ))),
-      );
+      const handoffs = handoffsForRun(projection, run);
       const nativeForkTransfer = projection.contextTransfers.find(
         (transfer) =>
           transfer.type === "fork" &&
@@ -638,14 +619,30 @@ export const layer: Layer.Layer<
               .filter((candidate) => candidate.status === "rolled_back")
               .map((candidate) => candidate.id),
           );
-          const rolledBackAttemptIds = new Set(
-            sourceProjection.attempts
-              .filter((attempt) => rolledBackRunIds.has(attempt.runId))
-              .map((attempt) => attempt.id),
+          // Nor can the source provider thread's turns from runs before its
+          // `firstRunOrdinal`: a rollback dropped the native conversation they
+          // belong to (see CheckpointRollbackService).
+          const droppedRunIds = new Set(
+            sourceProjection.runs
+              .filter(
+                (candidate) => candidate.ordinal < (sourceProviderThread.firstRunOrdinal ?? 0),
+              )
+              .map((candidate) => candidate.id),
           );
-          const sourceProviderTurns = sourceProjection.providerTurns.filter(
-            (turn) => turn.runAttemptId === null || !rolledBackAttemptIds.has(turn.runAttemptId),
+          const attemptRunIds = new Map(
+            sourceProjection.attempts.map((attempt) => [attempt.id, attempt.runId] as const),
           );
+          const sourceProviderTurns = sourceProjection.providerTurns.filter((turn) => {
+            const turnRunId =
+              turn.runAttemptId === null ? undefined : attemptRunIds.get(turn.runAttemptId);
+            return (
+              turnRunId === undefined ||
+              (!rolledBackRunIds.has(turnRunId) &&
+                !(
+                  turn.providerThreadId === sourceProviderThread.id && droppedRunIds.has(turnRunId)
+                ))
+            );
+          });
           return yield* loadFromProvider(
             session.forkThread({
               sourceProviderThread,
