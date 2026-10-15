@@ -3,6 +3,7 @@ import { assert, it, vi } from "@effect/vitest";
 import {
   CheckpointId,
   CheckpointScopeId,
+  type OrchestrationV2DomainEvent,
   type OrchestrationV2ThreadProjection,
   ProjectId,
   ProviderInstanceId,
@@ -647,6 +648,7 @@ it.effect.each([
         rootNodeId: null,
         activeAttemptId: `attempt-${ordinal}`,
       })),
+      contextHandoffs: [],
     } as unknown as OrchestrationV2ThreadProjection;
     const layerTest = layerCheckpointRollbackService.pipe(
       Layer.provide(
@@ -741,6 +743,189 @@ it.effect.each([
     }).pipe(Effect.provide(layerTest));
   },
 );
+
+/**
+ * Runs 1..n alternate provider threads as `providers` lists them; `p` is the
+ * active one. The handoff `p` received with run `carrierOrdinal` holds one
+ * message from each run in `handoffRuns`.
+ */
+const rollbackAcrossProviders = (input: {
+  readonly providers: ReadonlyArray<"c" | "p">;
+  readonly targetOrdinal: number;
+  readonly carrierOrdinal: number;
+  readonly handoffRuns: ReadonlyArray<number>;
+}) => {
+  const threadId = ThreadId.make("rollback-across-providers");
+  const providerSessionId = ProviderSessionId.make("rollback-across-providers-session");
+  const instanceId = ProviderInstanceId.make("rollback-across-providers-instance");
+  const checkpointId = CheckpointId.make("rollback-across-providers-checkpoint");
+  const scopeId = CheckpointScopeId.make("rollback-across-providers-scope");
+  const activeProviderThread = {
+    id: ProviderThreadId.make("p"),
+    providerSessionId,
+    providerInstanceId: instanceId,
+  };
+  const ordinals = input.providers.map((_, index) => index + 1);
+  const providerTurns = ordinals.map((ordinal) => ({
+    id: `turn-${ordinal}`,
+    providerThreadId: input.providers[ordinal - 1],
+    runAttemptId: `attempt-${ordinal}`,
+    ordinal: input.providers.slice(0, ordinal).filter((p) => p === input.providers[ordinal - 1])
+      .length,
+    status: "completed",
+  }));
+  const handoff = {
+    id: "handoff",
+    threadId,
+    targetRunId: `run-${input.carrierOrdinal}`,
+    toProviderThreadId: activeProviderThread.id,
+    status: "ready",
+    history: {
+      messages: input.handoffRuns.map((ordinal) => ({ runId: `run-${ordinal}` })),
+      coverage: "",
+      omittedItems: 0,
+    },
+    delivery: { nativeThreadId: "native", status: "inline", itemIds: [] },
+  };
+  const projection = {
+    thread: {
+      worktreePath: process.cwd(),
+      activeProviderThreadId: activeProviderThread.id,
+      modelSelection: { instanceId, model: "test" },
+    },
+    providerThreads: [activeProviderThread],
+    providerSessions: [],
+    providerTurns,
+    nodes: [],
+    attempts: ordinals.map((ordinal) => ({ id: `attempt-${ordinal}`, runId: `run-${ordinal}` })),
+    checkpoints: [
+      { id: checkpointId, scopeId, status: "ready", appRunOrdinal: input.targetOrdinal },
+    ],
+    checkpointScopes: [{ id: scopeId, cwd: process.cwd() }],
+    runs: ordinals.map((ordinal) => ({
+      id: `run-${ordinal}`,
+      ordinal,
+      status: "completed",
+      rootNodeId: null,
+      activeAttemptId: `attempt-${ordinal}`,
+    })),
+    contextHandoffs: [handoff],
+  } as unknown as OrchestrationV2ThreadProjection;
+  const rollbacks: Array<ProviderAdapter.ProviderAdapterV2RollbackThreadInput> = [];
+  const written: Array<OrchestrationV2DomainEvent> = [];
+  const testLayer = layerCheckpointRollbackService.pipe(
+    Layer.provide(
+      Layer.mergeAll(
+        Layer.effect(ThreadCommandExecutor.ThreadCommandExecutor, KeyedLock.make<ThreadId>()),
+        Layer.mock(CheckpointService.CheckpointServiceV2)({}),
+        Layer.mock(EventSink.EventSinkV2)({
+          write: ({ events }) =>
+            Effect.sync(() => {
+              written.push(...events);
+              return [];
+            }),
+        }),
+        IdAllocator.layer,
+        Layer.mock(ProjectionStore.ProjectionStoreV2)({
+          getThreadRecords: () => Effect.succeed(projection),
+        }),
+        Layer.mock(ProviderSessionManager.ProviderSessionManagerV2)({
+          open: () =>
+            Effect.succeed({
+              rollbackThread: (rollback: ProviderAdapter.ProviderAdapterV2RollbackThreadInput) =>
+                Effect.sync(() => {
+                  rollbacks.push(rollback);
+                  return { providerThread: activeProviderThread };
+                }),
+            } as never),
+        }),
+        Layer.mock(RuntimePolicy.RuntimePolicyV2)({ resolve: () => Effect.succeed({} as never) }),
+      ),
+    ),
+  );
+  return Effect.gen(function* () {
+    const service = yield* CheckpointRollbackService.CheckpointRollbackServiceV2;
+    yield* service.execute({
+      threadId,
+      providerThreadId: activeProviderThread.id,
+      checkpointId,
+      scopeId,
+      restoreFiles: false,
+    });
+    const handoffUpdate = written.find((event) => event.type === "context-handoff.updated");
+    const threadUpdate = written.find((event) => event.type === "provider-thread.updated");
+    return {
+      rollback: rollbacks[0]!,
+      lastRunOrdinal:
+        threadUpdate?.type === "provider-thread.updated"
+          ? threadUpdate.payload.lastRunOrdinal
+          : undefined,
+      rolledBackRunIds: written.flatMap((event) =>
+        event.type === "run.updated" && event.payload.status === "rolled_back"
+          ? [event.payload.id]
+          : [],
+      ),
+      handoff:
+        handoffUpdate?.type === "context-handoff.updated" ? handoffUpdate.payload : undefined,
+    };
+  }).pipe(Effect.provide(testLayer));
+};
+
+it.effect(
+  "rewinds the active provider thread to its start for a target of an earlier provider",
+  () =>
+    Effect.gen(function* () {
+      // Two runs on one provider, then a switch: the handoff covered both.
+      const result = yield* rollbackAcrossProviders({
+        providers: ["c", "c", "p"],
+        targetOrdinal: 1,
+        carrierOrdinal: 3,
+        handoffRuns: [1, 2],
+      });
+      assert.equal(result.rollback.target.type, "thread_start");
+      assert.deepEqual(
+        result.rollback.providerThreadTurns.map((turn) => String(turn.id)),
+        ["turn-3"],
+      );
+      assert.isNull(result.lastRunOrdinal);
+      assert.deepEqual(result.rolledBackRunIds, ["run-2", "run-3"]);
+      // The next turn sends the handoff again, without the discarded run.
+      assert.equal(result.handoff?.status, "ready");
+      assert.isUndefined(result.handoff?.delivery);
+      assert.deepEqual(
+        result.handoff?.history?.messages.map((message) => String(message.runId)),
+        ["run-1"],
+      );
+    }),
+);
+
+it.effect.each([
+  { targetOrdinal: 2, handoffStatus: "ready", delivered: false },
+  { targetOrdinal: 1, handoffStatus: "superseded", delivered: true },
+])(
+  "rewinds a provider thread that ran before and after another one to its last turn at or before %s",
+  ({ targetOrdinal, handoffStatus, delivered }) =>
+    Effect.gen(function* () {
+      // Back on `p` after a run on `c`: the handoff with run 3 covered run 2.
+      const result = yield* rollbackAcrossProviders({
+        providers: ["p", "c", "p"],
+        targetOrdinal,
+        carrierOrdinal: 3,
+        handoffRuns: [2],
+      });
+      assert.equal(result.rollback.target.type, "provider_turn");
+      assert.equal(
+        result.rollback.target.type === "provider_turn"
+          ? result.rollback.target.providerTurn.id
+          : undefined,
+        "turn-1",
+      );
+      assert.equal(result.lastRunOrdinal, 1);
+      assert.equal(result.handoff?.status, handoffStatus);
+      assert.equal(result.handoff?.delivery !== undefined, delivered);
+    }),
+);
+
 
 it.effect.skipIf(!symlinksSupported)(
   "rejects an archived thread sharing a worktree through a symlink",

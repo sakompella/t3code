@@ -25,7 +25,7 @@ import {
   historicalMessage,
 } from "@t3tools/provider-core/server/handoffBudget";
 import { projectContextHandoffForWire } from "./WireProjection.ts";
-import { deliverContextHandoffs } from "./ContextHandoffDelivery.ts";
+import { deliverContextHandoffs, handoffsForRun } from "./ContextHandoffDelivery.ts";
 
 const encodeJson = Schema.encodeEffect(Schema.fromJsonString(Schema.Unknown));
 const decodeHandoff = Schema.decodeUnknownSync(OrchestrationV2ContextHandoff);
@@ -457,6 +457,25 @@ describe("handoff delivery", () => {
       assert.deepEqual(decodeHandoff(durable).delivery, durable.delivery);
     }),
   );
+
+  it("sends a handoff again after a rollback discarded the run that carried it", () => {
+    const carrier = { id: handoff.targetRunId, status: "rolled_back", userMessageId: null };
+    const next = { id: RunId.make("run:next"), providerThreadId: providerThread.id };
+    const delivered = {
+      ...handoff,
+      delivery: { nativeThreadId: "native:target", status: "inline" as const, itemIds: [] },
+    };
+    const carried = (candidate: OrchestrationV2ContextHandoff) =>
+      handoffsForRun(
+        { contextHandoffs: [candidate], runs: [carrier], messages: [] } as never,
+        next,
+      ).map((selected) => selected.targetRunId);
+
+    // The rollback left it undelivered; the next run carries it from now on.
+    assert.deepEqual(carried(handoff), [next.id]);
+    assert.deepEqual(carried(delivered), []);
+  });
+
   it.effect("loads the history budget only when a handoff needs delivery", () =>
     Effect.gen(function* () {
       let reads = 0;
