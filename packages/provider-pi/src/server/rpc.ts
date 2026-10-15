@@ -186,11 +186,12 @@ export interface PiRpcConnection {
    * Correlated request: assigns an `id`, waits for the matching response
    * record, and returns its `data` (undefined when the command carries none).
    * Fails on `success: false`, transport death, timeout, or a reply over the
-   * record size limit.
+   * record size limit. A `null` timeout waits for the response, for commands
+   * that must not be abandoned midway.
    */
   readonly request: (
     record: PiRpcRecord,
-    timeoutMs?: number,
+    timeoutMs?: number | null,
   ) => Effect.Effect<unknown, PiRpcError | PiRpcTimeoutError | PiRpcRecordTooLargeError>;
   readonly events: Queue.Queue<PiRpcRecord, PiRpcError>;
   readonly exited: Effect.Effect<number, PiRpcError>;
@@ -589,7 +590,7 @@ export const makePiRpcConnection = Effect.fnUntraced(function* (options: PiRpcSp
 
   const request = (
     record: PiRpcRecord,
-    timeoutMs = DEFAULT_REQUEST_TIMEOUT_MS,
+    timeoutMs: number | null = DEFAULT_REQUEST_TIMEOUT_MS,
   ): Effect.Effect<unknown, PiRpcError | PiRpcTimeoutError | PiRpcRecordTooLargeError> =>
     Effect.gen(function* () {
       const id = `t3-${nextRequestId++}`;
@@ -599,11 +600,17 @@ export const makePiRpcConnection = Effect.fnUntraced(function* (options: PiRpcSp
       yield* send({ ...record, id }).pipe(
         Effect.tapError(() => Effect.sync(() => pendingRequests.delete(id))),
       );
-      return yield* Effect.raceFirst(Deferred.await(deferred), Deferred.await(transportDown)).pipe(
-        Effect.timeoutOrElse({
-          duration: Duration.millis(timeoutMs),
-          orElse: () => Effect.fail(new PiRpcTimeoutError({ operation, timeoutMs })),
-        }),
+      const response = Effect.raceFirst(Deferred.await(deferred), Deferred.await(transportDown));
+      return yield* (
+        timeoutMs === null
+          ? response
+          : response.pipe(
+              Effect.timeoutOrElse({
+                duration: Duration.millis(timeoutMs),
+                orElse: () => Effect.fail(new PiRpcTimeoutError({ operation, timeoutMs })),
+              }),
+            )
+      ).pipe(
         Effect.onInterrupt(() => Effect.sync(() => pendingRequests.delete(id))),
         Effect.onError(() => Effect.sync(() => pendingRequests.delete(id))),
       );

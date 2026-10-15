@@ -10025,6 +10025,25 @@ describe("PiAdapterV2 with the Prime Agent flavor", () => {
       ...(summary === undefined ? {} : { summary }),
     });
 
+  /**
+   * Rolls a 0.10 fork thread back to its first turn. The fork first lists its
+   * active branch, which still holds every turn's user entry.
+   */
+  const rollForkBackToFirstTurn = (
+    session: Effect.Success<ReturnType<typeof openPrimeThread>>,
+    fake: FakePi,
+    turns: ReadonlyArray<OrchestrationV2ProviderTurn | undefined>,
+    summary?: OrchestrationV2RollbackSummary,
+  ) => {
+    fake.queueForkMessages({
+      messages: turns.map((turn) => ({
+        entryId: turn!.nativeTurnRef!.nativeId,
+        text: turn!.nativeTurnRef!.nativeId,
+      })),
+    });
+    return rollBackToFirstTurn(session, turns, summary);
+  };
+
   it.effect("rolls back at the first user entry the discarded turn added", () =>
     Effect.gen(function* () {
       const fake = yield* makeFakePi;
@@ -10474,7 +10493,7 @@ describe("PiAdapterV2 with the Prime Agent flavor", () => {
       const first = yield* runPrimeTurn(session, fake, 1, ["u1"]);
       const second = yield* runPrimeTurn(session, fake, 2, ["u1", "u2"]);
 
-      const snapshot = yield* rollBackToFirstTurn(session, [first, second]);
+      const snapshot = yield* rollForkBackToFirstTurn(session, fake, [first, second]);
 
       const requests = fake.allRequests();
       assert.deepEqual(
@@ -10543,7 +10562,7 @@ describe("PiAdapterV2 with the Prime Agent flavor", () => {
         const first = yield* runPrimeTurn(session, fake, 1, ["u1"]);
         const second = yield* runPrimeTurn(session, fake, 2, ["u1", "u2"]);
 
-        yield* rollBackToFirstTurn(session, [first, second], summary);
+        yield* rollForkBackToFirstTurn(session, fake, [first, second], summary);
         assert.deepEqual(
           fake
             .allRequests()
@@ -10552,6 +10571,25 @@ describe("PiAdapterV2 with the Prime Agent flavor", () => {
           [{ type: "navigate_tree", targetId: "u2", ...navigation }],
         );
       }).pipe(Effect.scoped, Effect.provide(layerTest)),
+  );
+
+  it.effect("does not summarize again when a retried rollback finds the branch already moved", () =>
+    Effect.gen(function* () {
+      const fake = yield* makeFakePi;
+      fake.queueForkMessages({ messages: [] });
+      const session = yield* openPrimeThread(fake, THREAD_ID, PRIME_AGENT_FORK_FLAVOR);
+      const first = yield* runPrimeTurn(session, fake, 1, ["u1"]);
+      const second = yield* runPrimeTurn(session, fake, 2, ["u1", "u2"]);
+
+      // The first attempt moved the branch and left its summary, then failed in T3.
+      fake.queueForkMessages({ messages: [{ entryId: "u1", text: "u1" }] });
+      const { providerThread } = yield* rollBackToFirstTurn(session, [first, second], {});
+      assert.deepEqual(
+        fake.allRequests().filter((request) => request.type === "navigate_tree"),
+        [],
+      );
+      assert.equal(providerThread.nativeConversationHeadRef?.nativeId, "u2");
+    }).pipe(Effect.scoped, Effect.provide(layerTest)),
   );
 
   /** A `get_fork_messages` reply that says nothing about the active branch. */
@@ -10613,7 +10651,10 @@ describe("PiAdapterV2 with the Prime Agent flavor", () => {
         const session = yield* openPrimeThread(fake, THREAD_ID, PRIME_AGENT_FORK_FLAVOR);
         const first = yield* runPrimeTurn(session, fake, 1, ["u1"]);
         const second = yield* runPrimeTurn(session, fake, 2, ["u1", "u2"]);
-        const { providerThread: stored } = yield* rollBackToFirstTurn(session, [first, second]);
+        const { providerThread: stored } = yield* rollForkBackToFirstTurn(session, fake, [
+          first,
+          second,
+        ]);
         assert.equal(stored.nativeConversationHeadRef?.nativeId, "u2");
 
         const reopened = yield* reopenForkThread(stored, activeBranch);
@@ -10667,7 +10708,10 @@ describe("PiAdapterV2 with the Prime Agent flavor", () => {
       const session = yield* openPrimeThread(fake, THREAD_ID, PRIME_AGENT_FORK_FLAVOR);
       const first = yield* runPrimeTurn(session, fake, 1, ["u1"]);
       const second = yield* runPrimeTurn(session, fake, 2, ["u1", "u2"]);
-      const { providerThread: stored } = yield* rollBackToFirstTurn(session, [first, second]);
+      const { providerThread: stored } = yield* rollForkBackToFirstTurn(session, fake, [
+        first,
+        second,
+      ]);
 
       const reopened = yield* reopenForkThread(stored, listing);
       assert.deepEqual(navigations(reopened.fake), [], "a reopen must never move the leaf");
@@ -10717,7 +10761,10 @@ describe("PiAdapterV2 with the Prime Agent flavor", () => {
       const session = yield* openPrimeThread(fake, THREAD_ID, PRIME_AGENT_FORK_FLAVOR);
       const first = yield* runPrimeTurn(session, fake, 1, ["u1"]);
       const second = yield* runPrimeTurn(session, fake, 2, ["u1", "u2"]);
-      const { providerThread: stored } = yield* rollBackToFirstTurn(session, [first, second]);
+      const { providerThread: stored } = yield* rollForkBackToFirstTurn(session, fake, [
+        first,
+        second,
+      ]);
 
       const reopened = yield* reopenForkThread(stored, []);
       assert.isNull(reopened.session.providerThread.nativeConversationHeadRef);
@@ -10731,7 +10778,10 @@ describe("PiAdapterV2 with the Prime Agent flavor", () => {
       const session = yield* openPrimeThread(fake, THREAD_ID, PRIME_AGENT_FORK_FLAVOR);
       const first = yield* runPrimeTurn(session, fake, 1, ["u1"]);
       const second = yield* runPrimeTurn(session, fake, 2, ["u1", "u2"]);
-      const { providerThread: stored } = yield* rollBackToFirstTurn(session, [first, second]);
+      const { providerThread: stored } = yield* rollForkBackToFirstTurn(session, fake, [
+        first,
+        second,
+      ]);
 
       yield* session.takeEvent(
         (event) =>
@@ -10769,7 +10819,10 @@ describe("PiAdapterV2 with the Prime Agent flavor", () => {
       const session = yield* openPrimeThread(fake, THREAD_ID, PRIME_AGENT_FORK_FLAVOR);
       const first = yield* runPrimeTurn(session, fake, 1, ["u1"]);
       const second = yield* runPrimeTurn(session, fake, 2, ["u1", "u2"]);
-      const { providerThread: stored } = yield* rollBackToFirstTurn(session, [first, second]);
+      const { providerThread: stored } = yield* rollForkBackToFirstTurn(session, fake, [
+        first,
+        second,
+      ]);
       yield* startTurn(
         session.runtime,
         stored,
