@@ -2443,6 +2443,103 @@ describe("PiAdapterV2", () => {
     }).pipe(Effect.scoped, Effect.provide(layerTest)),
   );
 
+  describe("a boundary behind turns with synthetic refs", () => {
+    // The shape of a long Prime Agent thread: wake turns (one failed) follow
+    // the target and never had a user entry of their own.
+    const turnsAround = (providerThreadId: ProviderThreadId, laterStrong: boolean) => {
+      const turn = (
+        ordinal: number,
+        ref: "weak" | string,
+        status: OrchestrationV2ProviderTurn["status"] = "completed",
+      ): OrchestrationV2ProviderTurn => ({
+        id: ProviderTurnId.make(`turn-${ordinal}`),
+        providerThreadId,
+        nodeId: NodeId.make(`node-${ordinal}`),
+        runAttemptId: null,
+        nativeTurnRef:
+          ref === "weak"
+            ? { driver: PI_PROVIDER, nativeId: `attempt-${ordinal}`, strength: "weak" }
+            : { driver: PI_PROVIDER, nativeId: ref, strength: "strong" },
+        ordinal,
+        status,
+        startedAt: null,
+        completedAt: null,
+      });
+      const target = turn(2, "weak");
+      return {
+        target,
+        turns: [
+          turn(1, "u1"),
+          target,
+          turn(3, "weak"),
+          turn(4, "weak", "failed"),
+          ...(laterStrong ? [turn(5, "u5", "failed")] : []),
+        ],
+      };
+    };
+
+    it.effect.each([
+      { laterStrong: true, entries: ["u5"] },
+      { laterStrong: false, entries: [] },
+    ])("forks at the next user entry (later strong: $laterStrong)", ({ laterStrong, entries }) =>
+      Effect.gen(function* () {
+        const fake = yield* makeFakePi;
+        const forkFake = yield* makeFakePi;
+        const { runtime } = yield* openRuntime(fake, "default", THREAD_ID, SESSION_ID, forkFake);
+        const source = yield* runtime.ensureThread({
+          threadId: THREAD_ID,
+          modelSelection: modelSelection("default"),
+          runtimePolicy,
+        });
+        const { target, turns } = turnsAround(source.id, laterStrong);
+        forkFake.queueState({ sessionFile: "/fake/forked.jsonl" });
+        yield* runtime.forkThread({
+          sourceProviderThread: source,
+          sourceProviderTurns: turns,
+          providerTurnId: target.id,
+          targetThreadId: ThreadId.make("fork-target"),
+        });
+        assert.deepEqual(
+          forkFake
+            .allRequests()
+            .filter((request) => request.type === "fork")
+            .map((request) => request.entryId),
+          entries,
+        );
+      }).pipe(Effect.scoped, Effect.provide(layerTest)),
+    );
+
+    it.effect("rolls back to the next user entry", () =>
+      Effect.gen(function* () {
+        const fake = yield* makeFakePi;
+        const { runtime } = yield* openRuntime(fake);
+        const providerThread = yield* runtime.ensureThread({
+          threadId: THREAD_ID,
+          modelSelection: modelSelection("default"),
+          runtimePolicy,
+        });
+        const { target, turns } = turnsAround(providerThread.id, true);
+        yield* runtime.rollbackThread({
+          providerThread,
+          target: {
+            type: "provider_turn",
+            checkpointId: CheckpointId.make("checkpoint-1"),
+            appRunOrdinal: 1,
+            providerTurn: target,
+          },
+          providerThreadTurns: turns,
+        });
+        assert.deepEqual(
+          fake
+            .allRequests()
+            .filter((request) => request.type === "fork")
+            .map((request) => request.entryId),
+          ["u5"],
+        );
+      }).pipe(Effect.scoped, Effect.provide(layerTest)),
+    );
+  });
+
   it.effect("presents explicitly namespaced MCP extension tools", () =>
     Effect.gen(function* () {
       const fake = yield* makeFakePi;

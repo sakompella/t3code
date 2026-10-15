@@ -3,6 +3,7 @@ import { expect, it, vi } from "vite-plus/test";
 import { it as effectIt } from "@effect/vitest";
 import {
   CheckpointScopeId,
+  ContextTransferId,
   MessageId,
   NodeId,
   ProviderSessionId,
@@ -172,6 +173,8 @@ function makeLocalCommandHarness(input: {
   readonly logoutFailure?: string;
   readonly openFailure?: unknown;
   readonly ensureThreadFailure?: unknown;
+  /** Starts the run as a native fork of another thread, which the adapter refuses with this cause. */
+  readonly forkFailure?: unknown;
   readonly historyReadFailureAfterFallback?: unknown;
   readonly interruptOpen?: boolean;
   readonly interruptRunBeforeOpenFailure?: boolean;
@@ -344,7 +347,21 @@ function makeLocalCommandHarness(input: {
     providerSessions: [],
     providerTurns: [],
     contextHandoffs: [],
-    contextTransfers: [],
+    contextTransfers:
+      "forkFailure" in input
+        ? [
+            {
+              id: ContextTransferId.make("fork-transfer"),
+              type: "fork",
+              sourceThreadId: ThreadId.make("fork-source-thread"),
+              targetThreadId: threadId,
+              sourcePoint: { runId: RunId.make("fork-source-run") },
+              targetRunId: runId,
+              status: "pending",
+              resolution: null,
+            } as unknown as OrchestrationV2ThreadProjection["contextTransfers"][number],
+          ]
+        : [],
     turnItems: [],
     visibleTurnItems: [],
     runtimeRequests: [],
@@ -444,6 +461,18 @@ function makeLocalCommandHarness(input: {
                 } as never)
               : Effect.die("A local command must not open a native session."),
   );
+  const forkThread = vi.fn(() =>
+    Effect.fail(
+      new ProviderAdapter.ProviderAdapterForkThreadError({
+        driver: providerThread.driver,
+        providerThreadId,
+        cause: input.forkFailure,
+      }),
+    ),
+  );
+  const openForkSession = vi.fn(() =>
+    Effect.succeed({ driver: providerThread.driver, forkThread } as never),
+  );
   const startRootRun = vi.fn<
     (input: RunExecutionService.RunExecutionServiceV2StartRootRunInput) => Effect.Effect<void>
   >(() =>
@@ -497,8 +526,19 @@ function makeLocalCommandHarness(input: {
       Effect.succeed({ cwd: thread.worktreePath ?? "/tmp/native-account-command" } as never),
   );
   const createWorktree = vi.fn(() => Effect.succeed({} as never));
-  const getThreadRecords = vi.fn<ProjectionStore.ProjectionStoreV2Shape["getThreadRecords"]>(() =>
-    Effect.succeed(projection),
+  const forkSourceRecords = {
+    runs: [{ id: RunId.make("fork-source-run"), providerThreadId, activeAttemptId: null }],
+    providerThreads: [providerThread],
+    attempts: [],
+    providerTurns: [],
+  };
+  const getThreadRecords = vi.fn<ProjectionStore.ProjectionStoreV2Shape["getThreadRecords"]>(
+    (requestedThreadId) =>
+      Effect.succeed(
+        requestedThreadId === ThreadId.make("fork-source-thread")
+          ? (forkSourceRecords as never)
+          : projection,
+      ),
   );
   const getTurnStartContext = vi.fn(() =>
     Effect.succeed({
@@ -568,7 +608,9 @@ function makeLocalCommandHarness(input: {
               }),
             ),
         }),
-        Layer.mock(ProviderSessionManager.ProviderSessionManagerV2)({ open }),
+        Layer.mock(ProviderSessionManager.ProviderSessionManagerV2)({
+          open: "forkFailure" in input ? openForkSession : open,
+        }),
         Layer.mock(ProviderAuthService.ProviderAuthService)({ tryHandlePromptCommand }),
         Layer.mock(RunExecutionService.RunExecutionServiceV2)({ startRootRun }),
         Layer.mock(RuntimePolicy.RuntimePolicyV2)({
@@ -586,6 +628,7 @@ function makeLocalCommandHarness(input: {
     resolveRuntimePolicy,
     createWorktree,
     open,
+    forkThread,
     writeIfRunCurrent,
     startRootRun,
     tryHandlePromptCommand,
@@ -867,6 +910,37 @@ effectIt.effect("does not overwrite a run interrupted while its provider session
     expect(projection.nodes[0]?.status).toBe("pending");
     expect(projection.turnItems).toEqual([]);
     expect(harness.events).toEqual([]);
+  }),
+);
+
+effectIt.effect("does not retry a fork the adapter refuses on protocol grounds", () =>
+  Effect.gen(function* () {
+    const harness = makeLocalCommandHarness({
+      text: "Continue",
+      forkFailure: new ProviderAdapter.ProviderAdapterProtocolError({
+        driver: ProviderDriverKind.make("primeAgent"),
+        detail: "fork source has no session file",
+      }),
+    });
+
+    yield* harness.startWithRetry;
+
+    expect(harness.forkThread).toHaveBeenCalledOnce();
+    expect(harness.projection().runs.at(-1)?.status).toBe("failed");
+  }),
+);
+
+effectIt.effect("retries a fork that failed for another reason", () =>
+  Effect.gen(function* () {
+    const harness = makeLocalCommandHarness({
+      text: "Continue",
+      forkFailure: new Error("pi process exited with code 1"),
+    });
+
+    const error = yield* harness.startWithRetry.pipe(Effect.flip);
+
+    expect(error._tag).toBe("ProviderTurnStartError");
+    expect(harness.projection().runs.at(-1)?.status).toBe("starting");
   }),
 );
 
