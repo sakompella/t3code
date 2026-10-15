@@ -192,7 +192,7 @@ it.layer(layerTest)("PiDriver workspace discovery", (it) => {
   );
 
   it.effect.each([true, false])(
-    "limits discovered thinking defaults to the known active model, known=%s",
+    "offers the active model's thinking level as every model's default only when the active model is known, known=%s",
     (known) =>
       Effect.gen(function* () {
         const { spawner } = yield* makePiSpawner({
@@ -223,8 +223,8 @@ it.layer(layerTest)("PiDriver workspace discovery", (it) => {
           [
             ["default", []],
             ["test/model", known ? ["high"] : []],
-            ["other/model", []],
-            ["test/other", []],
+            ["other/model", known ? ["high"] : []],
+            ["test/other", known ? ["high"] : []],
           ],
         );
       }).pipe(Effect.scoped),

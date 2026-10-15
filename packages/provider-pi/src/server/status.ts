@@ -110,12 +110,28 @@ function piModelsFromSettings(
   );
 }
 
-function parseDiscoveredModels(data: unknown, state: unknown): ReadonlyArray<ServerProviderModel> {
+export function parseDiscoveredModels(
+  data: unknown,
+  state: unknown,
+): ReadonlyArray<ServerProviderModel> {
   const models = recordField(data, "models");
   if (!Array.isArray(models)) return [];
+  // `set_model` keeps the session's thinking level and clamps it into the new
+  // model, so the active model's level is every model's default. A model that
+  // cannot think reports "off", and switching from it restores a setting we
+  // cannot see, so that level says nothing.
   const activeModel = recordField(state, "model");
   const activeProvider = recordString(activeModel, "provider");
   const activeModelId = recordString(activeModel, "id");
+  const activeModelThinks = models.some(
+    (model) =>
+      recordString(model, "provider") === activeProvider &&
+      recordString(model, "id") === activeModelId &&
+      recordField(model, "reasoning") === true,
+  );
+  const configuredThinkingLevel = activeModelThinks
+    ? recordString(state, "thinkingLevel")
+    : undefined;
   const seen = new Set<string>();
   const parsed: Array<ServerProviderModel> = [];
   for (const model of models) {
@@ -130,12 +146,7 @@ function parseDiscoveredModels(data: unknown, state: unknown): ReadonlyArray<Ser
       name: recordString(model, "name") ?? slug,
       subProvider: provider,
       isCustom: false,
-      capabilities: thinkingCapabilitiesForPiModel(
-        model,
-        provider === activeProvider && id === activeModelId
-          ? recordString(state, "thinkingLevel")
-          : undefined,
-      ),
+      capabilities: thinkingCapabilitiesForPiModel(model, configuredThinkingLevel),
     });
   }
   return parsed;
