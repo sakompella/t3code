@@ -2,9 +2,11 @@ import {
   CheckpointId,
   CheckpointScopeId,
   latestProviderTurnForAttempt,
+  type OrchestrationV2ContextHandoff,
   type OrchestrationV2DomainEvent,
   type OrchestrationV2RollbackSummary,
   ProviderThreadId,
+  type RunId,
   ThreadId,
 } from "@t3tools/contracts";
 import * as Context from "effect/Context";
@@ -131,6 +133,7 @@ export const layer: Layer.Layer<
         "attempts",
         "nodes",
         "providerTurns",
+        "contextHandoffs",
       ]);
       const providerThread = projection.providerThreads.find(
         (candidate) => candidate.id === input.providerThreadId,
@@ -167,36 +170,74 @@ export const layer: Layer.Layer<
       }
 
       const targetOrdinal = checkpoint.appRunOrdinal ?? 0;
+      // Rolled-back turns stay in the audit history, but no longer exist in
+      // the provider conversation and must not be counted by a later rewind.
+      const rolledBackRunIds = new Set(
+        projection.runs.filter((run) => run.status === "rolled_back").map((run) => run.id),
+      );
+      // A rollback that dropped this provider thread's native conversation
+      // (see the other provider threads below) restarted it at
+      // `firstRunOrdinal`. Turns of earlier runs belong to the dropped one.
+      const conversationStart = providerThread.firstRunOrdinal ?? 0;
+      const outsideRunIds = new Set(
+        projection.runs
+          .filter((run) => rolledBackRunIds.has(run.id) || run.ordinal < conversationStart)
+          .map((run) => run.id),
+      );
+      const outsideAttemptIds = new Set(
+        projection.attempts
+          .filter((attempt) => outsideRunIds.has(attempt.runId))
+          .map((attempt) => attempt.id),
+      );
+      const providerThreadTurns = projection.providerTurns.filter(
+        (turn) =>
+          turn.providerThreadId === providerThread.id &&
+          (turn.runAttemptId === null || !outsideAttemptIds.has(turn.runAttemptId)),
+      );
+      // A goal run can span several native turns; roll back to its last.
+      const providerTurnForRun = (run: (typeof projection.runs)[number]) =>
+        latestProviderTurnForAttempt(projection.providerTurns, run.activeAttemptId) ??
+        projection.providerTurns.find(
+          (turn) =>
+            turn.id ===
+            projection.attempts.find((attempt) => attempt.id === run.activeAttemptId)
+              ?.providerTurnId,
+        );
+      const targetRun = projection.runs.find((run) => run.ordinal === targetOrdinal);
+      if (
+        targetOrdinal > 0 &&
+        (targetRun === undefined || providerTurnForRun(targetRun) === undefined)
+      ) {
+        return yield* new CheckpointRollbackExecutionError({
+          reason: "provider-turn-unavailable",
+          threadId: input.threadId,
+          providerThreadId: input.providerThreadId,
+          checkpointId: input.checkpointId,
+        });
+      }
+      // The active provider thread rewinds to its own last turn at or before
+      // the target. Turns of an earlier provider reached it only through a
+      // context handoff, so a target among them rewinds it to its last earlier
+      // turn, or to its start.
+      const boundary = projection.runs
+        .filter((run) => run.ordinal <= targetOrdinal && !outsideRunIds.has(run.id))
+        .toSorted((left, right) => left.ordinal - right.ordinal)
+        .flatMap((run) => {
+          const providerTurn = providerTurnForRun(run);
+          return providerTurn?.providerThreadId === providerThread.id
+            ? [{ run, providerTurn }]
+            : [];
+        })
+        .at(-1);
       const rollbackTarget: ProviderAdapter.ProviderAdapterV2RollbackTarget =
-        targetOrdinal === 0
-          ? {
-              type: "thread_start",
+        boundary === undefined
+          ? { type: "thread_start", checkpointId: checkpoint.id, appRunOrdinal: 0 }
+          : {
+              type: "provider_turn",
               checkpointId: checkpoint.id,
-              appRunOrdinal: 0,
-            }
-          : yield* Effect.gen(function* () {
-              const targetRun = projection.runs.find((run) => run.ordinal === targetOrdinal);
-              const targetAttempt = projection.attempts.find(
-                (attempt) => attempt.id === targetRun?.activeAttemptId,
-              );
-              const targetTurn =
-                latestProviderTurnForAttempt(projection.providerTurns, targetAttempt?.id) ??
-                projection.providerTurns.find((turn) => turn.id === targetAttempt?.providerTurnId);
-              if (targetTurn === undefined || targetTurn.providerThreadId !== providerThread.id) {
-                return yield* new CheckpointRollbackExecutionError({
-                  reason: "provider-turn-unavailable",
-                  threadId: input.threadId,
-                  providerThreadId: input.providerThreadId,
-                  checkpointId: input.checkpointId,
-                });
-              }
-              return {
-                type: "provider_turn" as const,
-                checkpointId: checkpoint.id,
-                appRunOrdinal: targetOrdinal,
-                providerTurn: targetTurn,
-              };
-            });
+              appRunOrdinal: boundary.run.ordinal,
+              providerTurn: boundary.providerTurn,
+            };
 
       const { worktreePath, branch } = projection.thread;
       if (worktreePath != null && branch != null && !(yield* fileSystem.exists(worktreePath))) {
@@ -260,21 +301,6 @@ export const layer: Layer.Layer<
             run.status === "failed" ||
             run.status === "cancelled"),
       );
-      // Rolled-back turns stay in the audit history, but no longer exist in
-      // the provider conversation and must not be counted by a later rewind.
-      const rolledBackRunIds = new Set(
-        projection.runs.filter((run) => run.status === "rolled_back").map((run) => run.id),
-      );
-      const rolledBackAttemptIds = new Set(
-        projection.attempts
-          .filter((attempt) => rolledBackRunIds.has(attempt.runId))
-          .map((attempt) => attempt.id),
-      );
-      const providerThreadTurns = projection.providerTurns.filter(
-        (turn) =>
-          turn.providerThreadId === providerThread.id &&
-          (turn.runAttemptId === null || !rolledBackAttemptIds.has(turn.runAttemptId)),
-      );
 
       const snapshot =
         runsToRollback.length === 0
@@ -314,6 +340,43 @@ export const layer: Layer.Layer<
                 }) as Event,
             );
           const events: Array<OrchestrationV2DomainEvent> = [];
+          // Other provider threads this rollback discarded turns from cannot be
+          // rewound without their sessions. Dropping their native conversation
+          // makes the next switch back start a fresh one with the kept history,
+          // and that run sets `firstRunOrdinal` again. These go first: the last provider-thread.updated becomes the active one.
+          for (const otherProviderThread of projection.providerThreads) {
+            if (
+              otherProviderThread.id === providerThread.id ||
+              otherProviderThread.ownerNodeId !== null ||
+              otherProviderThread.nativeThreadRef === null ||
+              !runsToRollback.some((run) => run.providerThreadId === otherProviderThread.id)
+            ) {
+              continue;
+            }
+            const lastKeptRun = projection.runs.findLast(
+              (run) =>
+                run.providerThreadId === otherProviderThread.id &&
+                run.ordinal <= targetOrdinal &&
+                !rolledBackRunIds.has(run.id),
+            );
+            events.push(
+              yield* makeEvent({
+                type: "provider-thread.updated",
+                threadId: input.threadId,
+                driver: otherProviderThread.driver,
+                providerInstanceId: otherProviderThread.providerInstanceId,
+                occurredAt: now,
+                payload: {
+                  ...otherProviderThread,
+                  nativeThreadRef: null,
+                  nativeConversationHeadRef: null,
+                  firstRunOrdinal: null,
+                  lastRunOrdinal: lastKeptRun?.ordinal ?? null,
+                  updatedAt: now,
+                },
+              }),
+            );
+          }
           events.push(
             yield* makeEvent({
               type: "provider-thread.updated",
@@ -323,7 +386,8 @@ export const layer: Layer.Layer<
               occurredAt: now,
               payload: {
                 ...snapshot.providerThread,
-                lastRunOrdinal: targetOrdinal === 0 ? null : targetOrdinal,
+                lastRunOrdinal:
+                  rollbackTarget.appRunOrdinal === 0 ? null : rollbackTarget.appRunOrdinal,
                 updatedAt: now,
               },
             }),
@@ -368,6 +432,31 @@ export const layer: Layer.Layer<
               );
             }
           }
+          // Handoffs this provider thread received in discarded turns left its
+          // conversation with them. One that still holds kept history goes out
+          // again with its next turn, without the discarded runs.
+          const discardedRunIds = new Set(runsToRollback.map((run) => run.id));
+          for (const handoff of projection.contextHandoffs) {
+            if (
+              handoff.status !== "ready" ||
+              handoff.toProviderThreadId !== providerThread.id ||
+              !discardedRunIds.has(handoff.targetRunId)
+            ) {
+              continue;
+            }
+            events.push(
+              yield* makeEvent({
+                type: "context-handoff.updated",
+                threadId: input.threadId,
+                providerInstanceId: providerThread.providerInstanceId,
+                occurredAt: now,
+                payload: {
+                  ...handoffWithoutDiscardedRuns(handoff, discardedRunIds),
+                  updatedAt: now,
+                },
+              }),
+            );
+          }
           yield* eventSink.write({ events });
         }),
       );
@@ -397,3 +486,23 @@ export const layer: Layer.Layer<
     });
   }),
 );
+
+/**
+ * A handoff whose carrying turn a rollback discarded: undelivered, so the next
+ * turn sends it again, minus the discarded runs. One that held only discarded
+ * runs is superseded.
+ */
+function handoffWithoutDiscardedRuns(
+  handoff: OrchestrationV2ContextHandoff,
+  discardedRunIds: ReadonlySet<RunId>,
+): OrchestrationV2ContextHandoff {
+  const { delivery: _delivery, ...undelivered } = handoff;
+  if (handoff.history === undefined) return undelivered;
+  const messages = handoff.history.messages.filter(
+    (message) => message.runId === null || !discardedRunIds.has(message.runId),
+  );
+  if (messages.length === 0 && handoff.history.messages.length > 0) {
+    return { ...handoff, status: "superseded" };
+  }
+  return { ...undelivered, history: { ...handoff.history, messages } };
+}

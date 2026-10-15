@@ -1521,6 +1521,9 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         projection,
         queuedProviderThread.id,
       );
+      // No native conversation: a new provider thread, or one whose native
+      // conversation a rollback dropped (see CheckpointRollbackService).
+      const needsFullContext = deliveryProviderThread.nativeThreadRef === null;
       const coveredRuns =
         canResumeAcrossInstances ||
         latestHandoffRun === undefined ||
@@ -1529,10 +1532,9 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           : projection.runs.filter(
               (run) =>
                 isHandoffSourceRun(run) &&
-                run.ordinal > (targetLastCompletedRun?.ordinal ?? 0) &&
+                run.ordinal > (needsFullContext ? 0 : (targetLastCompletedRun?.ordinal ?? 0)) &&
                 run.ordinal <= latestHandoffRun.ordinal,
             );
-      const needsFullContext = deliveryProviderThread.nativeThreadRef === null;
       const legacyImportItems =
         projection.thread.historyOrigin === "v1_import"
           ? yield* readHandoffItems(threadId, [null])
@@ -5774,7 +5776,12 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
                 capabilities,
                 sameProvider:
                   pendingForkTransfer.sourceProviderInstanceId === modelSelection.instanceId,
-                hasStrongNativeSource: sourceProviderThread?.nativeThreadRef?.strength === "strong",
+                // A rollback can drop the source provider thread's native
+                // conversation; runs before its `firstRunOrdinal` have no turn
+                // in the current one (see CheckpointRollbackService).
+                hasStrongNativeSource:
+                  sourceProviderThread?.nativeThreadRef?.strength === "strong" &&
+                  sourceRun.ordinal >= (sourceProviderThread.firstRunOrdinal ?? 0),
                 sourceRunStatus: sourceRun.status,
                 fromSpecificTurn: sourceRun !== null,
               }),
@@ -5871,8 +5878,11 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
                     }),
                 ),
               );
+      // A rollback can drop a reused provider thread's native conversation
+      // (see CheckpointRollbackService); it then needs the whole history.
       const requiresFullProviderSwitchContext =
-        isProviderSwitch && pendingMergeBackTransfer !== undefined;
+        isProviderSwitch &&
+        (pendingMergeBackTransfer !== undefined || targetProviderThread?.nativeThreadRef === null);
       const targetLastCompletedRun =
         targetProviderThread === undefined
           ? undefined
@@ -9800,18 +9810,13 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         const targetRun = projection.runs.find((run) => run.ordinal === targetOrdinal);
         const targetProviderTurn =
           targetRun === undefined ? undefined : providerTurnForRun(projection, targetRun);
+        // The target may belong to an earlier provider thread. The rollback
+        // then rewinds the active one to its last earlier turn or its start.
         if (targetRun === undefined || targetProviderTurn === undefined) {
           return yield* new OrchestratorDispatchError({
             commandId: command.commandId,
             commandType: command.type,
             cause: `Cannot roll back to checkpoint ${targetCheckpoint.id}: its provider turn is unavailable.`,
-          });
-        }
-        if (targetProviderTurn.providerThreadId !== providerThread.id) {
-          return yield* new OrchestratorDispatchError({
-            commandId: command.commandId,
-            commandType: command.type,
-            cause: `Cannot roll back provider thread ${providerThread.id} to checkpoint ${targetCheckpoint.id}: target provider turn ${targetProviderTurn.id} belongs to provider thread ${targetProviderTurn.providerThreadId}.`,
           });
         }
       }
