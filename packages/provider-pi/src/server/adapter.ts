@@ -3403,8 +3403,13 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
         summary: OrchestrationV2RollbackSummary | undefined,
       ) {
         // A retried rollback finds the entry already off the active branch.
-        // Navigating again would add a second summary.
+        // Navigating again would replace its summary with a summary of that.
         const activeBranch = yield* readUserEntryIds();
+        if (summary !== undefined && Option.isNone(activeBranch)) {
+          return yield* protocolError(
+            `${name} could not list its active branch, so T3 cannot tell whether this rollback already left a summary`,
+          );
+        }
         const alreadyMoved = Option.exists(activeBranch, (entryIds) => !entryIds.includes(entryId));
         if (!alreadyMoved) {
           // No timeout: abandoning the request would not stop the move or its

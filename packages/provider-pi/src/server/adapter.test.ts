@@ -10592,6 +10592,26 @@ describe("PiAdapterV2 with the Prime Agent flavor", () => {
     }).pipe(Effect.scoped, Effect.provide(layerTest)),
   );
 
+  it.effect(
+    "fails a summarized rollback rather than guess when the active branch is unreadable",
+    () =>
+      Effect.gen(function* () {
+        const fake = yield* makeFakePi;
+        fake.queueForkMessages({ messages: [] });
+        const session = yield* openPrimeThread(fake, THREAD_ID, PRIME_AGENT_FORK_FLAVOR);
+        const first = yield* runPrimeTurn(session, fake, 1, ["u1"]);
+        const second = yield* runPrimeTurn(session, fake, 2, ["u1", "u2"]);
+
+        fake.failNextForkMessages();
+        const error = yield* rollBackToFirstTurn(session, [first, second], {}).pipe(Effect.flip);
+        assert.include(String(error.cause), "already left a summary");
+        assert.deepEqual(
+          fake.allRequests().filter((request) => request.type === "navigate_tree"),
+          [],
+        );
+      }).pipe(Effect.scoped, Effect.provide(layerTest)),
+  );
+
   /** A `get_fork_messages` reply that says nothing about the active branch. */
   type UnreadableBranch = "a failed listing" | "a listing without messages" | "an entry without id";
 
