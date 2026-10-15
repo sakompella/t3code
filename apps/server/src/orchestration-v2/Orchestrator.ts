@@ -9680,7 +9680,15 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
     Effect.gen(function* () {
       const projection = yield* loadProjectionForCommand(
         command,
-        ["providerThreads", "checkpoints", "checkpointScopes", "runs", "providerTurns", "attempts"],
+        [
+          "providerSessions",
+          "providerThreads",
+          "checkpoints",
+          "checkpointScopes",
+          "runs",
+          "providerTurns",
+          "attempts",
+        ],
         { turnItemTypes: [], messageRoles: ["user"] },
       );
       const providerThread = projection.providerThreads.find(
@@ -9702,23 +9710,31 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       }
 
       const modelSelection = projection.thread.modelSelection;
-      const capabilities = yield* providerAdapters.get(modelSelection.instanceId).pipe(
-        Effect.flatMap((adapter) => adapter.getCapabilities()),
-        Effect.mapError(
-          (cause) =>
-            new OrchestratorProviderAdapterError({
-              commandId: command.commandId,
-              providerInstanceId: modelSelection.instanceId,
-              cause,
-            }),
-        ),
+      // The session hosting the provider thread reports what its binary
+      // supports, which can be more than the driver's own capabilities say.
+      const providerSession = projection.providerSessions.find(
+        (candidate) => candidate.id === providerThread.providerSessionId,
       );
+      const capabilities =
+        providerSession?.capabilities ??
+        (yield* providerAdapters.get(modelSelection.instanceId).pipe(
+          Effect.flatMap((adapter) => adapter.getCapabilities()),
+          Effect.mapError(
+            (cause) =>
+              new OrchestratorProviderAdapterError({
+                commandId: command.commandId,
+                providerInstanceId: modelSelection.instanceId,
+                cause,
+              }),
+          ),
+        ));
       yield* enforceCommandPolicy(command)(
         commandPolicy.ensureRollback({
           commandId: command.commandId,
           threadId: command.threadId,
           providerInstanceId: modelSelection.instanceId,
           capabilities,
+          summarize: command.summary !== undefined,
         }),
       );
 
@@ -9840,6 +9856,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           request: {
             type: "provider-thread.rollback",
             ...(command.restoreFiles === undefined ? {} : { restoreFiles: command.restoreFiles }),
+            ...(command.summary === undefined ? {} : { summary: command.summary }),
             providerThreadId: providerThread.id,
             checkpointId: targetCheckpoint.id,
             scopeId: targetScope.id,
