@@ -1,7 +1,10 @@
 import { ProviderDriverKind } from "@t3tools/contracts";
 import { describe, expect, it } from "vite-plus/test";
 
-import { resolveProviderInstanceAcpRegistryIconUrl } from "./ProviderInstanceIcon";
+import {
+  providerDrawsInitialsGlyph,
+  resolveProviderInstanceAcpRegistryIconUrl,
+} from "./ProviderInstanceIcon";
 
 describe("resolveProviderInstanceAcpRegistryIconUrl", () => {
   it("uses allowlisted catalog metadata and rejects untrusted overrides", () => {
@@ -28,5 +31,16 @@ describe("resolveProviderInstanceAcpRegistryIconUrl", () => {
         agentId: "kilo",
       }),
     ).toBeNull();
+  });
+});
+
+describe("providerDrawsInitialsGlyph", () => {
+  it("is true only for providers that have no glyph of their own", () => {
+    const drawsInitials = (driverKind: string) =>
+      providerDrawsInitialsGlyph(ProviderDriverKind.make(driverKind));
+    expect(drawsInitials("primeAgent")).toBe(true);
+    for (const withGlyph of ["codex", "claudeAgent", "antigravity", "pi", "acpRegistry"]) {
+      expect(drawsInitials(withGlyph), withGlyph).toBe(false);
+    }
   });
 });

@@ -104,6 +104,7 @@ Changes against upstream `main`, grouped by feature. Each item says what changed
   - Limits: a folded stored reply leaves no baseline, so the reply after it is not compared. A reply that arrives after a newer one was counted is history and does not move the baseline. Replies without a response id and with the same timestamp count as one.
 - **Long notices expand.** A long notice can be opened to read all of it, and a notification with no detail no longer opens an empty panel.
 - **Syntax highlighting** for shell commands and Python cells in tool rows, on web and mobile. Mobile shows the exit code under the highlighted source.
+- **Prime Agent's icon is its initials, and the instance badge skips it.** Prime Agent has no official mark, so web and mobile draw the instance initials as its glyph. An accent-color or shared-driver badge would repeat them on top, so the badge is not drawn for a glyph that already is the initials. Web tints the initials with the instance's accent color instead.
 
 ### General fixes
 
@@ -120,4 +121,5 @@ These aren't Prime Agent-specific.
 - **Rollback.** A fork no longer brings back turns that were rolled back first.
 - **Image attachments are scaled for Claude and Pi/Prime Agent.** A long side over 2000 px is scaled down to 2000 when the server inlines the image (`apps/server/src/provider/providerImage.ts`, reached from the Claude adapter and `ProviderHost.readImageForProvider`). The stored file and the path shown to the agent stay the original.
   - Why: once a conversation held more than 20 images, Anthropic rejected every request because one image was over 2000 px, and the history kept resending it. Uses `@napi-rs/image`, loaded on first use; an image it cannot decode is sent as stored. Codex, ACP, Cursor, OpenCode and Muse are not scaled. Images already in a Pi or Claude session keep their size.
+- **Pi and Prime Agent thinking levels show a default on every model.** Discovery marks the level Pi has active, clamped into each model's levels, as that model's default, as long as the active model can think. Upstream (#17835) limited it to the active model, but `set_model` carries the session's level to the next model, so the thinking control on any other model showed no level and no menu mark. A draft still sends no thinking option, and Pi applies the same level.
 - **Provider switching.** Agent instructions say to delegate to another provider only for a capability the current one lacks (for example Codex computer use), not to reach a model family. Prime Agent can run GPT models itself.
