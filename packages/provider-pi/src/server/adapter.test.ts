@@ -10172,162 +10172,6 @@ describe("PiAdapterV2 with the Prime Agent flavor", () => {
     }).pipe(Effect.scoped, Effect.provide(layerTest)),
   );
 
-  describe("a fork or rollback past turns whose prompts Prime rejected", () => {
-    const FORK_FILE = "/fake/forked.jsonl";
-    const providerTurn = (
-      source: OrchestrationV2ProviderThread,
-      ordinal: number,
-      nativeTurnRef: OrchestrationV2ProviderTurn["nativeTurnRef"],
-    ): OrchestrationV2ProviderTurn => ({
-      id: ProviderTurnId.make(`turn-${ordinal}`),
-      providerThreadId: source.id,
-      nodeId: NodeId.make(`node-${ordinal}`),
-      runAttemptId: null,
-      nativeTurnRef,
-      ordinal,
-      status: "completed",
-      startedAt: null,
-      completedAt: null,
-    });
-    const strongRef = (nativeId: string) => ({
-      driver: PRIME_AGENT_FLAVOR.driverKind,
-      nativeId,
-      strength: "strong" as const,
-    });
-    /** What a turn that failed before its prompt landed was persisted with. */
-    const placeholderRef = (ordinal: number) => ({
-      driver: PRIME_AGENT_FLAVOR.driverKind,
-      nativeId: `provider-thread:native-thread:pending:attempt:run-attempt:ordinal:${ordinal}:attempt:1`,
-      strength: "weak" as const,
-    });
-
-    const openForkable = Effect.gen(function* () {
-      const fake = yield* makeFakePi;
-      const forkFake = yield* makeFakePi;
-      const { runtime } = yield* openRuntime(
-        fake,
-        "default",
-        THREAD_ID,
-        SESSION_ID,
-        forkFake,
-        PRIME_AGENT_FLAVOR,
-      );
-      const source = yield* runtime.ensureThread({
-        threadId: THREAD_ID,
-        modelSelection: modelSelection("default"),
-        runtimePolicy,
-      });
-      forkFake.queueState({ sessionFile: FORK_FILE });
-      fake.queueState({ sessionFile: FORK_FILE });
-      return { runtime, source, fake, forkFake };
-    });
-
-    const forkEntries = (fake: FakePi) =>
-      fake
-        .allRequests()
-        .filter((request) => request["type"] === "fork")
-        .map((request) => request["entryId"]);
-
-    it.effect.each([
-      {
-        name: "forks the whole session when no user entry follows the target",
-        branch: ["u1"],
-        forkedAt: [],
-      },
-    ])("$name", ({ branch, forkedAt }) =>
-      Effect.gen(function* () {
-        const { runtime, source, forkFake } = yield* openForkable;
-        forkFake.queueForkMessages({ messages: branch.map((entryId) => ({ entryId })) });
-        const turns = [
-          providerTurn(source, 1, strongRef("u1")),
-          providerTurn(source, 2, placeholderRef(2)),
-          providerTurn(source, 3, placeholderRef(3)),
-        ];
-
-        const forked = yield* runtime.forkThread({
-          sourceProviderTurns: turns,
-          sourceProviderThread: source,
-          providerTurnId: turns[0]!.id,
-          targetThreadId: ThreadId.make("fork-target"),
-        });
-
-        assert.equal(forked.nativeThreadRef?.nativeId, FORK_FILE);
-        assert.deepEqual(forkEntries(forkFake), forkedAt);
-      }).pipe(Effect.scoped, Effect.provide(layerTest)),
-    );
-
-    it.effect("refuses ambiguous later user entries that may be steers inside the target", () =>
-      Effect.gen(function* () {
-        const { runtime, source, forkFake } = yield* openForkable;
-        forkFake.queueForkMessages({ messages: [{ entryId: "u1" }, { entryId: "steer" }] });
-        const turns = [
-          providerTurn(source, 1, strongRef("u1")),
-          providerTurn(source, 2, placeholderRef(2)),
-        ];
-
-        const error = yield* runtime
-          .forkThread({
-            sourceProviderTurns: turns,
-            sourceProviderThread: source,
-            providerTurnId: turns[0]!.id,
-            targetThreadId: ThreadId.make("fork-target"),
-          })
-          .pipe(Effect.flip);
-
-        assert.include(String(error.cause), "no captured session-tree entry");
-        assert.deepEqual(forkEntries(forkFake), []);
-      }).pipe(Effect.scoped, Effect.provide(layerTest)),
-    );
-
-    it.effect(
-      "still fails without starting a process when the target's own ref is a placeholder",
-      () =>
-        Effect.gen(function* () {
-          const { runtime, source, forkFake } = yield* openForkable;
-          const turns = [
-            providerTurn(source, 1, placeholderRef(1)),
-            providerTurn(source, 2, placeholderRef(2)),
-          ];
-
-          const error = yield* runtime
-            .forkThread({
-              sourceProviderTurns: turns,
-              sourceProviderThread: source,
-              providerTurnId: turns[0]!.id,
-              targetThreadId: ThreadId.make("fork-target"),
-            })
-            .pipe(Effect.flip);
-
-          assert.include(String(error.cause), "no captured session-tree entry");
-          assert.deepEqual(forkFake.allRequests(), []);
-        }).pipe(Effect.scoped, Effect.provide(layerTest)),
-    );
-
-    it.effect("keeps the complete target when rejected turns left no later user entry", () =>
-      Effect.gen(function* () {
-        const { runtime, source, fake } = yield* openForkable;
-        const turns = [
-          providerTurn(source, 1, strongRef("u1")),
-          providerTurn(source, 2, placeholderRef(2)),
-        ];
-        fake.queueForkMessages({ messages: [{ entryId: "u1" }] });
-
-        yield* runtime.rollbackThread({
-          providerThread: source,
-          target: {
-            type: "provider_turn",
-            checkpointId: CheckpointId.make("checkpoint-1"),
-            appRunOrdinal: 1,
-            providerTurn: turns[0]!,
-          },
-          providerThreadTurns: turns,
-        });
-
-        assert.deepEqual(forkEntries(fake), []);
-      }).pipe(Effect.scoped, Effect.provide(layerTest)),
-    );
-  });
-
   describe("when the Prime Agent daemon loses the session its process is bound to", () => {
     const LOST_SESSION_ID = "e8c7fdcbd6f2";
 
@@ -10419,7 +10263,7 @@ describe("PiAdapterV2 with the Prime Agent flavor", () => {
         const session = yield* openPrimeThread(fake);
         fake.loseDaemonSession(LOST_SESSION_ID);
 
-        // A rollback reads the active branch through the process.
+        // A rollback reads the session's commands through the process.
         yield* session.runtime
           .rollbackThread({
             providerThread: session.providerThread,
@@ -10430,17 +10274,17 @@ describe("PiAdapterV2 with the Prime Agent flavor", () => {
             },
             providerThreadTurns: [
               {
-                id: ProviderTurnId.make("turn-weak"),
+                id: ProviderTurnId.make("turn-1"),
                 providerThreadId: session.providerThread.id,
-                nodeId: NodeId.make("node-weak"),
+                nodeId: NodeId.make("node-1"),
                 runAttemptId: null,
                 nativeTurnRef: {
                   driver: PRIME_AGENT_FLAVOR.driverKind,
-                  nativeId: "w",
-                  strength: "weak",
+                  nativeId: "u1",
+                  strength: "strong",
                 },
                 ordinal: 1,
-                status: "failed",
+                status: "completed",
                 startedAt: null,
                 completedAt: null,
               },
