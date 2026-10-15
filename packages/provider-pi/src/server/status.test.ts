@@ -11,9 +11,10 @@ import * as Stream from "effect/Stream";
 import * as ChildProcess from "effect/process/ChildProcess";
 import * as ChildProcessSpawner from "effect/process/ChildProcessSpawner";
 import { TestClock } from "effect/testing";
+import type { ServerProviderModel } from "@t3tools/contracts";
 
 import { PI_FLAVOR, PRIME_AGENT_FLAVOR } from "./flavor.ts";
-import { checkPiProviderStatus, detectPiFlavor } from "./status.ts";
+import { checkPiProviderStatus, detectPiFlavor, parseDiscoveredModels } from "./status.ts";
 import {
   forkCapabilitiesWith,
   PRIME_AGENT_098_CAPABILITIES,
@@ -583,6 +584,70 @@ describe("PiProvider", () => {
         assert.equal(snapshot.version, flavor.minimumVersion);
       }).pipe(Effect.provide(NodeServices.layer)),
   );
+});
+
+describe("parseDiscoveredModels", () => {
+  const reasoningModel = (id: string, thinkingLevelMap: Record<string, unknown> = {}) => ({
+    provider: "cpa",
+    id,
+    reasoning: true,
+    thinkingLevelMap,
+  });
+  const defaultLevelOf = (model: ServerProviderModel | undefined) => {
+    const thinking = model?.capabilities?.optionDescriptors?.find(({ id }) => id === "thinking");
+    return thinking?.type === "select"
+      ? thinking.options.find((option) => option.isDefault)?.id
+      : undefined;
+  };
+
+  it("declares Pi's configured level as the default of every model, not only the active one", () => {
+    const models = parseDiscoveredModels(
+      {
+        models: [
+          reasoningModel("active", { xhigh: "xhigh" }),
+          reasoningModel("other", { xhigh: "xhigh", max: "max" }),
+        ],
+      },
+      { model: { provider: "cpa", id: "active" }, thinkingLevel: "high" },
+    );
+    assert.deepEqual(
+      models.map((model) => [model.slug, defaultLevelOf(model)]),
+      [
+        ["cpa/active", "high"],
+        ["cpa/other", "high"],
+      ],
+    );
+  });
+
+  it("clamps the configured level into each model's supported levels", () => {
+    const models = parseDiscoveredModels(
+      {
+        models: [
+          reasoningModel("active"),
+          reasoningModel("no-max", { xhigh: "xhigh" }),
+          reasoningModel("no-off", { off: null }),
+        ],
+      },
+      { model: { provider: "cpa", id: "active" }, thinkingLevel: "off" },
+    );
+    assert.deepEqual(
+      models.map((model) => defaultLevelOf(model)),
+      ["off", "off", "minimal"],
+    );
+  });
+
+  it("declares no default when the active model cannot think", () => {
+    const models = parseDiscoveredModels(
+      {
+        models: [{ provider: "cpa", id: "plain", reasoning: false }, reasoningModel("thinker")],
+      },
+      { model: { provider: "cpa", id: "plain" }, thinkingLevel: "off" },
+    );
+    assert.deepEqual(
+      models.map((model) => defaultLevelOf(model)),
+      [undefined, undefined],
+    );
+  });
 });
 
 describe("detectPiFlavor identity cache", () => {
