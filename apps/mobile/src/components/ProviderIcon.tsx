@@ -12,6 +12,9 @@ type ProviderIconProps = {
   readonly provider: string | null | undefined;
   readonly iconUrl?: string | null | undefined;
   readonly size?: number;
+  /** Names the instance whose initials a provider without a mark draws. */
+  readonly displayName?: string;
+  readonly accentColor?: string;
 };
 
 function AcpRegistryFallbackIcon(props: { readonly color: string; readonly size: number }) {
@@ -95,8 +98,15 @@ export function ProviderIcon(props: ProviderIconProps) {
     // that unknown drivers get below.
     return (
       <View style={{ width: size, height: size, alignItems: "center", justifyContent: "center" }}>
-        <Text style={{ fontSize: size * 0.5, fontWeight: "700", lineHeight: size, color: mono }}>
-          {providerInstanceInitials("Prime Agent")}
+        <Text
+          style={{
+            fontSize: size * 0.5,
+            fontWeight: "700",
+            lineHeight: size,
+            color: props.accentColor ?? mono,
+          }}
+        >
+          {providerInstanceInitials(props.displayName ?? "Prime Agent")}
         </Text>
       </View>
     );
@@ -170,7 +180,8 @@ export function ProviderIcon(props: ProviderIconProps) {
  * `ProviderIcon` plus the web sidebar's account badge: an accent-color
  * initials bubble in the bottom-right corner, drawn when `showBadge` is set
  * (accent color present, or several instances share this driver), except on
- * a glyph that already is the initials. The glyph dims to 60% opacity while the badge stays fully saturated, matching
+ * a glyph that already is the instance initials. The glyph dims to 60% opacity
+ * while the badge stays fully saturated, matching
  * `apps/web/src/components/chat/ProviderInstanceIcon.tsx`.
  */
 export function ProviderInstanceIcon(props: {
@@ -185,7 +196,13 @@ export function ProviderInstanceIcon(props: {
   return (
     <View style={{ position: "relative" }}>
       <View style={{ opacity: 0.6 }}>
-        <ProviderIcon iconUrl={props.iconUrl} provider={props.provider} size={props.size} />
+        <ProviderIcon
+          iconUrl={props.iconUrl}
+          provider={props.provider}
+          size={props.size}
+          displayName={props.displayName}
+          accentColor={props.accentColor}
+        />
       </View>
       {props.showBadge && !providerDrawsInitialsGlyph(props.provider) ? (
         <View

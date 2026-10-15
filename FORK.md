@@ -104,7 +104,7 @@ Changes against upstream `main`, grouped by feature. Each item says what changed
   - Limits: a folded stored reply leaves no baseline, so the reply after it is not compared. A reply that arrives after a newer one was counted is history and does not move the baseline. Replies without a response id and with the same timestamp count as one.
 - **Long notices expand.** A long notice can be opened to read all of it, and a notification with no detail no longer opens an empty panel.
 - **Syntax highlighting** for shell commands and Python cells in tool rows, on web and mobile. Mobile shows the exit code under the highlighted source.
-- **Prime Agent's icon is its initials, and the instance badge skips it.** Prime Agent has no official mark, so web and mobile draw the instance initials as its glyph. An accent-color or shared-driver badge would repeat them on top, so the badge is not drawn for a glyph that already is the initials. Web tints the initials with the instance's accent color instead.
+- **Prime Agent's icon is its initials, and the instance badge skips it.** Prime Agent has no official mark, so web and mobile draw the instance initials as its glyph. An accent-color or shared-driver badge would repeat them on top, so the badge is not drawn for a glyph that already is the initials. Both tint the initials with the instance's accent color instead.
 
 ### General fixes
 
