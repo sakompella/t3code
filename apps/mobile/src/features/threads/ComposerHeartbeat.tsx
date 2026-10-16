@@ -4,8 +4,8 @@ import { useAtomValue } from "@effect/atom-react";
 import * as DateTime from "effect/DateTime";
 import { View } from "react-native";
 
-import { AppText as Text } from "../../components/AppText";
-import { SymbolView } from "../../components/AppSymbol";
+import { AppText as Text } from "../../components/ui/AppText";
+import { SymbolView } from "../../components/ui/AppSymbol";
 import { environmentThreadDetails } from "../../state/threads";
 
 /**
