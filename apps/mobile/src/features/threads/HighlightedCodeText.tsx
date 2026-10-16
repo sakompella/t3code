@@ -6,7 +6,7 @@ import {
 import { memo, useMemo, type ComponentProps, type ReactNode } from "react";
 import { Platform, type TextStyle } from "react-native";
 
-import { AppText as Text } from "../../components/AppText";
+import { AppText as Text } from "../../components/ui/AppText";
 import { cn } from "../../lib/cn";
 import type { ReviewDiffTheme, ReviewHighlightedToken } from "../review/shikiReviewHighlighter";
 import { useMarkdownCodeHighlight } from "./markdownCodeHighlightState";
