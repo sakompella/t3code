@@ -2077,6 +2077,7 @@ export const layerWithOptions = (
                     if (delivered !== null) {
                       yield* storeSessionChildThreadEvent(entry, childThread.threadId, delivered);
                     }
+                    yield* releaseLiveOutput;
                     return;
                   }
                   // Some providers can block before a run subscriber exists
