@@ -14,7 +14,7 @@ import {
   createRouter,
   useParams,
 } from "@tanstack/react-router";
-import { useCallback, useEffect, useRef } from "react";
+import { useEffect, useRef } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
 
@@ -51,8 +51,9 @@ function ThreadView() {
   const promptRef = useRef("");
   const composerRef = useRef<ChatComposerHandle | null>(null);
   const attachmentsRef = useRef([]);
-  const focusComposer = useCallback(() => composerRef.current?.focusAtEnd(), []);
+  const focusComposer = () => composerRef.current?.focusAtEnd();
   useEffect(() => {
+    if (!thread.id) return;
     const frame = requestAnimationFrame(focusComposer);
     return () => cancelAnimationFrame(frame);
   }, [thread.id, focusComposer]);
@@ -68,6 +69,7 @@ function ThreadView() {
     routeThreadRef: threadRef,
     draftId: null,
     multipleModelSelections: null,
+    isCompacting: false,
     supportsMultipleModels: false,
     onMultipleModelSelectionsChange: noop,
     activeThreadId: thread.id,
@@ -210,8 +212,6 @@ function ThreadView() {
           onUnsnooze={noop}
           onUnpin={noop}
           onAcknowledgeWoke={noop}
-          changeRequestSnapshot={null}
-          onChangeRequestSnapshot={noop}
         />
       </ul>
       <ChatComposer {...props} />

@@ -13,11 +13,13 @@ import {
   PROJECT_SCOPED_SERVER_SETTING_KEYS,
   type ProjectScopedServerSettingKey,
 } from "@t3tools/contracts";
+import { useAtomValue } from "@effect/atom-react";
 import { useRef, useState } from "react";
 import { View } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 
 import { RUNTIME_MODE_CHOICES } from "../threads/thread-settings-options";
+import { environmentPresentations } from "../../state/presentation";
 import { serverEnvironment } from "../../state/server";
 import { useAtomCommand } from "../../state/use-atom-command";
 import { SettingsScreen } from "./components/SettingsScreen";
@@ -165,11 +167,15 @@ function ServerSettingsDetail(props: { readonly page: SettingsPage }) {
   const uniform = <K extends keyof ServerSettings>(key: K) =>
     uniformMobileSetting(displayTargets, key);
   // A default a provider does not offer runs as the mode shown here.
-  const offeredDefaultModes = offeredDefaultRuntimeModes(displayTargets);
+  const providersByEnvironment = useAtomValue(environmentPresentations.providersByEnvironmentAtom);
+  const offeredDefaultModes = offeredDefaultRuntimeModes(displayTargets, providersByEnvironment);
   const defaultRuntimeModeChoices = RUNTIME_MODE_CHOICES.filter((choice) =>
     offeredDefaultModes.includes(choice.mode),
   );
-  const shownDefaultRuntimeMode = displayedDefaultRuntimeMode(displayTargets);
+  const shownDefaultRuntimeMode = displayedDefaultRuntimeMode(
+    displayTargets,
+    providersByEnvironment,
+  );
   // `uniform` folds a real null into "mixed"; nullable keys need the distinction.
   const isMixed = (key: keyof ServerSettings) =>
     reference === null ||

@@ -84,14 +84,12 @@ export function ProjectDefaultsSettings({ category }: { category: ProjectSetting
   // Each selected target offers what its new threads can run in, and a
   // default a provider does not offer runs as the mode shown here.
   const newThreadDefaults = targets.flatMap((candidate) => {
-    const config = environments.find(
-      (environment) => environment.environmentId === candidate.environmentId,
-    )?.serverConfig;
-    return config
+    const providers = providersByEnvironment.get(candidate.environmentId);
+    return providers
       ? [
           {
             providers: applyProjectProviderEnablement(
-              config.providers,
+              providers,
               candidate.settings,
               candidate.projectId,
             ),

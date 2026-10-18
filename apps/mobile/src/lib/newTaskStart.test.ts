@@ -112,16 +112,17 @@ function settingsAndServerModes(
   stored: RuntimeMode,
 ) {
   const target = {
-    environment: { serverConfig: configOf(providers) },
+    environment: { environmentId: "fixture", serverConfig: configOf(providers) },
     projectId: null,
     settings: { defaultModelSelection, defaultRuntimeMode: stored },
   };
+  const providersByEnvironment = new Map([["fixture", providers]]) as never;
   const actualProvider = providers.find(
     (candidate) => candidate.instanceId === startedOn?.instanceId,
   );
   return {
-    shown: displayedDefaultRuntimeMode([target] as never),
-    offered: offeredDefaultRuntimeModes([target] as never),
+    shown: displayedDefaultRuntimeMode([target] as never, providersByEnvironment),
+    offered: offeredDefaultRuntimeModes([target] as never, providersByEnvironment),
     runs: providerRuntimeMode(stored, actualProvider?.supportedRuntimeModes),
   };
 }

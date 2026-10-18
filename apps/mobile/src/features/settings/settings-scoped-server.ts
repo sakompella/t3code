@@ -9,6 +9,7 @@ import {
   type EnvironmentId,
   type ProjectId,
   type ProjectScopedServerSettingKey,
+  type ServerProvider,
   type ServerSettings,
   type ServerSettingsPatch,
 } from "@t3tools/contracts";
@@ -106,30 +107,45 @@ export function uniformMobileSetting<K extends keyof ServerSettings>(
   return targets.every((target) => target.settings[key] === value) ? value : null;
 }
 
+/** Provider statuses per environment; they live apart from the environment presentations. */
+type ProvidersByEnvironment = ReadonlyMap<EnvironmentId, ReadonlyArray<ServerProvider>>;
+type NewThreadTarget = Pick<ScopedMobileSettingsTarget, "environment" | "projectId" | "settings">;
+
 const newThreadDefaults = (
-  target: Pick<ScopedMobileSettingsTarget, "environment" | "projectId" | "settings">,
-): NewThreadDefaults => ({
-  providers: applyProjectProviderEnablement(
-    target.environment.serverConfig.providers,
-    target.environment.serverConfig.settings,
-    target.projectId,
-  ),
-  defaultModelSelection: target.settings.defaultModelSelection,
-  defaultRuntimeMode: target.settings.defaultRuntimeMode,
-});
+  targets: readonly NewThreadTarget[],
+  providersByEnvironment: ProvidersByEnvironment,
+): NewThreadDefaults[] =>
+  targets.flatMap((target) => {
+    const providers = providersByEnvironment.get(target.environment.environmentId);
+    return providers === undefined
+      ? []
+      : [
+          {
+            providers: applyProjectProviderEnablement(
+              providers,
+              target.environment.serverConfig.settings,
+              target.projectId,
+            ),
+            defaultModelSelection: target.settings.defaultModelSelection,
+            defaultRuntimeMode: target.settings.defaultRuntimeMode,
+          },
+        ];
+  });
 
 /** The default permissions new threads can run with on every target. */
 export function offeredDefaultRuntimeModes(
-  targets: readonly Pick<ScopedMobileSettingsTarget, "environment" | "projectId" | "settings">[],
+  targets: readonly NewThreadTarget[],
+  providersByEnvironment: ProvidersByEnvironment,
 ): ReadonlyArray<RuntimeMode> {
-  return runtimeModesForNewThreads(targets.map(newThreadDefaults));
+  return runtimeModesForNewThreads(newThreadDefaults(targets, providersByEnvironment));
 }
 
 /** The permissions new threads run with on every target, or null when they differ. */
 export function displayedDefaultRuntimeMode(
-  targets: readonly Pick<ScopedMobileSettingsTarget, "environment" | "projectId" | "settings">[],
+  targets: readonly NewThreadTarget[],
+  providersByEnvironment: ProvidersByEnvironment,
 ): RuntimeMode | null {
-  return newThreadRuntimeMode(targets.map(newThreadDefaults));
+  return newThreadRuntimeMode(newThreadDefaults(targets, providersByEnvironment));
 }
 
 export function planMobileScopedSettingsClear(

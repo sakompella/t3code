@@ -4,6 +4,7 @@ import {
   type ProjectId,
   type ProviderInstanceId,
   RuntimeMode,
+  type ServerProvider,
   type ServerSettings,
 } from "@t3tools/contracts";
 import { describe, expect, it } from "vite-plus/test";
@@ -170,20 +171,23 @@ describe("mobile project settings scope", () => {
 describe("mobile default permissions", () => {
   const primeAgent = "primeAgent" as ProviderInstanceId;
   const codex = "codex" as ProviderInstanceId;
+  const providersByEnvironment = new Map<EnvironmentId, ReadonlyArray<ServerProvider>>();
   const withProviders = (
     target: SettingsTarget,
     providers: ReadonlyArray<{
       readonly instanceId: ProviderInstanceId;
       readonly supportedRuntimeModes?: ReadonlyArray<RuntimeMode>;
     }>,
-  ) =>
-    ({
-      ...target,
-      serverConfig: {
-        ...target.serverConfig,
-        providers: providers.map((provider) => ({ enabled: true, status: "ready", ...provider })),
-      },
-    }) as unknown as SettingsTarget;
+  ) => {
+    providersByEnvironment.set(
+      target.environmentId,
+      providers.map(
+        (provider) =>
+          ({ enabled: true, status: "ready", ...provider }) as unknown as ServerProvider,
+      ),
+    );
+    return target;
+  };
   const forkDefault: ServerSettings = {
     ...DEFAULT_SERVER_SETTINGS,
     defaultRuntimeMode: "approval-required",
@@ -199,7 +203,7 @@ describe("mobile default permissions", () => {
       ],
       null,
     );
-    expect(offeredDefaultRuntimeModes(targets)).toEqual(["full-access"]);
+    expect(offeredDefaultRuntimeModes(targets, providersByEnvironment)).toEqual(["full-access"]);
   });
 
   it("offers only the modes every selected environment's default provider runs", () => {
@@ -218,8 +222,10 @@ describe("mobile default permissions", () => {
       ],
       null,
     );
-    expect(offeredDefaultRuntimeModes(targets)).toEqual(["full-access"]);
-    expect(offeredDefaultRuntimeModes(targets.slice(1))).toEqual(RuntimeMode.literals);
+    expect(offeredDefaultRuntimeModes(targets, providersByEnvironment)).toEqual(["full-access"]);
+    expect(offeredDefaultRuntimeModes(targets.slice(1), providersByEnvironment)).toEqual(
+      RuntimeMode.literals,
+    );
   });
 
   it("offers only Full access when the default is unset and the fork is the only provider", () => {
@@ -232,7 +238,7 @@ describe("mobile default permissions", () => {
       ],
       null,
     );
-    expect(offeredDefaultRuntimeModes(targets)).toEqual(["full-access"]);
+    expect(offeredDefaultRuntimeModes(targets, providersByEnvironment)).toEqual(["full-access"]);
   });
 
   it("shows the mode of the provider an unset default starts on, per environment", () => {
@@ -250,13 +256,23 @@ describe("mobile default permissions", () => {
       { instanceId: codex },
     ]);
     const codexTargets = resolveMobileSettingsTargets([codexFirst], null);
-    expect(displayedDefaultRuntimeMode(codexTargets)).toBe("approval-required");
-    expect(offeredDefaultRuntimeModes(codexTargets)).toContain("approval-required");
-    expect(displayedDefaultRuntimeMode(resolveMobileSettingsTargets([forkFirst], null))).toBe(
-      "full-access",
+    expect(displayedDefaultRuntimeMode(codexTargets, providersByEnvironment)).toBe(
+      "approval-required",
+    );
+    expect(offeredDefaultRuntimeModes(codexTargets, providersByEnvironment)).toContain(
+      "approval-required",
     );
     expect(
-      displayedDefaultRuntimeMode(resolveMobileSettingsTargets([codexFirst, forkFirst], null)),
+      displayedDefaultRuntimeMode(
+        resolveMobileSettingsTargets([forkFirst], null),
+        providersByEnvironment,
+      ),
+    ).toBe("full-access");
+    expect(
+      displayedDefaultRuntimeMode(
+        resolveMobileSettingsTargets([codexFirst, forkFirst], null),
+        providersByEnvironment,
+      ),
     ).toBeNull();
   });
 
@@ -277,10 +293,16 @@ describe("mobile default permissions", () => {
     const members = [firstProject, secondProject].map((id) => ({ environmentId: firstId, id }));
     const [codexOff, codexOn] = resolveMobileSettingsTargets([target], members);
 
-    expect(offeredDefaultRuntimeModes([codexOff!])).toEqual(["full-access"]);
-    expect(displayedDefaultRuntimeMode([codexOff!])).toBe("full-access");
-    expect(offeredDefaultRuntimeModes([codexOn!])).toEqual(RuntimeMode.literals);
-    expect(displayedDefaultRuntimeMode([codexOn!])).toBe("approval-required");
-    expect(displayedDefaultRuntimeMode([codexOff!, codexOn!])).toBeNull();
+    expect(offeredDefaultRuntimeModes([codexOff!], providersByEnvironment)).toEqual([
+      "full-access",
+    ]);
+    expect(displayedDefaultRuntimeMode([codexOff!], providersByEnvironment)).toBe("full-access");
+    expect(offeredDefaultRuntimeModes([codexOn!], providersByEnvironment)).toEqual(
+      RuntimeMode.literals,
+    );
+    expect(displayedDefaultRuntimeMode([codexOn!], providersByEnvironment)).toBe(
+      "approval-required",
+    );
+    expect(displayedDefaultRuntimeMode([codexOff!, codexOn!], providersByEnvironment)).toBeNull();
   });
 });
