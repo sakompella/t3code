@@ -1,5 +1,3 @@
-// @vitest-environment jsdom
-
 import {
   DEFAULT_UNIFIED_SETTINGS,
   EnvironmentId,
@@ -17,6 +15,7 @@ import {
 import { useEffect, useRef } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
+import { userEvent } from "vite-plus/test/browser";
 
 import { useComposerDraftStore } from "../composerDraftStore";
 import { makeThreadFixture } from "../test-fixtures";
@@ -248,8 +247,11 @@ interface EditorView {
 }
 
 /**
- * A pointer press with the browser's default action, which jsdom leaves out:
- * an unprevented mousedown moves focus to the focusable element under it.
+ * A synchronous pointer press, so keys can follow it before the navigation
+ * settles. A dispatched mousedown has no default action, so this applies the
+ * browser's: an unprevented mousedown moves focus to the focusable element
+ * under it. (A real `userEvent.click` resolves only after ChatView has
+ * refocused the composer, so it cannot catch keys lost in between.)
  */
 function clickElement(target: HTMLElement) {
   const mousedown = new MouseEvent("mousedown", { bubbles: true, cancelable: true, detail: 1 });
@@ -275,30 +277,6 @@ function pressKey(key: string) {
 
 beforeEach(async () => {
   vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", false);
-  vi.stubGlobal("matchMedia", (query: string) => ({
-    matches: false,
-    media: query,
-    addEventListener: noop,
-    removeEventListener: noop,
-    addListener: noop,
-    removeListener: noop,
-  }));
-  vi.stubGlobal(
-    "ResizeObserver",
-    class {
-      observe() {}
-      unobserve() {}
-      disconnect() {}
-    },
-  );
-  Object.defineProperty(document, "fonts", {
-    configurable: true,
-    value: { addEventListener: noop, removeEventListener: noop, ready: Promise.resolve() },
-  });
-  Range.prototype.getClientRects = () => [] as unknown as DOMRectList;
-  Range.prototype.getBoundingClientRect = () => new DOMRect();
-  Element.prototype.scrollIntoView = noop;
-
   useComposerDraftStore.getState().setPrompt(refFor("a"), "hi");
   useComposerDraftStore.getState().setPrompt(refFor("b"), "fix the bug");
   container = document.createElement("div");
@@ -307,9 +285,7 @@ beforeEach(async () => {
   router = makeRouter();
   await router.load();
   root.render(<RouterProvider router={router} />);
-  await nextTask();
-  await nextFrame();
-  expect(document.activeElement).toBe(composerEditor());
+  await vi.waitFor(() => expect(document.activeElement).toBe(composerEditor()));
 });
 
 afterEach(() => {
@@ -350,7 +326,7 @@ describe("typing right after clicking another thread in the sidebar", () => {
     const row = container.querySelector<HTMLElement>('[data-testid="sidebar-row-card"]')!;
     row.focus();
     expect(document.activeElement).toBe(row);
-    pressKey("Enter");
+    await userEvent.keyboard("{Enter}");
     await nextTask();
     await nextFrame();
 
