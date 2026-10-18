@@ -24,6 +24,7 @@ import {
 } from "./index.ts";
 import {
   latestProviderTurnForAttempt,
+  OrchestrationV2AppThreadJson,
   OrchestrationV2Checkpoint,
   OrchestrationV2CheckpointScope,
   OrchestrationV2Command,
@@ -1201,6 +1202,42 @@ describe("orchestration V2 contracts", () => {
     }
     expect(handoff.toProviderInstanceId).toBe("claudeAgent");
     expect(fork.type).toBe("fork");
+  });
+
+  it("decodes stored rollbacks from before head moves were tracked, and round-trips a rollback summary", () => {
+    const storedThread = Schema.decodeUnknownSync(OrchestrationV2AppThreadJson)({
+      ...emptyThreadProjection().thread,
+      createdAt: "2026-04-20T00:00:00.000Z",
+      updatedAt: "2026-04-20T00:00:00.000Z",
+      rollbackRequestId: "rollback-1",
+      rollbackFailure: null,
+    });
+    expect(storedThread.rollbackRequestId).toBe("rollback-1");
+    expect(storedThread.pendingHeadMove).toBeUndefined();
+
+    const summary = decodeOrchestrationV2TurnItem({
+      id: "turn-item:rollback-summary:rollback-1",
+      type: "rollback_summary",
+      threadId: "thread-1",
+      runId: null,
+      nodeId: null,
+      providerThreadId: "provider-thread-1",
+      providerTurnId: null,
+      nativeItemRef: null,
+      parentItemId: null,
+      ordinal: 9,
+      status: "completed",
+      title: null,
+      rollbackRequestId: "rollback-1",
+      rewoundToRunId: "run-1",
+      summary: "Kept the failing test names.",
+      startedAt: now,
+      completedAt: now,
+      updatedAt: now,
+    });
+    expect(
+      decodeOrchestrationV2TurnItemJson(encodeOrchestrationV2TurnItemJson(summary)),
+    ).toStrictEqual(summary);
   });
 
   it("exports the V2 branded ids through the public contracts entrypoint", () => {

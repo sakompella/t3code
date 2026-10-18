@@ -355,6 +355,13 @@ export function isContextHandoffActivityGroup(entry: ThreadFeedActivityGroup): b
   );
 }
 
+function isRollbackSummaryActivityGroup(entry: ThreadFeedActivityGroup): boolean {
+  return (
+    entry.activities.length === 1 &&
+    entry.activities[0]?.projectedItem.item.type === "rollback_summary"
+  );
+}
+
 export function isSecretRequestActivityGroup(entry: ThreadFeedActivityGroup): boolean {
   return (
     entry.activities.length === 1 &&
@@ -585,6 +592,8 @@ function itemIcon(item: OrchestrationV2TurnItem): ThreadFeedActivity["icon"] {
     case "proposed_plan":
     case "todo_list":
       return "check";
+    case "rollback_summary":
+      return "message";
     case "compaction":
     case "handoff":
     case "fork":
@@ -642,6 +651,8 @@ function itemSummary(
       return item.failure.class === "usage_limit" ? "Usage limit reached" : "Provider error";
     case "handoff":
       return "Context handed off";
+    case "rollback_summary":
+      return "Summary of discarded turns";
     case "fork":
       return "Thread forked";
     case "thread_created":
@@ -705,6 +716,9 @@ function itemPreview(item: OrchestrationV2TurnItem): string | null {
     case "fork":
     case "thread_created":
       return item.targetThreadId;
+    case "rollback_summary":
+      // The row keeps its label; the summary is shown only when expanded.
+      return null;
     case "secret_request":
       return item.reason || null;
     case "subagent":
@@ -969,6 +983,7 @@ function groupAdjacentActivities(entries: ReadonlyArray<RawThreadFeedEntry>): Th
     const isStandaloneActivity =
       entry.activity.projectedItem.item.type === "compaction" ||
       entry.activity.projectedItem.item.type === "handoff" ||
+      entry.activity.projectedItem.item.type === "rollback_summary" ||
       entry.activity.projectedItem.item.type === "notification";
     if (
       isStandaloneActivity ||
@@ -1230,6 +1245,7 @@ function deriveThreadFeedRunFolds(
                     activity.prominent ||
                     activity.projectedItem.item.type === "notification" ||
                     activity.projectedItem.item.type === "handoff" ||
+                    activity.projectedItem.item.type === "rollback_summary" ||
                     // A child still working outlives its settled launching run;
                     // its group stays visible while any member is live.
                     isLiveSubagentTurnItem(activity.projectedItem.item),
@@ -1441,6 +1457,7 @@ function isWorkLogFeedRow(row: ThreadFeedEntry | undefined): boolean {
       (row.type === "activity-group" &&
         !isContextCompactionActivityGroup(row) &&
         !isContextHandoffActivityGroup(row) &&
+        !isRollbackSummaryActivityGroup(row) &&
         row.activities.every(
           (activity) =>
             !activity.prominent &&
@@ -1474,6 +1491,7 @@ function appendPresentedFeedEntry(
   if (
     isContextCompactionActivityGroup(entry) ||
     isContextHandoffActivityGroup(entry) ||
+    isRollbackSummaryActivityGroup(entry) ||
     isUserInputActivityGroup(entry) ||
     entry.activities[0]?.projectedItem.item.type === "subagent"
   ) {

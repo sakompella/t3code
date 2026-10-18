@@ -5291,6 +5291,141 @@ it.layer(layerTest)("ProjectionStoreV2", (it) => {
     }),
   );
 
+  it.effect("keeps a rollback summary until a later rollback discards the run it follows", () =>
+    Effect.gen(function* () {
+      const projectionStore = yield* ProjectionStore.ProjectionStoreV2;
+      const now = yield* DateTime.now;
+      const threadId = ThreadId.make("thread:rollback-summary");
+      const providerThreadId = ProviderThreadId.make("provider-thread:rollback-summary");
+      const runIds = [1, 2].map((ordinal) => RunId.make(`run:rollback-summary:${ordinal}`));
+      yield* projectionStore.apply({
+        id: EventId.make("event:rollback-summary:thread-created"),
+        type: "thread.created",
+        threadId,
+        occurredAt: now,
+        payload: {
+          createdBy: "user",
+          creationSource: "web",
+          id: threadId,
+          projectId: ProjectId.make("project:rollback-summary"),
+          title: "Rollback summary",
+          providerInstanceId,
+          modelSelection,
+          runtimeMode: "full-access",
+          interactionMode: "default",
+          branch: null,
+          worktreePath: null,
+          activeProviderThreadId: providerThreadId,
+          lineage: { parentThreadId: null, relationshipToParent: null, rootThreadId: threadId },
+          forkedFrom: null,
+          createdAt: now,
+          updatedAt: now,
+          archivedAt: null,
+          settledOverride: null,
+          settledAt: null,
+          lastVisitedAt: null,
+          deletedAt: null,
+        },
+      });
+      const run = (ordinal: number, status: OrchestrationV2RunStatus) => ({
+        id: runIds[ordinal - 1]!,
+        threadId,
+        ordinal,
+        providerInstanceId,
+        modelSelection,
+        providerThreadId,
+        userMessageId: MessageId.make(`message:rollback-summary:${ordinal}`),
+        rootNodeId: NodeId.make(`node:rollback-summary:${ordinal}`),
+        activeAttemptId: null,
+        status,
+        requestedAt: now,
+        startedAt: now,
+        completedAt: now,
+        checkpointId: null,
+        contextHandoffId: null,
+      });
+      for (const ordinal of [1, 2]) {
+        yield* projectionStore.apply({
+          id: EventId.make(`event:rollback-summary:run-${ordinal}`),
+          type: "run.created",
+          threadId,
+          runId: runIds[ordinal - 1]!,
+          driver,
+          occurredAt: now,
+          payload: run(ordinal, ordinal === 2 ? "rolled_back" : "completed"),
+        });
+      }
+      const summaryItem = (rewoundToRunId: RunId | null, ordinal: number) =>
+        ({
+          id: TurnItemId.make(`turn-item:rollback-summary:${ordinal}`),
+          threadId,
+          runId: null,
+          nodeId: null,
+          providerThreadId,
+          providerTurnId: null,
+          nativeItemRef: null,
+          parentItemId: null,
+          ordinal,
+          status: "completed",
+          title: null,
+          startedAt: now,
+          completedAt: now,
+          updatedAt: now,
+          type: "rollback_summary",
+          rollbackRequestId: CommandId.make(`rollback-summary:${ordinal}`),
+          rewoundToRunId,
+          summary: `Summary ${ordinal}`,
+        }) as const;
+      // One rollback rewound to the thread start, a later one to run 1.
+      for (const [rewoundTo, ordinal] of [
+        [null, 10],
+        [runIds[0]!, 20],
+      ] as const) {
+        yield* projectionStore.apply({
+          id: EventId.make(`event:rollback-summary:item-${ordinal}`),
+          type: "turn-item.updated",
+          threadId,
+          occurredAt: now,
+          payload: summaryItem(rewoundTo, ordinal),
+        });
+      }
+      const visibleSummaries = Effect.gen(function* () {
+        const full = yield* projectionStore.getThreadProjection(threadId);
+        const window = yield* projectionStore.getThreadSnapshotWindow(threadId, { rowLimit: 50 });
+        const texts = (rows: ReadonlyArray<{ readonly item: { readonly type: string } }>) =>
+          rows.flatMap(({ item }) =>
+            item.type === "rollback_summary" ? [(item as { summary?: string }).summary] : [],
+          );
+        const fromWindow = texts(window.projection.visibleTurnItems);
+        assert.deepEqual(fromWindow, texts(full.visibleTurnItems));
+        return fromWindow;
+      });
+
+      assert.deepEqual(yield* visibleSummaries, ["Summary 10", "Summary 20"]);
+
+      // A rollback past run 1 discards the summary that followed it.
+      yield* projectionStore.apply({
+        id: EventId.make("event:rollback-summary:run-1-rolled-back"),
+        type: "run.updated",
+        threadId,
+        runId: runIds[0]!,
+        driver,
+        occurredAt: now,
+        payload: run(1, "rolled_back"),
+      });
+      assert.deepEqual(yield* visibleSummaries, ["Summary 10"]);
+      assert.equal(
+        (
+          (yield* projectionStore.getTurnItem({
+            threadId,
+            itemId: TurnItemId.make("turn-item:rollback-summary:20"),
+          })) as { summary?: string } | null
+        )?.summary,
+        "Summary 20",
+      );
+    }),
+  );
+
   it.effect("keeps fork visible items stable after a source run is rolled back", () =>
     Effect.gen(function* () {
       const projectionStore = yield* ProjectionStore.ProjectionStoreV2;

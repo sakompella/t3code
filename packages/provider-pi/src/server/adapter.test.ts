@@ -307,7 +307,21 @@ const makeFakePi: Effect.Effect<FakePi> = Effect.gen(function* () {
       case "fork":
         return { ...base, data: { text: "Hello pi", cancelled: false } };
       case "navigate_tree":
-        return { ...base, data: { cancelled: false, editorText: "Hello pi" } };
+        return {
+          ...base,
+          data: {
+            cancelled: false,
+            editorText: "Hello pi",
+            ...(record["summarize"] === true
+              ? {
+                  summaryEntry: {
+                    type: "branch_summary",
+                    summary: "What the discarded turns did.",
+                  },
+                }
+              : {}),
+          },
+        };
       default:
         return base;
     }
@@ -10438,7 +10452,7 @@ describe("PiAdapterV2 with the Prime Agent flavor", () => {
         const first = yield* runPrimeTurn(session, fake, 1, ["u1"]);
         const second = yield* runPrimeTurn(session, fake, 2, ["u1", "u2"]);
 
-        yield* rollForkBackToFirstTurn(session, fake, [first, second], summary);
+        const result = yield* rollForkBackToFirstTurn(session, fake, [first, second], summary);
         assert.deepEqual(
           fake
             .allRequests()
@@ -10446,6 +10460,7 @@ describe("PiAdapterV2 with the Prime Agent flavor", () => {
             .map(({ id: _id, ...request }) => request),
           [{ type: "navigate_tree", targetId: "u2", ...navigation }],
         );
+        assert.equal(result.rollbackSummary, "What the discarded turns did.");
       }).pipe(Effect.scoped, Effect.provide(layerTest)),
   );
 

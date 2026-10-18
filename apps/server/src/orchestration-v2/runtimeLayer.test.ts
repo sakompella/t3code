@@ -947,6 +947,60 @@ it.layer(layerTest)("OrchestrationV2LayerLive", (it) => {
     }).pipe(Effect.provide(Layer.fresh(layerTest))),
   );
 
+  it.effect("refuses to start a turn while the thread is rewinding", () =>
+    Effect.gen(function* () {
+      const orchestrator = yield* Orchestrator.OrchestratorV2;
+      const eventSink = yield* EventSink.EventSinkV2;
+      const threadId = ThreadId.make("runtime-rewinding-thread");
+      yield* orchestrator.dispatch({
+        type: "thread.create",
+        createdBy: "user",
+        creationSource: "web",
+        commandId: CommandId.make("runtime-rewinding-create"),
+        threadId,
+        projectId: ProjectId.make("runtime-rewinding-project"),
+        title: "Rewinding",
+        modelSelection,
+        runtimeMode: "full-access",
+        interactionMode: "default",
+        branch: null,
+        worktreePath: process.cwd(),
+      });
+      const { thread } = yield* orchestrator.getThreadProjection(threadId);
+      const now = yield* DateTime.now;
+      yield* eventSink.write({
+        commandId: CommandId.make("runtime-rewinding-seed"),
+        events: [
+          {
+            id: EventId.make("runtime-rewinding-seed-event"),
+            type: "thread.metadata-updated",
+            threadId,
+            providerInstanceId: thread.providerInstanceId,
+            occurredAt: now,
+            payload: {
+              ...thread,
+              pendingHeadMove: { requestId: CommandId.make("runtime-rewinding"), summarize: true },
+              updatedAt: now,
+            },
+          },
+        ],
+      });
+      const message = {
+        type: "message.dispatch",
+        createdBy: "user",
+        creationSource: "web",
+        commandId: CommandId.make("runtime-rewinding-message"),
+        threadId,
+        messageId: MessageId.make("runtime-rewinding-message"),
+        text: "Sent while the thread rewinds.",
+        attachments: [],
+        dispatchMode: { type: "start_immediately" },
+      } as const;
+      const refused = yield* orchestrator.dispatch(message).pipe(Effect.flip);
+      assert.match(String(refused.cause), /still rewinding/);
+    }).pipe(Effect.provide(Layer.fresh(layerTest))),
+  );
+
   it.effect("resolves delivery intent against the active run and starts after it completes", () =>
     Effect.gen(function* () {
       const orchestrator = yield* Orchestrator.OrchestratorV2;

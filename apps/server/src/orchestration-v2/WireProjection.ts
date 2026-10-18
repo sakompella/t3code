@@ -109,7 +109,8 @@ function boundSubagentText<
 
 export function projectTurnItemForWire(item: OrchestrationV2TurnItem): OrchestrationV2TurnItem {
   switch (item.type) {
-    case "handoff": {
+    case "handoff":
+    case "rollback_summary": {
       const { summary: _summary, ...projected } = item;
       return projected;
     }

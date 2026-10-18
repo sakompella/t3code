@@ -1,4 +1,5 @@
 import {
+  CommandId,
   ContextHandoffId,
   MessageId,
   CheckpointId,
@@ -1960,6 +1961,46 @@ describe("retained v2 feed presentation", () => {
       expect(alone.map((entry) => entry.type)).toEqual(["message", "activity-group"]);
     },
   );
+
+  it("keeps a rollback summary a separate collapsed row that fetches its text when expanded", () => {
+    const summary = projected(
+      {
+        ...base("rollback-summary", "2026-06-20T00:00:03.000Z", 2),
+        runId: null,
+        type: "rollback_summary",
+        rollbackRequestId: CommandId.make("rollback"),
+        rewoundToRunId: runId,
+      },
+      2,
+    );
+    const rows = deriveThreadFeedPresentation(
+      buildThreadFeed([
+        projected(userMessage(), 0),
+        projected(command("2026-06-20T00:00:02.000Z"), 1),
+        summary,
+        projected(command("2026-06-20T00:00:04.000Z"), 3),
+        projected(assistantMessage("2026-06-20T00:00:05.000Z"), 4),
+      ]),
+      null,
+      new Set(),
+    );
+    const groups = rows.filter(
+      (entry) =>
+        entry.type === "activity-group" &&
+        entry.activities.some((activity) => activity.projectedItem === summary),
+    );
+    expect(groups).toHaveLength(1);
+    expect(groups[0]).toMatchObject({
+      activities: [
+        {
+          summary: "Summary of discarded turns",
+          canExpand: true,
+          fetchesDetail: true,
+          detail: null,
+        },
+      ],
+    });
+  });
 
   it("keeps a standalone compaction visible and folds it with other completed work", () => {
     const compact = projected(
