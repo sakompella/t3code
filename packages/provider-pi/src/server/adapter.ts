@@ -3434,8 +3434,11 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
           if (recordField(result, "cancelled") === true) {
             return yield* protocolError(`${name} cancelled the rollback`);
           }
+          rollbackNoticePending = true;
+          return recordString(recordField(result, "summaryEntry"), "summary");
         }
         rollbackNoticePending = true;
+        return undefined;
       });
 
       const runtime: ProviderAdapter.ProviderAdapterV2SessionRuntime = {
@@ -4087,9 +4090,10 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
                     flavor.rollback === "rpc_tree" ||
                     (flavor.rollback === "tree" && navigateTreeAvailable === true)
                   ) {
-                    yield* flavor.rollback === "rpc_tree"
-                      ? navigateTreeByRpc(forkEntryId, rollbackInput.summary)
-                      : navigateTreeInPlace(forkEntryId);
+                    const rollbackSummary =
+                      flavor.rollback === "rpc_tree"
+                        ? yield* navigateTreeByRpc(forkEntryId, rollbackInput.summary)
+                        : yield* navigateTreeInPlace(forkEntryId).pipe(Effect.as(undefined));
                     const treeBaseline = yield* readSessionTreeBaseline();
                     return yield* commitAfterDrain(
                       Effect.gen(function* () {
@@ -4100,7 +4104,10 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
                           nativeConversationHeadRef:
                             flavor.rollback === "rpc_tree" ? providerRef(forkEntryId) : null,
                         });
-                        return piThreadSnapshot(state.providerThread);
+                        return {
+                          ...piThreadSnapshot(state.providerThread),
+                          ...(rollbackSummary === undefined ? {} : { rollbackSummary }),
+                        };
                       }),
                     );
                   }

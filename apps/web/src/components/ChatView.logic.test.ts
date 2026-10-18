@@ -2143,40 +2143,78 @@ describe("waitForRevertedMessage", () => {
 
   afterEach(() => vi.restoreAllMocks());
 
-  it("rejects with the projected reason when the rollback fails for good", async () => {
-    const { state, projection } = projectionAtom();
-    const waiting = waitForRevertedMessage(threadRef, messageId, 1, requestId, async () => {});
-    await Promise.resolve();
+  function setThread(
+    state: ReturnType<typeof projectionAtom>["state"],
+    projection: ReturnType<typeof projectionAtom>["projection"],
+    thread: Partial<ReturnType<typeof projectionAtom>["projection"]["thread"]>,
+  ) {
     appAtomRegistry.set(state, {
-      data: Option.some({
-        ...projection,
-        thread: {
-          ...projection.thread,
-          rollbackFailure: { requestId, message: "The provider could not roll back." },
-        },
-      }),
+      data: Option.some({ ...projection, thread: { ...projection.thread, ...thread } }),
+    });
+  }
+
+  function track(promise: Promise<void>) {
+    const outcome: { value: "pending" | "done" | Error } = { value: "pending" };
+    promise.then(
+      () => (outcome.value = "done"),
+      (error: Error) => (outcome.value = error),
+    );
+    return outcome;
+  }
+
+  it("follows a slow rollback past any fixed deadline until the server ends it", async () => {
+    vi.useFakeTimers();
+    const { state, projection } = projectionAtom();
+    const outcome = track(waitForRevertedMessage(threadRef, messageId, requestId, async () => {}));
+    setThread(state, projection, {
+      rollbackRequestId: requestId,
+      pendingHeadMove: { requestId, summarize: true },
+    });
+    await vi.advanceTimersByTimeAsync(10 * 60_000);
+    expect(outcome.value).toBe("pending");
+
+    setThread(state, projection, { rollbackRequestId: requestId, pendingHeadMove: null });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(outcome.value).toBe("done");
+    vi.useRealTimers();
+  });
+
+  it("rejects with the server's reason when the rollback fails", async () => {
+    const { state, projection } = projectionAtom();
+    const waiting = waitForRevertedMessage(threadRef, messageId, requestId, async () => {});
+    await Promise.resolve();
+    setThread(state, projection, {
+      rollbackRequestId: requestId,
+      rollbackFailure: { requestId, message: "The provider could not roll back." },
+      pendingHeadMove: null,
     });
 
     await expect(waiting).rejects.toThrow("The provider could not roll back.");
   });
 
-  it("ignores a failure recorded for an earlier rollback", async () => {
-    vi.useFakeTimers();
+  it("waits until the projection has seen this rollback, ignoring an earlier one's end", async () => {
     const { state, projection } = projectionAtom();
-    const waiting = waitForRevertedMessage(threadRef, messageId, 1, requestId, async () => {}, 50);
-    const settled = expect(waiting).rejects.toThrow("Timed out waiting for the thread to rewind.");
-    appAtomRegistry.set(state, {
-      data: Option.some({
-        ...projection,
-        thread: {
-          ...projection.thread,
-          rollbackFailure: { requestId: CommandId.make("rollback-0"), message: "Old failure." },
-        },
-      }),
+    const earlier = CommandId.make("rollback-0");
+    setThread(state, projection, {
+      rollbackRequestId: earlier,
+      rollbackFailure: { requestId: earlier, message: "Old failure." },
+      pendingHeadMove: null,
     });
-    await vi.advanceTimersByTimeAsync(50);
-    await settled;
-    vi.useRealTimers();
+    const outcome = track(waitForRevertedMessage(threadRef, messageId, requestId, async () => {}));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(outcome.value).toBe("pending");
+  });
+
+  it("ends when a later rollback already replaced this one in the projection", async () => {
+    const { state, projection } = projectionAtom();
+    const outcome = track(waitForRevertedMessage(threadRef, messageId, requestId, async () => {}));
+    const later = CommandId.make("rollback-2");
+    setThread(state, projection, {
+      rollbackRequestId: later,
+      pendingHeadMove: { requestId: later, summarize: false },
+    });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(outcome.value).toBe("done");
   });
 });
 

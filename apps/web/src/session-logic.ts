@@ -324,6 +324,7 @@ export function hasActionableProposedPlan(plan: LatestProposedPlanState | null):
 const STANDALONE_V2_ITEM_TYPES = new Set<OrchestrationV2ProjectedTurnItem["item"]["type"]>([
   "fork",
   "handoff",
+  "rollback_summary",
   "run_interrupt_request",
   "run_interrupt_result",
   "secret_request",

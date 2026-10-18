@@ -1058,55 +1058,52 @@ export async function waitForStartedServerThread(
   });
 }
 
+/**
+ * Sends the rollback and follows the server until it ends. A summarized
+ * rollback waits for a model call, so there is no deadline: the thread's
+ * `pendingHeadMove` shows it is still running, and a failure carries the
+ * server's reason.
+ */
 export async function waitForRevertedMessage(
   threadRef: ScopedThreadRef,
   messageId: MessageId,
-  turnCount: number,
   requestId: CommandId,
   revert: () => Promise<void>,
-  timeoutMs = 120_000,
 ): Promise<void> {
   const threadAtom = environmentThreadDetails.stateAtom(threadRef);
   const readProjection = () => Option.getOrNull(appAtomRegistry.get(threadAtom).data);
-  const initial = readProjection();
-  if (!initial?.messages.some((message) => message.id === messageId)) {
+  if (!readProjection()?.messages.some((message) => message.id === messageId)) {
     throw new Error("The message to rewind is no longer available.");
   }
-  const messageRunId = initial.messages.find((message) => message.id === messageId)?.runId;
+  // A newer rollback replaces ours as the thread's request, so ours is over
+  // once the thread names any request other than the one before it.
+  const previousRequestId = readProjection()?.thread.rollbackRequestId;
   return new Promise<void>((resolve, reject) => {
     let settled = false;
     let accepted = false;
     let unsubscribe = () => {};
-    let timeout: ReturnType<typeof globalThis.setTimeout> | undefined;
     const finish = (error?: unknown) => {
       if (settled) return;
       settled = true;
-      if (timeout !== undefined) globalThis.clearTimeout(timeout);
       unsubscribe();
       if (error !== undefined) reject(error);
       else resolve();
     };
     const inspect = () => {
-      const thread = readProjection();
-      if (!thread) return;
-      const failure = thread.thread.rollbackFailure;
-      if (failure?.requestId === requestId) {
-        finish(new Error(failure.message));
+      const thread = readProjection()?.thread;
+      if (!accepted || thread === undefined) return;
+      if (thread.rollbackFailure?.requestId === requestId) {
+        finish(new Error(thread.rollbackFailure.message));
         return;
       }
       if (
-        accepted &&
-        thread.runs.some(
-          (run) =>
-            run.id === messageRunId && run.ordinal > turnCount && run.status === "rolled_back",
-        )
-      )
+        thread.rollbackRequestId !== previousRequestId &&
+        thread.pendingHeadMove?.requestId !== requestId
+      ) {
         finish();
+      }
     };
     unsubscribe = appAtomRegistry.subscribe(threadAtom, inspect);
-    timeout = globalThis.setTimeout(() => {
-      finish(new Error("Timed out waiting for the thread to rewind."));
-    }, timeoutMs);
     Promise.resolve()
       .then(revert)
       .then(() => {

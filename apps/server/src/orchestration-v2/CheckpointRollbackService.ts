@@ -1,13 +1,16 @@
 import {
   CheckpointId,
   CheckpointScopeId,
+  type CommandId,
   latestProviderTurnForAttempt,
   type OrchestrationV2ContextHandoff,
   type OrchestrationV2DomainEvent,
   type OrchestrationV2RollbackSummary,
+  type OrchestrationV2TurnItem,
   ProviderThreadId,
   type RunId,
   ThreadId,
+  TurnItemId,
 } from "@t3tools/contracts";
 import * as Context from "effect/Context";
 import * as DateTime from "effect/DateTime";
@@ -77,6 +80,7 @@ const isCheckpointRollbackExecutionError = Schema.is(CheckpointRollbackExecution
 export interface CheckpointRollbackServiceV2Shape {
   readonly execute: (input: {
     readonly threadId: ThreadId;
+    readonly requestId: CommandId;
     readonly providerThreadId: ProviderThreadId;
     readonly checkpointId: CheckpointId;
     readonly scopeId: CheckpointScopeId;
@@ -124,6 +128,7 @@ export const layer: Layer.Layer<
 
     const execute = Effect.fn("orchestrationV2.checkpointRollback.execute")(function* (input: {
       readonly threadId: ThreadId;
+      readonly requestId: CommandId;
       readonly providerThreadId: ProviderThreadId;
       readonly checkpointId: CheckpointId;
       readonly scopeId: CheckpointScopeId;
@@ -314,7 +319,10 @@ export const layer: Layer.Layer<
             run.status === "cancelled"),
       );
 
-      const snapshot =
+      const snapshot: Pick<
+        ProviderAdapter.ProviderAdapterV2RollbackThreadResult,
+        "providerThread" | "rollbackSummary"
+      > =
         runsToRollback.length === 0
           ? { providerThread }
           : yield* session.rollbackThread({
@@ -466,6 +474,52 @@ export const layer: Layer.Layer<
                   ...handoffWithoutDiscardedRuns(handoff, discardedRunIds),
                   updatedAt: now,
                 },
+              }),
+            );
+          }
+          if (snapshot.rollbackSummary !== undefined) {
+            const item: OrchestrationV2TurnItem = {
+              id: TurnItemId.make(`turn-item:rollback-summary:${input.requestId}`),
+              threadId: input.threadId,
+              runId: null,
+              nodeId: null,
+              providerThreadId: providerThread.id,
+              providerTurnId: null,
+              nativeItemRef: null,
+              parentItemId: null,
+              // The event sink places it after the run it was rewound to.
+              ordinal: 0,
+              status: "completed",
+              title: null,
+              startedAt: now,
+              completedAt: now,
+              updatedAt: now,
+              type: "rollback_summary",
+              rollbackRequestId: input.requestId,
+              rewoundToRunId: targetRun?.id ?? null,
+              summary: snapshot.rollbackSummary,
+            };
+            events.push(
+              yield* makeEvent({
+                type: "turn-item.updated",
+                threadId: input.threadId,
+                providerInstanceId: providerThread.providerInstanceId,
+                occurredAt: now,
+                payload: item,
+              }),
+            );
+          }
+          // Re-read under the lock: the head move can take minutes, and the
+          // thread may have changed meanwhile.
+          const { thread } = yield* projections.getThreadRecords(input.threadId, []);
+          if (thread.pendingHeadMove?.requestId === input.requestId) {
+            events.push(
+              yield* makeEvent({
+                type: "thread.metadata-updated",
+                threadId: input.threadId,
+                providerInstanceId: thread.providerInstanceId,
+                occurredAt: now,
+                payload: { ...thread, pendingHeadMove: null, updatedAt: now },
               }),
             );
           }

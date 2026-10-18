@@ -856,6 +856,7 @@ function turnItemText(item: OrchestrationV2TurnItem): string | null {
     case "error":
       return item.failure.message;
     case "compaction":
+    case "rollback_summary":
       return item.summary ?? null;
     case "handoff":
       return item.summary ?? `${item.strategy} handoff to ${item.toProviderInstanceId}`;

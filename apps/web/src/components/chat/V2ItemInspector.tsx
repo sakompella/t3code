@@ -414,6 +414,22 @@ export const V2ItemInspector = memo(function V2ItemInspector(props: V2ItemInspec
         <StructuredValue value={noticeExpandedText(item)} />
       ) : null}
       {item.type === "error" ? <StructuredValue value={item.failure.message} /> : null}
+      {item.type === "rollback_summary" ? (
+        item.summary === undefined ? (
+          <ToolOutput {...outputState} />
+        ) : (
+          <div className="text-muted-foreground">
+            <ChatMarkdown
+              text={item.summary}
+              cwd={props.cwd}
+              threadRef={{
+                environmentId: props.environmentId,
+                threadId: props.projectedItem.sourceThreadId,
+              }}
+            />
+          </div>
+        )
+      ) : null}
       {item.type === "proposed_plan" ? <StructuredValue value={item.markdown} /> : null}
       {item.type === "todo_list" ? (
         <StructuredValue

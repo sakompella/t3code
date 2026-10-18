@@ -2859,8 +2859,14 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
                   SELECT item.rowid AS item_rowid, item.payload_json, item.ordinal, item.turn_item_id,
                     item.run_id, item.node_id, item.type
                   FROM orchestration_v2_projection_turn_items AS item
+                  -- Mirrors timelineRunId: a rollback summary goes with the
+                  -- run it was rewound to.
                   LEFT JOIN orchestration_v2_projection_runs AS run
-                    ON run.run_id = item.run_id
+                    ON run.run_id = COALESCE(
+                      item.run_id,
+                      CASE WHEN item.type = 'rollback_summary'
+                        THEN json_extract(item.payload_json, '$.rewoundToRunId') END
+                    )
                   WHERE item.thread_id = ${threadId}
                     AND item.ordinal <= COALESCE(
                       (
@@ -3031,14 +3037,14 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
         // Reuse the decoded items for cohort IDs and the resulting projection.
         // Parsing these rows separately duplicates every retained tool output.
         const turnItems = yield* decodeRows(decodeTurnItemPayload, threadId)(boundedTurnItemRows);
-        const cohortJson = (field: string) =>
-          JSON.stringify(
-            turnItems.flatMap((payload) => {
-              const value = nullableStringField(payload, field);
-              return value === null ? [] : [value];
-            }),
-          );
-        const cohortRunIds = cohortJson("runId");
+        const cohortIds = (field: string) =>
+          turnItems.flatMap((payload) => {
+            const value = nullableStringField(payload, field);
+            return value === null ? [] : [value];
+          });
+        const cohortJson = (field: string) => encodeIdList(cohortIds(field));
+        // A rollback summary's visibility reads the run it was rewound to.
+        const cohortRunIds = encodeIdList([...cohortIds("runId"), ...cohortIds("rewoundToRunId")]);
         const cohortNodeIds =
           window === undefined ||
           (fields !== undefined &&
@@ -5028,6 +5034,7 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
       >["inputIntent"];
       readonly createdBy?: "user" | "agent" | "system";
       readonly messageId?: MessageId;
+      readonly rewoundToRunId?: RunId | null;
     };
     type TimelineIndexRow = {
       readonly sourceThreadId: ThreadId;
@@ -5057,10 +5064,12 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
           input_intent: NonNullable<TimelineIndexItem["inputIntent"]> | null;
           created_by: "user" | "agent" | "system" | null;
           message_id: string | null;
+          rewound_to_run_id: string | null;
         }>`SELECT turn_item_id, run_id, node_id, type,
           CASE WHEN type = 'user_message' THEN json_extract(payload_json, '$.inputIntent') END AS input_intent,
           CASE WHEN type = 'user_message' THEN json_extract(payload_json, '$.createdBy') END AS created_by,
-          CASE WHEN type IN ('user_message', 'assistant_message') THEN json_extract(payload_json, '$.messageId') END AS message_id
+          CASE WHEN type IN ('user_message', 'assistant_message') THEN json_extract(payload_json, '$.messageId') END AS message_id,
+          CASE WHEN type = 'rollback_summary' THEN json_extract(payload_json, '$.rewoundToRunId') END AS rewound_to_run_id
         FROM orchestration_v2_projection_turn_items WHERE thread_id = ${threadId}
         ORDER BY ordinal ASC, turn_item_id ASC`;
         const items: Array<TimelineIndexItem> = rows.map((row) => ({
@@ -5072,6 +5081,9 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
           ...(row.input_intent === null ? {} : { inputIntent: row.input_intent }),
           ...(row.created_by === null ? {} : { createdBy: row.created_by }),
           ...(row.message_id === null ? {} : { messageId: MessageId.make(row.message_id) }),
+          ...(row.rewound_to_run_id === null
+            ? {}
+            : { rewoundToRunId: RunId.make(row.rewound_to_run_id) }),
         }));
         const local: Array<TimelineIndexRow> = items.map((item) => ({
           sourceThreadId: threadId,

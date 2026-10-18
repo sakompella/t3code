@@ -437,6 +437,19 @@ export const OrchestrationV2AppThread = Schema.Struct({
       }),
     ),
   ),
+  /**
+   * A move of the conversation head (a rollback) the provider is still
+   * carrying out, which can take as long as its summary model call. Cleared
+   * when it completes or fails.
+   */
+  pendingHeadMove: Schema.optional(
+    Schema.NullOr(
+      Schema.Struct({
+        requestId: CommandId,
+        summarize: Schema.Boolean,
+      }),
+    ),
+  ),
   deletedAt: Schema.NullOr(Schema.DateTimeUtc),
 });
 export type OrchestrationV2AppThread = typeof OrchestrationV2AppThread.Type;
@@ -1642,6 +1655,18 @@ export const OrchestrationV2TurnItem = Schema.Union([
     /** Set on the wire when output was withheld; fetch it with getTurnItem. */
     outputOmitted: Schema.optional(Schema.Boolean),
   }),
+  Schema.Struct({
+    ...OrchestrationV2TurnItemBaseFields,
+    type: Schema.Literal("rollback_summary"),
+    rollbackRequestId: CommandId,
+    /**
+     * The run the conversation was rewound to, null for the thread start. A
+     * later rollback that discards that run discards this summary too.
+     */
+    rewoundToRunId: Schema.NullOr(RunId),
+    /** What the provider kept of the discarded turns. Omitted on the wire; fetch it with getTurnItem. */
+    summary: Schema.optional(Schema.String),
+  }),
 ]);
 export type OrchestrationV2TurnItem = typeof OrchestrationV2TurnItem.Type;
 
@@ -2419,6 +2444,18 @@ export const OrchestrationV2TurnItemJson = Schema.Union([
     output: Schema.optional(Schema.Unknown),
     /** Set on the wire when output was withheld; fetch it with getTurnItem. */
     outputOmitted: Schema.optional(Schema.Boolean),
+  }),
+  Schema.Struct({
+    ...OrchestrationV2TurnItemJsonBaseFields,
+    type: Schema.Literal("rollback_summary"),
+    rollbackRequestId: CommandId,
+    /**
+     * The run the conversation was rewound to, null for the thread start. A
+     * later rollback that discards that run discards this summary too.
+     */
+    rewoundToRunId: Schema.NullOr(RunId),
+    /** What the provider kept of the discarded turns. Omitted on the wire; fetch it with getTurnItem. */
+    summary: Schema.optional(Schema.String),
   }),
 ]);
 export type OrchestrationV2TurnItemJson = typeof OrchestrationV2TurnItemJson.Type;

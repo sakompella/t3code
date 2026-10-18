@@ -3,6 +3,7 @@ import { assert, it } from "@effect/vitest";
 import {
   CheckpointId,
   CheckpointScopeId,
+  CommandId,
   type OrchestrationV2ThreadProjection,
   ProjectId,
   ProviderInstanceId,
@@ -191,13 +192,27 @@ it.effect.each([
     );
     if (rejected) {
       const error = yield* service
-        .execute({ threadId, providerThreadId, checkpointId, scopeId, restoreFiles })
+        .execute({
+          threadId,
+          requestId: CommandId.make("rollback-request"),
+          providerThreadId,
+          checkpointId,
+          scopeId,
+          restoreFiles,
+        })
         .pipe(Effect.flip);
       assert.equal(error.reason, "shared-workspace");
       assert.deepEqual(calls, []);
       assert.equal(yield* fs.readFileString(otherFile), "other thread's uncommitted work");
     } else {
-      yield* service.execute({ threadId, providerThreadId, checkpointId, scopeId, restoreFiles });
+      yield* service.execute({
+        threadId,
+        requestId: CommandId.make("rollback-request"),
+        providerThreadId,
+        checkpointId,
+        scopeId,
+        restoreFiles,
+      });
       assert.deepEqual(calls, restoreFiles ? ["provider", "files"] : ["provider"]);
       assert.equal(yield* fs.exists(otherFile), !restoreFiles);
     }

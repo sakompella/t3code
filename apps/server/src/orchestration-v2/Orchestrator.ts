@@ -572,6 +572,7 @@ function pendingThreadTitleGenerationEffect(
 }
 
 const WORKSPACE_PREPARATION_INPUT = "Preparing workspace";
+const THREAD_REWINDING_MESSAGE = "This thread is still rewinding. Try again when it finishes.";
 
 function withoutPreparationResult(
   item: Extract<OrchestrationV2TurnItem, { readonly type: "command_execution" }>,
@@ -4980,6 +4981,14 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         (dispatchMode.type === "defer_start" ||
           dispatchMode.type === "start_immediately" ||
           dispatchMode.type === "queue_after_active");
+      // A turn started now would race the provider moving its conversation head.
+      if (!shouldQueue && projection.thread.pendingHeadMove) {
+        return yield* new OrchestratorDispatchError({
+          commandId: command.commandId,
+          commandType: command.type,
+          cause: THREAD_REWINDING_MESSAGE,
+        });
+      }
       if (shouldQueue) {
         if (pendingMergeBackTransfers.length > 0) {
           return yield* new OrchestratorDispatchError({
@@ -9835,6 +9844,10 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           ...projection.thread,
           rollbackRequestId: command.commandId,
           rollbackFailure: null,
+          pendingHeadMove: {
+            requestId: command.commandId,
+            summarize: command.summary !== undefined,
+          },
           updatedAt: now,
         },
       });
@@ -9898,6 +9911,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         payload: {
           ...thread,
           rollbackFailure: { requestId: command.requestId, message: command.message },
+          pendingHeadMove: null,
           updatedAt: now,
         },
       });
@@ -11008,6 +11022,13 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
             commandId: command.commandId,
             commandType: command.type,
             cause: "Continue the limited thread before resuming its queue.",
+          });
+        }
+        if (projection.thread.pendingHeadMove) {
+          return yield* new OrchestratorDispatchError({
+            commandId: command.commandId,
+            commandType: command.type,
+            cause: THREAD_REWINDING_MESSAGE,
           });
         }
         const now = yield* DateTime.now;

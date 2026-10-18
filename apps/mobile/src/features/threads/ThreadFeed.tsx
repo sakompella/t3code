@@ -5,6 +5,7 @@ import { useMarkdownImageSource } from "../../native/useMarkdownImageSource";
 import { enrichedContextLinkPresentation } from "../../lib/enrichedLinkPresentation";
 import { ThreadContextDivider } from "./thread-context-divider";
 import { ThreadHandoffDivider, ThreadHandoffRow } from "./thread-handoff-row";
+import { ThreadPendingHeadMoveRow } from "./thread-pending-head-move-row";
 import { SecretRequestCard } from "./SecretRequestCard";
 import { AppActivityIndicator } from "../../components/ui/AppActivityIndicator";
 import {
@@ -2674,14 +2675,21 @@ export const ThreadFeed = memo(function ThreadFeed(props: ThreadFeedProps) {
               </>
             }
             ListFooterComponent={
-              props.pendingHandoff ? (
-                <ThreadHandoffDivider
+              <>
+                {props.pendingHandoff ? (
+                  <ThreadHandoffDivider
+                    environmentId={props.environmentId}
+                    endpoints={props.pendingHandoff}
+                    iconColor={iconSubtleColor}
+                    label="Context handoff pending"
+                  />
+                ) : null}
+                <ThreadPendingHeadMoveRow
                   environmentId={props.environmentId}
-                  endpoints={props.pendingHandoff}
+                  threadId={props.threadId}
                   iconColor={iconSubtleColor}
-                  label="Context handoff pending"
                 />
-              ) : null
+              </>
             }
             contentContainerStyle={{
               paddingTop: 12,

@@ -1036,23 +1036,30 @@ const ThreadWorkLogRow = memo(function ThreadWorkLogRow(
     call && shownItem.type === "command_execution" && shownItem.exitCode
       ? shownItem.exitCode
       : null;
+  const rollbackSummary = shownItem.type === "rollback_summary" ? shownItem : null;
   const outputImages = expanded && fetchedItem ? turnItemOutputImages(fetchedItem) : [];
   const viewedImagePath = workEntryViewedImagePath(row.workEntry);
   const fetchedOutput =
     !expanded || streamsOutput
       ? null
-      : shownItem.type === "file_search" || shownItem.type === "web_search"
-        ? turnItemOutputText(shownItem)
-        : fetchedItem
-          ? (turnItemOutputText(fetchedItem) ??
-            (outputImages.length > 0 || viewedImagePath ? null : "No output."))
+      : rollbackSummary
+        ? rollbackSummary.summary !== undefined
+          ? null
           : fetchedDetail.error
-            ? `Couldn't load output: ${fetchedDetail.error}`
-            : row.fetchesDetail
-              ? fetchedDetail.data
-                ? "Output is no longer available."
-                : "Loading output…"
-              : null;
+            ? `Couldn't load summary: ${fetchedDetail.error}`
+            : "Loading summary…"
+        : shownItem.type === "file_search" || shownItem.type === "web_search"
+          ? turnItemOutputText(shownItem)
+          : fetchedItem
+            ? (turnItemOutputText(fetchedItem) ??
+              (outputImages.length > 0 || viewedImagePath ? null : "No output."))
+            : fetchedDetail.error
+              ? `Couldn't load output: ${fetchedDetail.error}`
+              : row.fetchesDetail
+                ? fetchedDetail.data
+                  ? "Output is no longer available."
+                  : "Loading output…"
+                : null;
   const exitLine =
     failedExitCode === null ? null : (
       <Text className="mt-1.5 font-mono text-2xs leading-normal text-danger-foreground">
@@ -1079,7 +1086,7 @@ const ThreadWorkLogRow = memo(function ThreadWorkLogRow(
   const failed = row.status === "failure";
   const toolIcon = row.workEntry.toolIcon ?? row.workEntry.toolSource?.icon;
   const fullDetail =
-    expanded && !reasoning && !bodyCode && !call
+    expanded && !reasoning && !rollbackSummary && !bodyCode && !call
       ? fetchedItem && !isRead
         ? formatItemFullDetail(row.projectedItem, fetchedItem)
         : row.getFullDetail()
@@ -1221,6 +1228,7 @@ const ThreadWorkLogRow = memo(function ThreadWorkLogRow(
 
       {expanded &&
       (reasoning ||
+        rollbackSummary ||
         bodyCode ||
         fullDetail ||
         call ||
@@ -1232,7 +1240,7 @@ const ThreadWorkLogRow = memo(function ThreadWorkLogRow(
           entering={WORK_LOG_DETAIL_ENTER_TRANSITION}
           exiting={WORK_LOG_DETAIL_EXIT_TRANSITION}
           layout={WORK_LOG_LAYOUT_TRANSITION}
-          className={reasoning ? "ml-7 py-1" : "pb-1 pt-0.5"}
+          className={reasoning || rollbackSummary ? "ml-7 py-1" : "pb-1 pt-0.5"}
         >
           {row.workEntry.questionAnswer ? (
             <QuestionAnswerHistory
@@ -1272,6 +1280,8 @@ const ThreadWorkLogRow = memo(function ThreadWorkLogRow(
           >
             {reasoning ? (
               props.renderReasoning(reasoning.text)
+            ) : rollbackSummary?.summary ? (
+              props.renderReasoning(rollbackSummary.summary)
             ) : bodyCode ? (
               <>
                 <HighlightedCodeText

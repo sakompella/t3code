@@ -107,6 +107,7 @@ import {
 } from "@t3tools/client-runtime/state/thread-workflows";
 import { resolvePendingHandoff } from "@t3tools/client-runtime/handoff";
 import { HandoffRow } from "./chat/V2LifecycleRow";
+import { TimelineSystemDivider } from "./chat/TimelineSystemDivider";
 import {
   deriveThreadHeartbeats,
   presentHeartbeats,
@@ -281,6 +282,7 @@ import {
   GitBranchIcon,
   ShieldQuestionIcon,
   TargetIcon,
+  Undo2Icon,
   WifiOffIcon,
 } from "lucide-react";
 import { cn, randomUUID } from "~/lib/utils";
@@ -807,25 +809,19 @@ async function rewindToMessage(input: {
       throw new Error("Make room for this message's attachments in the composer before rewinding.");
     }
     const commandId = CommandId.make(randomUUID());
-    await waitForRevertedMessage(
-      input.routeThreadRef,
-      message.id,
-      input.turnCount,
-      commandId,
-      async () => {
-        const result = await input.revertThreadCheckpoint({
-          environmentId,
-          input: {
-            commandId,
-            threadId: input.threadId,
-            turnCount: input.turnCount,
-            restoreFiles: input.restoreFiles,
-            ...(input.summary === undefined ? {} : { summary: input.summary }),
-          },
-        });
-        if (result._tag === "Failure") throw squashAtomCommandFailure(result);
-      },
-    );
+    await waitForRevertedMessage(input.routeThreadRef, message.id, commandId, async () => {
+      const result = await input.revertThreadCheckpoint({
+        environmentId,
+        input: {
+          commandId,
+          threadId: input.threadId,
+          turnCount: input.turnCount,
+          restoreFiles: input.restoreFiles,
+          ...(input.summary === undefined ? {} : { summary: input.summary }),
+        },
+      });
+      if (result._tag === "Failure") throw squashAtomCommandFailure(result);
+    });
     const currentPrompt = store.getComposerDraft(draftTarget)?.prompt ?? "";
     const restoredPrompt = recallableComposerPrompt(message.text);
     const nextPrompt =
@@ -1318,9 +1314,11 @@ export default function ChatView(props: ChatViewProps) {
     Record<string, LocalThreadErrorEntry>
   >({});
   const [isConnecting, _setIsConnecting] = useState(false);
-  const isRevertingCheckpoint = useComposerDraftStore((store) =>
-    store.rewindingThreadKeys.has(routeThreadKey),
-  );
+  const pendingHeadMove = serverProjection?.thread.pendingHeadMove ?? null;
+  // The server field covers rewinds started in another tab or before a reload.
+  const isRevertingCheckpoint =
+    useComposerDraftStore((store) => store.rewindingThreadKeys.has(routeThreadKey)) ||
+    pendingHeadMove !== null;
 
   const workspaceFileDragRouteKey = `${routeThreadKey}:${draftId ?? ""}`;
   const [workspaceFileDragRoute, setWorkspaceFileDragRoute] = useState(workspaceFileDragRouteKey);
@@ -8058,17 +8056,32 @@ export default function ChatView(props: ChatViewProps) {
                 {...(onOpenWorktreeSetupTerminal ? { onOpenWorktreeSetupTerminal } : {})}
                 isPreparingWorktree={!paintOnlyDisplayedTimeline && isPreparingWorktree}
                 footer={
-                  paintOnlyDisplayedTimeline ? null : pendingHandoff === null ? (
+                  paintOnlyDisplayedTimeline ? null : pendingHandoff === null &&
+                    pendingHeadMove === null ? (
                     threadStatusLine
                   ) : (
                     <>
-                      <div className="chat-content-lane">
-                        <HandoffRow
-                          endpoints={pendingHandoff}
-                          providers={providerStatuses}
-                          pending
-                        />
-                      </div>
+                      {pendingHandoff === null ? null : (
+                        <div className="chat-content-lane">
+                          <HandoffRow
+                            endpoints={pendingHandoff}
+                            providers={providerStatuses}
+                            pending
+                          />
+                        </div>
+                      )}
+                      {pendingHeadMove === null ? null : (
+                        <div className="chat-content-lane">
+                          <TimelineSystemDivider
+                            label={
+                              pendingHeadMove.summarize
+                                ? "Summarizing discarded turns…"
+                                : "Rewinding…"
+                            }
+                            icon={Undo2Icon}
+                          />
+                        </div>
+                      )}
                       {threadStatusLine}
                     </>
                   )
