@@ -25,6 +25,7 @@ import {
   type AssistantCitation,
   type EnvironmentId,
   type MessageId,
+  type OrchestrationV2ProjectedTurnItem,
   type OrchestrationV2TurnItem,
   type RunAttemptId,
   type ScopedThreadRef,
@@ -2948,6 +2949,9 @@ function V2EventTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "event"
       />
     );
   }
+  if (item.type === "rollback_summary") {
+    return <RollbackSummaryRow projectedItem={row.projectedItem} />;
+  }
   const presentation = v2EventPresentation(item);
   const Icon = presentation.icon;
   if (item.type === "error") {
@@ -3104,6 +3108,46 @@ function V2EventTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "event"
         </div>
       </div>
     </section>
+  );
+}
+
+/** Mounts the inspector only when opened, since it fetches the summary the wire item omits. */
+function RollbackSummaryRow({
+  projectedItem,
+}: {
+  readonly projectedItem: OrchestrationV2ProjectedTurnItem;
+}) {
+  const ctx = use(TimelineRowCtx);
+  const [open, setOpen] = useState(false);
+  return (
+    <details
+      className="group"
+      data-v2-item-type={projectedItem.item.type}
+      onToggle={(event) => setOpen(event.currentTarget.open)}
+    >
+      <summary className="cursor-pointer list-none rounded-md focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring/70 [&::-webkit-details-marker]:hidden">
+        <TimelineSystemDivider
+          label="Summary of discarded turns"
+          icon={Undo2Icon}
+          showDetailSeparator={false}
+          detail={
+            <ChevronDownIcon className="size-3 shrink-0 transition-transform group-open:rotate-180" />
+          }
+        />
+      </summary>
+      {open ? (
+        <div className="px-3 pb-2">
+          <V2ItemInspector
+            projectedItem={projectedItem}
+            environmentId={ctx.activeThreadEnvironmentId}
+            cwd={ctx.markdownCwd}
+            workspaceRoot={ctx.workspaceRoot}
+            onOpenThread={ctx.onOpenThread}
+            onOpenTurnDiff={ctx.onOpenTurnDiff}
+          />
+        </div>
+      ) : null}
+    </details>
   );
 }
 

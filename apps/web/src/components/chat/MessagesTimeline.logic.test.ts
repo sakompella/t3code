@@ -2,6 +2,7 @@ import { shouldPreserveAssistantLineBreaks } from "@t3tools/shared/markdownPipel
 import { ThreadId, type WorktreeSetupSnapshot } from "@t3tools/contracts";
 import {
   CheckpointRef,
+  CommandId,
   NodeId,
   ProviderDriverKind,
   ProviderInstanceId,
@@ -5268,6 +5269,88 @@ describe("failed turn transcript", () => {
       });
     },
   );
+});
+
+describe("rollback summaries", () => {
+  it("stays its own row after the settled turn it follows instead of folding into it", () => {
+    const runId = RunId.make("kept-run");
+    const threadId = ThreadId.make("rewound-thread");
+    const at = (second: number) =>
+      DateTime.makeUnsafe(`2026-10-06T10:00:${String(second).padStart(2, "0")}Z`);
+    const base = (id: string, second: number, itemRunId: RunId | null = runId) => ({
+      id: TurnItemId.make(id),
+      threadId,
+      runId: itemRunId,
+      nodeId: null,
+      providerThreadId: null,
+      providerTurnId: null,
+      nativeItemRef: null,
+      parentItemId: null,
+      ordinal: second,
+      title: null,
+      status: "completed" as const,
+      startedAt: at(second),
+      completedAt: at(second),
+      updatedAt: at(second),
+    });
+    const items: OrchestrationV2TurnItem[] = [
+      {
+        ...base("user", 0),
+        type: "user_message",
+        messageId: MessageId.make("user"),
+        createdBy: "user",
+        creationSource: "web",
+        inputIntent: "turn_start",
+        text: "Inspect the repo",
+        attachments: [],
+      },
+      {
+        ...base("command", 1),
+        type: "command_execution",
+        input: "pwd",
+        output: "/repo",
+        exitCode: 0,
+      },
+      {
+        ...base("assistant", 2),
+        type: "assistant_message",
+        messageId: MessageId.make("assistant"),
+        text: "Done.",
+        streaming: false,
+      },
+      {
+        ...base("summary", 3, null),
+        type: "rollback_summary",
+        rollbackRequestId: CommandId.make("rollback"),
+        rewoundToRunId: runId,
+      },
+    ];
+    const rows = deriveMessagesTimelineRows({
+      timelineEntries: deriveTimelineEntriesFromVisibleTurnItems({
+        visibleTurnItems: items.map((item) => ({
+          position: item.ordinal,
+          visibility: "local",
+          sourceThreadId: threadId,
+          sourceItemId: item.id,
+          item,
+        })),
+        optimisticMessages: [],
+      }),
+      latestRun: {
+        runId,
+        status: "completed",
+        startedAt: DateTime.formatIso(at(0)),
+        completedAt: DateTime.formatIso(at(2)),
+      },
+      isWorking: false,
+      turnDiffSummaries: [],
+      supportsConversationRollback: true,
+    });
+    expect(rows.find((row) => row.id === "summary")).toMatchObject({ kind: "event" });
+    expect(rows.findIndex((row) => row.id === "summary")).toBeGreaterThan(
+      rows.findIndex((row) => row.kind === "turn-fold"),
+    );
+  });
 });
 
 describe("live subagents after their parent turn settles", () => {
