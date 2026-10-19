@@ -1,0 +1,4 @@
+# Fork topics, in merge order: <topic> <parent>. parent is `upstream` or an earlier topic.
+# Topic X lives on branch topic/X. Edit this file on topic/meta, then run scripts/fork-topics.py rebuild.
+meta    upstream   # fork rules (FORK.md), this list, scripts/fork-topics.py
+fork    meta       # everything else, until it is carved into topics (see FORK.md, Topic branches)
