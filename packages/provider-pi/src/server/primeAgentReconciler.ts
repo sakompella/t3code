@@ -348,6 +348,15 @@ export function makePrimeAgentReconciler<E>(input: {
     ledger.historyMark = historyMark;
   };
 
+  /** Marks messages T3 chose not to show, so no history read offers them as a lost wake. */
+  const account = (messages: ReadonlyArray<unknown>) => {
+    if (ledger === null) return;
+    for (const message of messages) {
+      const key = transcriptMessageKey(message);
+      if (key !== undefined) ledger.keys.add(key);
+    }
+  };
+
   /** The session the ledger was seeded from. */
   let seededSession: string | null = null;
 
@@ -766,6 +775,7 @@ export function makePrimeAgentReconciler<E>(input: {
   });
 
   return {
+    account,
     baseline,
     isLate,
     noteSeen,
