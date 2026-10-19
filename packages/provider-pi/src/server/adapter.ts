@@ -121,6 +121,7 @@ import {
 } from "./primeAgentCacheMiss.ts";
 import { makePrimeAgentReconciler, transcriptMessageKey } from "./primeAgentReconciler.ts";
 import { primeAgentHeartbeats } from "./primeAgentHeartbeats.ts";
+import { primeAgentQuotaParkNotice, primeAgentQuotaParkResumeAt } from "./primeAgentQuotaPark.ts";
 import { makePrimeAgentStream, snapshotBlock } from "./primeAgentStream.ts";
 import { makePrimeAgentTools } from "./primeAgentTools.ts";
 import { makePrimeAgentSettle } from "./primeAgentSettle.ts";
@@ -438,6 +439,20 @@ function parseNavigateTreeResult(json: string): unknown {
   return Option.getOrUndefined(decodeNavigateTreeResult(json));
 }
 
+/** A reply the model produced; Prime Agent reports a failed call as an empty reply that stopped with an error. */
+function isWorkingReply(message: unknown): boolean {
+  return (
+    recordString(message, "role") === "assistant" && recordString(message, "stopReason") !== "error"
+  );
+}
+
+/** When the quota park a retry outcome reports resumes the session, or null when it reports none. */
+function retryOutcomeParkResumeAt(event: PiRpcRecord): DateTime.Utc | null {
+  return event["success"] === true
+    ? null
+    : primeAgentQuotaParkResumeAt(recordString(event, "finalError"));
+}
+
 /**
  * Events that stay live while a wake is buffered, so a child's events never
  * wait on the parent's turn.
@@ -742,6 +757,8 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
       let daemonLostSession = false;
       let unsolicitedActivityDetected = false;
       let pendingWake: PiWake | null = null;
+      /** When Prime Agent's quota park resumes the session; cleared by the next reply that works. */
+      let quotaParkedUntil: DateTime.Utc | null = null;
       let rollbackBarrier: Deferred.Deferred<
         void,
         ProviderAdapter.ProviderAdapterProtocolError
@@ -1786,7 +1803,7 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
         }
       });
 
-      /** A warning about this session's setup, shown once in its first turn. */
+      /** A warning in `turn`, one per key: the session's setup, or why the turn waits. */
       const emitSessionNotice = Effect.fnUntraced(function* (
         turn: ActivePiTurn,
         notice: { readonly key: string; readonly title: string; readonly message: string },
@@ -2334,6 +2351,40 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
           .pipe(Effect.tapError(() => stopPendingWake(wake)));
       });
 
+      /**
+       * Whether a wake's every reply failed at once while a remembered quota
+       * park holds the session. The park may have refused it, or something else
+       * failed it; its retry outcome, which follows agent_end, tells which.
+       */
+      const mayBeRefusedByQuotaPark = Effect.fnUntraced(function* (wake: PiWake) {
+        const parkedUntil = quotaParkedUntil;
+        if (parkedUntil === null || !DateTime.isGreaterThan(parkedUntil, yield* DateTime.now)) {
+          return false;
+        }
+        const replies = wake.events.filter(
+          (event) =>
+            event["type"] === "message_end" &&
+            recordString(event["message"], "role") === "assistant",
+        );
+        return replies.length > 0 && replies.every((event) => !isWorkingReply(event["message"]));
+      });
+
+      /**
+       * Prime Agent keeps a wake its quota park refused and resumes the session
+       * itself, so no run shows it. Its messages are accounted for, so a later
+       * history read does not offer them as a lost wake.
+       */
+      const dropRefusedWake = Effect.fnUntraced(function* (wake: PiWake) {
+        pendingWake = null;
+        reconciler.account(wake.events.map((event) => event["message"]));
+        yield* Effect.logInfo("orchestration-v2.pi-wake-refused-by-quota-park", {
+          driver,
+          providerSessionId: input.providerSessionId,
+          parkedUntil: quotaParkedUntil === null ? null : DateTime.formatIso(quotaParkedUntil),
+        });
+        yield* updateProviderSession("ready", null);
+      });
+
       /** What a message Prime Agent injected says about background work: a job or a child ended. */
       const applyInjectedMessage = Effect.fnUntraced(function* (message: unknown) {
         yield* completeBackgroundJob(message);
@@ -2435,6 +2486,8 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
         }
         // An event about a message an earlier turn already showed.
         if (reconciler.isLate(event)) return;
+        const message = event["message"];
+        if (event["type"] === "message_end" && isWorkingReply(message)) quotaParkedUntil = null;
         // Model-selection hooks can await a dialog before startTurn can claim
         // a wake. Keep interactive requests session-scoped until a turn owns
         // them; buffer native output and notifications for that turn.
@@ -2453,17 +2506,26 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
           wake.events.push(event);
           if (event["type"] === "agent_start") yield* updateProviderSession("running", null);
           if (event["type"] === "agent_settled") yield* updateProviderSession("ready", null);
-          if (event["type"] === "message_start") yield* applyInjectedMessage(event["message"]);
+          if (event["type"] === "message_start") yield* applyInjectedMessage(message);
+          // A wake that may be refused by the park stays unoffered until its
+          // retry outcome. A wake that never gets one is offered by the idle
+          // history read, which finds it unoffered.
+          if (event["type"] === "agent_end" && (yield* mayBeRefusedByQuotaPark(wake))) return;
+          if (event["type"] === "auto_retry_end" && !wake.offered) {
+            const parkResumeAt = retryOutcomeParkResumeAt(event);
+            if (parkResumeAt !== null) {
+              quotaParkedUntil = parkResumeAt;
+              return yield* dropRefusedWake(wake);
+            }
+          }
           // Wait for the agent's own reply, so every message it was woken
           // with (kernel restore notices come first) is in the buffer.
-          const agentReplied =
-            event["type"] === "message_start" &&
-            recordString(event["message"], "role") === "assistant";
+          const agentReplied = event["type"] === "message_start" && isWorkingReply(message);
           const appThreadId = wake.state.providerThread.appThreadId;
           if (
             flavor.wakeNotices &&
             appThreadId != null &&
-            (agentReplied || event["type"] === "agent_end")
+            (agentReplied || event["type"] === "agent_end" || event["type"] === "auto_retry_end")
           ) {
             yield* offerWake(wake, appThreadId);
           }
@@ -2474,6 +2536,11 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
         if (turn !== null) {
           yield* reconciler.repairLostEnds(turn, event);
           reconciler.noteSeen(turn, event);
+        } else if (recordString(message, "customType") === "provider_retry_outcome") {
+          // Prime Agent's notice of a retry outcome can trail the turn or wake
+          // it ended. T3 shows the outcome from auto_retry_end, so no history
+          // read may offer the notice as a lost wake.
+          reconciler.account([message]);
         }
         switch (event["type"]) {
           case "agent_start": {
@@ -2717,8 +2784,25 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
             return;
           }
           case "auto_retry_end": {
+            const parkResumeAt = retryOutcomeParkResumeAt(event);
+            if (parkResumeAt !== null) quotaParkedUntil = parkResumeAt;
             if (turn === null) return;
             const emittedAt = yield* DateTime.now;
+            if (parkResumeAt !== null) {
+              // Prime Agent kept the input and resumes the session itself, so
+              // the turn waits for quota rather than failing.
+              if (turn.activeProviderRetry !== null) {
+                yield* emitProviderRetry(turn, turn.activeProviderRetry, "interrupted", emittedAt);
+                turn.activeProviderRetry = null;
+              }
+              turn.failure = null;
+              yield* emitSessionNotice(turn, {
+                key: "quota-park",
+                title: "Waiting for quota",
+                message: primeAgentQuotaParkNotice(parkResumeAt, name),
+              });
+              return;
+            }
             if (event["success"] === true) {
               // before retrying, so leaving that failure in place would make
               // `agent_settled` terminalize a successful turn as failed.
