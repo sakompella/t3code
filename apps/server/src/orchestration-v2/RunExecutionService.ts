@@ -1490,7 +1490,7 @@ export const layer: Layer.Layer<
                 const completedAt = yield* DateTime.now;
                 yield* Effect.logWarning("orchestration V2 provider event ingestion failed", {
                   runId: input.run.id,
-                  cause,
+                  cause: Cause.pretty(cause),
                 });
                 if (yield* Ref.get(rootRunFinalized)) return;
                 const providerThread = yield* Ref.get(latestProviderThread);
@@ -1641,7 +1641,7 @@ export const layer: Layer.Layer<
           Effect.catchCause((cause) =>
             Effect.logError("orchestration V2 provider turn start failed", {
               runId: input.run.id,
-              cause,
+              cause: Cause.pretty(cause),
             }).pipe(
               Effect.andThen(Fiber.interrupt(providerEventFiber)),
               Effect.andThen(Ref.get(latestProviderThread)),
