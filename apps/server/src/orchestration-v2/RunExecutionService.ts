@@ -1,5 +1,4 @@
 import { makeAssistantStreamingFilter } from "./assistantStreaming.ts";
-import { resolveProjectSettings } from "@t3tools/shared/projectSettings";
 import {
   isOrchestrationV2WorkActive,
   CommandId,
@@ -62,6 +61,8 @@ export interface ProviderEventRoutingState {
   readonly ownedProviderThreadIds: ReadonlySet<ProviderThreadId>;
   readonly ownedProviderTurnIds: ReadonlySet<ProviderTurnId>;
   readonly inheritedBackgroundTurnItems: ReadonlyMap<TurnItemId, OrchestrationV2Run["id"]>;
+  // The subagent rows behind inherited subagent items, which report on their own events.
+  readonly inheritedBackgroundSubagents: ReadonlyMap<NodeId, OrchestrationV2Run["id"]>;
   readonly rootProviderTurnId: ProviderTurnId | null;
 }
 
@@ -75,6 +76,8 @@ export interface ProviderEventRouteIdentity {
 export interface InheritedBackgroundTurnItemRoute {
   readonly id: TurnItemId;
   readonly runId: OrchestrationV2Run["id"];
+  /** Set for a subagent item, so its `subagent.updated` events are inherited with it. */
+  readonly subagentId?: NodeId;
 }
 
 type ProviderTerminalEvent = Extract<
@@ -137,7 +140,13 @@ export function selectInheritedBackgroundTurnItems(input: {
     settledPriorRunIds.has(turnItem.runId) &&
     backgroundCapableTurnItemTypes.has(turnItem.type) &&
     !isSettledTurnItemStatus(turnItem.status)
-      ? [{ id: turnItem.id, runId: turnItem.runId }]
+      ? [
+          {
+            id: turnItem.id,
+            runId: turnItem.runId,
+            ...(turnItem.type === "subagent" ? { subagentId: turnItem.subagentId } : {}),
+          },
+        ]
       : [],
   );
 }
@@ -342,9 +351,37 @@ export function makeProviderEventRoutingState(input: {
     inheritedBackgroundTurnItems: new Map(
       (input.inheritedBackgroundTurnItems ?? []).map((item) => [item.id, item.runId]),
     ),
+    inheritedBackgroundSubagents: new Map(
+      (input.inheritedBackgroundTurnItems ?? []).flatMap((item) =>
+        item.subagentId === undefined ? [] : [[item.subagentId, item.runId] as const],
+      ),
+    ),
     rootProviderTurnId: input.providerTurnId,
   };
 }
+
+/**
+ * Every run on a session sees every `subagent.updated`, and only the run that
+ * owns the subagent keeps it. Logging each subscriber's verdict shows which
+ * run took an update, or that none did.
+ */
+const logSubagentRouting = (
+  subagent: OrchestrationV2Subagent,
+  route: ProviderEventRouteIdentity,
+  accepted: boolean,
+) =>
+  Effect.logDebug("orchestration-v2.subagent-update-routing").pipe(
+    Effect.annotateLogs({
+      accepted,
+      subscriberRunId: route.runId,
+      subscriberThreadId: route.threadId,
+      subagentId: subagent.id,
+      subagentRunId: subagent.runId,
+      subagentThreadId: subagent.threadId,
+      subagentProviderThreadId: subagent.providerThreadId,
+      status: subagent.status,
+    }),
+  );
 
 export function routeProviderEvent(
   event: ProviderAdapter.ProviderAdapterV2Event,
@@ -393,6 +430,8 @@ export function routeProviderEvent(
         },
       ];
     }
+    case "app_thread.reparented":
+      return [ownsChildThread(event.threadId), state];
     case "provider_thread.updated": {
       const belongs =
         state.ownedProviderThreadIds.has(event.providerThread.id) ||
@@ -418,6 +457,25 @@ export function routeProviderEvent(
     }
     case "subagent.updated": {
       const belongs = ownsRun(event.subagent.runId) || ownsChildThread(event.subagent.threadId);
+      if (!belongs) {
+        // A child outlives the run that launched it. Like its turn item, its
+        // updates reach the one live run that inherited it, so a terminal
+        // update still closes the card after the origin run stopped listening.
+        const inheritedRunId = state.inheritedBackgroundSubagents.get(event.subagent.id);
+        const isInheritedSubagent =
+          event.subagent.threadId === input.threadId &&
+          event.subagent.runId !== null &&
+          event.subagent.runId === inheritedRunId;
+        if (!isInheritedSubagent) {
+          return [false, state];
+        }
+        if (!isSettledSubagentStatus(event.subagent.status)) {
+          return [true, state];
+        }
+        const inheritedBackgroundSubagents = new Map(state.inheritedBackgroundSubagents);
+        inheritedBackgroundSubagents.delete(event.subagent.id);
+        return [true, { ...state, inheritedBackgroundSubagents }];
+      }
       const coordinator = event.subagent;
       // A provider-native subagent's child thread follows the live run it is
       // attributed to. A resume reattributes it to the resuming run, which
@@ -853,12 +911,9 @@ export const layer: Layer.Layer<
             threadDisposition: "reusable",
           });
           const responseStreamingMode = yield* Effect.gen(function* () {
-            const responseStreamingMode = yield* serverSettings.getSettings.pipe(
-              Effect.map(
-                (settings) =>
-                  resolveProjectSettings(settings, input.appThread.projectId).settings
-                    .responseStreamingMode,
-              ),
+            const responseStreamingMode = yield* ServerSettings.readResponseStreamingMode(
+              serverSettings.getSettings,
+              input.appThread.projectId,
             );
             yield* checkpointService
               .captureBaseline({
@@ -1216,7 +1271,15 @@ export const layer: Layer.Layer<
           const reservedHeldTurnItemIds = new Set<TurnItemId>();
           const providerEventFiber = yield* eventSubscription.events.pipe(
             Stream.filterEffect((event) =>
-              Ref.modify(eventRouting, (state) => routeProviderEvent(event, routeIdentity, state)),
+              Ref.modify(eventRouting, (state) =>
+                routeProviderEvent(event, routeIdentity, state),
+              ).pipe(
+                Effect.tap((accepted) =>
+                  event.type === "subagent.updated"
+                    ? logSubagentRouting(event.subagent, routeIdentity, accepted)
+                    : Effect.void,
+                ),
+              ),
             ),
             Stream.tap((event) =>
               Effect.gen(function* () {

@@ -4,18 +4,23 @@ import { assert, it } from "@effect/vitest";
 import { AgentScope } from "@t3tools/shared/AgentScope";
 import {
   EnvironmentId,
+  MessageId,
   type ModelSelection,
+  NodeId,
   type OrchestrationV2AppThread,
   type OrchestrationV2DomainEvent,
   type OrchestrationV2ProviderCapabilities,
   type OrchestrationV2ProviderSession,
   type OrchestrationV2ProviderThread,
+  type OrchestrationV2TurnItem,
   type Project,
   ProjectId,
   ProviderDriverKind,
   ProviderInstanceId,
   type ProviderSessionId,
+  RunId,
   ThreadId,
+  TurnItemId,
 } from "@t3tools/contracts";
 import * as Cause from "effect/Cause";
 import * as DateTime from "effect/DateTime";
@@ -53,6 +58,7 @@ import * as ThreadCommandExecutor from "./ThreadCommandExecutor.ts";
 import * as ProviderSessionManager from "./ProviderSessionManager.ts";
 import * as CommandOutputHub from "./CommandOutputHub.ts";
 import * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
+import { makeSubagentChildThread } from "@t3tools/provider-core/server/subagentProjection";
 
 const layerTestDatabase = SqlitePersistence.layerMemory;
 const layerTestStores = Layer.merge(EventStore.layer, ProjectionStore.layer).pipe(
@@ -156,6 +162,86 @@ const layerBeforeUnchangedWriteEventSink = (before: Ref.Ref<Effect.Effect<void>>
             Effect.flatten,
             Effect.andThen(delegate.writeIfProviderThreadUnchanged(input)),
           ),
+      });
+    }),
+  ).pipe(Layer.provide(layerTestEventSink));
+
+// Fails a child thread's runless root-node writes with a defect, the way a
+// failed SQL commit surfaces, while the counter is above zero.
+const layerFlakyChildRootEventSink = (failures: Ref.Ref<number>) =>
+  Layer.effect(
+    EventSink.EventSinkV2,
+    Effect.gen(function* () {
+      const delegate = yield* EventSink.EventSinkV2;
+      const failsNow = (events: ReadonlyArray<OrchestrationV2DomainEvent>) =>
+        events.some(
+          (event) =>
+            event.type === "node.updated" &&
+            event.payload.kind === "root_turn" &&
+            event.payload.runId === null,
+        )
+          ? Ref.modify(failures, (left) => [left > 0, Math.max(0, left - 1)] as const)
+          : Effect.succeed(false);
+      return EventSink.EventSinkV2.of({
+        ...delegate,
+        write: (input) =>
+          Effect.gen(function* () {
+            if (yield* failsNow(input.events)) {
+              return yield* Effect.die(new Error("simulated commit failure"));
+            }
+            return yield* delegate.write(input);
+          }),
+        writeWithEffects: (input) =>
+          Effect.gen(function* () {
+            if (yield* failsNow(input.events)) {
+              return yield* Effect.die(new Error("simulated commit failure"));
+            }
+            return yield* delegate.writeWithEffects(input);
+          }),
+      });
+    }),
+  ).pipe(Layer.provide(layerTestEventSink));
+
+interface HeldChildRootWrite {
+  /** Completes when the first running child-root write reaches the sink. */
+  readonly entered: Deferred.Deferred<void>;
+  /** Lets that write go on. */
+  readonly proceed: Deferred.Deferred<void>;
+  /** Completes when a running child-root write commits. */
+  readonly committed: Deferred.Deferred<void>;
+  /** The held write then fails once, as a failed SQL commit does, so the next attempt is a retry. */
+  readonly failOnce: boolean;
+}
+
+// Holds the first running child-root write until the test lets it go.
+const layerHeldChildRootEventSink = (hold: HeldChildRootWrite) =>
+  Layer.effect(
+    EventSink.EventSinkV2,
+    Effect.gen(function* () {
+      const delegate = yield* EventSink.EventSinkV2;
+      const holding = yield* Ref.make(true);
+      const isRunningChildRoot = (events: ReadonlyArray<OrchestrationV2DomainEvent>) =>
+        events.some(
+          (event) =>
+            event.type === "node.updated" &&
+            event.payload.kind === "root_turn" &&
+            event.payload.runId === null &&
+            event.payload.status === "running",
+        );
+      return EventSink.EventSinkV2.of({
+        ...delegate,
+        write: (input) =>
+          Effect.gen(function* () {
+            if (!isRunningChildRoot(input.events)) return yield* delegate.write(input);
+            if (yield* Ref.getAndSet(holding, false)) {
+              yield* Deferred.succeed(hold.entered, undefined);
+              yield* Deferred.await(hold.proceed);
+              if (hold.failOnce) return yield* Effect.die(new Error("simulated commit failure"));
+            }
+            const stored = yield* delegate.write(input);
+            yield* Deferred.succeed(hold.committed, undefined);
+            return stored;
+          }),
       });
     }),
   ).pipe(Layer.provide(layerTestEventSink));
@@ -337,6 +423,7 @@ const makeProviderAdapter = Effect.fnUntraced(function* (
     readonly beforeUnload?: Effect.Effect<void>;
     readonly spawnBeforeOpen?: boolean;
     readonly scopeCloseReached?: Deferred.Deferred<void>;
+    readonly childThreadScope?: "session";
   } = {},
 ) {
   const mcpSessions = yield* McpProviderSessions.McpProviderSessions;
@@ -423,6 +510,9 @@ const makeProviderAdapter = Effect.fnUntraced(function* (
             : {
                 hasPendingBackgroundWorkForThread: () => options.hasPendingBackgroundWorkForThread!,
               }),
+          ...(options.childThreadScope === undefined
+            ? {}
+            : { childThreadScope: options.childThreadScope }),
           ensureThread: () => unimplemented("ensureThread unused in test"),
           resumeThread: (threadInput) =>
             Ref.update(state, (current) => ({
@@ -488,17 +578,24 @@ function layerTest(input: {
   readonly scopeCloseReached?: Deferred.Deferred<void>;
   readonly serverSettingsLayer?: ReturnType<typeof ServerSettings.layerTest>;
   readonly projectServiceLayer?: Layer.Layer<ProjectService.ProjectService>;
+  readonly childThreadScope?: "session";
+  readonly childRootWriteFailures?: Ref.Ref<number>;
+  readonly heldChildRootWrite?: HeldChildRootWrite;
 }) {
   const layerConfiguredEventSink =
-    input.flakyReleaseWrites !== undefined
-      ? layerFlakyReleaseEventSink(input.flakyReleaseWrites)
-      : input.pauseAttachWrite !== undefined
-        ? layerPausingAttachEventSink(input.pauseAttachWrite)
-        : input.beforeUnchangedWrite !== undefined
-          ? layerBeforeUnchangedWriteEventSink(input.beforeUnchangedWrite)
-          : input.failReleaseEventWrites
-            ? layerFailingReleaseEventSink
-            : layerTestEventSink;
+    input.heldChildRootWrite !== undefined
+      ? layerHeldChildRootEventSink(input.heldChildRootWrite)
+      : input.childRootWriteFailures !== undefined
+        ? layerFlakyChildRootEventSink(input.childRootWriteFailures)
+        : input.flakyReleaseWrites !== undefined
+          ? layerFlakyReleaseEventSink(input.flakyReleaseWrites)
+          : input.pauseAttachWrite !== undefined
+            ? layerPausingAttachEventSink(input.pauseAttachWrite)
+            : input.beforeUnchangedWrite !== undefined
+              ? layerBeforeUnchangedWriteEventSink(input.beforeUnchangedWrite)
+              : input.failReleaseEventWrites
+                ? layerFailingReleaseEventSink
+                : layerTestEventSink;
   const layerRegistry = Layer.unwrap(
     makeProviderAdapter(input.state, {
       failEventStream: input.failEventStream ?? false,
@@ -523,6 +620,7 @@ function layerTest(input: {
       ...(input.scopeCloseReached === undefined
         ? {}
         : { scopeCloseReached: input.scopeCloseReached }),
+      ...(input.childThreadScope === undefined ? {} : { childThreadScope: input.childThreadScope }),
     }).pipe(Effect.map(ProviderAdapterRegistry.layerSingle)),
   );
   const layerConfiguredMcpRegistry =
@@ -4907,4 +5005,583 @@ it.effect(
       });
       assert.isFalse(denied?.capabilities?.has("device"));
     }),
+);
+
+/** A Prime Agent style subagent: its card on the parent run, and its runless child thread. */
+function makeSessionChildThreadEvents(input: {
+  readonly parentThread: OrchestrationV2AppThread;
+  readonly now: DateTime.Utc;
+  readonly name: string;
+}) {
+  const childThreadId = ThreadId.make(`thread:${input.name}:child`);
+  const subagentId = NodeId.make(`node:${input.name}:subagent`);
+  const rootNodeId = NodeId.make(`node:${input.name}:child-root`);
+  const shell: ProviderAdapter.ProviderAdapterV2Event = {
+    type: "app_thread.created",
+    driver: CODEX_DRIVER,
+    appThread: makeSubagentChildThread({
+      parentThread: input.parentThread,
+      childThreadId,
+      parentNodeId: subagentId,
+      activeProviderThreadId: null,
+      providerInstanceId: modelSelection.instanceId,
+      modelSelection,
+      title: `${input.name} child`,
+      now: input.now,
+      createdBy: "agent",
+      creationSource: "provider",
+    }),
+  };
+  const childRoot = (status: "running" | "completed"): ProviderAdapter.ProviderAdapterV2Event => ({
+    type: "node.updated",
+    driver: CODEX_DRIVER,
+    node: {
+      id: rootNodeId,
+      threadId: childThreadId,
+      runId: null,
+      parentNodeId: null,
+      rootNodeId,
+      kind: "root_turn",
+      status,
+      countsForRun: false,
+      providerThreadId: null,
+      providerTurnId: null,
+      nativeItemRef: null,
+      runtimeRequestId: null,
+      checkpointScopeId: null,
+      startedAt: input.now,
+      completedAt: status === "completed" ? input.now : null,
+    },
+  });
+  const reply = (text: string, streaming: boolean): ProviderAdapter.ProviderAdapterV2Event => ({
+    type: "message.updated",
+    driver: CODEX_DRIVER,
+    message: {
+      createdBy: "agent",
+      creationSource: "provider",
+      id: MessageId.make(`message:${input.name}:reply`),
+      threadId: childThreadId,
+      runId: null,
+      nodeId: rootNodeId,
+      role: "assistant",
+      text,
+      attachments: [],
+      streaming,
+      createdAt: input.now,
+      updatedAt: input.now,
+    },
+  });
+  const card: ProviderAdapter.ProviderAdapterV2Event = {
+    type: "subagent.updated",
+    driver: CODEX_DRIVER,
+    subagent: {
+      id: subagentId,
+      threadId: input.parentThread.id,
+      runId: RunId.make(`run:${input.name}:launching`),
+      parentNodeId: NodeId.make(`node:${input.name}:launching-root`),
+      origin: "provider_native",
+      createdBy: "agent",
+      driver: CODEX_DRIVER,
+      providerInstanceId: modelSelection.instanceId,
+      providerThreadId: null,
+      childThreadId,
+      nativeTaskRef: null,
+      prompt: "Run the task",
+      title: `${input.name} child`,
+      model: null,
+      status: "running",
+      result: null,
+      startedAt: input.now,
+      completedAt: null,
+      updatedAt: input.now,
+    },
+  };
+  return { childThreadId, shell, childRoot, reply, card };
+}
+
+/** Opens a session whose adapter queue the test feeds, on a stored parent thread. */
+const openSessionWithParentThread = (name: string) =>
+  Effect.gen(function* () {
+    const eventSink = yield* EventSink.EventSinkV2;
+    const idAllocator = yield* IdAllocator.IdAllocatorV2;
+    const manager = yield* ProviderSessionManager.ProviderSessionManagerV2;
+    const now = yield* DateTime.now;
+    const threadId = ThreadId.make(`thread:${name}`);
+    const providerSessionId = yield* idAllocator.allocate.providerSession({
+      providerInstanceId: modelSelection.instanceId,
+      threadId,
+    });
+    const parentCreated = yield* makeThreadCreatedEvent({ idAllocator, threadId, now });
+    yield* eventSink.write({ events: [parentCreated] });
+    const runtime = yield* manager.open({
+      threadId,
+      providerSessionId,
+      modelSelection,
+      runtimePolicy,
+    });
+    return { threadId, providerSessionId, runtime, parentThread: parentCreated.payload, now };
+  });
+
+/**
+ * Publishes the events, then a session status update the pump stores before it
+ * reads anything after it, and waits for that update to be stored.
+ */
+const publishAndDrain = (
+  state: Ref.Ref<TestProviderRuntimeState>,
+  session: Effect.Success<ReturnType<typeof openSessionWithParentThread>>,
+  events: ReadonlyArray<ProviderAdapter.ProviderAdapterV2Event>,
+) =>
+  Effect.gen(function* () {
+    const eventSink = yield* EventSink.EventSinkV2;
+    const afterSequence = yield* eventSink.latestSequence({ threadId: session.threadId });
+    const drained = yield* eventSink.stream({ threadId: session.threadId, afterSequence }).pipe(
+      Stream.filter((stored) => stored.event.type === "provider-session.updated"),
+      Stream.take(1),
+      Stream.runDrain,
+      Effect.forkScoped,
+    );
+    const adapterQueue = (yield* Ref.get(state)).eventQueues.get(String(session.providerSessionId));
+    assert.isDefined(adapterQueue);
+    yield* Queue.offerAll(adapterQueue!, [
+      ...events,
+      {
+        type: "provider_session.updated",
+        driver: CODEX_DRIVER,
+        providerSession: session.runtime.providerSession,
+      },
+    ]);
+    yield* Fiber.join(drained);
+  });
+
+const storedEventTypes = (threadId: ThreadId) =>
+  Effect.gen(function* () {
+    const eventStore = yield* EventStore.EventStoreV2;
+    const stored = yield* eventStore.read({ threadId }).pipe(Stream.runCollect);
+    return Array.from(stored, (event) => event.event.type);
+  });
+
+it.effect(
+  "ProviderSessionManagerV2 stores a session-scoped subagent thread once, with no run listening",
+  () =>
+    Effect.gen(function* () {
+      const state = yield* Ref.make(emptyState);
+      const effect = Effect.gen(function* () {
+        // A nested child that starts after its run's root turn ended, while no run is live.
+        const session = yield* openSessionWithParentThread("session-child-unheard");
+        const child = makeSessionChildThreadEvents({ ...session, name: "session-child-unheard" });
+        yield* publishAndDrain(state, session, [
+          child.shell,
+          child.childRoot("running"),
+          child.reply("Working on it", true),
+          child.reply("Done.", false),
+          child.childRoot("completed"),
+        ]);
+        // The streaming update is held back like a run holds it; the final reply is stored.
+        assert.deepEqual(yield* storedEventTypes(child.childThreadId), [
+          "thread.created",
+          "node.updated",
+          "message.updated",
+          "node.updated",
+        ]);
+        const projectionStore = yield* ProjectionStore.ProjectionStoreV2;
+        const projection = yield* projectionStore.getThreadProjection(child.childThreadId);
+        assert.equal(projection.thread.lineage.parentThreadId, session.threadId);
+        assert.deepEqual(
+          projection.messages.map((message) => message.text),
+          ["Done."],
+        );
+      });
+      yield* effect.pipe(
+        Effect.provide(layerTest({ state, idleTimeoutMs: 60_000, childThreadScope: "session" })),
+      );
+    }),
+);
+
+it.effect(
+  "ProviderSessionManagerV2 keeps a session-scoped subagent thread from runs, however they subscribe",
+  () =>
+    Effect.gen(function* () {
+      const state = yield* Ref.make(emptyState);
+      const effect = Effect.gen(function* () {
+        const session = yield* openSessionWithParentThread("session-child-runs");
+        const child = makeSessionChildThreadEvents({ ...session, name: "session-child-runs" });
+        // The launching run hears the card; a second run subscribes between the
+        // card and the shell; the launching run stops before the child ends.
+        const listen = (subscription: ProviderAdapter.ProviderAdapterV2EventSubscription) =>
+          Effect.gen(function* () {
+            const heard = yield* Queue.unbounded<ProviderAdapter.ProviderAdapterV2Event["type"]>();
+            yield* subscription.events.pipe(
+              Stream.runForEach((event) => Queue.offer(heard, event.type)),
+              Effect.forkScoped,
+            );
+            return heard;
+          });
+        const heard = (
+          queue: Queue.Queue<ProviderAdapter.ProviderAdapterV2Event["type"]>,
+          count: number,
+        ) => Queue.takeN(queue, count).pipe(Effect.map((types) => Array.from(types)));
+        const launchingRun = yield* session.runtime.subscribeEvents!;
+        const launching = yield* listen(launchingRun);
+        yield* publishAndDrain(state, session, [child.card]);
+        assert.deepEqual(yield* heard(launching, 2), [
+          "subagent.updated",
+          "provider_session.updated",
+        ]);
+        const laterRun = yield* session.runtime.subscribeEvents!;
+        const later = yield* listen(laterRun);
+        yield* publishAndDrain(state, session, [child.shell, child.childRoot("running")]);
+        assert.deepEqual(yield* heard(launching, 1), ["provider_session.updated"]);
+        assert.deepEqual(yield* heard(later, 1), ["provider_session.updated"]);
+        yield* launchingRun.close;
+        yield* publishAndDrain(state, session, [child.childRoot("completed")]);
+        assert.deepEqual(yield* heard(later, 1), ["provider_session.updated"]);
+        yield* laterRun.close;
+        assert.deepEqual(yield* storedEventTypes(child.childThreadId), [
+          "thread.created",
+          "node.updated",
+          "node.updated",
+        ]);
+      });
+      yield* effect.pipe(
+        Effect.provide(layerTest({ state, idleTimeoutMs: 60_000, childThreadScope: "session" })),
+      );
+    }),
+);
+
+it.effect(
+  "ProviderSessionManagerV2 moves a session-scoped subagent thread under a new parent and keeps the user's edits",
+  () =>
+    Effect.gen(function* () {
+      const state = yield* Ref.make(emptyState);
+      const effect = Effect.gen(function* () {
+        const session = yield* openSessionWithParentThread("reparent");
+        const child = makeSessionChildThreadEvents({ ...session, name: "reparent-child" });
+        const nested = makeSessionChildThreadEvents({ ...session, name: "reparent-nested" });
+        yield* publishAndDrain(state, session, [nested.shell, nested.childRoot("running")]);
+        const store = yield* ProjectionStore.ProjectionStoreV2;
+        const sink = yield* EventSink.EventSinkV2;
+        const idAllocator = yield* IdAllocator.IdAllocatorV2;
+        const created = yield* store.getThreadProjection(nested.childThreadId);
+        const pinnedAt = DateTime.add(session.now, { seconds: 1 });
+        yield* sink.write({
+          events: [
+            {
+              ...(yield* makeThreadCreatedEvent({
+                idAllocator,
+                threadId: nested.childThreadId,
+                now: pinnedAt,
+              })),
+              type: "thread.metadata-updated",
+              payload: { ...created.thread, title: "My renamed child", pinnedAt },
+            },
+          ],
+        });
+        const reparented: ProviderAdapter.ProviderAdapterV2Event = {
+          type: "app_thread.reparented",
+          driver: CODEX_DRIVER,
+          threadId: nested.childThreadId,
+          parentThreadId: child.childThreadId,
+        };
+        yield* publishAndDrain(state, session, [child.shell, reparented, reparented]);
+
+        const after = yield* store.getThreadProjection(nested.childThreadId);
+        assert.equal(after.thread.lineage.parentThreadId, child.childThreadId);
+        assert.equal(after.thread.title, "My renamed child");
+        assert.deepEqual(after.thread.pinnedAt, pinnedAt);
+        assert.deepEqual(
+          { ...after.thread, lineage: created.thread.lineage, updatedAt: created.thread.updatedAt },
+          { ...created.thread, title: "My renamed child", pinnedAt },
+        );
+        // The repeated repair finds the parent already set and stores nothing.
+        assert.deepEqual(yield* storedEventTypes(nested.childThreadId), [
+          "thread.created",
+          "node.updated",
+          "thread.metadata-updated",
+          "thread.metadata-updated",
+        ]);
+      });
+      yield* effect.pipe(
+        Effect.provide(layerTest({ state, idleTimeoutMs: 60_000, childThreadScope: "session" })),
+      );
+    }),
+);
+
+it.effect(
+  "ProviderSessionManagerV2 takes a moved subagent card off its old thread for stored and live readers alike",
+  () =>
+    Effect.gen(function* () {
+      const state = yield* Ref.make(emptyState);
+      const effect = Effect.gen(function* () {
+        const session = yield* openSessionWithParentThread("moved-card");
+        const parent = makeSessionChildThreadEvents({ ...session, name: "moved-card-parent" });
+        const nested = makeSessionChildThreadEvents({ ...session, name: "moved-card-nested" });
+        const parentRoot = parent.childRoot("running");
+        assert.isTrue(parentRoot.type === "node.updated");
+        if (parentRoot.type !== "node.updated") return;
+        const rootCard: OrchestrationV2TurnItem = {
+          id: TurnItemId.make("turn-item:moved-card"),
+          threadId: session.threadId,
+          runId: null,
+          nodeId: NodeId.make("node:moved-card:root-turn"),
+          providerThreadId: null,
+          providerTurnId: null,
+          nativeItemRef: null,
+          parentItemId: null,
+          ordinal: 1,
+          startedAt: session.now,
+          updatedAt: session.now,
+          completedAt: null,
+          status: "running",
+          title: "Nested",
+          type: "subagent",
+          subagentId: NodeId.make("node:moved-card-nested:subagent"),
+          origin: "provider_native",
+          driver: CODEX_DRIVER,
+          providerInstanceId: modelSelection.instanceId,
+          childThreadId: nested.childThreadId,
+          prompt: "nested",
+          result: null,
+        };
+        const sink = yield* EventSink.EventSinkV2;
+        const idAllocator = yield* IdAllocator.IdAllocatorV2;
+        yield* sink.write({
+          events: [
+            {
+              ...(yield* makeThreadCreatedEvent({
+                idAllocator,
+                threadId: session.threadId,
+                now: session.now,
+              })),
+              type: "turn-item.updated",
+              payload: rootCard,
+            },
+          ],
+        });
+        const store = yield* ProjectionStore.ProjectionStoreV2;
+        const rootBefore = yield* store.getThreadProjection(session.threadId);
+        assert.equal(rootBefore.turnItems.length, 1);
+        const afterSequence = yield* sink.latestSequence({ threadId: session.threadId });
+        const movedCard = {
+          ...rootCard,
+          threadId: parent.childThreadId,
+          nodeId: parentRoot.node.id,
+        };
+        yield* publishAndDrain(state, session, [
+          parent.shell,
+          parentRoot,
+          nested.shell,
+          {
+            type: "turn_item.updated",
+            driver: CODEX_DRIVER,
+            movedFromThreadId: session.threadId,
+            turnItem: movedCard,
+          },
+          {
+            type: "turn_item.updated",
+            driver: CODEX_DRIVER,
+            turnItem: { ...movedCard, status: "completed", completedAt: session.now },
+          },
+        ]);
+
+        const storedRoot = yield* store.getThreadProjection(session.threadId);
+        const storedParent = yield* store.getThreadProjection(parent.childThreadId);
+        assert.deepEqual(storedRoot.turnItems, []);
+        assert.deepEqual(
+          storedParent.turnItems.map((item) => [item.id, item.status]),
+          [[rootCard.id, "completed"]],
+        );
+        // A client that had the root open applies what the root's subscription delivers.
+        const eventStore = yield* EventStore.EventStoreV2;
+        const delivered = yield* eventStore
+          .read({ threadId: session.threadId, afterSequence })
+          .pipe(Stream.runCollect);
+        const liveRoot = Array.from(delivered).reduce(
+          (projection, stored) => ProjectionStore.applyToProjection(projection, stored.event),
+          rootBefore,
+        );
+        assert.deepEqual(liveRoot.turnItems, storedRoot.turnItems);
+        assert.deepEqual(
+          liveRoot.visibleTurnItems.map((row) => row.sourceItemId),
+          storedRoot.visibleTurnItems.map((row) => row.sourceItemId),
+        );
+      });
+      yield* effect.pipe(
+        Effect.provide(layerTest({ state, idleTimeoutMs: 60_000, childThreadScope: "session" })),
+      );
+    }),
+);
+
+it.effect("ProviderSessionManagerV2 leaves other adapters' subagent threads to their runs", () =>
+  Effect.gen(function* () {
+    const state = yield* Ref.make(emptyState);
+    const effect = Effect.gen(function* () {
+      const session = yield* openSessionWithParentThread("run-child");
+      const child = makeSessionChildThreadEvents({ ...session, name: "run-child" });
+      const run = yield* session.runtime.subscribeEvents!;
+      yield* publishAndDrain(state, session, [child.shell, child.childRoot("running")]);
+      const heard = yield* run.events.pipe(Stream.take(3), Stream.runCollect);
+      yield* run.close;
+      assert.deepEqual(
+        Array.from(heard, (event) => event.type),
+        ["app_thread.created", "node.updated", "provider_session.updated"],
+      );
+      assert.deepEqual(yield* storedEventTypes(child.childThreadId), []);
+    });
+    yield* effect.pipe(Effect.provide(layerTest({ state, idleTimeoutMs: 60_000 })));
+  }),
+);
+
+it.live("ProviderSessionManagerV2 retries a failed session-scoped child thread write", () =>
+  Effect.gen(function* () {
+    const state = yield* Ref.make(emptyState);
+    const failures = yield* Ref.make(2);
+    const effect = Effect.gen(function* () {
+      const session = yield* openSessionWithParentThread("session-child-retry");
+      const child = makeSessionChildThreadEvents({ ...session, name: "session-child-retry" });
+      yield* publishAndDrain(state, session, [child.shell, child.childRoot("running")]);
+      assert.equal(yield* Ref.get(failures), 0);
+      assert.deepEqual(yield* storedEventTypes(child.childThreadId), [
+        "thread.created",
+        "node.updated",
+      ]);
+    }).pipe(Effect.scoped);
+    yield* effect.pipe(
+      Effect.provide(
+        layerTest({
+          state,
+          idleTimeoutMs: 60_000,
+          childThreadScope: "session",
+          childRootWriteFailures: failures,
+        }),
+      ),
+    );
+  }),
+);
+
+it.live(
+  "ProviderSessionManagerV2 drops a child thread write that keeps failing and keeps the session",
+  () =>
+    Effect.gen(function* () {
+      const state = yield* Ref.make(emptyState);
+      const failures = yield* Ref.make(1_000);
+      const effect = Effect.gen(function* () {
+        const manager = yield* ProviderSessionManager.ProviderSessionManagerV2;
+        const session = yield* openSessionWithParentThread("session-child-give-up");
+        const child = makeSessionChildThreadEvents({ ...session, name: "session-child-give-up" });
+        yield* publishAndDrain(state, session, [
+          child.shell,
+          child.childRoot("running"),
+          child.reply("Done.", false),
+        ]);
+        assert.deepEqual(yield* storedEventTypes(child.childThreadId), [
+          "thread.created",
+          "message.updated",
+        ]);
+        assert.isTrue(Option.isSome(yield* manager.get(session.providerSessionId)));
+      }).pipe(Effect.scoped);
+      yield* effect.pipe(
+        Effect.provide(
+          layerTest({
+            state,
+            idleTimeoutMs: 60_000,
+            childThreadScope: "session",
+            childRootWriteFailures: failures,
+          }),
+        ),
+      );
+    }),
+);
+
+const holdChildRootWrite = (failOnce: boolean) =>
+  Effect.gen(function* () {
+    return {
+      entered: yield* Deferred.make<void>(),
+      proceed: yield* Deferred.make<void>(),
+      committed: yield* Deferred.make<void>(),
+      failOnce,
+    } satisfies HeldChildRootWrite;
+  });
+
+/**
+ * The pump has started the child's running root write when release begins.
+ * Release must keep the session until that write, retries included, is done,
+ * so the replacement session's completed root is the last word.
+ */
+const releaseDuringChildWrite = (
+  state: Ref.Ref<TestProviderRuntimeState>,
+  hold: HeldChildRootWrite,
+  name: string,
+) =>
+  Effect.gen(function* () {
+    const manager = yield* ProviderSessionManager.ProviderSessionManagerV2;
+    const session = yield* openSessionWithParentThread(name);
+    const child = makeSessionChildThreadEvents({ ...session, name });
+    yield* publishAndDrain(state, session, [child.shell]);
+    const oldQueue = (yield* Ref.get(state)).eventQueues.get(String(session.providerSessionId));
+    assert.isDefined(oldQueue);
+    yield* Queue.offer(oldQueue!, child.childRoot("running"));
+    yield* Deferred.await(hold.entered);
+
+    const releasing = yield* manager
+      .release({ providerSessionId: session.providerSessionId, reason: "manual_shutdown" })
+      .pipe(Effect.forkScoped({ startImmediately: true }));
+    const stillLive = Option.isSome(yield* manager.get(session.providerSessionId));
+    yield* Deferred.succeed(hold.proceed, undefined);
+    assert.isTrue(stillLive, "release waits for the child write the pump already started");
+    yield* Deferred.await(hold.committed);
+    yield* Fiber.join(releasing);
+
+    const replacement = yield* manager.open({
+      threadId: session.threadId,
+      providerSessionId: session.providerSessionId,
+      modelSelection,
+      runtimePolicy,
+    });
+    yield* publishAndDrain(state, { ...session, runtime: replacement }, [
+      child.shell,
+      child.childRoot("completed"),
+    ]);
+    const projection = yield* (yield* ProjectionStore.ProjectionStoreV2).getThreadProjection(
+      child.childThreadId,
+    );
+    assert.equal(
+      projection.nodes.find((node) => node.kind === "root_turn")?.status,
+      "completed",
+      "a released session's pump cannot write over its replacement",
+    );
+  });
+
+it.effect("ProviderSessionManagerV2 release waits for a child thread write the pump started", () =>
+  Effect.gen(function* () {
+    const state = yield* Ref.make(emptyState);
+    const hold = yield* holdChildRootWrite(false);
+    yield* releaseDuringChildWrite(state, hold, "release-child-write").pipe(
+      Effect.provide(
+        layerTest({
+          state,
+          idleTimeoutMs: 60_000,
+          childThreadScope: "session",
+          heldChildRootWrite: hold,
+        }),
+      ),
+    );
+  }),
+);
+
+it.live("ProviderSessionManagerV2 release waits through a child thread write's retry", () =>
+  Effect.gen(function* () {
+    const state = yield* Ref.make(emptyState);
+    const hold = yield* holdChildRootWrite(true);
+    yield* releaseDuringChildWrite(state, hold, "release-child-retry").pipe(
+      Effect.scoped,
+      Effect.provide(
+        layerTest({
+          state,
+          idleTimeoutMs: 60_000,
+          childThreadScope: "session",
+          heldChildRootWrite: hold,
+        }),
+      ),
+    );
+  }),
 );

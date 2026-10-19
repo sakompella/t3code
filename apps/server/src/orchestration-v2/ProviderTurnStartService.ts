@@ -42,7 +42,7 @@ import {
   historicalMessage,
   latestNativeContextUsage,
 } from "@t3tools/provider-core/server/handoffBudget";
-import { deliverContextHandoffs } from "./ContextHandoffDelivery.ts";
+import { deliverContextHandoffs, handoffsForRun } from "./ContextHandoffDelivery.ts";
 import * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
 import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
 import * as ProjectionStore from "./ProjectionStore.ts";
@@ -70,6 +70,11 @@ const isProviderTurnStartError = Schema.is(ProviderTurnStartError);
 const refusedBeforePrompt = (error: unknown): boolean =>
   Predicate.isTagged(error, "ClaudeBackgroundWorkBlocksQueryReplacementError") ||
   (Predicate.hasProperty(error, "cause") && refusedBeforePrompt(error.cause));
+
+/** A fork an adapter refuses for a protocol reason (no boundary, no session file) fails the same way every time. */
+const isRefusedFork = (error: ProviderAdapter.ProviderAdapterV2Error): boolean =>
+  error._tag === "ProviderAdapterForkThreadError" &&
+  Predicate.isTagged(error.cause, "ProviderAdapterProtocolError");
 
 export interface ProviderTurnStartServiceV2Shape {
   readonly start: (input: {
@@ -132,13 +137,18 @@ export const layer: Layer.Layer<
         typeof RunExecutionService.selectInheritedBackgroundTurnItems
       >;
     }) => {
+      // Guards read only the run's row, and background routing reads live
+      // execution state, never every completed message and tool output in the
+      // thread. `false` means the run moved on or is gone. A failed read is an error,
+      // so the caller fails the start or the run instead of skipping it.
       const isCurrentAttemptInStatus = (expectedStatus: OrchestrationV2Run["status"]) =>
-        projectionStore.getRuntimeRecoveryProjection(input.threadId).pipe(
-          Effect.map((current) => {
-            const run = current.runs.find((candidate) => candidate.id === input.runId);
-            return run?.activeAttemptId === input.attemptId && run.status === expectedStatus;
-          }),
-        );
+        projectionStore
+          .getRunState(input.threadId, input.runId)
+          .pipe(
+            Effect.map(
+              (run) => run?.activeAttemptId === input.attemptId && run.status === expectedStatus,
+            ),
+          );
       return {
         isCurrentAttemptInStatus,
         loadInheritedBackgroundTurnItems: () =>
@@ -156,15 +166,15 @@ export const layer: Layer.Layer<
           ),
         shouldStartProviderTurn: () => isCurrentAttemptInStatus("running"),
         shouldFinalizeRun: () =>
-          projectionStore.getRuntimeRecoveryProjection(input.threadId).pipe(
-            Effect.map((current) => {
-              const run = current.runs.find((candidate) => candidate.id === input.runId);
-              return (
-                run?.activeAttemptId === input.attemptId &&
-                (run.status === "starting" || run.status === "running")
-              );
-            }),
-          ),
+          projectionStore
+            .getRunState(input.threadId, input.runId)
+            .pipe(
+              Effect.map(
+                (run) =>
+                  run?.activeAttemptId === input.attemptId &&
+                  (run.status === "starting" || run.status === "running"),
+              ),
+            ),
         hasUnpairedRunInterruptRequest: () =>
           projectionStore
             .hasUnpairedRunInterruptRequest(
@@ -240,26 +250,7 @@ export const layer: Layer.Layer<
       const checkpointScope = projection.checkpointScopes.find(
         (candidate) => candidate.id === rootNode?.checkpointScopeId,
       );
-      const handoffs = projection.contextHandoffs.filter(
-        (handoff) =>
-          handoff.status === "ready" &&
-          (handoff.targetRunId === run.id ||
-            (handoff.toProviderThreadId === run.providerThreadId &&
-              projection.runs.some(
-                (source) =>
-                  source.id === handoff.targetRunId &&
-                  (source.status === "failed" ||
-                    source.status === "interrupted" ||
-                    (source.status === "completed" &&
-                      handoff.delivery === undefined &&
-                      projection.messages.some(
-                        (message) =>
-                          message.id === source.userMessageId &&
-                          message.attachments.length === 0 &&
-                          message.text.trim().toLowerCase() === "/compact",
-                      ))),
-              ))),
-      );
+      const handoffs = handoffsForRun(projection, run);
       const nativeForkTransfer = projection.contextTransfers.find(
         (transfer) =>
           transfer.type === "fork" &&
@@ -585,7 +576,8 @@ export const layer: Layer.Layer<
         Effect.gen(function* () {
           const loaded = yield* Effect.result(load);
           if (loaded._tag === "Success") return loaded.success;
-          if (input.willRetry === true) return yield* loaded.failure;
+          if (input.willRetry === true && !isRefusedFork(loaded.failure))
+            return yield* loaded.failure;
           yield* settleStartFailure({
             signal: "provider-thread-load-failure",
             title: "Provider turn failed to start",
@@ -620,10 +612,41 @@ export const layer: Layer.Layer<
               cause: `Native fork transfer ${nativeForkTransfer.id} has no source provider execution.`,
             });
           }
+          // Rolled-back turns stay in the audit history but no longer exist in
+          // the provider conversation, so their native refs cannot bound a fork.
+          const rolledBackRunIds = new Set(
+            sourceProjection.runs
+              .filter((candidate) => candidate.status === "rolled_back")
+              .map((candidate) => candidate.id),
+          );
+          // Nor can the source provider thread's turns from runs before its
+          // `firstRunOrdinal`: a rollback dropped the native conversation they
+          // belong to (see CheckpointRollbackService).
+          const droppedRunIds = new Set(
+            sourceProjection.runs
+              .filter(
+                (candidate) => candidate.ordinal < (sourceProviderThread.firstRunOrdinal ?? 0),
+              )
+              .map((candidate) => candidate.id),
+          );
+          const attemptRunIds = new Map(
+            sourceProjection.attempts.map((attempt) => [attempt.id, attempt.runId] as const),
+          );
+          const sourceProviderTurns = sourceProjection.providerTurns.filter((turn) => {
+            const turnRunId =
+              turn.runAttemptId === null ? undefined : attemptRunIds.get(turn.runAttemptId);
+            return (
+              turnRunId === undefined ||
+              (!rolledBackRunIds.has(turnRunId) &&
+                !(
+                  turn.providerThreadId === sourceProviderThread.id && droppedRunIds.has(turnRunId)
+                ))
+            );
+          });
           return yield* loadFromProvider(
             session.forkThread({
               sourceProviderThread,
-              sourceProviderTurns: sourceProjection.providerTurns,
+              sourceProviderTurns,
               targetThreadId: projection.thread.id,
               modelSelection: run.modelSelection,
               runtimePolicy: resolvedRuntimePolicy,

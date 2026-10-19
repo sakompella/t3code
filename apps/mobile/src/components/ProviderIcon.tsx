@@ -12,6 +12,9 @@ type ProviderIconProps = {
   readonly provider: string | null | undefined;
   readonly iconUrl?: string | null | undefined;
   readonly size?: number;
+  /** Names the instance whose initials a provider without a mark draws. */
+  readonly displayName?: string;
+  readonly accentColor?: string;
 };
 
 function AcpRegistryFallbackIcon(props: { readonly color: string; readonly size: number }) {
@@ -63,6 +66,14 @@ function AcpRegistryProviderIcon(props: {
   );
 }
 
+/**
+ * Prime Agent has no official mark, so `ProviderIcon` draws its initials. An
+ * instance badge carrying the same initials would only repeat them.
+ */
+export function providerDrawsInitialsGlyph(provider: string | null | undefined): boolean {
+  return provider === "primeAgent";
+}
+
 export function ProviderIcon(props: ProviderIconProps) {
   const { themeAppearance } = useAppearancePreferences();
   const isDarkMode = themeAppearance === "dark";
@@ -81,6 +92,24 @@ export function ProviderIcon(props: ProviderIconProps) {
   }
   if (props.provider === "acpRegistry") {
     return <AcpRegistryProviderIcon color={mono} iconUrl={props.iconUrl} size={size} />;
+  }
+  if (providerDrawsInitialsGlyph(props.provider)) {
+    // Initials match the web fallback instead of borrowing the Codex glyph
+    // that unknown drivers get below.
+    return (
+      <View style={{ width: size, height: size, alignItems: "center", justifyContent: "center" }}>
+        <Text
+          style={{
+            fontSize: size * 0.5,
+            fontWeight: "700",
+            lineHeight: size,
+            color: props.accentColor ?? mono,
+          }}
+        >
+          {providerInstanceInitials(props.displayName ?? "Prime Agent")}
+        </Text>
+      </View>
+    );
   }
 
   if (props.provider === "claudeAgent") {
@@ -147,6 +176,14 @@ export function ProviderIcon(props: ProviderIconProps) {
   );
 }
 
+/**
+ * `ProviderIcon` plus the web sidebar's account badge: an accent-color
+ * initials bubble in the bottom-right corner, drawn when `showBadge` is set
+ * (accent color present, or several instances share this driver), except on
+ * a glyph that already is the instance initials. The glyph dims to 60% opacity
+ * while the badge stays fully saturated, matching
+ * `apps/web/src/components/chat/ProviderInstanceIcon.tsx`.
+ */
 export function ProviderInstanceIcon(props: {
   readonly iconUrl?: string | null;
   readonly provider: string | null | undefined;
@@ -159,9 +196,15 @@ export function ProviderInstanceIcon(props: {
   return (
     <View style={{ position: "relative" }}>
       <View style={{ opacity: 0.6 }}>
-        <ProviderIcon iconUrl={props.iconUrl} provider={props.provider} size={props.size} />
+        <ProviderIcon
+          iconUrl={props.iconUrl}
+          provider={props.provider}
+          size={props.size}
+          displayName={props.displayName}
+          accentColor={props.accentColor}
+        />
       </View>
-      {props.showBadge ? (
+      {props.showBadge && !providerDrawsInitialsGlyph(props.provider) ? (
         // A wide right-aligned box lets the badge fit its initials. Alone, an
         // absolute badge is capped at the icon's width, which clips "WO".
         <View

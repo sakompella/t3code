@@ -131,6 +131,8 @@ export function turnItemNeedsDetailFetch(item: OrchestrationV2TurnItem): boolean
       return item.outputOmitted === true;
     case "dynamic_tool":
       return item.outputOmitted === true || isSummarizedValue(item.input);
+    case "rollback_summary":
+      return item.summary === undefined;
     default:
       return false;
   }
@@ -219,6 +221,7 @@ export function turnItemHasDetail(item: OrchestrationV2TurnItem): boolean {
     case "checkpoint":
     case "fork":
     case "handoff":
+    case "rollback_summary":
       return true;
     case "file_search":
       return (item.results?.length ?? 0) > 0 || Boolean(item.pattern?.trim());

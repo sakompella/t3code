@@ -311,6 +311,12 @@ export async function readTranscriptRecords<State>(
       tailRecords,
     );
 
+    // An appended line can correct a record the cached part produced. Reparse
+    // only this changed file; ordinary appended lines still use the fast path.
+    if (resumed && codec?.needsFullParse?.(state) === true) {
+      return await readTranscriptRecords(filePath, format, undefined, options);
+    }
+
     const guardLength = Math.min(GUARD_LENGTH, resumeOffset);
     let guardHash = 0;
     if (guardLength > 0) {

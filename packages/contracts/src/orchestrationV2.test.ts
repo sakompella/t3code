@@ -24,6 +24,7 @@ import {
 } from "./index.ts";
 import {
   latestProviderTurnForAttempt,
+  OrchestrationV2AppThreadJson,
   OrchestrationV2Checkpoint,
   OrchestrationV2CheckpointScope,
   OrchestrationV2Command,
@@ -404,7 +405,7 @@ describe("orchestration V2 contracts", () => {
     ).toThrow();
   });
 
-  it("decodes persisted capability snapshots that predate runtimePolicy", () => {
+  it("decodes persisted capability snapshots that predate runtimePolicy and rollback summaries", () => {
     const legacyCapabilities = {
       sessions: {
         supportsMultipleProviderThreadsPerSession: false,
@@ -498,6 +499,7 @@ describe("orchestration V2 contracts", () => {
 
     const decoded = decodeOrchestrationV2ProviderCapabilities(legacyCapabilities);
     expect(decoded.runtimePolicy).toEqual({ enforcement: "client-boundary" });
+    expect(decoded.checkpointing.providerCanSummarizeRollback).toBe(false);
 
     const explicit = decodeOrchestrationV2ProviderCapabilities({
       ...legacyCapabilities,
@@ -1202,6 +1204,42 @@ describe("orchestration V2 contracts", () => {
     expect(fork.type).toBe("fork");
   });
 
+  it("decodes stored rollbacks from before head moves were tracked, and round-trips a rollback summary", () => {
+    const storedThread = Schema.decodeUnknownSync(OrchestrationV2AppThreadJson)({
+      ...emptyThreadProjection().thread,
+      createdAt: "2026-04-20T00:00:00.000Z",
+      updatedAt: "2026-04-20T00:00:00.000Z",
+      rollbackRequestId: "rollback-1",
+      rollbackFailure: null,
+    });
+    expect(storedThread.rollbackRequestId).toBe("rollback-1");
+    expect(storedThread.pendingHeadMove).toBeUndefined();
+
+    const summary = decodeOrchestrationV2TurnItem({
+      id: "turn-item:rollback-summary:rollback-1",
+      type: "rollback_summary",
+      threadId: "thread-1",
+      runId: null,
+      nodeId: null,
+      providerThreadId: "provider-thread-1",
+      providerTurnId: null,
+      nativeItemRef: null,
+      parentItemId: null,
+      ordinal: 9,
+      status: "completed",
+      title: null,
+      rollbackRequestId: "rollback-1",
+      rewoundToRunId: "run-1",
+      summary: "Kept the failing test names.",
+      startedAt: now,
+      completedAt: now,
+      updatedAt: now,
+    });
+    expect(
+      decodeOrchestrationV2TurnItemJson(encodeOrchestrationV2TurnItemJson(summary)),
+    ).toStrictEqual(summary);
+  });
+
   it("exports the V2 branded ids through the public contracts entrypoint", () => {
     expect(ThreadId.make("thread-1")).toBe("thread-1");
     expect(ProjectId.make("project-1")).toBe("project-1");
@@ -1236,6 +1274,7 @@ describe("orchestration V2 contracts", () => {
     });
 
     expect(providerThread.pendingBackgroundTasks).toEqual([]);
+    expect(providerThread.heartbeats).toEqual([]);
     expect(providerThread.contextUsage).toBeNull();
     expect(providerThread.nativeMetadata).toBeNull();
 
@@ -1259,6 +1298,49 @@ describe("orchestration V2 contracts", () => {
     expect(runtimeThread.pendingBackgroundTasks).toEqual([]);
     expect(runtimeThread.contextUsage).toBeNull();
     expect(runtimeThread.nativeMetadata).toBeNull();
+  });
+
+  it("round-trips a provider thread's heartbeats without touching its background roster", () => {
+    const providerThread = decodeOrchestrationV2ProviderThreadJson({
+      id: "provider-thread-1",
+      driver: "primeAgent",
+      providerInstanceId: "primeAgent",
+      providerSessionId: null,
+      appThreadId: "thread-1",
+      ownerNodeId: null,
+      nativeThreadRef: null,
+      nativeConversationHeadRef: null,
+      status: "idle",
+      firstRunOrdinal: null,
+      lastRunOrdinal: null,
+      handoffIds: [],
+      forkedFrom: null,
+      heartbeats: [
+        {
+          id: "job-1",
+          description: "check the deploy",
+          schedule: "every 15m",
+          paused: false,
+          nextRunAt: "2026-10-03T15:40:00.000Z",
+        },
+        { id: "job-2", schedule: "every 5m", paused: true },
+      ],
+      createdAt: "2026-04-20T00:00:00.000Z",
+      updatedAt: "2026-04-20T00:00:00.000Z",
+    });
+
+    expect(providerThread.pendingBackgroundTasks).toEqual([]);
+    expect(providerThread.heartbeats?.map((heartbeat) => heartbeat.id)).toEqual(["job-1", "job-2"]);
+    expect(encodeOrchestrationV2ProviderThreadJson(providerThread).heartbeats).toEqual([
+      {
+        id: "job-1",
+        description: "check the deploy",
+        schedule: "every 15m",
+        paused: false,
+        nextRunAt: "2026-10-03T15:40:00.000Z",
+      },
+      { id: "job-2", schedule: "every 5m", paused: true },
+    ]);
   });
 
   it("decodes historical thread shell JSON without pendingBackgroundTasks as empty roster", () => {
@@ -1438,6 +1520,8 @@ describe("background work kinds from older or newer servers", () => {
     const cases = [
       [{ kind: "subagent", childThreadId: "child" }, { kind: "background_task" }],
       [{ kind: "subagent" }, { kind: "background_task" }],
+      [{ kind: "heartbeat", heartbeatId: "deploy" }, { kind: "background_task" }],
+      [{ kind: "heartbeat" }, { kind: "background_task" }],
       [{ kind: "command" }, { kind: "background_command" }],
       [{ kind: "monitor" }, { kind: "monitor" }],
       [{ kind: "background_task" }, { kind: "background_task" }],

@@ -3,14 +3,23 @@ import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 
 import type { McpProviderSessionConfig } from "@t3tools/provider-core/server/mcpSession";
+
+import type { PiFlavor } from "./flavor.ts";
 import {
   PI_T3_MCP_EXTENSION_FILENAME,
   PI_T3_MCP_EXTENSION_SOURCE,
   T3_MCP_BEARER_ENV,
   T3_MCP_URL_ENV,
+  T3_PI_MCP_TOOLS_ENV,
+  T3_PI_MCP_TOOLS_KERNEL,
   T3_PI_RUNTIME_MODE_ENV,
   T3_PI_MCP_EXTENSION_PATH_ENV,
 } from "./mcpExtensionSource.ts";
+import {
+  PI_T3_CODE_SKILL_FILENAME,
+  PI_T3_CODE_SKILL_NAME,
+  PI_T3_CODE_SKILL_SOURCE,
+} from "./skillSource.ts";
 
 const RESERVED_PI_LAUNCH_ARGUMENTS = new Set([
   "--continue",
@@ -34,6 +43,7 @@ const RESERVED_PI_LAUNCH_ARGUMENTS = new Set([
 
 const PI_ARGUMENTS_WITH_VALUES = new Set([
   "--api-key",
+  "--daemon-socket",
   "--append-system-prompt",
   "--exclude-tools",
   "-xt",
@@ -77,6 +87,61 @@ const PI_ARGUMENTS_WITHOUT_VALUES = new Set([
   "--offline",
   "--verbose",
 ]);
+
+/** Extension and tool-selection options, which a CLI without extensions rejects. */
+const PI_EXTENSION_ARGUMENTS = new Set([
+  "--extension",
+  "-e",
+  "--no-extensions",
+  "-ne",
+  "--tools",
+  "-t",
+  "--exclude-tools",
+  "-xt",
+  "--no-tools",
+  "-nt",
+  "--no-builtin-tools",
+  "-nbt",
+]);
+
+/**
+ * Resolved launch args split into those a CLI without extensions accepts and
+ * those it rejects, each rejected option with its value.
+ */
+export function partitionPiExtensionArgs(args: ReadonlyArray<string>): {
+  readonly accepted: ReadonlyArray<string>;
+  readonly rejected: ReadonlyArray<string>;
+} {
+  const accepted: string[] = [];
+  const rejected: string[] = [];
+  for (let index = 0; index < args.length; index += 1) {
+    const arg = args[index]!;
+    if (!PI_EXTENSION_ARGUMENTS.has(arg)) {
+      accepted.push(arg);
+      continue;
+    }
+    rejected.push(arg);
+    const value = args[index + 1];
+    if (PI_ARGUMENTS_WITH_VALUES.has(arg) && value !== undefined) {
+      rejected.push(value);
+      index += 1;
+    }
+  }
+  return { accepted, rejected };
+}
+
+/** The launch args `flavor`'s CLI accepts, and the configured ones it would reject. */
+export const piLaunchArgsForFlavor = (
+  flavor: Pick<PiFlavor, "extensions">,
+  args: ReadonlyArray<string>,
+) => (flavor.extensions ? { accepted: args, rejected: [] } : partitionPiExtensionArgs(args));
+
+/** Tells the user which configured launch args T3 left out for a CLI without extensions. */
+export const rejectedPiLaunchArgsNotice = (
+  flavor: Pick<PiFlavor, "displayName">,
+  rejected: ReadonlyArray<string>,
+) =>
+  `${flavor.displayName} has no extensions or tool selection, so T3 Code left out these launch arguments: ${rejected.join(" ")}. Remove them from the provider's launch arguments in Settings.`;
 
 export type PiLaunchArgsResolution =
   | { readonly ok: true; readonly args: ReadonlyArray<string> }
@@ -223,21 +288,33 @@ function withoutToolSelectionArgs(args: ReadonlyArray<string>): ReadonlyArray<st
   return filtered;
 }
 
-function piT3McpExtensionDestPath(cacheDir: string): string {
-  return `${cacheDir.replace(/\\/g, "/")}/${PI_T3_MCP_EXTENSION_FILENAME}`;
-}
+const writeFileIfChanged = Effect.fnUntraced(function* (dest: string, content: string) {
+  const fs = yield* FileSystem.FileSystem;
+  const existing = yield* fs.readFileString(dest).pipe(Effect.orElseSucceed(() => ""));
+  if (existing !== content) yield* fs.writeFileString(dest, content);
+});
 
+/** Writes the T3 extension into the cache and returns its path, the value for `--extension`. */
 export const materializePiT3McpExtension = Effect.fn("materializePiT3McpExtension")(function* (
   cacheDir: string,
 ) {
   const fs = yield* FileSystem.FileSystem;
   yield* fs.makeDirectory(cacheDir, { recursive: true });
-  const dest = piT3McpExtensionDestPath(cacheDir);
-  const existing = yield* fs.readFileString(dest).pipe(Effect.orElseSucceed(() => ""));
-  if (existing !== PI_T3_MCP_EXTENSION_SOURCE) {
-    yield* fs.writeFileString(dest, PI_T3_MCP_EXTENSION_SOURCE);
-  }
+  const dest = `${cacheDir.replace(/\\/g, "/")}/${PI_T3_MCP_EXTENSION_FILENAME}`;
+  yield* writeFileIfChanged(dest, PI_T3_MCP_EXTENSION_SOURCE);
   return dest;
+});
+
+/**
+ * Writes the `t3-code` skill and returns its directory, the value for
+ * `--skill`. Pi rejects a skill whose directory name differs from its `name`.
+ */
+export const materializePiT3Skill = Effect.fn("materializePiT3Skill")(function* (cacheDir: string) {
+  const fs = yield* FileSystem.FileSystem;
+  const skillDir = `${cacheDir.replace(/\\/g, "/")}/pi-t3-skills/${PI_T3_CODE_SKILL_NAME}`;
+  yield* fs.makeDirectory(skillDir, { recursive: true });
+  yield* writeFileIfChanged(`${skillDir}/${PI_T3_CODE_SKILL_FILENAME}`, PI_T3_CODE_SKILL_SOURCE);
+  return skillDir;
 });
 
 export function buildPiRpcLaunch(input: {
@@ -245,7 +322,15 @@ export function buildPiRpcLaunch(input: {
   readonly environment: NodeJS.ProcessEnv;
   readonly mcpSession: McpProviderSessionConfig | undefined;
   readonly extensionPath: string | undefined;
+  /**
+   * Set for agents that reach T3 through their own MCP client. The extension
+   * then registers no T3 tools. `skillPath` is the `t3-code` skill directory,
+   * present only when the user declared the server.
+   */
+  readonly kernelMcp?: { readonly skillPath: string | undefined };
   readonly ephemeral?: boolean;
+  /** Session file the process starts on, instead of a new session. */
+  readonly resumeSessionFile?: string;
   readonly disableExtensions?: boolean;
   readonly disableTools?: boolean;
   readonly runtimeMode?: "approval-required" | "auto-accept-edits" | "auto" | "full-access";
@@ -255,7 +340,9 @@ export function buildPiRpcLaunch(input: {
   readonly hasT3Mcp: boolean;
 } {
   const hasT3Extension = input.disableExtensions !== true && input.extensionPath !== undefined;
-  const hasT3Mcp = hasT3Extension && input.mcpSession !== undefined;
+  const kernelMcp = input.disableExtensions === true ? undefined : input.kernelMcp;
+  // T3's tools are reached through the extension's bridge or the kernel's own MCP client.
+  const hasT3Mcp = input.mcpSession !== undefined && (hasT3Extension || kernelMcp !== undefined);
   const extensionSafeArgs =
     input.disableExtensions === true
       ? withoutExplicitExtensions(input.launchArgs)
@@ -266,6 +353,7 @@ export function buildPiRpcLaunch(input: {
     "--mode",
     "rpc",
     ...(input.ephemeral === true ? ["--no-session"] : []),
+    ...(input.resumeSessionFile === undefined ? [] : ["--resume", input.resumeSessionFile]),
     ...launchArgs,
     // Restrictions follow user launch args so a configured --tools or
     // --extension cannot silently re-enable unattended text-generation code.
@@ -279,12 +367,16 @@ export function buildPiRpcLaunch(input: {
   ) {
     args.push("--extension", input.extensionPath);
   }
+  // The skill describes tools that only work with a T3 credential.
+  const skillPath = hasT3Mcp ? kernelMcp?.skillPath : undefined;
+  if (skillPath !== undefined) args.push("--skill", skillPath);
   const environment = { ...input.environment };
   // These values belong to the current T3 session. Never let a Pi child reuse
   // credentials inherited from the server or a parent provider process.
   delete environment[T3_MCP_URL_ENV];
   delete environment[T3_MCP_BEARER_ENV];
   delete environment[T3_PI_MCP_EXTENSION_PATH_ENV];
+  delete environment[T3_PI_MCP_TOOLS_ENV];
 
   return {
     args,
@@ -298,6 +390,9 @@ export function buildPiRpcLaunch(input: {
             [T3_PI_RUNTIME_MODE_ENV]:
               input.runtimeMode === "auto" ? "approval-required" : input.runtimeMode,
           }
+        : {}),
+      ...(hasT3Extension && kernelMcp !== undefined
+        ? { [T3_PI_MCP_TOOLS_ENV]: T3_PI_MCP_TOOLS_KERNEL }
         : {}),
       ...(hasT3Mcp && input.mcpSession !== undefined
         ? {
