@@ -446,6 +446,13 @@ function isWorkingReply(message: unknown): boolean {
   );
 }
 
+/** When the quota park a retry outcome reports resumes the session, or null when it reports none. */
+function retryOutcomeParkResumeAt(event: PiRpcRecord): DateTime.Utc | null {
+  return event["success"] === true
+    ? null
+    : primeAgentQuotaParkResumeAt(recordString(event, "finalError"));
+}
+
 /**
  * Events that stay live while a wake is buffered, so a child's events never
  * wait on the parent's turn.
@@ -2346,8 +2353,12 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
           .pipe(Effect.tapError(() => stopPendingWake(wake)));
       });
 
-      /** Whether a wake's every reply failed at once while the quota park holds the session. */
-      const refusedByQuotaPark = Effect.fnUntraced(function* (wake: PiWake) {
+      /**
+       * Whether a wake's every reply failed at once while a remembered quota
+       * park holds the session. The park may have refused it, or something else
+       * failed it; its retry outcome, which follows agent_end, tells which.
+       */
+      const mayBeRefusedByQuotaPark = Effect.fnUntraced(function* (wake: PiWake) {
         const parkedUntil = quotaParkedUntil;
         if (parkedUntil === null || !DateTime.isGreaterThan(parkedUntil, yield* DateTime.now)) {
           return false;
@@ -2498,18 +2509,25 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
           if (event["type"] === "agent_start") yield* updateProviderSession("running", null);
           if (event["type"] === "agent_settled") yield* updateProviderSession("ready", null);
           if (event["type"] === "message_start") yield* applyInjectedMessage(message);
-          if (event["type"] === "agent_end" && (yield* refusedByQuotaPark(wake))) {
-            return yield* dropRefusedWake(wake);
+          // A wake that may be refused by the park stays unoffered until its
+          // retry outcome. A wake that never gets one is offered by the idle
+          // history read, which finds it unoffered.
+          if (event["type"] === "agent_end" && (yield* mayBeRefusedByQuotaPark(wake))) return;
+          if (event["type"] === "auto_retry_end" && !wake.offered) {
+            const parkResumeAt = retryOutcomeParkResumeAt(event);
+            if (parkResumeAt !== null) {
+              quotaParkedUntil = parkResumeAt;
+              return yield* dropRefusedWake(wake);
+            }
           }
           // Wait for the agent's own reply, so every message it was woken
-          // with (kernel restore notices come first) is in the buffer. A
-          // reply that failed at once may be the quota park refusing the wake.
+          // with (kernel restore notices come first) is in the buffer.
           const agentReplied = event["type"] === "message_start" && isWorkingReply(message);
           const appThreadId = wake.state.providerThread.appThreadId;
           if (
             flavor.wakeNotices &&
             appThreadId != null &&
-            (agentReplied || event["type"] === "agent_end")
+            (agentReplied || event["type"] === "agent_end" || event["type"] === "auto_retry_end")
           ) {
             yield* offerWake(wake, appThreadId);
           }
@@ -2768,10 +2786,7 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
             return;
           }
           case "auto_retry_end": {
-            const parkResumeAt =
-              event["success"] === true
-                ? null
-                : primeAgentQuotaParkResumeAt(recordString(event, "finalError"));
+            const parkResumeAt = retryOutcomeParkResumeAt(event);
             if (parkResumeAt !== null) quotaParkedUntil = parkResumeAt;
             if (turn === null) return;
             const emittedAt = yield* DateTime.now;

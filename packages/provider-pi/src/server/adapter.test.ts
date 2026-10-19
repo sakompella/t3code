@@ -9995,13 +9995,18 @@ describe("PiAdapterV2 with the Prime Agent flavor", () => {
   const QUOTA_PARK_RESUME_AT = "2026-10-19T06:01:57.434Z";
   const QUOTA_COOLDOWN =
     "Provider rate limit exceeded (rate_limit_error, 429): All credentials for model claude-haiku-4-5-20251001 are cooling down";
-  const emitQuotaRefusedReply = (fake: FakePi, finalError: string, timestamp: number) =>
+  const emitQuotaRefusedReply = (
+    fake: FakePi,
+    finalError: string,
+    timestamp: number,
+    errorMessage = QUOTA_COOLDOWN,
+  ) =>
     Effect.gen(function* () {
       const message = {
         role: "assistant",
         content: [],
         stopReason: "error",
-        errorMessage: QUOTA_COOLDOWN,
+        errorMessage,
         timestamp,
       };
       yield* fake.emit({ type: "message_start", message });
@@ -10155,6 +10160,53 @@ describe("PiAdapterV2 with the Prime Agent flavor", () => {
         assert.isFalse(failed);
         assert.equal(notices.filter((notice) => notice.startsWith("Waiting for quota")).length, 1);
       }).pipe(Effect.scoped, Effect.provide(layerTest)),
+  );
+
+  it.effect("runs a wake that fails for another reason while a quota park is remembered", () =>
+    Effect.gen(function* () {
+      const fake = yield* makeFakePi;
+      const { runtime, takeEvent, providerThread, offers } = yield* openPrimeThreadWithWakes(fake);
+      yield* startTurn(runtime, providerThread);
+      yield* fake.takeRequest("prompt");
+      yield* fake.emit({ type: "agent_start" });
+      yield* emitQuotaRefusedReply(fake, firstParkError, 1_000);
+      yield* fake.takeRequest("get_state");
+      yield* drainUntilTerminal(takeEvent);
+
+      const authError = "Authentication failed (401): invalid x-api-key";
+      yield* fake.emit({ type: "agent_start" });
+      yield* fake.emit({
+        type: "message_start",
+        message: {
+          role: "custom",
+          customType: "async_bash_completion",
+          content: "[bash-done pid:32703 exit:0]",
+          details: { pid: 32703, command: "sleep 60; echo done", exitCode: 0 },
+          timestamp: 2_000,
+        },
+      });
+      yield* emitQuotaRefusedReply(fake, authError, 2_010, authError);
+      const offer = yield* Queue.take(offers);
+      assert.equal(offer.notification?.summary, "Background command finished");
+      yield* startTurn(
+        runtime,
+        providerThread,
+        "default",
+        [],
+        "Background command finished",
+        undefined,
+        1,
+        THREAD_ID,
+        "provider",
+      );
+      yield* fake.takeRequest("get_state");
+      const terminal = yield* takeEvent((event) => event.type === "turn.terminal");
+      assert.isTrue(
+        terminal.type === "turn.terminal" &&
+          terminal.status === "failed" &&
+          terminal.failure.message.includes(authError),
+      );
+    }).pipe(Effect.scoped, Effect.provide(layerTest)),
   );
 
   /** What Prime Agent emits when a child's message wakes the idle parent. */
