@@ -26,6 +26,18 @@ function withoutLegacyPythonPrefix(label: string): string {
 
 const collapseWhitespace = (value: string) => value.replace(/\s+/gu, " ").trim();
 
+// Clients may cut a long label to its start plus "..." (mobile does at 200 characters).
+const TRUNCATION_MARK = "...";
+
+/** Whether a label shows this code, whole or cut short, ignoring whitespace differences. */
+function labelShowsCode(label: string, code: string): boolean {
+  const shown = collapseWhitespace(label);
+  const full = collapseWhitespace(code);
+  if (shown === full) return true;
+  const start = shown.slice(0, -TRUNCATION_MARK.length);
+  return shown.endsWith(TRUNCATION_MARK) && start.length > 0 && full.startsWith(start);
+}
+
 /**
  * The label of a Python cell row: the provider's title, which is the cell's
  * first line. Kept apart from prose labels so it is never recapitalized.
@@ -42,21 +54,16 @@ export function pythonCellLabel(entry: CodeEntry): string | null {
  * client can render it in its code font and highlight it. Returns null when
  * the label is prose, such as a group heading or a live "Running git" label.
  * Whitespace differences are ignored, so a client may pass a label it has
- * collapsed to one line.
+ * collapsed to one line, and a label cut short with "..." still counts.
  */
 export function workEntryLabelCode(entry: CodeEntry, label: string): WorkEntryCode | null {
-  if (
-    entry.command &&
-    collapseWhitespace(label) === collapseWhitespace(commandDisplayText(entry.command))
-  ) {
+  if (entry.command && labelShowsCode(label, commandDisplayText(entry.command))) {
     return { code: label, language: "shellscript" };
   }
   const python = pythonCellLabel(entry);
   if (python === null || python === "Python") return null;
   const code = withoutLegacyPythonPrefix(label);
-  return collapseWhitespace(code) === collapseWhitespace(python)
-    ? { code, language: "python" }
-    : null;
+  return labelShowsCode(code, python) ? { code, language: "python" } : null;
 }
 
 function pythonCellSource(entry: CodeEntry): string | null {

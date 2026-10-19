@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vite-plus/test";
 
 import type { OrchestrationV2TurnItem } from "@t3tools/contracts";
+import { truncate } from "@t3tools/shared/String";
 
 import {
   pythonCellLabel,
@@ -56,6 +57,22 @@ describe("workEntryLabelCode", () => {
   it("accepts a label a client collapsed to one line", () => {
     const command = commandEntry("echo a &&\n  echo b");
     expect(workEntryLabelCode(command, "echo a && echo b")?.language).toBe("shellscript");
+  });
+
+  it("accepts a long label a client cut short with an ellipsis", () => {
+    const longCommand = `printf '%s\\n' ${"word ".repeat(80)}&& \n  echo done`;
+    for (const max of [10, 60, 200]) {
+      const label = truncate(commandDisplayText(longCommand).replace(/\s+/gu, " "), max);
+      expect(workEntryLabelCode(commandEntry(longCommand), label)).toEqual({
+        code: label,
+        language: "shellscript",
+      });
+      expect(workEntryBodyCode(commandEntry(longCommand), label)?.code).toBe(longCommand);
+    }
+    const longCell = `values = [${"1, ".repeat(100)}]`;
+    const cell = pythonEntry(longCell, { toolTitle: longCell });
+    expect(workEntryLabelCode(cell, truncate(longCell, 200))?.language).toBe("python");
+    expect(workEntryLabelCode(commandEntry(longCommand), "Running printf...")).toBeNull();
   });
 
   it("leaves prose labels alone", () => {

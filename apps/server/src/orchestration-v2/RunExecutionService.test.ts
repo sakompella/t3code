@@ -819,6 +819,7 @@ describe("a late subagent shell across a session's subscribers", () => {
         Layer.mergeAll(
           McpAppModelContext.layerEmpty,
           Layer.mock(CheckpointService.CheckpointServiceV2)({ captureBaseline: () => Effect.void }),
+          layerTurnItemPositionsTest,
           Layer.mock(EventSink.EventSinkV2)({
             write: () => Effect.succeed([]),
             writeWithEffects: () => Effect.succeed([]),

@@ -3194,7 +3194,6 @@ export const PublishedHtmlRender = Schema.Struct({
   title: Schema.String,
   height: Schema.Number,
   heights: Schema.optional(Schema.Array(Schema.Tuple([Schema.Int, Schema.Int]))),
-  outline: Schema.optional(Schema.String),
 });
 export type PublishedHtmlRender = typeof PublishedHtmlRender.Type;
 
