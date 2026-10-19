@@ -2583,7 +2583,7 @@ describe("deriveMessagesTimelineRows", () => {
         sourceItemId: item.id,
         item,
       }));
-    const rows = (settled: boolean, expandedRunIds?: ReadonlySet<RunId>) =>
+    const rows = (settled: boolean, expandedFoldKeys?: ReadonlySet<string>) =>
       deriveMessagesTimelineRows({
         timelineEntries: deriveTimelineEntriesFromVisibleTurnItems({
           visibleTurnItems: items(settled),
@@ -2598,7 +2598,7 @@ describe("deriveMessagesTimelineRows", () => {
         runningRunId: settled ? null : runId,
         isWorking: !settled,
         activeTurnStartedAt: settled ? null : DateTime.formatIso(at(0)),
-        ...(expandedRunIds === undefined ? {} : { expandedRunIds }),
+        ...(expandedFoldKeys === undefined ? {} : { expandedFoldKeys }),
         turnDiffSummaries: [],
         supportsConversationRollback: false,
       });

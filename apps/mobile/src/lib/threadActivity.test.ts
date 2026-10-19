@@ -21,6 +21,7 @@ import {
   type OrchestrationV2TurnItem,
 } from "@t3tools/contracts";
 import { resolveUserMessagePresentation } from "@t3tools/client-runtime/user-message";
+import { workEntryLabelCode } from "@t3tools/client-runtime/work-log/entry-code";
 import { summarizeToolGroup } from "@t3tools/client-runtime/work-log/presentation";
 import * as DateTime from "effect/DateTime";
 import { describe, expect, it } from "vite-plus/test";
@@ -2609,6 +2610,19 @@ describe("code rows", () => {
       null,
       new Set(),
     ).find((entry) => entry.type === "work-toggle");
+  // A lone call is shown as its own row in place of the group header; the row highlights its label.
+  const standInCode = (entries: ReadonlyArray<ThreadFeedEntry>) => {
+    const row = entries
+      .flatMap((entry) => (entry.type === "activity-group" ? entry.activities : []))
+      .find((activity) => activity.groupStandIn !== undefined);
+    return row?.groupStandIn === undefined
+      ? undefined
+      : {
+          live: row.live,
+          label: row.groupStandIn.label,
+          code: workEntryLabelCode(row.workEntry, row.groupStandIn.label),
+        };
+  };
 
   it("labels a Python cell with the code as the provider spelled it", () => {
     const feed = buildThreadFeed([projected(pythonCell(), 0)]);
@@ -2617,14 +2631,22 @@ describe("code rows", () => {
     expect(workEntryRowLabel(activity!.workEntry)).toBe("import os");
   });
 
-  it("marks a one-call group summary as code", () => {
-    expect(settledToggle(pythonCell())).toMatchObject({
-      summary: "import os",
-      summaryCode: { code: "import os", language: "python" },
+  it("highlights a lone call's row as code", () => {
+    const settled = (item: OrchestrationV2TurnItem) =>
+      standInCode(
+        deriveThreadFeedPresentation(
+          buildThreadFeed([projected({ ...item, runId: null }, 0)]),
+          null,
+          new Set(),
+        ),
+      );
+    expect(settled(pythonCell())).toMatchObject({
+      label: "import os",
+      code: { code: "import os", language: "python" },
     });
-    expect(settledToggle({ ...command(), input: "/bin/zsh -lc 'ls -la src'" })).toMatchObject({
-      summary: "ls -la src",
-      summaryCode: { code: "ls -la src", language: "shellscript" },
+    expect(settled({ ...command(), input: "/bin/zsh -lc 'ls -la src'" })).toMatchObject({
+      label: "ls -la src",
+      code: { code: "ls -la src", language: "shellscript" },
     });
   });
 
@@ -2650,17 +2672,14 @@ describe("code rows", () => {
         new Set(),
         startedAt,
         true,
-      ).find((entry) => entry.type === "work-toggle");
+      );
 
-    expect(live(pythonCell())).toMatchObject({
+    expect(standInCode(live(pythonCell()))).toMatchObject({
       live: true,
-      shimmer: true,
-      summary: "import os",
-      summaryCode: { code: "import os", language: "python" },
+      label: "import os",
+      code: { code: "import os", language: "python" },
     });
-    const runningCommand = live(command());
-    expect(runningCommand).toMatchObject({ summary: "Running vp" });
-    expect(runningCommand).not.toHaveProperty("summaryCode");
+    expect(standInCode(live(command()))).toMatchObject({ label: "Running vp", code: null });
   });
 });
 
