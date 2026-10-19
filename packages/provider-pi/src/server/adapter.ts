@@ -647,7 +647,11 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
           Effect.tapError((error) =>
             (error._tag === "PiSessionLeaseHeldError" ? Effect.logInfo : Effect.logWarning)(
               `${name} could not start on the thread's session`,
-              { providerSessionId: input.providerSessionId, errorTag: error._tag },
+              {
+                providerSessionId: input.providerSessionId,
+                errorTag: error._tag,
+                detail: error.message,
+              },
             ),
           ),
           Effect.retry({
