@@ -9678,6 +9678,128 @@ describe("PiAdapterV2 with the Prime Agent flavor", () => {
     return { runtime, takeEvent, providerThread, offers };
   });
 
+  /**
+   * What Prime Agent 0.10 sends for a turn its quota park refuses, recorded
+   * from a real session on a provider whose credentials were cooling down:
+   * the reply fails at once, and the park's status follows agent_end.
+   */
+  const QUOTA_PARK_RESUME_AT = "2026-10-19T06:01:57.434Z";
+  const QUOTA_COOLDOWN =
+    "Provider rate limit exceeded (rate_limit_error, 429): All credentials for model claude-haiku-4-5-20251001 are cooling down";
+  const emitQuotaRefusedReply = (fake: FakePi, finalError: string, timestamp: number) =>
+    Effect.gen(function* () {
+      const message = {
+        role: "assistant",
+        content: [],
+        stopReason: "error",
+        errorMessage: QUOTA_COOLDOWN,
+        timestamp,
+      };
+      yield* fake.emit({ type: "message_start", message });
+      yield* fake.emit({ type: "message_end", message });
+      yield* fake.emit({ type: "agent_end", messages: [] });
+      yield* fake.emit({ type: "auto_retry_end", success: false, attempt: 0, finalError });
+      const outcome = {
+        role: "custom",
+        customType: "provider_retry_outcome",
+        content: `⚠ Error: ${finalError}`,
+        details: { success: false, attempts: 0, finalError },
+        timestamp: timestamp + 1,
+      };
+      yield* fake.emit({ type: "message_start", message: outcome });
+      yield* fake.emit({ type: "message_end", message: outcome });
+    });
+  const firstParkError = `Provider requested a 150s wait before retrying (above retry.provider.maxRetryDelayMs=60000ms). Session parked until ${QUOTA_PARK_RESUME_AT} and will resume automatically (retry.provider.waitForUsage.pauseUntilReset): ${QUOTA_COOLDOWN}`;
+  const stillParkedError = `Session is parked until ${QUOTA_PARK_RESUME_AT} waiting for the provider usage reset; this turn ended without a retry: ${QUOTA_COOLDOWN}`;
+
+  it.effect("ends a turn the quota park refused with one waiting notice, not a failure", () =>
+    Effect.gen(function* () {
+      const fake = yield* makeFakePi;
+      const { runtime, takeEvent, providerThread } = yield* openPrimeThreadWithWakes(fake);
+      for (const [index, finalError] of [firstParkError, stillParkedError].entries()) {
+        yield* startTurn(
+          runtime,
+          providerThread,
+          "default",
+          [],
+          `message ${index}`,
+          undefined,
+          index + 1,
+        );
+        yield* fake.takeRequest("prompt");
+        yield* fake.emit({ type: "agent_start" });
+        yield* emitQuotaRefusedReply(fake, finalError, 1_000 + index * 10);
+        yield* fake.takeRequest("get_state");
+        const seen = yield* drainUntilTerminal(takeEvent);
+
+        const terminal = seen.at(-1);
+        assert.isTrue(terminal?.type === "turn.terminal" && terminal.status === "completed");
+        const notices = seen.flatMap((event) =>
+          event.type === "turn_item.updated" && event.turnItem.type === "system_notice"
+            ? [event.turnItem]
+            : [],
+        );
+        assert.lengthOf(notices, 1);
+        assert.match(
+          notices[0]!.message,
+          /^Waiting for quota until .+\. Prime Agent resumes on its own\.$/,
+        );
+        assert.equal(notices[0]!.tone, "warning");
+        assert.isFalse(
+          seen.some(
+            (event) =>
+              event.type === "turn_item.updated" &&
+              event.turnItem.type === "error" &&
+              event.turnItem.status === "failed",
+          ),
+        );
+      }
+    }).pipe(Effect.scoped, Effect.provide(layerTest)),
+  );
+
+  it.effect("offers no run for a wake the quota park refused", () =>
+    Effect.gen(function* () {
+      const fake = yield* makeFakePi;
+      const { runtime, takeEvent, providerThread, offers } = yield* openPrimeThreadWithWakes(fake);
+      yield* startTurn(runtime, providerThread);
+      yield* fake.takeRequest("prompt");
+      yield* fake.emit({ type: "agent_start" });
+      yield* emitQuotaRefusedReply(fake, firstParkError, 1_000);
+      yield* fake.takeRequest("get_state");
+      yield* drainUntilTerminal(takeEvent);
+
+      yield* fake.emit({ type: "agent_start" });
+      yield* fake.emit({
+        type: "message_start",
+        message: {
+          role: "custom",
+          customType: "async_bash_completion",
+          content: "[bash-done pid:32703 exit:0]",
+          details: { pid: 32703, command: "sleep 60; echo done", exitCode: 0 },
+          timestamp: 2_000,
+        },
+      });
+      yield* emitQuotaRefusedReply(fake, stillParkedError, 2_010);
+
+      // Prime Agent resumes the session itself once the quota is back.
+      yield* fake.emit({ type: "agent_start" });
+      yield* fake.emit({
+        type: "message_start",
+        message: {
+          role: "custom",
+          customType: "heartbeat_prompt",
+          content: "[heartbeat: every 5m run#3]\n\nCheck the deploy.",
+          details: { jobId: "deploy", schedule: "every 5m", runCount: 3 },
+          timestamp: 3_000,
+        },
+      });
+      yield* emitAssistantReply(fake, "The deploy is fine.");
+      const offer = yield* Queue.take(offers);
+      assert.equal(offer.notification?.summary, "Heartbeat");
+      assert.equal(yield* Queue.size(offers), 0);
+    }).pipe(Effect.scoped, Effect.provide(layerTest)),
+  );
+
   /** What Prime Agent emits when a child's message wakes the idle parent. */
   const emitChildMessageWake = (fake: FakePi) =>
     Effect.gen(function* () {
@@ -9927,6 +10049,62 @@ describe("PiAdapterV2 with the Prime Agent flavor", () => {
       assert.equal(Queue.sizeUnsafe(session.offers), 0);
       // The child only sent a message; nothing says it ended.
       assert.isTrue(yield* session.runtime.hasPendingBackgroundWork!);
+    }).pipe(Effect.scoped, Effect.provide(layerTest)),
+  );
+
+  it.effect("does not offer a wake the quota park refused when a later check reads it", () =>
+    Effect.gen(function* () {
+      const fake = yield* makeFakePi;
+      const session = yield* settleWithChildAndHistory(fake);
+      const refused = (timestamp: number, finalError: string) => [
+        {
+          role: "assistant",
+          content: [],
+          stopReason: "error",
+          errorMessage: QUOTA_COOLDOWN,
+          timestamp,
+        },
+        {
+          role: "custom",
+          customType: "provider_retry_outcome",
+          content: `⚠ Error: ${finalError}`,
+          details: { success: false, attempts: 0, finalError },
+          timestamp: timestamp + 1,
+        },
+      ];
+      const parkedTurn = [
+        ...session.history,
+        storedPrompt(1_050, "Hello again"),
+        ...refused(1_100, firstParkError),
+      ];
+      yield* startTurn(
+        session.runtime,
+        session.providerThread,
+        "default",
+        [],
+        "Hello again",
+        undefined,
+        2,
+      );
+      yield* fake.takeRequest("prompt");
+      yield* fake.emit({ type: "agent_start" });
+      yield* emitQuotaRefusedReply(fake, firstParkError, 1_100);
+      fake.setTranscript(parkedTurn);
+      yield* fake.takeRequest("get_state");
+      const terminal = yield* session.takeEvent((event) => event.type === "turn.terminal");
+      assert.isTrue(terminal.type === "turn.terminal" && terminal.status === "completed");
+
+      yield* fake.emit({ type: "agent_start" });
+      yield* fake.emit({ type: "message_start", message: storedChildMessage(2_000) });
+      yield* emitQuotaRefusedReply(fake, stillParkedError, 2_010);
+      fake.setTranscript([
+        ...parkedTurn,
+        storedChildMessage(2_000),
+        ...refused(2_010, stillParkedError),
+      ]);
+
+      yield* tickUntil(() => Queue.sizeUnsafe(session.offers) > 0);
+      assert.equal(Queue.sizeUnsafe(session.offers), 0);
     }).pipe(Effect.scoped, Effect.provide(layerTest)),
   );
 
