@@ -145,6 +145,7 @@ def restack(st):
             st.setdefault("review", {})[t] = (
                 f"git range-diff {old_base[:12]}..{st['old'][t][:12]} {new_tip(p)[:12]}..topic/{t}"
             )
+            save(st)
             if old_base != new_tip(p):
                 rebase(
                     f"rebase of topic/{t}",
@@ -251,6 +252,8 @@ def land(args):
         sys.exit("a rebuild or collapse is in progress; finish it first")
     topic, branch = f"topic/{args.topic}", args.branch
     original = rev(branch)
+    if git("reflog", "-1", "--format=%gs", branch).stdout.startswith(f"rebase (finish): refs/heads/{branch} onto"):
+        original = rev(f"{branch}@{{1}}")  # rerun after a stopped land: the rebase already moved the branch
     archive = f"archive/worker/{branch}/{TODAY}-{original[:10]}"
     git("tag", "-f", archive, original)
     snaps = [rev(topic)] + git(
