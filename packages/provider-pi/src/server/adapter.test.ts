@@ -1969,9 +1969,25 @@ describe("PiAdapterV2", () => {
           (_, launchCount) => launchCount === 1,
         );
 
-        const runtime = yield* waitOutLaunch(openOnSavedSession(launches.fake));
+        const warnings: Array<unknown> = [];
+        const captureWarnings = Logger.make(({ logLevel, message }) => {
+          const [text, fields] = message as ReadonlyArray<unknown>;
+          if (
+            logLevel === "Warn" &&
+            String(text).endsWith("could not start on the thread's session")
+          ) {
+            warnings.push(fields);
+          }
+        });
+        const runtime = yield* openOnSavedSession(launches.fake).pipe(
+          Effect.provide(Logger.layer([captureWarnings])),
+        );
         const failed = yield* runtime.resumeThread({ providerThread }).pipe(Effect.flip);
 
+        assert.lengthOf(warnings, 1);
+        const { detail } = warnings[0] as { readonly detail: unknown };
+        assert.isString(detail);
+        assert.isNotEmpty(detail);
         assert.deepEqual(launches.spawnedArgs.map(resumeFile), [FAKE_SESSION_FILE, undefined]);
         assert.equal(failed._tag, "ProviderAdapterResumeThreadError");
         assert.deepEqual(replacementRequests(fake), []);
