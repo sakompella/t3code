@@ -6692,6 +6692,8 @@ it.layer(layerSharedApplicationDataPlaneTest)("snooze projection", (it) => {
         threadId,
         snoozedUntil,
       });
+      const snoozedAgainAt = (yield* orchestrator.getThreadProjection(threadId)).thread.snoozedAt;
+      assert.isNotNull(snoozedAgainAt);
 
       yield* orchestrator.dispatch({
         type: "message.dispatch",
@@ -6708,7 +6710,7 @@ it.layer(layerSharedApplicationDataPlaneTest)("snooze projection", (it) => {
 
       const afterMessage = yield* orchestrator.getThreadProjection(threadId);
       assert.equal(DateTime.formatIso(afterMessage.thread.snoozedUntil!), snoozedUntil);
-      assert.deepEqual(afterMessage.thread.snoozedAt, firstSnoozedAt);
+      assert.deepEqual(afterMessage.thread.snoozedAt, snoozedAgainAt);
 
       yield* orchestrator.dispatch({
         type: "thread.unsnooze",
