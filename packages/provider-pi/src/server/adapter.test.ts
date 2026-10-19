@@ -10109,6 +10109,54 @@ describe("PiAdapterV2 with the Prime Agent flavor", () => {
     }).pipe(Effect.scoped, Effect.provide(layerTest)),
   );
 
+  it.effect(
+    "runs the wake that first parks the session with the waiting notice, not a failure",
+    () =>
+      Effect.gen(function* () {
+        const fake = yield* makeFakePi;
+        const { runtime, takeEvent, providerThread, offers } =
+          yield* openPrimeThreadWithWakes(fake);
+        yield* fake.emit({ type: "agent_start" });
+        yield* fake.emit({
+          type: "message_start",
+          message: {
+            role: "custom",
+            customType: "async_bash_completion",
+            content: "[bash-done pid:32703 exit:0]",
+            details: { pid: 32703, command: "sleep 60; echo done", exitCode: 0 },
+            timestamp: 2_000,
+          },
+        });
+        yield* emitQuotaRefusedReply(fake, firstParkError, 2_010);
+        const offer = yield* Queue.take(offers);
+        assert.equal(offer.notification?.summary, "Background command finished");
+        yield* startTurn(
+          runtime,
+          providerThread,
+          "default",
+          [],
+          "Background command finished",
+          undefined,
+          1,
+          THREAD_ID,
+          "provider",
+        );
+        yield* fake.takeRequest("get_state");
+        const notices: string[] = [];
+        let failed = false;
+        const terminal = yield* takeEvent((event) => {
+          if (event.type === "turn_item.updated" && event.turnItem.type === "system_notice") {
+            notices.push(event.turnItem.message);
+          }
+          if (event.type === "turn_item.updated" && event.turnItem.type === "error") failed = true;
+          return event.type === "turn.terminal";
+        });
+        assert.isTrue(terminal.type === "turn.terminal" && terminal.status === "completed");
+        assert.isFalse(failed);
+        assert.equal(notices.filter((notice) => notice.startsWith("Waiting for quota")).length, 1);
+      }).pipe(Effect.scoped, Effect.provide(layerTest)),
+  );
+
   /** What Prime Agent emits when a child's message wakes the idle parent. */
   const emitChildMessageWake = (fake: FakePi) =>
     Effect.gen(function* () {
