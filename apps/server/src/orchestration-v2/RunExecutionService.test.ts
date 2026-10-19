@@ -34,6 +34,7 @@ import * as DateTime from "effect/DateTime";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
+import * as Logger from "effect/Logger";
 import * as Option from "effect/Option";
 import * as Queue from "effect/Queue";
 import * as Ref from "effect/Ref";
@@ -4587,33 +4588,52 @@ it.effect("does not start a turn whose run settled during the app context read",
   }),
 );
 
-it.effect("refreshes pull requests only once when startup failure closes its event stream", () =>
-  Effect.gen(function* () {
-    const ingestionStarted = yield* Deferred.make<void>();
-    const { observed, written } = yield* captureRootRunTermination({
-      key: "pull-request-refresh:startup-error",
-      shouldFinalizeRun: () => Effect.succeed(true),
-      events: () =>
-        Stream.unwrap(Deferred.succeed(ingestionStarted, undefined).pipe(Effect.as(Stream.never))),
-      startTurn: (input) =>
-        Deferred.await(ingestionStarted).pipe(
-          Effect.andThen(
-            Effect.fail(
-              new ProviderAdapter.ProviderAdapterTurnStartError({
-                driver,
-                threadId: input.threadId,
-                providerThreadId: input.providerThread.id,
-                runId: input.runId,
-                cause: "provider rejected the turn",
-              }),
-            ),
+const captureRejectedTurnStart = Effect.gen(function* () {
+  const ingestionStarted = yield* Deferred.make<void>();
+  return yield* captureRootRunTermination({
+    key: "pull-request-refresh:startup-error",
+    shouldFinalizeRun: () => Effect.succeed(true),
+    events: () =>
+      Stream.unwrap(Deferred.succeed(ingestionStarted, undefined).pipe(Effect.as(Stream.never))),
+    startTurn: (input) =>
+      Deferred.await(ingestionStarted).pipe(
+        Effect.andThen(
+          Effect.fail(
+            new ProviderAdapter.ProviderAdapterTurnStartError({
+              driver,
+              threadId: input.threadId,
+              providerThreadId: input.providerThread.id,
+              runId: input.runId,
+              cause: "provider rejected the turn",
+            }),
           ),
         ),
-    });
+      ),
+  });
+});
+
+it.effect("refreshes pull requests only once when startup failure closes its event stream", () =>
+  Effect.gen(function* () {
+    const { observed, written } = yield* captureRejectedTurnStart;
     assert.equal(observed.filter((item) => item === "pull-requests-refreshed").length, 1);
     assert.equal(observed[0], "run:failed");
     const error = written.find((item) => item.type === "error");
     assert.include(error?.failure.message ?? "", "provider could not start this turn");
+  }),
+);
+
+it.effect("logs a failed turn start's cause as text", () =>
+  Effect.gen(function* () {
+    const logged: Array<unknown> = [];
+    const capture = Logger.make(({ message }) => {
+      const [text, fields] = Array.isArray(message) ? message : [message];
+      if (text === "orchestration V2 provider turn start failed") logged.push(fields);
+    });
+    yield* captureRejectedTurnStart.pipe(Effect.provide(Logger.layer([capture])));
+    assert.lengthOf(logged, 1);
+    const { cause } = logged[0] as { readonly cause: unknown };
+    assert.isString(cause);
+    assert.include(cause as string, "provider rejected the turn");
   }),
 );
 
