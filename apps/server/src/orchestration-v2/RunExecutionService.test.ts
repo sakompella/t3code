@@ -1,4 +1,4 @@
-import { assert, it, vi } from "@effect/vitest";
+import { assert, describe, it, vi } from "@effect/vitest";
 import {
   CheckpointScopeId,
   ChatAttachmentId,
@@ -28,12 +28,15 @@ import {
   TurnItemId,
 } from "@t3tools/contracts";
 import * as Cause from "effect/Cause";
+import * as Context from "effect/Context";
 import * as Exit from "effect/Exit";
 import * as DateTime from "effect/DateTime";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
+import * as Logger from "effect/Logger";
 import * as Option from "effect/Option";
+import * as Queue from "effect/Queue";
 import * as Ref from "effect/Ref";
 import * as Stream from "effect/Stream";
 
@@ -327,6 +330,710 @@ it("routes only enrolled workflow members after the root turn ends", () => {
   );
 });
 
+describe("subagent shells that arrive after the launching run's root turn ended", () => {
+  const threadId = ThreadId.make("thread:late-shell");
+  const launching: RunExecutionService.ProviderEventRouteIdentity = {
+    threadId,
+    runId: RunId.make("run:late-shell:launching"),
+    attemptId: RunAttemptId.make("attempt:late-shell:launching"),
+    providerThreadId: ProviderThreadId.make("provider-thread:late-shell"),
+  };
+  const live: RunExecutionService.ProviderEventRouteIdentity = {
+    ...launching,
+    runId: RunId.make("run:late-shell:live"),
+    attemptId: RunAttemptId.make("attempt:late-shell:live"),
+  };
+  const launchingTurnId = ProviderTurnId.make("provider-turn:late-shell:launching");
+  const subagentNodeId = NodeId.make("node:late-shell:subagent");
+  const childThreadId = ThreadId.make("thread:late-shell:child");
+
+  const subagentNode = {
+    type: "node.updated",
+    driver,
+    node: {
+      id: subagentNodeId,
+      threadId,
+      runId: launching.runId,
+      parentNodeId: null,
+      rootNodeId: NodeId.make("node:late-shell:root"),
+      kind: "subagent",
+      status: "running",
+      countsForRun: false,
+      providerThreadId: launching.providerThreadId,
+      providerTurnId: launchingTurnId,
+      nativeItemRef: null,
+      runtimeRequestId: null,
+      checkpointScopeId: null,
+      startedAt: null,
+      completedAt: null,
+    },
+  } satisfies ProviderAdapter.ProviderAdapterV2Event;
+  const childShell = {
+    type: "app_thread.created",
+    driver,
+    appThread: {
+      id: childThreadId,
+      lineage: {
+        parentThreadId: threadId,
+        relationshipToParent: "subagent",
+        rootThreadId: threadId,
+      },
+      forkedFrom: { type: "node", nodeId: subagentNodeId },
+    },
+  } as ProviderAdapter.ProviderAdapterV2Event;
+  const childRootNode = {
+    type: "node.updated",
+    driver,
+    node: {
+      ...subagentNode.node,
+      id: NodeId.make("node:late-shell:child-root"),
+      threadId: childThreadId,
+      runId: null,
+      kind: "root_turn",
+    },
+  } satisfies ProviderAdapter.ProviderAdapterV2Event;
+  const launchingTerminal = {
+    type: "turn.terminal",
+    driver,
+    providerThreadId: launching.providerThreadId,
+    providerTurnId: launchingTurnId,
+    runOrdinal: 1,
+    status: "completed",
+    failure: null,
+    threadDisposition: "reusable",
+  } satisfies ProviderAdapter.ProviderAdapterV2Event;
+
+  const route = (
+    identity: RunExecutionService.ProviderEventRouteIdentity,
+    initial: RunExecutionService.ProviderEventRoutingState,
+    events: ReadonlyArray<ProviderAdapter.ProviderAdapterV2Event>,
+  ) =>
+    events.reduce<{
+      readonly accepted: ReadonlyArray<boolean>;
+      readonly state: RunExecutionService.ProviderEventRoutingState;
+    }>(
+      ({ accepted, state }, event) => {
+        const [isAccepted, next] = RunExecutionService.routeProviderEvent(event, identity, state);
+        return { accepted: [...accepted, isAccepted], state: next };
+      },
+      { accepted: [], state: initial },
+    );
+  const launchingState = () =>
+    RunExecutionService.makeProviderEventRoutingState({
+      identity: launching,
+      providerTurnId: launchingTurnId,
+    });
+  const liveState = () =>
+    RunExecutionService.makeProviderEventRoutingState({ identity: live, providerTurnId: null });
+
+  // A child thread handed to runs goes to the run whose root turn is live,
+  // never to the run that launched it. Prime Agent's child threads never reach
+  // this routing: its session stores them (see ProviderSessionManager's
+  // session-scoped subagent thread tests).
+  it("the launching run does not adopt a node-first shell after its root turn ended", () => {
+    const { accepted, state } = route(launching, launchingState(), [
+      launchingTerminal,
+      subagentNode,
+      childShell,
+      childRootNode,
+    ]);
+    assert.deepEqual(
+      accepted,
+      [true, true, false, false],
+      "a late shell goes to the live run, not to its launching run",
+    );
+    assert.isFalse(state.ownedThreadIds.has(childThreadId));
+  });
+
+  it("a live run adopts a late shell forked from another run's subagent node", () => {
+    const { accepted, state } = route(live, liveState(), [subagentNode, childShell]);
+    assert.deepEqual(accepted, [false, true]);
+    assert.isTrue(state.ownedThreadIds.has(childThreadId));
+  });
+
+  it("a shell that precedes its subagent node (Claude and Codex order) still follows the live root turn", () => {
+    const duringRoot = route(launching, launchingState(), [childShell, subagentNode]);
+    assert.deepEqual(duringRoot.accepted, [true, true]);
+    const afterRoot = route(launching, launchingState(), [
+      launchingTerminal,
+      childShell,
+      subagentNode,
+    ]);
+    assert.deepEqual(afterRoot.accepted, [true, false, true]);
+    assert.isFalse(afterRoot.state.ownedThreadIds.has(childThreadId));
+    const liveRun = route(live, liveState(), [childShell, subagentNode]);
+    assert.deepEqual(liveRun.accepted, [true, false]);
+    assert.isTrue(liveRun.state.ownedThreadIds.has(childThreadId));
+  });
+});
+
+describe("a late subagent shell across a session's subscribers", () => {
+  const threadId = ThreadId.make("thread:shell-owner");
+  const providerThreadId = ProviderThreadId.make("provider-thread:shell-owner");
+  const providerInstanceId = ProviderInstanceId.make("codex");
+  const subagentNodeId = NodeId.make("node:shell-owner:subagent");
+  const childThreadId = ThreadId.make("thread:shell-owner:child");
+  const childProviderThreadId = ProviderThreadId.make("provider-thread:shell-owner:child");
+
+  interface ScenarioRun {
+    readonly runId: RunId;
+    readonly attemptId: RunAttemptId;
+    readonly rootNodeId: NodeId;
+    readonly providerTurnId: ProviderTurnId;
+  }
+  const scenarioRun = (name: string): ScenarioRun => ({
+    runId: RunId.make(`run:shell-owner:${name}`),
+    attemptId: RunAttemptId.make(`attempt:shell-owner:${name}`),
+    rootNodeId: NodeId.make(`node:shell-owner:${name}:root`),
+    providerTurnId: ProviderTurnId.make(`provider-turn:shell-owner:${name}`),
+  });
+  const launching = scenarioRun("launching");
+  const live = scenarioRun("live");
+
+  const subagentNode = (
+    status: OrchestrationV2ExecutionNode["status"],
+    nodeProviderThreadId: ProviderThreadId,
+  ) =>
+    ({
+      type: "node.updated",
+      driver,
+      node: {
+        id: subagentNodeId,
+        threadId,
+        runId: launching.runId,
+        parentNodeId: launching.rootNodeId,
+        rootNodeId: launching.rootNodeId,
+        kind: "subagent",
+        status,
+        countsForRun: false,
+        providerThreadId: nodeProviderThreadId,
+        providerTurnId: launching.providerTurnId,
+        nativeItemRef: null,
+        runtimeRequestId: null,
+        checkpointScopeId: null,
+        startedAt: null,
+        completedAt: null,
+      },
+    }) as ProviderAdapter.ProviderAdapterV2Event;
+  const subagentRow = (childThread: ThreadId | null) =>
+    ({
+      type: "subagent.updated",
+      driver,
+      subagent: {
+        id: subagentNodeId,
+        threadId,
+        runId: launching.runId,
+        childThreadId: childThread,
+        status: "running",
+      },
+    }) as ProviderAdapter.ProviderAdapterV2Event;
+  const childShellFrom = (parentNodeId: NodeId) =>
+    ({
+      type: "app_thread.created",
+      driver,
+      appThread: {
+        id: childThreadId,
+        lineage: {
+          parentThreadId: threadId,
+          relationshipToParent: "subagent",
+          rootThreadId: threadId,
+        },
+        forkedFrom: { type: "node", nodeId: parentNodeId },
+      },
+    }) as ProviderAdapter.ProviderAdapterV2Event;
+  const childShell = childShellFrom(subagentNodeId);
+  const childProviderThread = {
+    type: "provider_thread.updated",
+    driver,
+    providerThread: { id: childProviderThreadId, appThreadId: childThreadId },
+  } as ProviderAdapter.ProviderAdapterV2Event;
+  const childRoot = (
+    status: OrchestrationV2ExecutionNode["status"],
+    nodeId = NodeId.make("node:shell-owner:child-root"),
+  ) =>
+    ({
+      type: "node.updated",
+      driver,
+      node: {
+        id: nodeId,
+        threadId: childThreadId,
+        runId: null,
+        kind: "root_turn",
+        status,
+        providerThreadId: null,
+      },
+    }) as ProviderAdapter.ProviderAdapterV2Event;
+  const childRootNode = childRoot("running");
+  // Another child of the launching run, which keeps it ingesting after its root turn.
+  const otherChild = (status: OrchestrationV2Subagent["status"]) =>
+    ({
+      type: "subagent.updated",
+      driver,
+      subagent: {
+        id: NodeId.make("node:shell-owner:other-child"),
+        threadId,
+        runId: launching.runId,
+        status,
+      },
+    }) as ProviderAdapter.ProviderAdapterV2Event;
+  // OpenCode2 reports a subagent called again under a new node, with its thread again.
+  const secondCallNodeId = NodeId.make("node:shell-owner:subagent:second-call");
+  const secondCallNode = (status: OrchestrationV2ExecutionNode["status"]) =>
+    ({
+      type: "node.updated",
+      driver,
+      node: {
+        id: secondCallNodeId,
+        threadId,
+        runId: live.runId,
+        parentNodeId: live.rootNodeId,
+        rootNodeId: live.rootNodeId,
+        kind: "subagent",
+        status,
+        providerThreadId,
+      },
+    }) as ProviderAdapter.ProviderAdapterV2Event;
+  const secondCallRoot = (status: OrchestrationV2ExecutionNode["status"]) =>
+    childRoot(status, NodeId.make("node:shell-owner:child-root:second-call"));
+
+  // Each adapter that hands runs a child thread whose node comes first, in the
+  // order it emits them around the shell. None of them is still in its
+  // launching run's root turn here, so the live run takes the thread. Prime
+  // Agent's child threads are stored by its session instead.
+  const nodeFirstShapes = [
+    {
+      adapter: "OpenCode",
+      beforeShell: [subagentNode("running", providerThreadId), subagentRow(null)],
+      afterShell: [
+        childProviderThread,
+        subagentNode("running", childProviderThreadId),
+        subagentRow(childThreadId),
+        childRootNode,
+      ],
+    },
+    {
+      adapter: "OpenCode2",
+      beforeShell: [subagentNode("pending", providerThreadId), subagentRow(null)],
+      afterShell: [
+        childProviderThread,
+        subagentNode("running", childProviderThreadId),
+        subagentRow(childThreadId),
+        childRootNode,
+      ],
+    },
+  ] as const;
+
+  const touchesChildThread = (event: ProviderAdapter.ProviderAdapterV2Event): boolean =>
+    (event.type === "app_thread.created" && event.appThread.id === childThreadId) ||
+    (event.type === "provider_thread.updated" &&
+      event.providerThread.appThreadId === childThreadId) ||
+    (event.type === "node.updated" && event.node.threadId === childThreadId);
+  const rootTerminal = (run: ScenarioRun) =>
+    ({
+      type: "turn.terminal",
+      driver,
+      providerThreadId,
+      providerTurnId: run.providerTurnId,
+      runOrdinal: 1,
+      status: "completed",
+      failure: null,
+      threadDisposition: "reusable",
+    }) as ProviderAdapter.ProviderAdapterV2Event;
+  // A run ingests its own root node update, so seeing it ingested proves the
+  // run processed every event published before it.
+  const drainMarker = (run: ScenarioRun) =>
+    ({
+      type: "node.updated",
+      driver,
+      node: {
+        id: run.rootNodeId,
+        threadId,
+        runId: run.runId,
+        kind: "root_turn",
+        status: "running",
+        providerThreadId: null,
+      },
+    }) as ProviderAdapter.ProviderAdapterV2Event;
+
+  /** One provider session that several runs subscribe to, as ProviderSessionManager does. */
+  const sharedSessionScenario = Effect.gen(function* () {
+    const subscribers = yield* Ref.make<
+      ReadonlyMap<RunId, Queue.Queue<ProviderAdapter.ProviderAdapterV2Event, Cause.Done>>
+    >(new Map());
+    const closed = new Map(
+      [launching, live].map((run) => [run.runId, Deferred.makeUnsafe<void>()]),
+    );
+    const drained = new Map(
+      [launching, live].map((run) => [run.runId, Deferred.makeUnsafe<void>()]),
+    );
+    const childEventOwners = yield* Ref.make<ReadonlyArray<RunId | undefined>>([]);
+    const shellGate = yield* Ref.make<{
+      readonly runId: RunId;
+      readonly gate: Deferred.Deferred<void>;
+    } | null>(null);
+    const layerTest = RunExecutionService.layer.pipe(
+      Layer.provide(
+        Layer.mergeAll(
+          McpAppModelContext.layerEmpty,
+          Layer.mock(CheckpointService.CheckpointServiceV2)({ captureBaseline: () => Effect.void }),
+          layerTurnItemPositionsTest,
+          Layer.mock(EventSink.EventSinkV2)({
+            write: () => Effect.succeed([]),
+            writeWithEffects: () => Effect.succeed([]),
+            writeIfRunCurrent: () => Effect.succeed({ committed: true, storedEvents: [] }),
+          }),
+          IdAllocator.layer,
+          Layer.mock(ProviderEventIngestor.ProviderEventIngestorV2)({
+            ingestNormalized: (input) =>
+              Effect.gen(function* () {
+                const { event, runId } = input;
+                if (touchesChildThread(event)) {
+                  yield* Ref.update(childEventOwners, (owners) => [...owners, runId]);
+                }
+                const drainedRun = [launching, live].find(
+                  (run) => event.type === "node.updated" && event.node.id === run.rootNodeId,
+                );
+                if (drainedRun !== undefined) {
+                  yield* Deferred.succeed(drained.get(drainedRun.runId)!, undefined);
+                }
+                return [];
+              }),
+          }),
+          ServerSettings.layerTest(),
+        ),
+      ),
+    );
+    const runtime = yield* Layer.build(layerTest);
+    const runExecution = Context.get(runtime, RunExecutionService.RunExecutionServiceV2);
+    const publish = (events: ReadonlyArray<ProviderAdapter.ProviderAdapterV2Event>) =>
+      Effect.gen(function* () {
+        for (const queue of (yield* Ref.get(subscribers)).values()) {
+          yield* Queue.offerAll(queue, events);
+        }
+      });
+    const start = (run: ScenarioRun) =>
+      runExecution.startRootRun({
+        commandId: CommandId.make(`command:${run.runId}`),
+        appThread: { id: threadId } as OrchestrationV2AppThread,
+        providerSessionId: ProviderSessionId.make("session:shell-owner"),
+        session: {
+          events: Stream.empty,
+          subscribeEvents: Effect.gen(function* () {
+            const queue = yield* Queue.unbounded<
+              ProviderAdapter.ProviderAdapterV2Event,
+              Cause.Done
+            >();
+            yield* Ref.update(subscribers, (current) => new Map(current).set(run.runId, queue));
+            const close = Ref.update(subscribers, (current) => {
+              const next = new Map(current);
+              next.delete(run.runId);
+              return next;
+            }).pipe(
+              Effect.andThen(Queue.end(queue)),
+              Effect.andThen(Deferred.succeed(closed.get(run.runId)!, undefined)),
+              Effect.asVoid,
+            );
+            const events = Stream.fromQueue(queue).pipe(
+              Stream.mapEffect((event): Effect.Effect<ProviderAdapter.ProviderAdapterV2Event> =>
+                event.type === "app_thread.created"
+                  ? Ref.get(shellGate).pipe(
+                      Effect.flatMap((held) =>
+                        held === null || held.runId !== run.runId
+                          ? Effect.void
+                          : Deferred.await(held.gate),
+                      ),
+                      Effect.as(event),
+                    )
+                  : Effect.succeed(event),
+              ),
+            );
+            return { events, close };
+          }),
+          startTurn: () => Effect.void,
+        } as unknown as ProviderAdapter.ProviderAdapterV2SessionRuntime,
+        run: { id: run.runId, threadId, ordinal: 1, providerInstanceId } as OrchestrationV2Run,
+        rootNode: { id: run.rootNodeId } as OrchestrationV2ExecutionNode,
+        checkpointScope: {
+          id: CheckpointScopeId.make(`checkpoint-scope:${run.runId}`),
+        } as OrchestrationV2CheckpointScope,
+        providerThread: { id: providerThreadId, driver } as OrchestrationV2ProviderThread,
+        attempt: {
+          id: run.attemptId,
+          providerTurnId: run.providerTurnId,
+        } as OrchestrationV2RunAttempt,
+        attemptId: run.attemptId,
+        providerTurnOrdinal: 1,
+        message: {
+          messageId: MessageId.make(`message:${run.runId}`),
+          text: "Delegate.",
+          attachments: [],
+          createdBy: "user",
+          creationSource: "web",
+        },
+        modelSelection: { instanceId: providerInstanceId, model: "gpt-5.4" },
+        runtimePolicy: {
+          runtimeMode: "full-access",
+          interactionMode: "default",
+          cwd: process.cwd(),
+          approvalPolicy: "never",
+          sandboxPolicy: { type: "readOnly", access: { type: "fullAccess" }, networkAccess: false },
+        },
+      });
+    const awaitWithin = (deferred: Deferred.Deferred<void>, what: string) =>
+      Deferred.await(deferred).pipe(
+        Effect.timeoutOption("2 seconds"),
+        Effect.map((done) => assert.isTrue(Option.isSome(done), what)),
+      );
+    return {
+      start,
+      publish,
+      awaitDrained: (run: ScenarioRun) =>
+        awaitWithin(drained.get(run.runId)!, `${run.runId} did not drain`),
+      awaitClosed: (run: ScenarioRun) =>
+        awaitWithin(closed.get(run.runId)!, `${run.runId} still subscribed`),
+      childEventOwners: Ref.get(childEventOwners),
+      /** Holds a run before it reads a shell; the returned effect lets it go on. */
+      holdAtShell: (run: ScenarioRun) =>
+        Effect.gen(function* () {
+          const gate = yield* Deferred.make<void>();
+          yield* Ref.set(shellGate, { runId: run.runId, gate });
+          return Deferred.succeed(gate, undefined);
+        }),
+      endAll: Effect.gen(function* () {
+        for (const queue of (yield* Ref.get(subscribers)).values()) yield* Queue.end(queue);
+      }),
+    };
+  });
+
+  it.effect.each(nodeFirstShapes)(
+    "$adapter: one run adopts a shell when a run subscribes between its node and its shell",
+    (shape) =>
+      Effect.scoped(
+        Effect.gen(function* () {
+          const session = yield* sharedSessionScenario;
+          yield* session.start(launching);
+          // Another child keeps the launching run ingesting after its root turn.
+          yield* session.publish([
+            {
+              type: "subagent.updated",
+              driver,
+              subagent: {
+                id: NodeId.make("node:shell-owner:other-child"),
+                threadId,
+                runId: launching.runId,
+                status: "running",
+              },
+            } as ProviderAdapter.ProviderAdapterV2Event,
+            rootTerminal(launching),
+            ...shape.beforeShell,
+          ]);
+          yield* session.start(live);
+          const childEvents = [childShell, ...shape.afterShell].filter(touchesChildThread);
+          yield* session.publish([
+            childShell,
+            ...shape.afterShell,
+            drainMarker(launching),
+            drainMarker(live),
+          ]);
+          yield* session.awaitDrained(launching);
+          yield* session.awaitDrained(live);
+          assert.deepEqual(
+            yield* session.childEventOwners,
+            childEvents.map(() => live.runId),
+          );
+          yield* session.endAll;
+        }),
+      ),
+  );
+
+  it.effect.each(nodeFirstShapes)(
+    "$adapter: the live run adopts a shell whose launching run stopped listening",
+    (shape) =>
+      Effect.scoped(
+        Effect.gen(function* () {
+          const session = yield* sharedSessionScenario;
+          yield* session.start(launching);
+          yield* session.publish([rootTerminal(launching)]);
+          yield* session.awaitClosed(launching);
+          yield* session.start(live);
+          const childEvents = [childShell, ...shape.afterShell].filter(touchesChildThread);
+          yield* session.publish([
+            ...shape.beforeShell,
+            childShell,
+            ...shape.afterShell,
+            drainMarker(live),
+          ]);
+          yield* session.awaitDrained(live);
+          assert.deepEqual(
+            yield* session.childEventOwners,
+            childEvents.map(() => live.runId),
+          );
+          yield* session.endAll;
+        }),
+      ),
+  );
+
+  it.effect(
+    "a late node-first shell goes once to the lagging live run, not to its launching run",
+    () =>
+      Effect.scoped(
+        Effect.gen(function* () {
+          const session = yield* sharedSessionScenario;
+          yield* session.start(launching);
+          yield* session.publish([
+            otherChild("running"),
+            rootTerminal(launching),
+            subagentNode("running", providerThreadId),
+            drainMarker(launching),
+          ]);
+          yield* session.awaitDrained(launching);
+          yield* session.start(live);
+          const releaseLiveRun = yield* session.holdAtShell(live);
+          const childEvents = [childShell, childRootNode, childRoot("completed")];
+          yield* session.publish([...childEvents, otherChild("completed")]);
+          yield* session.awaitClosed(launching);
+          assert.deepEqual(
+            yield* session.childEventOwners,
+            [],
+            "a late shell goes to the live run, not to its launching run",
+          );
+          yield* releaseLiveRun;
+          yield* session.publish([drainMarker(live)]);
+          yield* session.awaitDrained(live);
+          assert.deepEqual(
+            yield* session.childEventOwners,
+            childEvents.map(() => live.runId),
+          );
+          yield* session.endAll;
+        }),
+      ),
+  );
+
+  it.effect("the live run adopts a subagent called again after its owner stopped", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const session = yield* sharedSessionScenario;
+        yield* session.start(launching);
+        yield* session.publish([
+          subagentNode("running", providerThreadId),
+          childShell,
+          childRootNode,
+          childRoot("completed"),
+          subagentNode("completed", providerThreadId),
+          rootTerminal(launching),
+        ]);
+        yield* session.awaitClosed(launching);
+        yield* session.start(live);
+        yield* session.publish([
+          secondCallNode("running"),
+          childShellFrom(secondCallNodeId),
+          childRootNode,
+          drainMarker(live),
+        ]);
+        yield* session.awaitDrained(live);
+        assert.deepEqual(yield* session.childEventOwners, [
+          launching.runId,
+          launching.runId,
+          launching.runId,
+          live.runId,
+          live.runId,
+        ]);
+        yield* session.endAll;
+      }),
+    ),
+  );
+
+  it.effect(
+    "OpenCode2: the live run adopts a re-called subagent's shell its old owner refused",
+    () =>
+      Effect.scoped(
+        Effect.gen(function* () {
+          const session = yield* sharedSessionScenario;
+          yield* session.start(launching);
+          yield* session.publish([
+            otherChild("running"),
+            subagentNode("running", providerThreadId),
+            childShell,
+            childRootNode,
+            rootTerminal(launching),
+            drainMarker(launching),
+          ]);
+          yield* session.awaitDrained(launching);
+          yield* session.start(live);
+          yield* session.publish([
+            childRoot("completed"),
+            subagentNode("completed", providerThreadId),
+            drainMarker(live),
+          ]);
+          yield* session.awaitDrained(live);
+          const releaseLiveRun = yield* session.holdAtShell(live);
+          yield* session.publish([
+            secondCallNode("running"),
+            childShellFrom(secondCallNodeId),
+            otherChild("completed"),
+          ]);
+          yield* session.awaitClosed(launching);
+          yield* releaseLiveRun;
+          yield* session.publish([
+            secondCallRoot("running"),
+            secondCallRoot("completed"),
+            rootTerminal(live),
+          ]);
+          yield* session.awaitClosed(live);
+          assert.deepEqual(yield* session.childEventOwners, [
+            launching.runId,
+            launching.runId,
+            launching.runId,
+            live.runId,
+            live.runId,
+            live.runId,
+          ]);
+        }),
+      ),
+  );
+
+  it.effect(
+    "OpenCode2: a run lagging across another run's re-call adopts neither shell, as before shells carried a run",
+    () =>
+      Effect.scoped(
+        Effect.gen(function* () {
+          const session = yield* sharedSessionScenario;
+          yield* session.start(launching);
+          yield* session.publish([
+            otherChild("running"),
+            subagentNode("running", providerThreadId),
+            rootTerminal(launching),
+            drainMarker(launching),
+          ]);
+          yield* session.awaitDrained(launching);
+          const releaseLaunching = yield* session.holdAtShell(launching);
+          yield* session.publish([childShell, childRootNode, childRoot("completed")]);
+          yield* session.start(live);
+          const secondCallEvents = [
+            childShellFrom(secondCallNodeId),
+            secondCallRoot("running"),
+            secondCallRoot("completed"),
+          ];
+          yield* session.publish([
+            secondCallNode("running"),
+            ...secondCallEvents,
+            secondCallNode("completed"),
+            rootTerminal(live),
+          ]);
+          yield* session.awaitClosed(live);
+          yield* releaseLaunching;
+          yield* session.publish([otherChild("completed")]);
+          yield* session.awaitClosed(launching);
+          assert.deepEqual(
+            yield* session.childEventOwners,
+            secondCallEvents.map(() => live.runId),
+            "an unstamped shell that arrives after its run's root turn ended is not adopted (pre-series base), and the newer call's events are delivered once",
+          );
+        }),
+      ),
+  );
+});
+
 it("does not route a superseded attempt through a reused provider thread", () => {
   const threadId = ThreadId.make("thread:shared-runtime:restart");
   const providerThreadId = ProviderThreadId.make("provider-thread:shared-runtime:restart");
@@ -450,6 +1157,78 @@ it("routes only exact same-thread background items inherited from settled runs",
   );
 });
 
+it("routes a settled run's subagent update to the live run that inherited its card", () => {
+  const threadId = ThreadId.make("thread:inherited-subagent-routing");
+  const priorRunId = RunId.make("run:inherited-subagent-routing:prior");
+  const identity: RunExecutionService.ProviderEventRouteIdentity = {
+    threadId,
+    runId: RunId.make("run:inherited-subagent-routing:current"),
+    attemptId: RunAttemptId.make("attempt:inherited-subagent-routing:current"),
+    providerThreadId: ProviderThreadId.make("provider-thread:inherited-subagent-routing:current"),
+  };
+  const subagentId = NodeId.make("node:inherited-subagent-routing");
+  const initial = RunExecutionService.makeProviderEventRoutingState({
+    identity,
+    inheritedBackgroundTurnItems: [
+      {
+        id: TurnItemId.make("turn-item:inherited-subagent-routing"),
+        runId: priorRunId,
+        subagentId,
+      },
+    ],
+    providerTurnId: null,
+  });
+  const subagentUpdate = (
+    status: OrchestrationV2Subagent["status"],
+    overrides: Partial<OrchestrationV2Subagent> = {},
+  ) =>
+    ({
+      type: "subagent.updated",
+      driver,
+      subagent: { id: subagentId, threadId, runId: priorRunId, status, ...overrides },
+    }) as ProviderAdapter.ProviderAdapterV2Event;
+
+  const [runningAccepted, afterRunning] = RunExecutionService.routeProviderEvent(
+    subagentUpdate("running"),
+    identity,
+    initial,
+  );
+  assert.isTrue(runningAccepted);
+  assert.isFalse(
+    RunExecutionService.routeProviderEvent(
+      subagentUpdate("completed", { id: NodeId.make("node:other-subagent") }),
+      identity,
+      afterRunning,
+    )[0],
+    "only the exact inherited card is routed",
+  );
+  assert.isFalse(
+    RunExecutionService.routeProviderEvent(
+      subagentUpdate("completed", { runId: RunId.make("run:inherited-subagent-routing:other") }),
+      identity,
+      afterRunning,
+    )[0],
+  );
+  assert.isFalse(
+    RunExecutionService.routeProviderEvent(
+      subagentUpdate("completed", { threadId: ThreadId.make("thread:inherited-other") }),
+      identity,
+      afterRunning,
+    )[0],
+  );
+
+  const [terminalAccepted, afterTerminal] = RunExecutionService.routeProviderEvent(
+    subagentUpdate("completed"),
+    identity,
+    afterRunning,
+  );
+  assert.isTrue(terminalAccepted);
+  assert.isFalse(
+    RunExecutionService.routeProviderEvent(subagentUpdate("running"), identity, afterTerminal)[0],
+    "a nonterminal replay must not resurrect an inherited terminal",
+  );
+});
+
 it("selects only live background items from non-completed settled prior runs", () => {
   const threadId = ThreadId.make("thread:inherited-background-selection");
   const otherThreadId = ThreadId.make("thread:inherited-background-selection:other");
@@ -480,6 +1259,7 @@ it("selects only live background items from non-completed settled prior runs", (
       ordinal,
       status,
     }) as OrchestrationV2Run;
+  const subagentIdOf = (id: TurnItemId) => NodeId.make(`node:${id}`);
   const makeItem = (
     id: TurnItemId,
     runId: RunId,
@@ -495,6 +1275,7 @@ it("selects only live background items from non-completed settled prior runs", (
       providerThreadId,
       type,
       status,
+      subagentId: subagentIdOf(id),
     }) as OrchestrationV2TurnItem;
 
   const selected = RunExecutionService.selectInheritedBackgroundTurnItems({
@@ -559,9 +1340,9 @@ it("selects only live background items from non-completed settled prior runs", (
   });
 
   assert.deepEqual(selected, [
-    { id: inheritedItemId, runId: interruptedRunId },
-    { id: failedItemId, runId: failedRunId },
-    { id: cancelledItemId, runId: cancelledRunId },
+    { id: inheritedItemId, runId: interruptedRunId, subagentId: subagentIdOf(inheritedItemId) },
+    { id: failedItemId, runId: failedRunId, subagentId: subagentIdOf(failedItemId) },
+    { id: cancelledItemId, runId: cancelledRunId, subagentId: subagentIdOf(cancelledItemId) },
   ]);
 });
 
@@ -3807,33 +4588,52 @@ it.effect("does not start a turn whose run settled during the app context read",
   }),
 );
 
-it.effect("refreshes pull requests only once when startup failure closes its event stream", () =>
-  Effect.gen(function* () {
-    const ingestionStarted = yield* Deferred.make<void>();
-    const { observed, written } = yield* captureRootRunTermination({
-      key: "pull-request-refresh:startup-error",
-      shouldFinalizeRun: () => Effect.succeed(true),
-      events: () =>
-        Stream.unwrap(Deferred.succeed(ingestionStarted, undefined).pipe(Effect.as(Stream.never))),
-      startTurn: (input) =>
-        Deferred.await(ingestionStarted).pipe(
-          Effect.andThen(
-            Effect.fail(
-              new ProviderAdapter.ProviderAdapterTurnStartError({
-                driver,
-                threadId: input.threadId,
-                providerThreadId: input.providerThread.id,
-                runId: input.runId,
-                cause: "provider rejected the turn",
-              }),
-            ),
+const captureRejectedTurnStart = Effect.gen(function* () {
+  const ingestionStarted = yield* Deferred.make<void>();
+  return yield* captureRootRunTermination({
+    key: "pull-request-refresh:startup-error",
+    shouldFinalizeRun: () => Effect.succeed(true),
+    events: () =>
+      Stream.unwrap(Deferred.succeed(ingestionStarted, undefined).pipe(Effect.as(Stream.never))),
+    startTurn: (input) =>
+      Deferred.await(ingestionStarted).pipe(
+        Effect.andThen(
+          Effect.fail(
+            new ProviderAdapter.ProviderAdapterTurnStartError({
+              driver,
+              threadId: input.threadId,
+              providerThreadId: input.providerThread.id,
+              runId: input.runId,
+              cause: "provider rejected the turn",
+            }),
           ),
         ),
-    });
+      ),
+  });
+});
+
+it.effect("refreshes pull requests only once when startup failure closes its event stream", () =>
+  Effect.gen(function* () {
+    const { observed, written } = yield* captureRejectedTurnStart;
     assert.equal(observed.filter((item) => item === "pull-requests-refreshed").length, 1);
     assert.equal(observed[0], "run:failed");
     const error = written.find((item) => item.type === "error");
     assert.include(error?.failure.message ?? "", "provider could not start this turn");
+  }),
+);
+
+it.effect("logs a failed turn start's cause as text", () =>
+  Effect.gen(function* () {
+    const logged: Array<unknown> = [];
+    const capture = Logger.make(({ message }) => {
+      const [text, fields] = Array.isArray(message) ? message : [message];
+      if (text === "orchestration V2 provider turn start failed") logged.push(fields);
+    });
+    yield* captureRejectedTurnStart.pipe(Effect.provide(Logger.layer([capture])));
+    assert.lengthOf(logged, 1);
+    const { cause } = logged[0] as { readonly cause: unknown };
+    assert.isString(cause);
+    assert.include(cause as string, "provider rejected the turn");
   }),
 );
 

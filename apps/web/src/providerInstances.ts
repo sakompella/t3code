@@ -6,6 +6,7 @@ import {
   type ProjectId,
   type ProviderDriverKind,
   ProviderInstanceId,
+  providerForNewThread,
   type ServerProvider,
   type ServerProviderModel,
   type ServerSettings,
@@ -216,23 +217,15 @@ export function getDefaultProviderInstanceModel(
   );
 }
 
-const isSelectableProviderInstanceEntry = (entry: ProviderInstanceEntry): boolean =>
-  entry.enabled && entry.isAvailable;
-
+/**
+ * Resolve an exact stored instance when it remains enabled and available,
+ * else the fallback a new thread starts on (see `providerForNewThread`).
+ */
 export function resolveSelectableProviderInstanceEntry(
   entries: ReadonlyArray<ProviderInstanceEntry>,
   instanceId: ProviderInstanceId | undefined,
 ): ProviderInstanceEntry | undefined {
-  if (instanceId !== undefined) {
-    const requested = entries.find((entry) => entry.instanceId === instanceId);
-    if (requested && isSelectableProviderInstanceEntry(requested)) {
-      return requested;
-    }
-  }
-  return (
-    entries.find(isProviderInstancePickerReady) ??
-    entries.find((entry) => isSelectableProviderInstanceEntry(entry) && entry.status !== "error")
-  );
+  return providerForNewThread(entries, instanceId);
 }
 
 export function resolveSelectableProviderInstance(

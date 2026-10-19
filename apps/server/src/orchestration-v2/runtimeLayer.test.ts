@@ -17,6 +17,7 @@ import {
   RuntimeRequestId,
   TurnItemId,
   type ModelSelection,
+  type OrchestrationV2Notification,
   type OrchestrationV2Run,
   ProjectId,
   type PullRequestDetail,
@@ -668,6 +669,124 @@ it.layer(layerTest)("OrchestrationV2LayerLive", (it) => {
     }),
   );
 
+  it.effect("passes a rollback summary on only when the provider's session can summarize", () =>
+    Effect.gen(function* () {
+      const orchestrator = yield* Orchestrator.OrchestratorV2;
+      const eventSink = yield* EventSink.EventSinkV2;
+      const outbox = yield* EffectOutbox.EffectOutboxV2;
+      const threadId = ThreadId.make("runtime-rollback-summary");
+      yield* orchestrator.dispatch({
+        type: "thread.create",
+        createdBy: "user",
+        creationSource: "web",
+        commandId: CommandId.make("runtime-rollback-summary-create"),
+        threadId,
+        projectId: ProjectId.make("runtime-rollback-summary-project"),
+        title: "Rollback summary",
+        modelSelection,
+        runtimeMode: "full-access",
+        interactionMode: "default",
+        branch: null,
+        worktreePath: process.cwd(),
+      });
+      yield* orchestrator.dispatch({
+        type: "message.dispatch",
+        createdBy: "user",
+        creationSource: "web",
+        commandId: CommandId.make("runtime-rollback-summary-message"),
+        threadId,
+        messageId: MessageId.make("runtime-rollback-summary-message"),
+        text: "Create the provider thread and checkpoint scope.",
+        attachments: [],
+        dispatchMode: { type: "start_immediately" },
+      });
+      const projection = yield* orchestrator.getThreadProjection(threadId);
+      const scope = projection.checkpointScopes[0]!;
+      const providerThread = projection.providerThreads[0]!;
+      const checkpointId = CheckpointId.make("runtime-rollback-summary-checkpoint");
+      const now = yield* DateTime.now;
+      yield* eventSink.write({
+        commandId: CommandId.make("runtime-rollback-summary-seed"),
+        events: [
+          {
+            id: EventId.make("runtime-rollback-summary-checkpoint-event"),
+            type: "checkpoint.captured",
+            threadId,
+            occurredAt: now,
+            payload: {
+              id: checkpointId,
+              threadId,
+              scopeId: scope.id,
+              runId: null,
+              nodeId: scope.nodeId,
+              parentCheckpointId: null,
+              ordinalWithinScope: 0,
+              appRunOrdinal: null,
+              ref: CheckpointRef.make("refs/t3/runtime-rollback-summary"),
+              status: "ready",
+              files: [],
+              capturedAt: now,
+            },
+          },
+        ],
+      });
+      const rollBack = (commandId: CommandId) =>
+        orchestrator.dispatch({
+          type: "checkpoint.rollback",
+          commandId,
+          threadId,
+          checkpointId,
+          scopeId: scope.id,
+          restoreFiles: false,
+          summary: { instructions: "Keep the decisions." },
+        });
+
+      const refusedCommandId = CommandId.make("runtime-rollback-summary-refused");
+      const refused = yield* rollBack(refusedCommandId).pipe(Effect.flip);
+      assert.match(String(refused.cause), /cannot summarize/);
+      assert.deepEqual(yield* outbox.listByCommandId(refusedCommandId), []);
+
+      // The adapter's own capabilities still say no; the hosting session says yes.
+      yield* eventSink.write({
+        commandId: CommandId.make("runtime-rollback-summary-session"),
+        events: [
+          {
+            id: EventId.make("runtime-rollback-summary-session-event"),
+            type: "provider-session.attached",
+            threadId,
+            occurredAt: now,
+            payload: {
+              id: providerThread.providerSessionId!,
+              driver,
+              providerInstanceId: modelSelection.instanceId,
+              status: "ready",
+              cwd: process.cwd(),
+              model: modelSelection.model,
+              capabilities: {
+                ...CodexProviderCapabilitiesV2,
+                checkpointing: {
+                  ...CodexProviderCapabilitiesV2.checkpointing,
+                  providerCanSummarizeRollback: true,
+                },
+              },
+              createdAt: now,
+              updatedAt: now,
+              lastError: null,
+            },
+          },
+        ],
+      });
+      const acceptedCommandId = CommandId.make("runtime-rollback-summary-accepted");
+      yield* rollBack(acceptedCommandId);
+      const [effect] = yield* outbox.listByCommandId(acceptedCommandId);
+      assert.equal(effect?.request.type, "provider-thread.rollback");
+      assert.deepEqual(
+        effect?.request.type === "provider-thread.rollback" ? effect.request.summary : undefined,
+        { instructions: "Keep the decisions." },
+      );
+    }).pipe(Effect.provide(Layer.fresh(layerTest))),
+  );
+
   it.effect("rejects non-ready rollback targets before persisting events or effects", () =>
     Effect.gen(function* () {
       const orchestrator = yield* Orchestrator.OrchestratorV2;
@@ -826,6 +945,60 @@ it.layer(layerTest)("OrchestrationV2LayerLive", (it) => {
           assert.deepEqual(yield* outbox.listByCommandId(commandId), []);
         }
       }
+    }).pipe(Effect.provide(Layer.fresh(layerTest))),
+  );
+
+  it.effect("refuses to start a turn while the thread is rewinding", () =>
+    Effect.gen(function* () {
+      const orchestrator = yield* Orchestrator.OrchestratorV2;
+      const eventSink = yield* EventSink.EventSinkV2;
+      const threadId = ThreadId.make("runtime-rewinding-thread");
+      yield* orchestrator.dispatch({
+        type: "thread.create",
+        createdBy: "user",
+        creationSource: "web",
+        commandId: CommandId.make("runtime-rewinding-create"),
+        threadId,
+        projectId: ProjectId.make("runtime-rewinding-project"),
+        title: "Rewinding",
+        modelSelection,
+        runtimeMode: "full-access",
+        interactionMode: "default",
+        branch: null,
+        worktreePath: process.cwd(),
+      });
+      const { thread } = yield* orchestrator.getThreadProjection(threadId);
+      const now = yield* DateTime.now;
+      yield* eventSink.write({
+        commandId: CommandId.make("runtime-rewinding-seed"),
+        events: [
+          {
+            id: EventId.make("runtime-rewinding-seed-event"),
+            type: "thread.metadata-updated",
+            threadId,
+            providerInstanceId: thread.providerInstanceId,
+            occurredAt: now,
+            payload: {
+              ...thread,
+              pendingHeadMove: { requestId: CommandId.make("runtime-rewinding"), summarize: true },
+              updatedAt: now,
+            },
+          },
+        ],
+      });
+      const message = {
+        type: "message.dispatch",
+        createdBy: "user",
+        creationSource: "web",
+        commandId: CommandId.make("runtime-rewinding-message"),
+        threadId,
+        messageId: MessageId.make("runtime-rewinding-message"),
+        text: "Sent while the thread rewinds.",
+        attachments: [],
+        dispatchMode: { type: "start_immediately" },
+      } as const;
+      const refused = yield* orchestrator.dispatch(message).pipe(Effect.flip);
+      assert.match(String(refused.cause), /still rewinding/);
     }).pipe(Effect.provide(Layer.fresh(layerTest))),
   );
 
@@ -3612,6 +3785,209 @@ it.layer(layerTest)("OrchestrationV2LayerLive lifecycle", (it) => {
       }),
   );
 
+  it.effect("a restart continuation of a settled thread leaves it settled", () =>
+    Effect.gen(function* () {
+      const orchestrator = yield* Orchestrator.OrchestratorV2;
+      const eventSink = yield* EventSink.EventSinkV2;
+      const threadId = ThreadId.make("runtime-layer-restart-settled");
+      yield* orchestrator.dispatch({
+        type: "thread.create",
+        createdBy: "user",
+        creationSource: "web",
+        commandId: CommandId.make("restart-settled-create"),
+        threadId,
+        projectId: ProjectId.make("restart-settled-project"),
+        title: "Restart settled",
+        modelSelection,
+        runtimeMode: "full-access",
+        interactionMode: "default",
+        branch: null,
+        worktreePath: "/tmp/runtime-layer-restart-settled",
+      });
+      yield* orchestrator.dispatch({
+        type: "message.dispatch",
+        createdBy: "user",
+        creationSource: "web",
+        commandId: CommandId.make("restart-settled-user-message"),
+        threadId,
+        messageId: MessageId.make("restart-settled-user-message"),
+        text: "Original work",
+        attachments: [],
+        modelSelection,
+        dispatchMode: { type: "start_immediately" },
+      });
+      const original = (yield* orchestrator.getThreadProjection(threadId)).runs[0]!;
+      const cancelledAt = yield* DateTime.now;
+      yield* eventSink.commitCommand({
+        commandId: CommandId.make("restart-settled-cancel"),
+        threadId,
+        commandType: "provider-runtime.reconcile",
+        acceptedAt: cancelledAt,
+        events: [
+          {
+            id: EventId.make("restart-settled-cancel-event"),
+            type: "run.updated",
+            threadId,
+            runId: original.id,
+            occurredAt: cancelledAt,
+            payload: { ...original, status: "cancelled", completedAt: cancelledAt },
+          },
+        ],
+        effects: [],
+      });
+      yield* orchestrator.dispatch({
+        type: "thread.settle",
+        commandId: CommandId.make("restart-settled-settle"),
+        threadId,
+      });
+      const settledAt = (yield* orchestrator.getThreadProjection(threadId)).thread.settledAt;
+      assert.isNotNull(settledAt);
+
+      yield* orchestrator.dispatch({
+        type: "message.dispatch",
+        createdBy: "agent",
+        creationSource: "server",
+        commandId: CommandId.make("restart-settled-continuation"),
+        threadId,
+        messageId: MessageId.make("restart-settled-continuation"),
+        text: "Continue where you left off.",
+        attachments: [],
+        modelSelection,
+        dispatchMode: { type: "start_immediately" },
+        restartContinuationOfRunId: original.id,
+      });
+      const resumed = yield* orchestrator.getThreadProjection(threadId);
+      assert.lengthOf(resumed.runs, 2);
+      assert.equal(resumed.thread.settledOverride, "settled");
+      assert.deepEqual(resumed.thread.settledAt, settledAt);
+    }),
+  );
+
+  it.effect("pinning un-settles a thread but leaves its snooze to the timer or an unsnooze", () =>
+    Effect.gen(function* () {
+      const orchestrator = yield* Orchestrator.OrchestratorV2;
+      const threadId = ThreadId.make("runtime-layer-pin-keeps-snooze");
+      yield* orchestrator.dispatch({
+        type: "thread.create",
+        createdBy: "user",
+        creationSource: "web",
+        commandId: CommandId.make("pin-snooze-create"),
+        threadId,
+        projectId: ProjectId.make("pin-snooze-project"),
+        title: "Pin keeps snooze",
+        modelSelection,
+        runtimeMode: "full-access",
+        interactionMode: "default",
+        branch: null,
+        worktreePath: "/tmp/runtime-layer-pin-snooze",
+      });
+      yield* orchestrator.dispatch({
+        type: "thread.settle",
+        commandId: CommandId.make("pin-snooze-settle"),
+        threadId,
+      });
+      const snoozedUntil = DateTime.add(yield* DateTime.now, { hours: 6 });
+      yield* orchestrator.dispatch({
+        type: "thread.snooze",
+        commandId: CommandId.make("pin-snooze-snooze"),
+        threadId,
+        snoozedUntil: DateTime.formatIso(snoozedUntil),
+      });
+      const snoozedAt = (yield* orchestrator.getThreadProjection(threadId)).thread.snoozedAt;
+
+      yield* orchestrator.dispatch({
+        type: "thread.pin",
+        commandId: CommandId.make("pin-snooze-pin"),
+        threadId,
+      });
+      const pinned = (yield* orchestrator.getThreadProjection(threadId)).thread;
+      assert.isNotNull(pinned.pinnedAt);
+      assert.equal(pinned.settledOverride, "active");
+      assert.deepEqual(pinned.snoozedUntil, snoozedUntil);
+      assert.deepEqual(pinned.snoozedAt, snoozedAt);
+
+      yield* orchestrator.dispatch({
+        type: "thread.unsnooze",
+        commandId: CommandId.make("pin-snooze-unsnooze"),
+        threadId,
+        reason: "user",
+      });
+      const woken = (yield* orchestrator.getThreadProjection(threadId)).thread;
+      assert.isNull(woken.snoozedUntil);
+      assert.isNotNull(woken.pinnedAt);
+    }),
+  );
+
+  it.effect("an unsnooze keeps the moment the snooze effectively ended", () =>
+    Effect.gen(function* () {
+      const orchestrator = yield* Orchestrator.OrchestratorV2;
+      const threadId = ThreadId.make("runtime-layer-snooze-ended-at");
+      yield* orchestrator.dispatch({
+        type: "thread.create",
+        createdBy: "user",
+        creationSource: "web",
+        commandId: CommandId.make("snooze-ended-create"),
+        threadId,
+        projectId: ProjectId.make("snooze-ended-project"),
+        title: "Snooze ended",
+        modelSelection,
+        runtimeMode: "full-access",
+        interactionMode: "default",
+        branch: null,
+        worktreePath: "/tmp/runtime-layer-snooze-ended",
+      });
+      const snooze = (name: string, until: DateTime.Utc) =>
+        orchestrator.dispatch({
+          type: "thread.snooze",
+          commandId: CommandId.make(`snooze-ended-${name}`),
+          threadId,
+          snoozedUntil: DateTime.formatIso(until),
+        });
+      const unsnooze = (name: string) =>
+        orchestrator
+          .dispatch({
+            type: "thread.unsnooze",
+            commandId: CommandId.make(`snooze-ended-${name}`),
+            threadId,
+            reason: "user",
+          })
+          .pipe(Effect.andThen(orchestrator.getThreadProjection(threadId)))
+          .pipe(Effect.map(({ thread }) => thread));
+      const iso = (value: DateTime.Utc | null | undefined) =>
+        value == null ? null : DateTime.formatIso(value);
+
+      assert.isUndefined((yield* orchestrator.getThreadProjection(threadId)).thread.snoozeEndedAt);
+
+      // An early unsnooze ends the snooze now, not at its deadline.
+      yield* snooze("early", DateTime.add(yield* DateTime.now, { hours: 6 }));
+      yield* TestClock.adjust("1 hour");
+      const early = yield* DateTime.now;
+      const afterEarly = yield* unsnooze("unsnooze-early");
+      assert.isNull(afterEarly.snoozedUntil);
+      assert.equal(iso(afterEarly.snoozeEndedAt), iso(early));
+
+      // Unsnoozing an awake thread changes nothing, even within the same millisecond.
+      const noop = yield* unsnooze("unsnooze-awake");
+      assert.equal(iso(noop.snoozeEndedAt), iso(early));
+      assert.deepEqual(noop.updatedAt, afterEarly.updatedAt);
+
+      // After the timer ran out, the deadline is when it ended; a run that
+      // finished after it and before this unsnooze stays fresh.
+      const expiredAt = DateTime.add(yield* DateTime.now, { hours: 1 });
+      yield* snooze("expired", expiredAt);
+      yield* TestClock.adjust("3 hours");
+      const afterExpired = yield* unsnooze("unsnooze-expired");
+      assert.equal(iso(afterExpired.snoozeEndedAt), iso(expiredAt));
+
+      // Recorded moments only move forward.
+      yield* snooze("late", DateTime.add(yield* DateTime.now, { hours: 6 }));
+      yield* TestClock.adjust("1 hour");
+      const lateAt = yield* DateTime.now;
+      const afterLate = yield* unsnooze("unsnooze-late");
+      assert.equal(iso(afterLate.snoozeEndedAt), iso(lateAt));
+    }),
+  );
+
   it.effect("rejects settling a thread while a run is active", () =>
     Effect.gen(function* () {
       const orchestrator = yield* Orchestrator.OrchestratorV2;
@@ -3743,6 +4119,264 @@ it.layer(layerTest)("OrchestrationV2LayerLive lifecycle", (it) => {
 
       const projection = yield* orchestrator.getThreadProjection(threadId);
       assert.equal(projection.thread.settledOverride, "settled");
+    }),
+  );
+
+  it.effect("agent wakes keep a thread settled and snoozed; only a user message un-settles", () =>
+    Effect.gen(function* () {
+      const orchestrator = yield* Orchestrator.OrchestratorV2;
+      const eventSink = yield* EventSink.EventSinkV2;
+      const threadId = ThreadId.make("runtime-layer-wake-keeps-parked");
+      const now = yield* DateTime.now;
+
+      yield* orchestrator.dispatch({
+        type: "thread.create",
+        createdBy: "user",
+        creationSource: "web",
+        commandId: CommandId.make("wake-parked-create"),
+        threadId,
+        projectId: ProjectId.make("wake-parked-project"),
+        title: "Wake keeps parked",
+        modelSelection,
+        runtimeMode: "full-access",
+        interactionMode: "default",
+        branch: null,
+        worktreePath: "/tmp/runtime-layer-wake-parked",
+      });
+      const finishRuns = (commandId: string, status: "completed" | "failed" = "completed") =>
+        Effect.gen(function* () {
+          const projection = yield* orchestrator.getThreadProjection(threadId);
+          const finishedAt = yield* DateTime.now;
+          yield* eventSink.commitCommand({
+            commandId: CommandId.make(commandId),
+            threadId,
+            commandType: "provider-runtime.reconcile",
+            acceptedAt: finishedAt,
+            events: projection.runs
+              .filter((run) => run.status !== "completed" && run.status !== "failed")
+              .map((run) => ({
+                id: EventId.make(`${commandId}:${run.id}`),
+                type: "run.updated" as const,
+                threadId,
+                runId: run.id,
+                occurredAt: finishedAt,
+                payload: { ...run, status, completedAt: finishedAt },
+              })),
+            effects: [],
+          });
+        });
+      const sendUserMessage = (id: string) =>
+        orchestrator.dispatch({
+          type: "message.dispatch",
+          createdBy: "user",
+          creationSource: "web",
+          commandId: CommandId.make(id),
+          threadId,
+          messageId: MessageId.make(id),
+          text: id,
+          attachments: [],
+          modelSelection,
+          dispatchMode: { type: "start_immediately" },
+        });
+      // The shape ProviderContinuationService dispatches for a provider self-wake.
+      const wake = (
+        id: string,
+        notification: OrchestrationV2Notification = {
+          source: { kind: "command" },
+          outcome: "completed",
+          summary: "Background command finished",
+        },
+      ) =>
+        orchestrator.dispatch({
+          type: "message.dispatch",
+          createdBy: "agent",
+          creationSource: "provider",
+          notification,
+          commandId: CommandId.make(id),
+          threadId,
+          messageId: MessageId.make(id),
+          text: id,
+          attachments: [],
+          dispatchMode: { type: "queue_after_active" },
+        });
+      // What ProviderContinuationService dispatches when delegated tasks finish:
+      // the parent run holds an open cohort whose pending delivery names the message.
+      const delegatedResult = (id: string) =>
+        Effect.gen(function* () {
+          const parentRun = (yield* orchestrator.getThreadProjection(threadId)).runs.at(-1);
+          assert.isDefined(parentRun);
+          const taskIds = [NodeId.make(`${id}-task`)];
+          const armedAt = yield* DateTime.now;
+          yield* eventSink.commitCommand({
+            commandId: CommandId.make(`${id}-arm`),
+            threadId,
+            commandType: "provider-runtime.reconcile",
+            acceptedAt: armedAt,
+            events: [
+              {
+                id: EventId.make(`${id}-arm`),
+                type: "run.updated" as const,
+                threadId,
+                runId: parentRun.id,
+                occurredAt: armedAt,
+                payload: {
+                  ...parentRun,
+                  delegatedCompletion: {
+                    disposition: "open" as const,
+                    nextGeneration: 2,
+                    delivery: { generation: 1, messageId: MessageId.make(id), taskIds },
+                  },
+                },
+              },
+            ],
+            effects: [],
+          });
+          return yield* orchestrator.dispatch({
+            type: "message.dispatch",
+            createdBy: "agent",
+            creationSource: "server",
+            delegatedCompletion: { parentRunId: parentRun.id, generation: 1, taskIds },
+            commandId: CommandId.make(id),
+            threadId,
+            messageId: MessageId.make(id),
+            text: id,
+            attachments: [],
+            dispatchMode: { type: "queue_after_active" },
+          });
+        });
+      // A scheduled task posts as its creator, not as a wake notification.
+      const scheduledMessage = (id: string) =>
+        orchestrator.dispatch({
+          type: "message.dispatch",
+          createdBy: "agent",
+          creationSource: "mcp",
+          commandId: CommandId.make(id),
+          threadId,
+          messageId: MessageId.make(id),
+          text: id,
+          attachments: [],
+          modelSelection,
+          dispatchMode: { type: "start_immediately" },
+        });
+
+      yield* sendUserMessage("wake-parked-first");
+      yield* finishRuns("wake-parked-first-done");
+      yield* orchestrator.dispatch({
+        type: "thread.settle",
+        commandId: CommandId.make("wake-parked-settle"),
+        threadId,
+      });
+      const settledAt = (yield* orchestrator.getThreadProjection(threadId)).thread.settledAt;
+      assert.isNotNull(settledAt);
+
+      yield* wake("wake-parked-settled-wake");
+      const afterSettledWake = yield* orchestrator.getThreadProjection(threadId);
+      assert.equal(afterSettledWake.thread.settledOverride, "settled");
+      assert.deepEqual(afterSettledWake.thread.settledAt, settledAt);
+      // The wake still runs: nothing the agent did is dropped.
+      assert.isTrue(
+        afterSettledWake.runs.some(
+          (run) => run.userMessageId === MessageId.make("wake-parked-settled-wake"),
+        ),
+      );
+      yield* finishRuns("wake-parked-settled-wake-done");
+
+      // A user message is the user re-engaging: it un-settles as before.
+      yield* sendUserMessage("wake-parked-user-returns");
+      const afterUser = yield* orchestrator.getThreadProjection(threadId);
+      assert.isNull(afterUser.thread.settledOverride);
+      assert.isNull(afterUser.thread.settledAt);
+      yield* finishRuns("wake-parked-user-returns-done");
+
+      const snoozedUntil = DateTime.add(now, { hours: 6 });
+      yield* orchestrator.dispatch({
+        type: "thread.snooze",
+        commandId: CommandId.make("wake-parked-snooze"),
+        threadId,
+        snoozedUntil: DateTime.formatIso(snoozedUntil),
+      });
+      const snoozedAt = (yield* orchestrator.getThreadProjection(threadId)).thread.snoozedAt;
+      assert.isNotNull(snoozedAt);
+
+      // Nothing that reaches a snoozed thread ends the snooze, and none of it
+      // is dropped: each message still starts its own run.
+      const arrivals = [
+        { id: "wake-parked-snoozed-command", send: wake("wake-parked-snoozed-command") },
+        {
+          id: "wake-parked-snoozed-subagent",
+          send: wake("wake-parked-snoozed-subagent", {
+            source: { kind: "subagent" },
+            outcome: "completed",
+            summary: "Subagent finished",
+          }),
+        },
+        {
+          id: "wake-parked-snoozed-heartbeat",
+          send: wake("wake-parked-snoozed-heartbeat", {
+            source: { kind: "background_task" },
+            outcome: "updated",
+            summary: "Heartbeat",
+          }),
+        },
+        {
+          id: "wake-parked-snoozed-delegated",
+          send: delegatedResult("wake-parked-snoozed-delegated"),
+        },
+        {
+          id: "wake-parked-snoozed-scheduled",
+          send: scheduledMessage("wake-parked-snoozed-scheduled"),
+        },
+        { id: "wake-parked-snoozed-user", send: sendUserMessage("wake-parked-snoozed-user") },
+      ];
+      for (const arrival of arrivals) {
+        yield* arrival.send;
+        const projection = yield* orchestrator.getThreadProjection(threadId);
+        assert.deepEqual(projection.thread.snoozedUntil, snoozedUntil, arrival.id);
+        assert.deepEqual(projection.thread.snoozedAt, snoozedAt, arrival.id);
+        assert.isTrue(
+          projection.runs.some((run) => run.userMessageId === MessageId.make(arrival.id)),
+          arrival.id,
+        );
+        yield* finishRuns(`${arrival.id}-done`);
+      }
+
+      // A run that fails under the snooze leaves it too.
+      yield* wake("wake-parked-snoozed-failing");
+      yield* finishRuns("wake-parked-snoozed-failing-done", "failed");
+      const afterFailure = yield* orchestrator.getThreadProjection(threadId);
+      assert.deepEqual(afterFailure.thread.snoozedUntil, snoozedUntil);
+      assert.deepEqual(afterFailure.thread.snoozedAt, snoozedAt);
+
+      // An explicit un-settle ("keep active") does not touch the snooze either.
+      yield* orchestrator.dispatch({
+        type: "thread.unsettle",
+        commandId: CommandId.make("wake-parked-keep-active"),
+        threadId,
+        reason: "user",
+      });
+      yield* wake("wake-parked-active-wake");
+      const afterActiveWake = yield* orchestrator.getThreadProjection(threadId);
+      assert.equal(afterActiveWake.thread.settledOverride, "active");
+      assert.deepEqual(afterActiveWake.thread.snoozedUntil, snoozedUntil);
+      yield* finishRuns("wake-parked-active-wake-done");
+
+      // The user's message still ends "keep active", but not the snooze.
+      yield* sendUserMessage("wake-parked-user-after-active");
+      const afterUserOnActive = yield* orchestrator.getThreadProjection(threadId);
+      assert.isNull(afterUserOnActive.thread.settledOverride);
+      assert.deepEqual(afterUserOnActive.thread.snoozedUntil, snoozedUntil);
+      yield* finishRuns("wake-parked-user-after-active-done");
+
+      // Only an explicit unsnooze ends it.
+      yield* orchestrator.dispatch({
+        type: "thread.unsnooze",
+        commandId: CommandId.make("wake-parked-unsnooze"),
+        threadId,
+        reason: "user",
+      });
+      const afterUnsnooze = yield* orchestrator.getThreadProjection(threadId);
+      assert.isNull(afterUnsnooze.thread.snoozedUntil);
+      assert.isNull(afterUnsnooze.thread.snoozedAt);
     }),
   );
 
@@ -4381,6 +5015,116 @@ it.layer(layerTest)("OrchestrationV2LayerLive lifecycle", (it) => {
       assert.deepEqual(
         ordinals,
         ordinals.toSorted((left, right) => left - right),
+      );
+    }),
+  );
+
+  it.effect("runs a heartbeat check as a routine run that does not move unread or user time", () =>
+    Effect.gen(function* () {
+      const orchestrator = yield* Orchestrator.OrchestratorV2;
+      const eventSink = yield* EventSink.EventSinkV2;
+      const threadId = ThreadId.make("runtime-layer-heartbeat-check-thread");
+      const messageId = (key: string) => MessageId.make(`runtime-layer-heartbeat-check-${key}`);
+
+      yield* orchestrator.dispatch({
+        type: "thread.create",
+        createdBy: "user",
+        creationSource: "web",
+        commandId: CommandId.make("runtime-layer-heartbeat-check-create"),
+        threadId,
+        projectId: ProjectId.make("runtime-layer-heartbeat-check-project"),
+        title: "Heartbeat check",
+        modelSelection,
+        runtimeMode: "full-access",
+        interactionMode: "default",
+        branch: null,
+        worktreePath: process.cwd(),
+      });
+      const runFor = (key: string) =>
+        Effect.map(orchestrator.getThreadProjection(threadId), ({ runs }) => {
+          const run = runs.find((candidate) => candidate.userMessageId === messageId(key));
+          assert.isDefined(run);
+          return run;
+        });
+      // Runs settle the way the provider would report them.
+      const settle = (key: string, completedAt: DateTime.Utc) =>
+        Effect.gen(function* () {
+          const run = yield* runFor(key);
+          yield* eventSink.write({
+            events: [
+              {
+                id: EventId.make(`runtime-layer-heartbeat-check-${key}-completed`),
+                type: "run.updated",
+                threadId,
+                runId: run.id,
+                ...(run.rootNodeId === null ? {} : { nodeId: run.rootNodeId }),
+                providerInstanceId: run.providerInstanceId,
+                occurredAt: completedAt,
+                payload: {
+                  ...run,
+                  status: "completed",
+                  startedAt: run.startedAt ?? completedAt,
+                  completedAt,
+                },
+              },
+            ],
+          });
+        });
+
+      yield* orchestrator.dispatch({
+        type: "message.dispatch",
+        createdBy: "user",
+        creationSource: "web",
+        commandId: CommandId.make("runtime-layer-heartbeat-check-prompt"),
+        threadId,
+        messageId: messageId("prompt"),
+        text: "Watch the deploy",
+        attachments: [],
+        modelSelection,
+        dispatchMode: { type: "start_immediately" },
+      });
+      const promptDoneAt = yield* DateTime.now;
+      yield* settle("prompt", promptDoneAt);
+      const userMessageAt = (yield* orchestrator.getThreadShell(threadId))?.latestUserMessageAt;
+      assert.isDefined(userMessageAt);
+
+      // The shape ProviderContinuationService dispatches for a heartbeat wake.
+      yield* orchestrator.dispatch({
+        type: "message.dispatch",
+        createdBy: "agent",
+        creationSource: "provider",
+        notification: {
+          source: { kind: "heartbeat", heartbeatId: "deploy" },
+          outcome: "updated",
+          summary: "Heartbeat",
+        },
+        commandId: CommandId.make("runtime-layer-heartbeat-check-wake"),
+        threadId,
+        messageId: messageId("wake"),
+        text: "Background activity updated",
+        attachments: [],
+        dispatchMode: { type: "queue_after_active" },
+      });
+      // An idle thread starts the wake in the same commit as its message.
+      assert.equal((yield* runFor("wake")).status, "starting");
+      yield* settle("wake", DateTime.add(promptDoneAt, { minutes: 5 }));
+
+      const shell = yield* orchestrator.getThreadShell(threadId);
+      assert.equal(shell?.latestRunId, (yield* runFor("wake")).id);
+      assert.equal(shell?.status, "completed");
+      assert.equal(shell?.latestRunTrigger, "heartbeat");
+      assert.deepEqual(shell?.latestUserMessageAt, userMessageAt);
+      assert.deepEqual(shell?.latestTaskRunCompletedAt, promptDoneAt);
+
+      // Mark unread rewinds to the user's run, not to the check after it.
+      yield* orchestrator.dispatch({
+        type: "thread.mark-unread",
+        commandId: CommandId.make("runtime-layer-heartbeat-check-mark-unread"),
+        threadId,
+      });
+      assert.deepEqual(
+        (yield* orchestrator.getThreadProjection(threadId)).thread.lastVisitedAt,
+        DateTime.subtract(promptDoneAt, { milliseconds: 1 }),
       );
     }),
   );
@@ -5230,6 +5974,8 @@ it.layer(layerSharedApplicationDataPlaneTest)("snooze projection", (it) => {
         threadId,
         snoozedUntil,
       });
+      const snoozedAgainAt = (yield* orchestrator.getThreadProjection(threadId)).thread.snoozedAt;
+      assert.isNotNull(snoozedAgainAt);
 
       yield* orchestrator.dispatch({
         type: "message.dispatch",
@@ -5238,12 +5984,22 @@ it.layer(layerSharedApplicationDataPlaneTest)("snooze projection", (it) => {
         commandId: CommandId.make("runtime-layer-snoozed-message"),
         threadId,
         messageId: MessageId.make("runtime-layer-snoozed-message"),
-        text: "Wake this thread.",
+        text: "This message does not wake the thread.",
         attachments: [],
         modelSelection,
         dispatchMode: { type: "start_immediately" },
       });
 
+      const afterMessage = yield* orchestrator.getThreadProjection(threadId);
+      assert.equal(DateTime.formatIso(afterMessage.thread.snoozedUntil!), snoozedUntil);
+      assert.deepEqual(afterMessage.thread.snoozedAt, snoozedAgainAt);
+
+      yield* orchestrator.dispatch({
+        type: "thread.unsnooze",
+        commandId: CommandId.make("runtime-layer-snoozed-thread-unsnooze"),
+        threadId,
+        reason: "user",
+      });
       const awakened = yield* orchestrator.getThreadProjection(threadId);
       assert.isNull(awakened.thread.snoozedUntil);
       assert.isNull(awakened.thread.snoozedAt);
@@ -5753,12 +6509,274 @@ it.layer(layerTest)("usage-limit recovery", (it) => {
       }),
   );
 
+  it.effect(
+    "an automatic recovery for a different failure keeps a snooze the old recovery owns",
+    () =>
+      Effect.gen(function* () {
+        const orchestrator = yield* Orchestrator.OrchestratorV2;
+        const events = yield* EventSink.EventSinkV2;
+        const threadId = ThreadId.make("recovery:different-failure");
+        const projectId = ProjectId.make("recovery:project:different-failure");
+        yield* seedProject({
+          projectId,
+          title: "Recovery project",
+          workspaceRoot: process.cwd(),
+          defaultModelSelection: modelSelection,
+          createdAt: DateTime.formatIso(yield* DateTime.now),
+        });
+        yield* orchestrator.dispatch({
+          type: "thread.create",
+          commandId: CommandId.make("recovery:different:create"),
+          threadId,
+          projectId,
+          title: "Limited twice",
+          modelSelection,
+          runtimeMode: "full-access",
+          interactionMode: "default",
+          branch: null,
+          worktreePath: null,
+          createdBy: "user",
+          creationSource: "web",
+        });
+        const send = (name: string, mode: "defer_start" | "start_immediately") =>
+          orchestrator.dispatch({
+            type: "message.dispatch",
+            commandId: CommandId.make(`recovery:different:${name}`),
+            threadId,
+            messageId: MessageId.make(`recovery:different:${name}`),
+            text: name,
+            attachments: [],
+            dispatchMode: { type: mode },
+            createdBy: "user",
+            creationSource: "web",
+          });
+        const failWithLimit = (name: string, resetAt: DateTime.Utc) =>
+          Effect.gen(function* () {
+            const run = (yield* orchestrator.getThreadProjection(threadId)).runs.at(-1)!;
+            const failedAt = yield* DateTime.now;
+            yield* events.write({
+              commandId: CommandId.make(`recovery:different:fail:${name}`),
+              events: [
+                {
+                  id: EventId.make(`recovery:different:run:${name}`),
+                  type: "run.updated",
+                  threadId,
+                  occurredAt: failedAt,
+                  payload: { ...run, status: "failed", completedAt: failedAt },
+                },
+                {
+                  id: EventId.make(`recovery:different:error:${name}`),
+                  type: "turn-item.updated",
+                  threadId,
+                  occurredAt: failedAt,
+                  payload: {
+                    id: TurnItemId.make(`recovery:different:error:${name}`),
+                    type: "error",
+                    threadId,
+                    runId: run.id,
+                    nodeId: run.rootNodeId,
+                    providerThreadId: null,
+                    providerTurnId: null,
+                    nativeItemRef: null,
+                    parentItemId: null,
+                    ordinal: 2,
+                    status: "failed",
+                    title: "Usage limit reached",
+                    startedAt: failedAt,
+                    completedAt: failedAt,
+                    updatedAt: failedAt,
+                    failure: {
+                      class: "usage_limit",
+                      message: "Plan limit reached.",
+                      code: "usageLimitExceeded",
+                      retryable: null,
+                      resetAt: DateTime.formatIso(resetAt),
+                    },
+                  },
+                },
+              ],
+            });
+            return run;
+          });
+
+        yield* send("first", "defer_start");
+        const firstReset = DateTime.add(yield* DateTime.now, { minutes: 30 });
+        const first = yield* failWithLimit("first", firstReset);
+        yield* orchestrator.dispatch({
+          type: "thread.metadata.update",
+          commandId: CommandId.make("recovery:different:arm-first"),
+          threadId,
+          limitRecovery: {
+            runId: first.id,
+            resetAt: DateTime.formatIso(firstReset),
+            autoResume: true,
+            snooze: true,
+          },
+        });
+        const snoozed = (yield* orchestrator.getThreadProjection(threadId)).thread;
+        assert.deepEqual(snoozed.snoozedUntil, firstReset);
+
+        // Work continues under the snooze and hits a different limit; the
+        // worker arms that failure with the global snooze setting off.
+        yield* send("second", "start_immediately");
+        const secondReset = DateTime.add(yield* DateTime.now, { minutes: 50 });
+        const second = yield* failWithLimit("second", secondReset);
+        yield* orchestrator.dispatch({
+          type: "thread.metadata.update",
+          commandId: CommandId.make("recovery:different:arm-second"),
+          threadId,
+          limitRecovery: {
+            runId: second.id,
+            resetAt: DateTime.formatIso(secondReset),
+            autoResume: true,
+            snooze: false,
+          },
+        });
+        const rearmed = (yield* orchestrator.getThreadProjection(threadId)).thread;
+        assert.equal(rearmed.limitRecovery?.runId, second.id);
+        assert.deepEqual(rearmed.snoozedUntil, firstReset);
+        assert.deepEqual(rearmed.snoozedAt, snoozed.snoozedAt);
+        assert.isUndefined(rearmed.snoozeEndedAt);
+      }),
+  );
+
+  it.effect.each([
+    ["a nearer reset", { hours: 24 }, { minutes: 30 }],
+    ["a later reset", { minutes: 10 }, { minutes: 30 }],
+  ] as const)(
+    "a recovery armed by %s leaves a running manual snooze and still resumes",
+    ([name, snoozeFor, resetIn]) =>
+      Effect.gen(function* () {
+        const orchestrator = yield* Orchestrator.OrchestratorV2;
+        const events = yield* EventSink.EventSinkV2;
+        const key = name.replaceAll(" ", "-");
+        const threadId = ThreadId.make(`recovery:manual:${key}`);
+        const projectId = ProjectId.make(`recovery:project:manual:${key}`);
+        yield* seedProject({
+          projectId,
+          title: "Recovery project",
+          workspaceRoot: process.cwd(),
+          defaultModelSelection: modelSelection,
+          createdAt: DateTime.formatIso(yield* DateTime.now),
+        });
+        yield* orchestrator.dispatch({
+          type: "thread.create",
+          commandId: CommandId.make(`recovery:manual:create:${key}`),
+          threadId,
+          projectId,
+          title: "Manually snoozed",
+          modelSelection,
+          runtimeMode: "full-access",
+          interactionMode: "default",
+          branch: null,
+          worktreePath: null,
+          createdBy: "user",
+          creationSource: "web",
+        });
+        yield* orchestrator.dispatch({
+          type: "message.dispatch",
+          commandId: CommandId.make(`recovery:manual:message:${key}`),
+          threadId,
+          messageId: MessageId.make(`recovery:manual:message:${key}`),
+          text: "Work on this.",
+          attachments: [],
+          dispatchMode: { type: "start_immediately" },
+          createdBy: "user",
+          creationSource: "web",
+        });
+        const manualDeadline = DateTime.add(yield* DateTime.now, snoozeFor);
+        yield* orchestrator.dispatch({
+          type: "thread.snooze",
+          commandId: CommandId.make(`recovery:manual:snooze:${key}`),
+          threadId,
+          snoozedUntil: DateTime.formatIso(manualDeadline),
+        });
+        const snoozed = (yield* orchestrator.getThreadProjection(threadId)).thread;
+
+        // The run fails under the manual snooze with a limit that resets sooner or later.
+        const run = (yield* orchestrator.getThreadProjection(threadId)).runs[0]!;
+        const failedAt = yield* DateTime.now;
+        const resetAt = DateTime.add(failedAt, resetIn);
+        yield* events.write({
+          commandId: CommandId.make(`recovery:manual:fail:${key}`),
+          events: [
+            {
+              id: EventId.make(`recovery:manual:run:${key}`),
+              type: "run.updated",
+              threadId,
+              occurredAt: failedAt,
+              payload: { ...run, status: "failed", completedAt: failedAt },
+            },
+            {
+              id: EventId.make(`recovery:manual:error:${key}`),
+              type: "turn-item.updated",
+              threadId,
+              occurredAt: failedAt,
+              payload: {
+                id: TurnItemId.make(`recovery:manual:error:${key}`),
+                type: "error",
+                threadId,
+                runId: run.id,
+                nodeId: run.rootNodeId,
+                providerThreadId: null,
+                providerTurnId: null,
+                nativeItemRef: null,
+                parentItemId: null,
+                ordinal: 2,
+                status: "failed",
+                title: "Usage limit reached",
+                startedAt: failedAt,
+                completedAt: failedAt,
+                updatedAt: failedAt,
+                failure: {
+                  class: "usage_limit",
+                  message: "Plan limit reached.",
+                  code: "usageLimitExceeded",
+                  retryable: null,
+                  resetAt: DateTime.formatIso(resetAt),
+                },
+              },
+            },
+          ],
+        });
+
+        // The worker arms it with the global snooze setting on.
+        const shell = (yield* orchestrator.getShellSnapshot()).threads.find(
+          (thread) => thread.id === threadId,
+        )!;
+        const arm = limitRecoveryCommand(shell, true, DateTime.toEpochMillis(failedAt), true)!;
+        yield* orchestrator.dispatch(arm);
+        const armed = (yield* orchestrator.getThreadProjection(threadId)).thread;
+        assert.isTrue(armed.limitRecovery?.autoResume);
+        assert.deepEqual(armed.snoozedUntil, manualDeadline);
+        assert.deepEqual(armed.snoozedAt, snoozed.snoozedAt);
+        assert.isUndefined(armed.snoozeEndedAt);
+
+        // The retry still comes due at the reset, and the snooze outlives or
+        // follows it untouched.
+        yield* TestClock.adjust(resetIn);
+        const due = (yield* orchestrator.getShellSnapshot()).threads.find(
+          (thread) => thread.id === threadId,
+        )!;
+        const resume = limitRecoveryCommand(
+          due,
+          true,
+          DateTime.toEpochMillis(yield* DateTime.now),
+        )!;
+        assert.equal(resume.type, "message.dispatch");
+        yield* orchestrator.dispatch(resume);
+        const resumed = yield* orchestrator.getThreadProjection(threadId);
+        assert.lengthOf(resumed.runs, 2);
+        assert.deepEqual(resumed.thread.snoozedUntil, manualDeadline);
+      }),
+  );
+
   it.effect.each([
     "resume",
     "queued-resume",
     "cancel",
     "rearm",
-    "snooze-race",
+    "snoozed-past-reset",
     "new-message",
     "archive",
     "settle",
@@ -5969,6 +6987,8 @@ it.layer(layerTest)("usage-limit recovery", (it) => {
         } else {
           assert.isNull(armedShell.snoozedUntil);
           assert.isNull(armedShell.snoozedAt);
+          // The explicit stop ended the snooze now, well before its reset time.
+          assert.isTrue(DateTime.toEpochMillis(armedShell.snoozeEndedAt!) < Date.parse(resetAt));
           assert.isTrue(armedShell.limitRecovery!.autoResume);
         }
       }
@@ -6071,30 +7091,29 @@ it.layer(layerTest)("usage-limit recovery", (it) => {
       );
       if (autoResume && scenario !== "cancel-resume-keep-snooze") assert.isNotNull(resume);
       else assert.isNull(resume);
-      if (scenario === "snooze-race") {
-        const wakeAt = DateTime.formatIso(DateTime.add(yield* DateTime.now, { minutes: 1 }));
+      if (scenario === "snoozed-past-reset") {
+        // Snooze hides the thread; it never delays a due provider retry.
+        const wakeAt = DateTime.add(yield* DateTime.now, { hours: 6 });
         yield* orchestrator.dispatch({
           type: "thread.snooze",
-          commandId: CommandId.make("recovery:raced-snooze"),
+          commandId: CommandId.make("recovery:snoozed-past-reset"),
           threadId,
-          snoozedUntil: wakeAt,
+          snoozedUntil: DateTime.formatIso(wakeAt),
         });
-        yield* orchestrator.dispatch(resume!);
-        assert.lengthOf((yield* orchestrator.getThreadProjection(threadId)).runs, 1);
-        yield* TestClock.adjust("1 minute");
-        const current = (yield* orchestrator.getShellSnapshot()).threads.find(
+        const snoozedShell = (yield* orchestrator.getShellSnapshot()).threads.find(
           (thread) => thread.id === threadId,
         )!;
-        const freshResume = limitRecoveryCommand(
-          current,
-          true,
-          DateTime.toEpochMillis(yield* DateTime.now),
+        assert.deepEqual(snoozedShell.snoozedUntil, wakeAt);
+        assert.deepEqual(
+          limitRecoveryCommand(snoozedShell, true, DateTime.toEpochMillis(yield* DateTime.now))
+            ?.commandId,
+          resume!.commandId,
         );
-        assert.isNotNull(freshResume);
-        assert.notEqual(freshResume!.commandId, resume!.commandId);
-        yield* orchestrator.dispatch(freshResume!);
-        yield* orchestrator.dispatch(freshResume!);
-        assert.lengthOf((yield* orchestrator.getThreadProjection(threadId)).runs, 2);
+        yield* orchestrator.dispatch(resume!);
+        yield* orchestrator.dispatch(resume!);
+        const resumed = yield* orchestrator.getThreadProjection(threadId);
+        assert.lengthOf(resumed.runs, 2);
+        assert.deepEqual(resumed.thread.snoozedUntil, wakeAt);
       }
       if (scenario === "expired-snooze") {
         const staleSnooze = yield* orchestrator

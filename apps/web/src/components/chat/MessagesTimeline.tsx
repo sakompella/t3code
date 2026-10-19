@@ -28,6 +28,7 @@ import {
   type AssistantCitation,
   type EnvironmentId,
   type MessageId,
+  type OrchestrationV2ProjectedTurnItem,
   type OrchestrationV2TurnItem,
   type RunAttemptId,
   type ScopedThreadRef,
@@ -74,6 +75,7 @@ import { claudeSkillInvocation, isJavaScriptReplTool } from "@t3tools/shared/too
 import { observeVisibleAnimation } from "../../lib/visibleAnimation";
 import {
   createContext,
+  Fragment,
   memo,
   use,
   useContext,
@@ -220,12 +222,13 @@ import {
   resolveWorkGroupScrollIndex,
   shouldCollapseUserMessage,
   shouldFollowWorkGroupAppend,
-  timelineTurnFoldRunIdsByEntryId,
+  timelineTurnFoldKeysByEntryId,
   threadReadLabelPrefix,
   threadReadTargetId,
   threadReadTargetTitle,
   toolGroupAction,
   workEntryDisplayLabel,
+  workEntryHasInspectableContent,
   workEntryReadOutput,
   workEntryIsVisibleInGroup,
   worktreeSetupAgentStarted,
@@ -239,6 +242,12 @@ import { type ThreadFindMatch } from "./threadFind";
 import { useThreadFindNavigation } from "./useThreadFindNavigation";
 import { readThreadFindPosition } from "./threadFindPosition";
 import type { ThreadFindPositionReader } from "./threadFind";
+import {
+  workEntryBodyCode,
+  workEntryLabelCode,
+  type WorkEntryCode,
+} from "@t3tools/client-runtime/work-log/entry-code";
+import { runFoldSegmentKeyIsForRun } from "@t3tools/client-runtime/state/run-fold";
 import { TerminalContextInlineChip } from "./TerminalContextInlineChip";
 import { Popover, PopoverPopup, PopoverTrigger } from "../ui/popover";
 import { Spinner } from "../ui/spinner";
@@ -287,6 +296,7 @@ import {
   formatUpcomingTimestamp,
 } from "../../timestampFormat";
 import { FetchedToolOutput, V2ItemInspector } from "./V2ItemInspector";
+import { HighlightedCode } from "./HighlightedCode";
 import { useV2ItemSupport } from "../../state/v2ItemSupport";
 import { Collapsible, CollapsibleTrigger, CollapsiblePanel } from "../ui/collapsible";
 import {
@@ -342,7 +352,7 @@ interface TimelineRowSharedState {
     readonly checkpointId: string;
     readonly scopeId: string;
   }) => void;
-  onToggleTurnFold: (runId: RunId) => void;
+  onToggleTurnFold: (foldKey: string) => void;
   onToggleAttemptFold: (attemptId: RunAttemptId) => void;
   onFileOpen: (attachment: ChatFileAttachment) => void;
   onFileDownload: (attachment: ChatFileAttachment) => void;
@@ -617,8 +627,8 @@ const ConversationTimeline = memo(function ConversationTimeline({
   // The remembered position is a snapshot taken when the list identity changes;
   // scrolling keeps rewriting the stored entry, which must not move the restore.
   const [listState, setListState] = useState(() => timelineListStateFor(listIdentityKey));
-  const [expandedRunIds, setExpandedRunIds] = useState<ReadonlySet<RunId>>(
-    () => listState.rememberedPosition?.disclosures?.runs ?? new Set(),
+  const [expandedFoldKeys, setExpandedFoldKeys] = useState<ReadonlySet<string>>(
+    () => listState.rememberedPosition?.disclosures?.folds ?? new Set(),
   );
   const [expandedWorkGroupIds, setExpandedWorkGroupIds] = useState<ReadonlySet<string>>(
     () => listState.rememberedPosition?.disclosures?.workGroups ?? new Set(),
@@ -632,7 +642,7 @@ const ConversationTimeline = memo(function ConversationTimeline({
   const restoringThreadPosition = positionedThreadKey !== listIdentityKey;
   const prefersReducedMotion = useMediaQuery("(prefers-reduced-motion: reduce)");
   const [settlingListIdentity, setSettlingListIdentity] = useState<string | null>(listIdentityKey);
-  let paintedExpandedRunIds = expandedRunIds;
+  let paintedExpandedFoldKeys = expandedFoldKeys;
   let paintedExpandedWorkGroupIds = expandedWorkGroupIds;
   let paintedExpandedAttemptIds = expandedAttemptIds;
   const identityChanged = listState.identity !== listIdentityKey;
@@ -643,18 +653,15 @@ const ConversationTimeline = memo(function ConversationTimeline({
     setListState({ identity: listIdentityKey, rememberedPosition, workGroupViewState });
     setPositionedThreadKey(null);
     setSettlingListIdentity(listIdentityKey);
-    paintedExpandedRunIds = rememberedPosition?.disclosures?.runs ?? new Set();
+    paintedExpandedFoldKeys = rememberedPosition?.disclosures?.folds ?? new Set();
     paintedExpandedWorkGroupIds = rememberedPosition?.disclosures?.workGroups ?? new Set();
     paintedExpandedAttemptIds = rememberedPosition?.disclosures?.attempts ?? new Set();
-    setExpandedRunIds(paintedExpandedRunIds);
+    setExpandedFoldKeys(paintedExpandedFoldKeys);
     setExpandedWorkGroupIds(paintedExpandedWorkGroupIds);
     setExpandedAttemptIds(paintedExpandedAttemptIds);
   }
   const citationThreadRef = parseScopedThreadKey(routeThreadKey);
   const openPullRequest = useOpenPrLink(citationThreadRef ?? undefined);
-  const expandCitedRun = (runId: RunId) => {
-    setExpandedRunIds((current) => (current.has(runId) ? current : new Set([...current, runId])));
-  };
   const [minimapStripMap] = useState(() => new Map<string, HTMLSpanElement>());
   const [disclosureToggleSettling, setDisclosureToggleSettling] = useState(false);
   const disclosureAnchorKeyRef = useRef<string | null>(null);
@@ -736,14 +743,14 @@ const ConversationTimeline = memo(function ConversationTimeline({
     return disclosureAnchorKey === null || row.id === disclosureAnchorKey;
   };
 
-  const onToggleTurnFold = (runId: RunId) => {
-    suspendEndScrollMaintenanceForDisclosure(`turn-fold:${runId}`);
-    setExpandedRunIds((existing) => {
+  const onToggleTurnFold = (foldKey: string) => {
+    suspendEndScrollMaintenanceForDisclosure(`turn-fold:${foldKey}`);
+    setExpandedFoldKeys((existing) => {
       const next = new Set(existing);
-      if (next.has(runId)) {
-        next.delete(runId);
+      if (next.has(foldKey)) {
+        next.delete(foldKey);
       } else {
-        next.add(runId);
+        next.add(foldKey);
       }
       return next;
     });
@@ -773,36 +780,9 @@ const ConversationTimeline = memo(function ConversationTimeline({
     });
   };
 
-  const previousLatestRunRef = useRef({ identity: listIdentityKey, run: latestRun });
-  useEffect(() => {
-    const { identity, run: previous } = previousLatestRunRef.current;
-    previousLatestRunRef.current = { identity: listIdentityKey, run: latestRun };
-    if (identity !== listIdentityKey || !latestRun || previous?.runId === undefined) {
-      return;
-    }
-    if (latestRun.runId === previous.runId) {
-      if (previous.status === "running" && latestRun.status === "interrupted") {
-        setExpandedRunIds((existing) => {
-          const next = new Set(existing);
-          next.add(latestRun.runId);
-          return next;
-        });
-      }
-      return;
-    }
-    setExpandedRunIds((existing) => {
-      if (!existing.has(previous.runId)) {
-        return existing;
-      }
-      const next = new Set(existing);
-      next.delete(previous.runId);
-      return next;
-    });
-  }, [latestRun, listIdentityKey]);
-
   // Imported turns fold under synthetic keys rather than the entries' own run ids.
-  const findFoldRunIds = findActive
-    ? timelineTurnFoldRunIdsByEntryId({
+  const findFoldKeys = findActive
+    ? timelineTurnFoldKeysByEntryId({
         timelineEntries,
         latestRun,
         runningRunId,
@@ -810,21 +790,21 @@ const ConversationTimeline = memo(function ConversationTimeline({
         runlessWorkActive,
       })
     : null;
-  const activeFindRunId =
-    findActive && activeFindMatch ? findFoldRunIds?.get(activeFindMatch.entryId) : undefined;
-  const [expandedFindRunId, setExpandedFindRunId] = useState<RunId | undefined>();
-  if (expandedFindRunId !== activeFindRunId) {
-    setExpandedFindRunId(activeFindRunId);
-    if (activeFindRunId) {
-      setExpandedRunIds((previous) =>
-        previous.has(activeFindRunId) ? previous : new Set(previous).add(activeFindRunId),
+  const activeFindFoldKey =
+    findActive && activeFindMatch ? findFoldKeys?.get(activeFindMatch.entryId) : undefined;
+  const [expandedFindFoldKey, setExpandedFindFoldKey] = useState<string | undefined>();
+  if (expandedFindFoldKey !== activeFindFoldKey) {
+    setExpandedFindFoldKey(activeFindFoldKey);
+    if (activeFindFoldKey) {
+      setExpandedFoldKeys((previous) =>
+        previous.has(activeFindFoldKey) ? previous : new Set(previous).add(activeFindFoldKey),
       );
     }
   }
-  const visibleExpandedRunIds =
-    !activeFindRunId || paintedExpandedRunIds.has(activeFindRunId)
-      ? paintedExpandedRunIds
-      : new Set(paintedExpandedRunIds).add(activeFindRunId);
+  const visibleExpandedFoldKeys =
+    !activeFindFoldKey || paintedExpandedFoldKeys.has(activeFindFoldKey)
+      ? paintedExpandedFoldKeys
+      : new Set(paintedExpandedFoldKeys).add(activeFindFoldKey);
 
   const activeFindAttemptId = activeFindMatch
     ? timelineEntries.find((entry) => entry.id === activeFindMatch.entryId)?.attempt?.id
@@ -847,7 +827,7 @@ const ConversationTimeline = memo(function ConversationTimeline({
     timelineEntries,
     latestRun,
     runningRunId,
-    expandedRunIds: visibleExpandedRunIds,
+    expandedFoldKeys: visibleExpandedFoldKeys,
     expandedAttemptIds: visibleExpandedAttemptIds,
     expandedWorkGroupIds,
     isWorking,
@@ -858,6 +838,38 @@ const ConversationTimeline = memo(function ConversationTimeline({
     worktreeSetup,
   });
   const rows = useStableRows(rawRows, listIdentityKey);
+  const runFoldKeys = (runId: RunId) =>
+    rows.flatMap((row) => (row.kind === "turn-fold" && row.runId === runId ? [row.foldKey] : []));
+  const expandCitedRun = (runId: RunId) => {
+    const collapsedKeys = runFoldKeys(runId).filter((key) => !expandedFoldKeys.has(key));
+    if (collapsedKeys.length > 0) {
+      setExpandedFoldKeys((current) => new Set([...current, ...collapsedKeys]));
+    }
+  };
+
+  // An in-session interrupt leaves its turn expanded so the user keeps their
+  // place; the next turn (or a reload, since this is local state) folds it.
+  const previousLatestRunRef = useRef({ identity: listIdentityKey, run: latestRun });
+  useEffect(() => {
+    const { identity, run: previous } = previousLatestRunRef.current;
+    previousLatestRunRef.current = { identity: listIdentityKey, run: latestRun };
+    if (identity !== listIdentityKey || !latestRun || previous?.runId === undefined) {
+      return;
+    }
+    if (latestRun.runId === previous.runId) {
+      if (previous.status === "running" && latestRun.status === "interrupted") {
+        const interruptedKeys = [latestRun.runId, ...runFoldKeys(latestRun.runId)];
+        setExpandedFoldKeys((existing) => new Set([...existing, ...interruptedKeys]));
+      }
+      return;
+    }
+    setExpandedFoldKeys((existing) => {
+      const next = new Set(
+        [...existing].filter((key) => !runFoldSegmentKeyIsForRun(key, previous.runId)),
+      );
+      return next.size === existing.size ? existing : next;
+    });
+  }, [latestRun, listIdentityKey, runFoldKeys]);
   // Run status/timestamps churn on every stream event; the shared row context
   // must not change with them or every timeline row re-renders per event.
   const runs = useStableHandoffRuns(runsProp);
@@ -1001,17 +1013,23 @@ const ConversationTimeline = memo(function ConversationTimeline({
     viewport: timelineViewportElement,
     historyLoading: citationHistoryLoading,
     loadEarlier,
-    getTurnFoldRunId: (entryId) =>
-      (
-        findFoldRunIds ??
-        timelineTurnFoldRunIdsByEntryId({
+    getTurnFoldRunId: (entryId) => {
+      const foldKey = (
+        findFoldKeys ??
+        timelineTurnFoldKeysByEntryId({
           timelineEntries,
           latestRun,
           runningRunId,
           isWorking,
           runlessWorkActive,
         })
-      ).get(entryId),
+      ).get(entryId);
+      const foldRow = rows.find(
+        (row): row is Extract<MessagesTimelineRow, { kind: "turn-fold" }> =>
+          row.kind === "turn-fold" && row.foldKey === foldKey,
+      );
+      return foldRow?.runId;
+    },
     onExpandTurn: expandCitedRun,
     onManualNavigation,
   });
@@ -1126,7 +1144,7 @@ const ConversationTimeline = memo(function ConversationTimeline({
             scrollOffset: element.scrollTop,
             atEnd: isAtEnd,
             disclosures: {
-              runs: paintedExpandedRunIds,
+              folds: paintedExpandedFoldKeys,
               workGroups: paintedExpandedWorkGroupIds,
               attempts: paintedExpandedAttemptIds,
               workGroupState: workGroupViewState,
@@ -1320,9 +1338,9 @@ const ConversationTimeline = memo(function ConversationTimeline({
   useLayoutEffect(() => {
     if (!findPositionReaderRef || !timelineViewportElement) return;
     const read: ThreadFindPositionReader = (query) => {
-      const foldRunIds =
-        findFoldRunIds ??
-        timelineTurnFoldRunIdsByEntryId({
+      const foldKeys =
+        findFoldKeys ??
+        timelineTurnFoldKeysByEntryId({
           timelineEntries,
           latestRun,
           runningRunId,
@@ -1343,16 +1361,16 @@ const ConversationTimeline = memo(function ConversationTimeline({
               continue;
             }
             const entry = timelineEntries.find((entry) => {
-              const runId =
+              const owner =
                 row.kind === "turn-fold"
-                  ? foldRunIds.get(entry.id)
+                  ? foldKeys.get(entry.id)
                   : entry.kind === "message"
                     ? entry.message.runId
                     : entry.kind === "proposed-plan"
                       ? entry.proposedPlan.runId
                       : null;
               return (
-                runId === row.runId &&
+                owner === (row.kind === "turn-fold" ? row.foldKey : row.runId) &&
                 (entry.kind !== "message" || entry.message.role === "assistant") &&
                 (row.kind !== "attempt-fold" || entry.attempt?.id === row.attemptId)
               );
@@ -1371,7 +1389,7 @@ const ConversationTimeline = memo(function ConversationTimeline({
     };
   }, [
     contentInsetEndAdjustment,
-    findFoldRunIds,
+    findFoldKeys,
     findPositionReaderRef,
     isWorking,
     latestRun,
@@ -1966,6 +1984,7 @@ const TimelineRowContent = memo(function TimelineRowContent({ row }: { row: Time
               groupedEntries={row.groupedEntries}
               isExpandedToolGroup={row.isExpandedToolGroup}
               displayLabel={row.displayLabel}
+              liveEntryId={row.liveEntryId}
             />
           ) : null}
           {row.kind === "work-live" ? <LiveWorkEntryTimelineRow row={row} /> : null}
@@ -2574,7 +2593,7 @@ function TurnFoldTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "turn-
         type="button"
         aria-expanded={row.expanded}
         data-scroll-anchor-ignore
-        onClick={() => ctx.onToggleTurnFold(row.runId)}
+        onClick={() => ctx.onToggleTurnFold(row.foldKey)}
         className="flex cursor-pointer select-none items-center gap-1 rounded-md px-1 text-sm leading-relaxed text-muted-foreground tabular-nums transition-colors hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring/70"
       >
         <span>{row.label}</span>
@@ -2974,6 +2993,9 @@ function V2EventTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "event"
       />
     );
   }
+  if (item.type === "rollback_summary") {
+    return <RollbackSummaryRow projectedItem={row.projectedItem} />;
+  }
   const presentation = v2EventPresentation(item);
   const Icon = presentation.icon;
   if (item.type === "error") {
@@ -3133,6 +3155,46 @@ function V2EventTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "event"
   );
 }
 
+/** Mounts the inspector only when opened, since it fetches the summary the wire item omits. */
+function RollbackSummaryRow({
+  projectedItem,
+}: {
+  readonly projectedItem: OrchestrationV2ProjectedTurnItem;
+}) {
+  const ctx = use(TimelineRowCtx);
+  const [open, setOpen] = useState(false);
+  return (
+    <details
+      className="group"
+      data-v2-item-type={projectedItem.item.type}
+      onToggle={(event) => setOpen(event.currentTarget.open)}
+    >
+      <summary className="cursor-pointer list-none rounded-md focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring/70 [&::-webkit-details-marker]:hidden">
+        <TimelineSystemDivider
+          label="Summary of discarded turns"
+          icon={Undo2Icon}
+          showDetailSeparator={false}
+          detail={
+            <ChevronDownIcon className="size-3 shrink-0 transition-transform group-open:rotate-180" />
+          }
+        />
+      </summary>
+      {open ? (
+        <div className="px-3 pb-2">
+          <V2ItemInspector
+            projectedItem={projectedItem}
+            environmentId={ctx.activeThreadEnvironmentId}
+            cwd={ctx.markdownCwd}
+            workspaceRoot={ctx.workspaceRoot}
+            onOpenThread={ctx.onOpenThread}
+            onOpenTurnDiff={ctx.onOpenTurnDiff}
+          />
+        </div>
+      ) : null}
+    </details>
+  );
+}
+
 function subagentGroupTiming(
   agents: ReadonlyArray<{
     status: OrchestrationV2TurnItem["status"];
@@ -3282,12 +3344,14 @@ const WorkGroupSection = memo(function WorkGroupSection({
   groupedEntries,
   isExpandedToolGroup,
   displayLabel,
+  liveEntryId,
 }: {
   anchorKey: string;
   disclosureAnchorKey?: string;
   groupedEntries: Extract<MessagesTimelineRow, { kind: "work" }>["groupedEntries"];
   isExpandedToolGroup: boolean;
   displayLabel?: string | undefined;
+  liveEntryId?: string | undefined;
 }) {
   const { workspaceRoot, routeThreadKey, onToggleWorkEntry } = use(TimelineRowCtx);
   const onToggleStandaloneEntry = (collapsed: boolean) =>
@@ -3307,6 +3371,7 @@ const WorkGroupSection = memo(function WorkGroupSection({
         anchorKey={anchorKey}
         disclosureAnchorKey={disclosureAnchorKey}
         entries={nonEmptyEntries}
+        liveEntryId={liveEntryId}
         workspaceRoot={workspaceRoot}
       />
     );
@@ -3375,10 +3440,12 @@ function ExpandedWorkGroupEntries({
   disclosureAnchorKey,
   entries,
   workspaceRoot,
+  liveEntryId,
 }: {
   anchorKey: string;
   disclosureAnchorKey: string;
   entries: TimelineWorkEntry[];
+  liveEntryId?: string | undefined;
   workspaceRoot: string | undefined;
 }) {
   const { workGroupViewState: viewState, onToggleWorkEntry } = use(TimelineRowCtx);
@@ -3459,7 +3526,12 @@ function ExpandedWorkGroupEntries({
   }, [updateScrollFades]);
 
   const renderEntry = ({ item }: { item: TimelineWorkEntry }) => (
-    <SimpleWorkEntryRow key={item.id} workEntry={item} workspaceRoot={workspaceRoot} />
+    <SimpleWorkEntryRow
+      key={item.id}
+      workEntry={item}
+      workspaceRoot={workspaceRoot}
+      active={item.id === liveEntryId}
+    />
   );
 
   const updateExpandedContentHeight = () => {
@@ -3642,6 +3714,7 @@ function LiveActivityRow({
   failed = false,
   active = false,
   shimmer = false,
+  codeLabel = false,
 }: {
   label: ReactNode;
   iconName?: WorkEntryIconName;
@@ -3649,6 +3722,8 @@ function LiveActivityRow({
   failed?: boolean;
   active?: boolean;
   shimmer?: boolean;
+  /** The label is highlighted code, so a running shine must not repaint its colors. */
+  codeLabel?: boolean;
 }) {
   const animated = active && !failed;
   const showShimmer = animated && shimmer;
@@ -3664,6 +3739,7 @@ function LiveActivityRow({
         failed={failed}
         announceFailure={failed}
         active={animated && !shimmer}
+        codeLabel={codeLabel}
       />
       {showShimmer ? (
         <ActivityShimmerOverlay>
@@ -3682,6 +3758,7 @@ function LiveActivityContent({
   announceFailure = false,
   active = false,
   highlighted = false,
+  codeLabel = false,
 }: {
   label: ReactNode;
   iconName: WorkEntryIconName | undefined;
@@ -3690,6 +3767,7 @@ function LiveActivityContent({
   announceFailure?: boolean;
   active?: boolean;
   highlighted?: boolean;
+  codeLabel?: boolean;
 }) {
   const showTrailingFailureMark =
     failed && iconName !== undefined && !toolIconAcceptsTint(toolIcon);
@@ -3794,6 +3872,7 @@ function LiveWorkEntryTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "
   const failed = workEntryDisplayIndicatesToolFailure(row.entry);
   const thoughtLine = row.thought && !row.expanded ? liveThoughtLine(row.thought.detail ?? "") : "";
   const thoughtIsStatus = thoughtLine !== "" && row.entry === row.thought;
+  const labelCode = questionHeading ? null : workEntryLabelCode(row.entry, label);
 
   return (
     <button
@@ -3857,6 +3936,15 @@ function LiveWorkEntryTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "
               environmentId={ctx.activeThreadEnvironmentId}
               linked={false}
             />
+          ) : labelCode !== null ? (
+            <span className="font-mono text-(length:--font-size-code,var(--text-xs))">
+              <HighlightedCode
+                code={labelCode.code}
+                language={labelCode.language}
+                theme={ctx.resolvedTheme}
+                kind="label"
+              />
+            </span>
           ) : (
             label
           )
@@ -3865,6 +3953,7 @@ function LiveWorkEntryTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "
         toolIcon={row.entry.toolIcon ?? row.entry.toolSource?.icon}
         failed={failed}
         active={row.active}
+        codeLabel={labelCode !== null}
       />
     </button>
   );
@@ -5050,21 +5139,32 @@ function workEntryRawCommand(
   return rawCommand === workEntry.command.trim() ? null : rawCommand;
 }
 
+interface ToolCallBodyBlock {
+  readonly text: string;
+  /** Set when the block is code worth syntax highlighting. */
+  readonly language?: WorkEntryCode["language"];
+}
+
 function buildToolCallExpandedBody(
   workEntry: TimelineWorkEntry,
   workspaceRoot: string | undefined,
   visibleLabel: string,
   viewedImagePath: string | null,
-): string | null {
-  const blocks: string[] = [];
+  bodyCode: WorkEntryCode | null,
+): ReadonlyArray<ToolCallBodyBlock> | null {
+  const blocks: ToolCallBodyBlock[] = [];
   const seen = new Set<string>([visibleLabel.trim()]);
-  const addBlock = (value: string | null | undefined) => {
+  const addBlock = (value: string | null | undefined, language?: WorkEntryCode["language"]) => {
     const text = value?.trim();
     if (!text || seen.has(text)) return;
     seen.add(text);
-    blocks.push(text);
+    blocks.push(language ? { text, language } : { text });
   };
-  if (workEntry.itemType === "dynamic_tool" && workEntry.toolData !== undefined) {
+  if (bodyCode?.language === "python") {
+    // The cell itself, not its JSON envelope. Shown even when it equals the
+    // truncated label, so a one-line cell still has a full-width body.
+    blocks.push({ text: bodyCode.code.trim(), language: "python" });
+  } else if (workEntry.itemType === "dynamic_tool" && workEntry.toolData !== undefined) {
     const input =
       workEntry.structuredPayload?.type === "dynamic_tool"
         ? workEntry.structuredPayload.input
@@ -5080,7 +5180,7 @@ function buildToolCallExpandedBody(
   if (command === visibleLabel.trim()) {
     seen.add(command);
   } else {
-    addBlock(raw ?? command);
+    addBlock(raw ?? command, bodyCode?.language);
   }
   const detail = workEntry.detail?.trim();
   if (detail !== viewedImagePath?.trim()) {
@@ -5103,7 +5203,7 @@ function buildToolCallExpandedBody(
   if (changedFiles.length > 0) {
     addBlock([...new Set(changedFiles)].join("\n"));
   }
-  return blocks.length > 0 ? blocks.join("\n\n") : null;
+  return blocks.length > 0 ? blocks : null;
 }
 
 const toolCallExpandedBodyClassName =
@@ -5121,6 +5221,7 @@ function workEntryIconName(workEntry: TimelineWorkEntry): WorkEntryIconName {
         return "terminal";
       case "monitor":
         return "eye";
+      case "heartbeat":
       case "background_task":
         return "zap";
       case "system":
@@ -5132,6 +5233,10 @@ function workEntryIconName(workEntry: TimelineWorkEntry): WorkEntryIconName {
   }
   if (workEntry.itemType === "user_input_request" || workEntry.itemType === "approval_request") {
     return "message-circle";
+  }
+  // The info tone's check mark would claim a notice that is still running is done.
+  if (workEntry.itemType === "system_notice" && workEntry.toolLifecycleStatus === "inProgress") {
+    return "zap";
   }
   if (workEntry.toolSurface) return workEntry.toolSurface;
   if (
@@ -5209,6 +5314,7 @@ type WorkEntryRowProps = {
   workspaceRoot: string | undefined;
   displayLabel?: string | undefined;
   onToggleEntry?: ((collapsed: boolean) => void) | undefined;
+  active?: boolean;
 };
 
 const SimpleWorkEntryRow = memo(function SimpleWorkEntryRow(props: WorkEntryRowProps) {
@@ -5345,6 +5451,7 @@ function WorkEntryLogRow(props: WorkEntryRowProps) {
         ? "Thinking"
         : "Thought"
       : questionHeading || (displayLabel ?? workEntryDisplayLabel(workEntry, workspaceRoot));
+  const labelCode = questionHeading ? null : workEntryLabelCode(workEntry, previewText);
   const answerPreview =
     workEntry.questionAnswer && hasQuestionAnswer(workEntry.questionAnswer)
       ? getQuestionAnswerPreview(workEntry.questionAnswer)
@@ -5378,15 +5485,19 @@ function WorkEntryLogRow(props: WorkEntryRowProps) {
       workEntry.changedFiles?.length ||
       viewedImage,
     );
+  const bodyCode = questionHeading ? null : workEntryBodyCode(workEntry, previewText);
   const expandedBody =
     expanded && !isReasoning
       ? plainOutput !== undefined
         ? plainOutput
+          ? [{ text: plainOutput }]
+          : null
         : buildToolCallExpandedBody(
             workEntry,
             workspaceRoot,
             previewText,
             viewedImage ? viewedImagePath : null,
+            bodyCode,
           )
       : null;
   const plainOutputFetches =
@@ -5394,17 +5505,21 @@ function WorkEntryLogRow(props: WorkEntryRowProps) {
     workEntry.projectedItem !== undefined &&
     turnItemNeedsDetailFetch(workEntry.projectedItem.item);
   const canExpandProjectedItem =
-    plainOutput !== undefined
+    workEntryHasInspectableContent(workEntry) &&
+    (plainOutput !== undefined
       ? Boolean(plainOutput || viewedImage || workEntry.questionAnswer || plainOutputFetches)
       : workEntry.projectedItem === undefined
         ? canExpand
         : isReasoning
           ? Boolean(workEntry.detail?.trim())
-          : Boolean(
-              viewedImage ||
-              workEntry.questionAnswer ||
-              turnItemHasDetail(workEntry.projectedItem.item),
-            );
+          : workEntry.projectedItem.item.type === "notification" ||
+              workEntry.projectedItem.item.type === "system_notice"
+            ? true
+            : Boolean(
+                viewedImage ||
+                workEntry.questionAnswer ||
+                turnItemHasDetail(workEntry.projectedItem.item),
+              ));
   const iconWrapperClass = cn(
     "flex size-4 items-center justify-center",
     showWarningIndicator
@@ -5470,7 +5585,12 @@ function WorkEntryLogRow(props: WorkEntryRowProps) {
         <div className="min-w-0 flex-1 overflow-hidden">
           <p className="flex min-w-0 w-full items-baseline gap-1.5 text-sm leading-relaxed">
             <span
-              className={cn(answerPreview ? "min-w-0" : "min-w-0 flex-1", "truncate", headingClass)}
+              className={cn(
+                answerPreview ? "min-w-0" : "min-w-0 flex-1",
+                "truncate",
+                headingClass,
+                props.active && !showFailedIndicator && "text-foreground",
+              )}
             >
               {isReasoning && !expanded ? (
                 <ReactMarkdown
@@ -5491,6 +5611,15 @@ function WorkEntryLogRow(props: WorkEntryRowProps) {
                   environmentId={ctx.activeThreadEnvironmentId}
                   linked
                 />
+              ) : labelCode !== null ? (
+                <span className="font-mono text-(length:--font-size-code,var(--text-xs))">
+                  <HighlightedCode
+                    code={labelCode.code}
+                    language={labelCode.language}
+                    theme={ctx.resolvedTheme}
+                    kind="label"
+                  />
+                </span>
               ) : (
                 previewText
               )}
@@ -5598,11 +5727,28 @@ function WorkEntryLogRow(props: WorkEntryRowProps) {
               onOpenTurnDiff={ctx.onOpenTurnDiff}
               onRollbackCheckpoint={ctx.onRollbackCheckpoint}
               onImageExpand={ctx.onImageExpand}
+              code={bodyCode ?? undefined}
             />
           ) : (
             <>
               {expandedBody ? (
-                <pre className={toolCallExpandedBodyClassName}>{expandedBody}</pre>
+                <pre className={toolCallExpandedBodyClassName}>
+                  {expandedBody.map((block, index) => (
+                    <Fragment key={block.text}>
+                      {index > 0 ? "\n\n" : null}
+                      {block.language ? (
+                        <HighlightedCode
+                          code={block.text}
+                          language={block.language}
+                          theme={ctx.resolvedTheme}
+                          kind="body"
+                        />
+                      ) : (
+                        block.text
+                      )}
+                    </Fragment>
+                  ))}
+                </pre>
               ) : null}
               {plainOutputFetches && workEntry.projectedItem ? (
                 <FetchedToolOutput

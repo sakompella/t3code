@@ -6,8 +6,20 @@ import * as NodeModule from "node:module";
 import * as NodeVM from "node:vm";
 import { assert, describe, expect, it } from "@effect/vitest";
 
-import { PI_T3_MCP_EXTENSION_SOURCE } from "./mcpExtensionSource.ts";
+import * as Schema from "effect/Schema";
+
+import {
+  PI_T3_MCP_EXTENSION_SOURCE,
+  T3_MCP_BEARER_ENV,
+  T3_MCP_URL_ENV,
+  T3_NAVIGATE_TREE_COMMAND,
+  T3_NAVIGATE_TREE_RESULT_MARKER,
+  T3_PI_MCP_TOOLS_ENV,
+  T3_ROLLBACK_NOTICE,
+} from "./mcpExtensionSource.ts";
 import { loadMcpBridge } from "./mcpBridge.testkit.ts";
+
+const decodeJson = Schema.decodeUnknownSync(Schema.fromJsonString(Schema.Unknown));
 
 type RequestHook = (
   event: { payload: unknown },
@@ -41,6 +53,7 @@ async function loadHooks(commands: ReadonlyArray<SkillCommand> = []) {
     pi: {
       on: (name: string, handler: unknown) => handlers.set(name, handler),
       getCommands: () => commands,
+      registerCommand: () => undefined,
     },
   });
   return handlers;
@@ -361,6 +374,7 @@ describe("Pi tool discovery permissions", () => {
           if (name === "tool_call") toolCall = handler;
         },
         getAllTools: () => [{ name: "tool_search", sourceInfo: { path: searchPath } }],
+        registerCommand: () => undefined,
       },
     });
     assert.isDefined(toolCall);
@@ -391,8 +405,48 @@ describe("Pi tool discovery permissions", () => {
   });
 });
 
-async function loadRequestHook(): Promise<RequestHook> {
-  const handlers = new Map<string, RequestHook>();
+interface NavigateTreeContext {
+  readonly navigateTree: (entryId: string) => Promise<{ cancelled: boolean }>;
+  readonly ui: { readonly notify: (message: string, type: string) => void };
+}
+
+interface RegisteredCommand {
+  readonly handler: (args: string, ctx: NavigateTreeContext) => Promise<void>;
+}
+
+interface SentMessage {
+  readonly message: { readonly customType: string; readonly content: string };
+  readonly options: { readonly deliverAs?: string; readonly triggerTurn?: boolean };
+}
+
+const FAKE_T3_TOOLS = ["orchestrator_capabilities", "delegate_task"];
+
+/** Answers the extension's MCP handshake and tool listing like T3's server. */
+const fakeT3McpFetch = async (_url: string, init: { readonly body: string }) => {
+  const { id, method } = decodeJson(init.body) as { id?: number; method: string };
+  const result =
+    method === "tools/list"
+      ? { tools: FAKE_T3_TOOLS.map((name) => ({ name, description: name, inputSchema: {} })) }
+      : {};
+  return {
+    ok: true,
+    status: 200,
+    headers: { get: (name: string) => (name === "content-type" ? "application/json" : null) },
+    text: async () => JSON.stringify({ jsonrpc: "2.0", id, result }),
+  };
+};
+
+async function loadExtension(env: Record<string, string> = {}): Promise<{
+  readonly handlers: Map<string, unknown>;
+  readonly commands: Map<string, RegisteredCommand>;
+  readonly sentMessages: Array<SentMessage>;
+  readonly registeredTools: Array<string>;
+}> {
+  const handlers = new Map<string, unknown>();
+  const commands = new Map<string, RegisteredCommand>();
+  const sentMessages: Array<SentMessage> = [];
+  const registeredTools: Array<string> = [];
+  // Execute the shipped extension; Typebox is replaced by a pass-through stub.
   const source = NodeModule.stripTypeScriptTypes(
     PI_T3_MCP_EXTENSION_SOURCE.replace(/^import .*;$/gm, "").replace(
       "export default async function",
@@ -400,12 +454,26 @@ async function loadRequestHook(): Promise<RequestHook> {
     ),
   );
   await NodeVM.runInNewContext(`${source}\nt3McpExtension(pi)`, {
-    process: { env: {} },
-    pi: { on: (name: string, handler: RequestHook) => handlers.set(name, handler) },
+    process: { env },
+    fetch: fakeT3McpFetch,
+    AbortSignal,
+    Type: { Unsafe: (schema: unknown) => schema, Object: () => ({}) },
+    pi: {
+      on: (name: string, handler: unknown) => handlers.set(name, handler),
+      registerCommand: (name: string, command: RegisteredCommand) => commands.set(name, command),
+      registerTool: (tool: { readonly name: string }) => registeredTools.push(tool.name),
+      sendMessage: (message: SentMessage["message"], options: SentMessage["options"]) =>
+        sentMessages.push({ message, options }),
+    },
   });
+  return { handlers, commands, sentMessages, registeredTools };
+}
+
+async function loadRequestHook(): Promise<RequestHook> {
+  const { handlers } = await loadExtension();
   const hook = handlers.get("before_provider_request");
   assert.isDefined(hook);
-  return hook!;
+  return hook as RequestHook;
 }
 
 describe("Pi upstream output-budget workaround", () => {
@@ -540,5 +608,204 @@ describe("Pi skill references", () => {
     } finally {
       await NodeFSP.rm(directory, { recursive: true });
     }
+  });
+});
+
+describe("T3 in-place rollback command", () => {
+  const runCommand = async (args: string, navigateTree: NavigateTreeContext["navigateTree"]) => {
+    const { commands, sentMessages } = await loadExtension();
+    const command = commands.get(T3_NAVIGATE_TREE_COMMAND);
+    assert.isDefined(command);
+    const notices: Array<string> = [];
+    const navigatedTo: Array<string> = [];
+    await command!.handler(args, {
+      navigateTree: (entryId) => {
+        navigatedTo.push(entryId);
+        return navigateTree(entryId);
+      },
+      ui: { notify: (message) => notices.push(message) },
+    });
+    assert.lengthOf(notices, 1);
+    assert.isTrue(notices[0]!.startsWith(T3_NAVIGATE_TREE_RESULT_MARKER));
+    return {
+      navigatedTo,
+      sentMessages,
+      result: decodeJson(notices[0]!.slice(T3_NAVIGATE_TREE_RESULT_MARKER.length)),
+    };
+  };
+
+  it("navigates to the requested entry and reports success with the request id", async () => {
+    const { navigatedTo, result, sentMessages } = await runCommand(
+      "  t3-nav-1   u2 ",
+      async () => ({ cancelled: false }),
+    );
+    assert.deepEqual(navigatedTo, ["u2"]);
+    assert.deepEqual(result, { requestId: "t3-nav-1", outcome: "ok" });
+    // The agent learns on its next turn that live tool state was not rewound.
+    assert.deepEqual(
+      sentMessages.map(({ message, options }) => [message.content, options.deliverAs]),
+      [[T3_ROLLBACK_NOTICE, "nextTurn"]],
+    );
+  });
+
+  it("reports extension vetoes and navigation errors instead of throwing", async () => {
+    const vetoed = await runCommand("t3-nav-2 u3", async () => ({ cancelled: true }));
+    assert.deepEqual(vetoed.result, { requestId: "t3-nav-2", outcome: "cancelled" });
+    assert.lengthOf(vetoed.sentMessages, 0);
+    const failed = await runCommand("t3-nav-3 missing", async () => {
+      throw new Error("Entry missing not found");
+    });
+    assert.deepEqual(failed.result, {
+      requestId: "t3-nav-3",
+      outcome: "error",
+      error: "Entry missing not found",
+    });
+    assert.lengthOf(failed.sentMessages, 0);
+  });
+});
+
+describe("T3 tools in the extension", () => {
+  const t3Env = {
+    [T3_MCP_URL_ENV]: "http://127.0.0.1:43123/mcp",
+    [T3_MCP_BEARER_ENV]: "secret-token",
+  };
+
+  it("registers T3's tools natively and adds the orchestration prompt by default", async () => {
+    const { registeredTools, handlers } = await loadExtension(t3Env);
+    assert.deepEqual(
+      registeredTools,
+      FAKE_T3_TOOLS.map((name) => `mcp__t3-code__${name}`),
+    );
+    const beforeStart = handlers.get("before_agent_start") as unknown as (event: {
+      systemPrompt: string;
+    }) => { systemPrompt: string };
+    assert.include(beforeStart({ systemPrompt: "base" }).systemPrompt, "T3 Code orchestration");
+  });
+
+  it("leaves T3's tools to the agent's own MCP client in kernel mode", async () => {
+    const { registeredTools, handlers, commands } = await loadExtension({
+      ...t3Env,
+      [T3_PI_MCP_TOOLS_ENV]: "kernel",
+    });
+    assert.deepEqual(registeredTools, []);
+    assert.isFalse(handlers.has("before_agent_start"));
+    assert.isFalse(handlers.has("session_start"));
+    // Permissions, the output cap, and in-place rollback still load.
+    assert.isTrue(handlers.has("tool_call"));
+    assert.isTrue(handlers.has("before_provider_request"));
+    assert.isTrue(commands.has(T3_NAVIGATE_TREE_COMMAND));
+  });
+});
+
+describe("T3 extension handlers on a stale ctx", () => {
+  // What Pi and Prime Agent throw from a retired runner's ctx getters.
+  const staleMessage =
+    "This extension ctx is stale after session replacement or reload. Do not use a captured pi or command ctx after ctx.newSession(), ctx.fork(), ctx.switchSession(), or ctx.reload().";
+  const throwingCtx = (message: string) =>
+    new Proxy(
+      {},
+      {
+        get: () => {
+          throw new Error(message);
+        },
+      },
+    );
+  const staleCtx = throwingCtx(staleMessage);
+  const brokenCtx = throwingCtx("ctx exploded");
+  const uncappedPayload = { max_tokens: 231_969 };
+
+  const loadHandler = async <Event, Ctx, Result>(
+    name: string,
+    env: Record<string, string> = {},
+  ) => {
+    const { handlers } = await loadExtension(env);
+    const handler = handlers.get(name);
+    assert.isDefined(handler);
+    return handler as (event: Event, ctx: Ctx) => Result;
+  };
+
+  it("sends a provider request from a replaced session on, uncapped and without an error", async () => {
+    const hook = await loadHandler<{ payload: unknown }, unknown, unknown>(
+      "before_provider_request",
+    );
+    assert.isUndefined(hook({ payload: uncappedPayload }, staleCtx));
+  });
+
+  it("still reports other ctx failures from a provider request", async () => {
+    const hook = await loadHandler<{ payload: unknown }, unknown, unknown>(
+      "before_provider_request",
+    );
+    assert.throws(() => hook({ payload: uncappedPayload }, brokenCtx), "ctx exploded");
+  });
+
+  describe("tool approval", () => {
+    const approvalEnv = { T3_PI_RUNTIME_MODE: "approval-required" };
+    const bash = { toolName: "bash", input: { command: "rm -rf build" } };
+    const loadToolCall = () =>
+      loadHandler<typeof bash, unknown, Promise<{ block: boolean; reason: string } | undefined>>(
+        "tool_call",
+        approvalEnv,
+      );
+
+    it("blocks the tool when the approval prompt belongs to a replaced session", async () => {
+      const toolCall = await loadToolCall();
+      const result = await toolCall(bash, staleCtx);
+      assert.isTrue(result?.block);
+      assert.match(result?.reason ?? "", /bash was blocked.*session was replaced/);
+    });
+
+    it("asks in a Pi or root Prime Agent session, then runs an approved tool and blocks a declined one", async () => {
+      const toolCall = await loadToolCall();
+      // Pi's session header has no rlmDepth; a root Prime Agent session has 0.
+      for (const header of [{ type: "session" }, { type: "session", rlmDepth: 0 }]) {
+        const answering = (approved: boolean) => ({
+          sessionManager: { getHeader: () => header },
+          ui: { confirm: async () => approved },
+        });
+        assert.isUndefined(await toolCall(bash, answering(true)));
+        assert.deepEqual(await toolCall(bash, answering(false)), {
+          block: true,
+          reason: "bash was declined in T3 Code.",
+        });
+      }
+    });
+
+    it("blocks a subagent's tool without asking, since no T3 prompt can reach a subagent", async () => {
+      const toolCall = await loadToolCall();
+      const subagent = {
+        sessionManager: { getHeader: () => ({ type: "session", rlmDepth: 1 }) },
+        ui: {
+          confirm: async () => {
+            throw new Error("a subagent's approval prompt has no recipient");
+          },
+        },
+      };
+      const result = await toolCall(bash, subagent);
+      assert.isTrue(result?.block);
+      assert.match(result?.reason ?? "", /bash was blocked.*subagent/);
+    });
+
+    it("rejects, rather than approving, when the prompt fails for another reason", async () => {
+      const toolCall = await loadToolCall();
+      let failure: unknown;
+      await toolCall(bash, brokenCtx).catch((error: unknown) => (failure = error));
+      assert.match(String(failure), /ctx exploded/);
+    });
+  });
+
+  it("starts a replaced session without a warning, and warns a live one", async () => {
+    const sessionStart = await loadHandler<unknown, unknown, Promise<void>>("session_start");
+    await sessionStart({}, staleCtx);
+    const warnings: Array<string> = [];
+    await sessionStart({}, { ui: { notify: (message: string) => warnings.push(message) } });
+    assert.lengthOf(warnings, 1);
+    assert.match(warnings[0]!, /T3_MCP_URL/);
+  });
+
+  it("leaves a rollback on a replaced session unreported instead of throwing", async () => {
+    const { commands } = await loadExtension();
+    const handler = commands.get(T3_NAVIGATE_TREE_COMMAND)?.handler;
+    assert.isDefined(handler);
+    await handler!("t3-nav-9 u1", staleCtx as unknown as NavigateTreeContext);
   });
 });

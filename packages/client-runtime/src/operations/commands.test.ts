@@ -278,6 +278,106 @@ describe("V2 environment commands", () => {
     }).pipe(Effect.provide(layerTestCrypto)),
   );
 
+  it.effect.each([
+    { turnCount: 355, expected: 354 },
+    { turnCount: 354, expected: 354 },
+    { turnCount: 353, expected: 352 },
+    { turnCount: 351, expected: 0 },
+  ])(
+    "resolves run ordinal $turnCount past runs that left no checkpoint to $expected",
+    ({ turnCount, expected }) =>
+      Effect.gen(function* () {
+        const scopeId = CheckpointScopeId.make("checkpoint-scope-root");
+        // Failed run 355 and cancelled run 353 captured nothing. The rows at
+        // their ordinals are the next runs' baselines, which name no run.
+        const checkpoint = (
+          ordinalWithinScope: number,
+          appRunOrdinal: number | null,
+          status: "ready" | "stale" = "ready",
+        ) => ({
+          id: CheckpointId.make(`checkpoint-${ordinalWithinScope}`),
+          threadId: v2ThreadId,
+          scopeId,
+          runId: appRunOrdinal === null ? null : RunId.make(`run-${appRunOrdinal}`),
+          nodeId: NodeId.make(`node-${ordinalWithinScope}`),
+          parentCheckpointId: null,
+          ordinalWithinScope,
+          appRunOrdinal,
+          ref: CheckpointRef.make(`refs/t3/ordinal/${ordinalWithinScope}`),
+          status,
+          files: [],
+          capturedAt: v2Now,
+        });
+        const projection: OrchestrationV2ThreadProjection = {
+          ...v2Projection,
+          checkpoints: [
+            checkpoint(0, null),
+            checkpoint(351, 351, "stale"),
+            checkpoint(352, 352),
+            checkpoint(353, null),
+            checkpoint(354, 354),
+            checkpoint(355, null),
+            checkpoint(356, 356),
+          ],
+        };
+        const commands: OrchestrationV2Command[] = [];
+        const supervisor = yield* makeSupervisor({ commands, projects: [], projection });
+
+        yield* revertThreadCheckpoint({
+          commandId: CommandId.make("rollback-past-failed-run"),
+          threadId: v2ThreadId,
+          turnCount,
+        }).pipe(Effect.provideService(EnvironmentSupervisor.EnvironmentSupervisor, supervisor));
+
+        expect(commands).toEqual([
+          {
+            type: "checkpoint.rollback",
+            commandId: "rollback-past-failed-run",
+            threadId: v2ThreadId,
+            scopeId,
+            checkpointId: `checkpoint-${expected}`,
+          },
+        ]);
+      }).pipe(Effect.provide(layerTestCrypto)),
+  );
+
+  it.effect("does not roll back past a run whose checkpoint failed", () =>
+    Effect.gen(function* () {
+      const scopeId = CheckpointScopeId.make("checkpoint-scope-root");
+      const projection: OrchestrationV2ThreadProjection = {
+        ...v2Projection,
+        checkpoints: [1, 2].map((ordinal) => ({
+          id: CheckpointId.make(`checkpoint-${ordinal}`),
+          threadId: v2ThreadId,
+          scopeId,
+          runId: RunId.make(`run-${ordinal}`),
+          nodeId: NodeId.make(`node-${ordinal}`),
+          parentCheckpointId: null,
+          ordinalWithinScope: ordinal,
+          appRunOrdinal: ordinal,
+          ref: CheckpointRef.make(`refs/t3/ordinal/${ordinal}`),
+          status: ordinal === 2 ? ("error" as const) : ("ready" as const),
+          files: [],
+          capturedAt: v2Now,
+        })),
+      };
+      const commands: OrchestrationV2Command[] = [];
+      const supervisor = yield* makeSupervisor({ commands, projects: [], projection });
+
+      const error = yield* revertThreadCheckpoint({
+        commandId: CommandId.make("rollback-past-error"),
+        threadId: v2ThreadId,
+        turnCount: 2,
+      }).pipe(
+        Effect.provideService(EnvironmentSupervisor.EnvironmentSupervisor, supervisor),
+        Effect.flip,
+      );
+
+      expect(error._tag).toBe("OrchestrationV2CheckpointUnavailableError");
+      expect(commands).toEqual([]);
+    }).pipe(Effect.provide(layerTestCrypto)),
+  );
+
   it.effect("preserves plan implementation provenance on V2 runs", () =>
     Effect.gen(function* () {
       const commands: OrchestrationV2Command[] = [];

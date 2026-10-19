@@ -41,6 +41,10 @@ export function useThreadTurnSubagents(target: AgentsTarget | null): ThreadTurnS
   );
 }
 
+export function useThreadRunningTurnBackgroundWork(target: AgentsTarget) {
+  return useAtomValue(environmentThreadDetails.runningTurnBackgroundWorkAtom(target));
+}
+
 export function ThreadAgentsSheet({ route }: StaticScreenProps<AgentsTarget>) {
   const { layout } = useAdaptiveWorkspaceLayout();
   const target = route.params;
