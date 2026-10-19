@@ -56,6 +56,7 @@ describe("Antigravity process environment", () => {
     tokenPath: "/t3/userdata/providers/antigravity/profile/antigravity-acp/acp_token.json",
     tempDirectory: "/t3/userdata/providers/antigravity/profile/antigravity-acp/tmp",
     browserCommand: "managed-browser-helper",
+    runtimeEnv: { ELECTRON_RUN_AS_NODE: "1" },
   };
 
   it("isolates the profile and harness after merging overrides without changing the base environment", () => {
@@ -104,7 +105,6 @@ describe("Antigravity process environment", () => {
         ANTIGRAVITY_HARNESS_PATH: "/release/harness",
         BROWSER: profile.browserCommand,
         PYTHONUNBUFFERED: "1",
-        ELECTRON_RUN_AS_NODE: "1",
         TMPDIR: profile.tempDirectory,
       },
     });
@@ -199,6 +199,7 @@ describe("Antigravity process environment", () => {
       tokenPath: "C:\\state\\providers\\antigravity\\profile\\antigravity-acp\\acp_token.json",
       tempDirectory: "C:\\state\\providers\\antigravity\\profile\\antigravity-acp\\tmp",
       browserCommand: "managed-browser-helper",
+      runtimeEnv: { ELECTRON_RUN_AS_NODE: "1" },
     };
     const input = {
       installation: {
@@ -795,6 +796,58 @@ it.layer(NodeServices.layer)("Antigravity profile preparation", (it) => {
           }),
       );
       expect(exitCode).toBe(0);
+    }),
+  );
+
+  it.effect("scopes ELECTRON_RUN_AS_NODE to the browser helper when the runtime is Electron", () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
+      const temporaryDirectory = yield* fs.makeTempDirectoryScoped();
+      let preflightEnv: Record<string, string | undefined> | undefined;
+      const profile = yield* prepareAntigravityProfile({
+        profileDirectory: temporaryDirectory,
+        platform: "linux",
+        baseEnv: { PATH: process.env.PATH, ELECTRON_RUN_AS_NODE: "0" },
+      }).pipe(
+        Effect.provideService(HostProcess.ExecutablePath, process.execPath),
+        Effect.provideService(HostProcess.IsExecutable, false),
+        Effect.provideService(HostProcess.IsElectron, true),
+        Effect.provideService(
+          ChildProcessSpawner.ChildProcessSpawner,
+          ChildProcessSpawner.make((command) => {
+            if (ChildProcess.isStandardCommand(command)) preflightEnv = { ...command.options.env };
+            return spawner.spawn(command);
+          }),
+        ),
+      );
+
+      expect(preflightEnv?.ELECTRON_RUN_AS_NODE).toBe("1");
+      expect(profile.browserCommand).toMatch(/^'\/usr\/bin\/env' 'ELECTRON_RUN_AS_NODE=1' '/);
+      const agentSpawn = buildAntigravityAcpSpawnInput({
+        installation: { executablePath: "/release/acp", harnessPath: "/release/harness" },
+        profile,
+        cwd: temporaryDirectory,
+        baseEnv: { PATH: "/usr/bin", ELECTRON_RUN_AS_NODE: "1" },
+      });
+      expect(agentSpawn.env).not.toHaveProperty("ELECTRON_RUN_AS_NODE");
+    }),
+  );
+
+  it.effect("adds no launcher or flag when the runtime is plain Node", () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const temporaryDirectory = yield* fs.makeTempDirectoryScoped();
+      const profile = yield* prepareAntigravityProfile({
+        profileDirectory: temporaryDirectory,
+        platform: "linux",
+      }).pipe(
+        Effect.provideService(HostProcess.ExecutablePath, process.execPath),
+        Effect.provideService(HostProcess.IsExecutable, false),
+        Effect.provideService(HostProcess.IsElectron, false),
+      );
+      expect(profile.browserCommand).not.toContain("ELECTRON_RUN_AS_NODE");
+      expect(profile.runtimeEnv).toEqual({});
     }),
   );
 

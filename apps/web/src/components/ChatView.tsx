@@ -37,7 +37,7 @@ import {
   latestExecutedRun,
   latestRootProviderFailure,
 } from "@t3tools/shared/orchestrationV2ThreadError";
-import type { UsageLimitSourceSnapshots } from "@t3tools/contracts";
+import type { OrchestrationV2RollbackSummary, UsageLimitSourceSnapshots } from "@t3tools/contracts";
 import { isUsageLimitsCommand } from "@t3tools/shared/usageLimits";
 import { feedbackBannerItem } from "./chat/ComposerFeedback";
 import { useUsageLimitsPanel } from "./chat/useUsageLimitsPanel";
@@ -50,6 +50,7 @@ import {
   TYPE_TO_FOCUS_EDITABLE_SELECTOR,
   TYPE_TO_FOCUS_FLOATING_LAYER_SELECTOR,
 } from "./chat/composerFocusRedirect";
+import { heartbeatBannerItem } from "./chat/ComposerHeartbeat";
 import { getTerminalLabel } from "@t3tools/shared/terminalLabels";
 import * as Schema from "effect/Schema";
 import {
@@ -109,9 +110,17 @@ import {
   resolveWorkflowOpening,
   workflowOpeningParentThreadId,
 } from "@t3tools/client-runtime/state/subagentRuntime";
-import { threadSupportsProviderHandoff } from "@t3tools/client-runtime/state/thread-workflows";
+import {
+  threadSupportsProviderHandoff,
+  threadSupportsRollbackSummary,
+} from "@t3tools/client-runtime/state/thread-workflows";
 import { resolvePendingHandoff } from "@t3tools/client-runtime/handoff";
 import { HandoffRow } from "./chat/V2LifecycleRow";
+import { TimelineSystemDivider } from "./chat/TimelineSystemDivider";
+import {
+  deriveThreadHeartbeats,
+  presentHeartbeats,
+} from "@t3tools/client-runtime/state/thread-heartbeats";
 import {
   codexFeedbackMessage,
   parseCodexFeedbackCommand,
@@ -139,7 +148,14 @@ import {
   resolveProjectScripts,
 } from "@t3tools/shared/projectScripts";
 import { CHAT_LIST_ANCHOR_OFFSET } from "@t3tools/shared/chatList";
-import { derivePendingBackgroundWork } from "@t3tools/shared/orchestrationV2PendingBackgroundWork";
+import {
+  deriveOutlivingBackgroundWork,
+  derivePendingBackgroundWork,
+} from "@t3tools/shared/orchestrationV2PendingBackgroundWork";
+import {
+  buildLiveSubagentTree,
+  selectSubagentsForBackgroundTasks,
+} from "@t3tools/client-runtime/state/subagent-tree";
 import {
   latestUnheldRun,
   usageLimitRunPresentedAsLatest,
@@ -281,6 +297,7 @@ import {
   GitBranchIcon,
   ShieldQuestionIcon,
   TargetIcon,
+  Undo2Icon,
   WifiOffIcon,
 } from "lucide-react";
 import { cn, randomUUID } from "~/lib/utils";
@@ -422,7 +439,7 @@ import type { AssistantCitationRequest } from "./chat/AssistantCitationSource";
 import { MessagesTimeline, type MessagesTimelineHistoryControls } from "./chat/MessagesTimeline";
 import { ProviderSubagentBar } from "./chat/ProviderSubagentBar";
 import { getTriggerDisplayModelName } from "./chat/providerIconUtils";
-import { resolveTimelineIsAtEnd } from "./chat/MessagesTimeline.logic";
+import { deriveTimelineLiveRunIds, resolveTimelineIsAtEnd } from "./chat/MessagesTimeline.logic";
 import {
   overlayComposerIsResting,
   resolveComposerTimelineInset,
@@ -549,6 +566,7 @@ import { useAtomCommand } from "../state/use-atom-command";
 import { useOrchestrationCommand } from "../state/use-orchestration-command";
 import { useAtomQueryRunner } from "../state/use-atom-query-runner";
 import { Button, InlineButton } from "./ui/button";
+import { SubagentTreeList } from "./chat/SubagentTree";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "./ui/tooltip";
 import { ServerUpdateAction, serverUpdateStageLabel } from "./ServerUpdateAction";
 import { useAutoBalanceUpdateBanner } from "./chat/useAutoBalanceUpdateBanner";
@@ -772,6 +790,7 @@ async function rewindToMessage(input: {
   readonly turnCount: number;
   readonly restoreFiles: boolean;
   readonly checkpoint: ReturnType<typeof findRevertCheckpoint>;
+  readonly summary: OrchestrationV2RollbackSummary | undefined;
   readonly draftTarget: ScopedThreadRef | DraftId;
   readonly composerHasPendingAttachments: boolean;
   readonly createAssetUrl: Parameters<
@@ -786,6 +805,7 @@ async function rewindToMessage(input: {
       restoreFiles: boolean;
       checkpointId?: string;
       scopeId?: string;
+      summary?: OrchestrationV2RollbackSummary;
     };
   }) => Promise<AtomCommandResult<unknown, unknown>>;
 }): Promise<
@@ -814,7 +834,7 @@ async function rewindToMessage(input: {
       throw new Error("Make room for this message's attachments in the composer before rewinding.");
     }
     const commandId = CommandId.make(randomUUID());
-    await waitForRevertedMessage(input.routeThreadRef, input.turnCount, commandId, async () => {
+    await waitForRevertedMessage(input.routeThreadRef, message.id, commandId, async () => {
       const result = await input.revertThreadCheckpoint({
         environmentId,
         input: {
@@ -825,6 +845,7 @@ async function rewindToMessage(input: {
           ...(input.checkpoint === undefined
             ? {}
             : { checkpointId: input.checkpoint.id, scopeId: input.checkpoint.scopeId }),
+          ...(input.summary === undefined ? {} : { summary: input.summary }),
         },
       });
       if (result._tag === "Failure") throw squashAtomCommandFailure(result);
@@ -1378,9 +1399,11 @@ export default function ChatView(props: ChatViewProps) {
     Record<string, LocalThreadErrorEntry>
   >({});
   const [isConnecting, _setIsConnecting] = useState(false);
-  const isRevertingCheckpoint = useComposerDraftStore((store) =>
-    store.rewindingThreadKeys.has(routeThreadKey),
-  );
+  const pendingHeadMove = serverProjection?.thread.pendingHeadMove ?? null;
+  // The server field covers rewinds started in another tab or before a reload.
+  const isRevertingCheckpoint =
+    useComposerDraftStore((store) => store.rewindingThreadKeys.has(routeThreadKey)) ||
+    pendingHeadMove !== null;
 
   const workspaceFileDragRouteKey = `${routeThreadKey}:${draftId ?? ""}`;
   const [workspaceFileDragRoute, setWorkspaceFileDragRoute] = useState(workspaceFileDragRouteKey);
@@ -1545,6 +1568,7 @@ export default function ChatView(props: ChatViewProps) {
   const isProviderSubagent =
     serverThread !== null && isProviderNativeSubagentThread(serverThread.source);
   const supportsProviderSwitchingViaHandoff = threadSupportsProviderHandoff(serverProjection);
+  const supportsRollbackSummary = threadSupportsRollbackSummary(serverProjection);
   const activeLatestRun = isServerThread ? serverLatestRun : (activeThread?.latestRun ?? null);
   const activeActivityRun = isServerThread ? serverActivityRun : (activeThread?.latestRun ?? null);
   const activeRuntime = isServerThread ? serverRuntime : (activeThread?.runtime ?? null);
@@ -2640,31 +2664,6 @@ export default function ChatView(props: ChatViewProps) {
     activeThreadLiveTokenUsage,
     activeProviderThread,
   );
-  const pendingBackgroundTasks = (() => {
-    if (serverProjection === null || serverProjection === undefined) {
-      return [];
-    }
-    const sessionError =
-      serverProjection.providerSessions.findLast(
-        (session) => session.providerInstanceId === serverProjection.thread.providerInstanceId,
-      )?.lastError ?? null;
-    const latestRun =
-      usageLimitRunPresentedAsLatest(
-        serverProjection.runs,
-        serverProjection.turnItems,
-        sessionError,
-      ) ?? latestUnheldRun(serverProjection.runs);
-    return [
-      ...derivePendingBackgroundWork({
-        latestRun,
-        providerThreads: serverProjection.providerThreads,
-        turnItems: serverProjection.turnItems,
-        activeProviderThreadId: serverProjection.thread.activeProviderThreadId,
-        runs: serverProjection.runs,
-        pullRequests: serverProjection.thread.pullRequests,
-      }),
-    ];
-  })();
   const activeWorkStartedAt =
     deriveActiveWorkStartedAt(activeActivityRun, activeRuntime, localDispatchStartedAt) ??
     runlessWorkStartedAt;
@@ -2926,6 +2925,52 @@ export default function ChatView(props: ChatViewProps) {
       }) as const,
   );
   const timelineEntries = isServerThread ? serverTimelineEntries : draftTimelineEntries;
+  // The runs the timeline presents as live, from the inputs it gets, so the
+  // banner leaves out exactly the work the live row shows.
+  const timelineLiveRunIds = deriveTimelineLiveRunIds({
+    timelineEntries,
+    latestRun: activeActivityRun,
+    runningRunId: activeRuntime?.activeRunId ?? null,
+    isWorking,
+  });
+  const pendingBackgroundTasks = (() => {
+    if (serverProjection === null || serverProjection === undefined) {
+      return [];
+    }
+    const sessionError =
+      serverProjection.providerSessions.findLast(
+        (session) => session.providerInstanceId === serverProjection.thread.providerInstanceId,
+      )?.lastError ?? null;
+    const latestRun =
+      usageLimitRunPresentedAsLatest(
+        serverProjection.runs,
+        serverProjection.turnItems,
+        sessionError,
+      ) ?? latestUnheldRun(serverProjection.runs);
+    // One derivation per projection update: while a turn runs, everything the
+    // timeline's live row does not already show; once settled, everything pending.
+    if (isWorking) {
+      return [
+        ...deriveOutlivingBackgroundWork({
+          providerThreads: serverProjection.providerThreads,
+          turnItems: serverProjection.turnItems,
+          activeProviderThreadId: serverProjection.thread.activeProviderThreadId,
+          runs: serverProjection.runs,
+          foregroundRunIds: timelineLiveRunIds,
+        }),
+      ];
+    }
+    return [
+      ...derivePendingBackgroundWork({
+        latestRun,
+        providerThreads: serverProjection.providerThreads,
+        turnItems: serverProjection.turnItems,
+        activeProviderThreadId: serverProjection.thread.activeProviderThreadId,
+        runs: serverProjection.runs,
+        pullRequests: serverProjection.thread.pullRequests,
+      }),
+    ];
+  })();
   const timelineMessages = timelineEntries.flatMap((entry) =>
     entry.kind === "message" ? [entry.message] : [],
   );
@@ -5067,7 +5112,6 @@ export default function ChatView(props: ChatViewProps) {
     wokeAt: activeThreadWokeAt,
     settled: activeThreadShell?.settledOverride === "settled",
     lastVisitedAt: activeThreadLastVisitedAt,
-    latestRunCompletedAt: activeLatestRun?.completedAt ?? null,
   });
   const activeThreadSettled =
     supportsSettlement && activeThreadShell?.settledOverride === "settled";
@@ -5239,7 +5283,10 @@ export default function ChatView(props: ChatViewProps) {
   });
   // The interrupt path also accepts a completed run while its provider still
   // has background work.
-  const activeBackgroundTasks = !isWorking && activeThread ? pendingBackgroundTasks : [];
+  // While a turn runs, the banner lists only work that outlived the step that
+  // started it. Its Stop would send the same interrupt as the composer's Stop,
+  // so the banner shows no Stop then.
+  const activeBackgroundTasks = activeThread ? pendingBackgroundTasks : [];
   const [stoppingBackgroundWorkKey, setStoppingBackgroundWorkKey] = useState<string | null>(null);
   const isStoppingBackgroundWork =
     stoppingBackgroundWorkKey === `${environmentId}:${activeThreadId}`;
@@ -5426,10 +5473,74 @@ export default function ChatView(props: ChatViewProps) {
     };
   })() as ComposerBannerStackItem | null;
 
+  // While a turn runs, only subagents the background list names; a subagent
+  // the timeline already shows live must not reappear in the banner's tree.
+  const liveSubagentTree = buildLiveSubagentTree(
+    isWorking
+      ? selectSubagentsForBackgroundTasks(serverProjection?.subagents ?? [], activeBackgroundTasks)
+      : (serverProjection?.subagents ?? []),
+  );
+
   const backgroundWorkBannerItem = (() => {
-    const presentation = presentPendingBackgroundWork(activeBackgroundTasks);
+    const presentation = presentPendingBackgroundWork(activeBackgroundTasks, {
+      turnRunning: isWorking,
+    });
     if (presentation === null || !activeThread) {
       return null;
+    }
+    const stopAction = isWorking ? undefined : (
+      <Button
+        size="xs"
+        variant="ghost"
+        disabled={!canOperateThread || isStoppingBackgroundWork}
+        onClick={() => void handleStopBackgroundWorkStable()}
+      >
+        {isStoppingBackgroundWork ? "Stopping..." : "Stop"}
+      </Button>
+    );
+    if (liveSubagentTree.roots.length > 0) {
+      // Live subagents read as a tree, like Prime Agent's agents view; other
+      // background work is listed after them.
+      const otherWork = presentation.items
+        .filter((item) => item.kind !== "subagent")
+        .map((item) => ({ taskId: item.taskId, label: item.label }));
+      return {
+        id: `background-work:${activeThread.id}`,
+        variant: "default",
+        priority: "activity",
+        icon: (
+          <span
+            className="size-1.5 animate-status-pulse rounded-full bg-foreground"
+            aria-hidden="true"
+          />
+        ),
+        title: (
+          <span className="flex flex-wrap items-center gap-x-3">
+            <span>Subagents</span>
+            <span>
+              <span className="text-success">●</span> {liveSubagentTree.runningCount} running
+            </span>
+            {liveSubagentTree.waitingCount === 0 ? null : (
+              <span>
+                <span className="text-warning">◐</span> {liveSubagentTree.waitingCount} waiting
+              </span>
+            )}
+            {otherWork.length === 0 ? null : (
+              <span className="text-muted-foreground">
+                {otherWork.length} {otherWork.length === 1 ? "command" : "commands"}
+              </span>
+            )}
+          </span>
+        ),
+        children: (
+          <SubagentTreeList
+            tree={liveSubagentTree}
+            commands={otherWork}
+            onOpenThread={onOpenRelatedThreadStable}
+          />
+        ),
+        actions: stopAction,
+      };
     }
     return {
       id: `background-work:${activeThread.id}`,
@@ -5474,18 +5585,21 @@ export default function ChatView(props: ChatViewProps) {
                 </Fragment>
               );
             }),
-      actions: (
-        <Button
-          size="xs"
-          variant="ghost"
-          disabled={!canOperateThread || isStoppingBackgroundWork}
-          onClick={() => void handleStopBackgroundWorkStable()}
-        >
-          {isStoppingBackgroundWork ? "Stopping..." : "Stop"}
-        </Button>
-      ),
+      actions: stopAction,
     };
   })() as ComposerBannerStackItem | null;
+  // Configuration, not work: shown quietly, and never part of the background list.
+  const threadHeartbeats =
+    serverProjection === null ? [] : deriveThreadHeartbeats(serverProjection);
+  const heartbeatThreadId = activeThread?.id ?? null;
+  const heartbeatPresentation = presentHeartbeats(
+    threadHeartbeats,
+    new Date(`${nowMinute}:00.000Z`),
+  );
+  const heartbeatBanner =
+    heartbeatPresentation === null || heartbeatThreadId === null
+      ? null
+      : heartbeatBannerItem(heartbeatThreadId, heartbeatPresentation);
   // The relative times read the clock; nowMinute re-renders them on the minute.
   const snoozedUntil = activeThreadShell?.snoozedUntil ?? null;
   const settledAt = activeThreadShell?.settledAt ?? null;
@@ -5635,6 +5749,7 @@ export default function ChatView(props: ChatViewProps) {
       goalBannerItem,
       backgroundWorkBannerItem,
     ].filter((item) => item !== null);
+    const heartbeatItems = heartbeatBanner === null ? [] : [heartbeatBanner];
     const usageLimitsItems = usageLimitsBanner === null ? [] : [usageLimitsBanner];
     const projectCloneItems = projectCloneBannerItem === null ? [] : [projectCloneBannerItem];
     if (!localCheckoutBranchMismatch || !showBranchMismatchBanner || !activeBranchMismatchKey) {
@@ -5645,6 +5760,7 @@ export default function ChatView(props: ChatViewProps) {
         ...projectCloneItems,
         ...systemComposerBannerItems,
         ...backgroundWorkItems,
+        ...heartbeatItems,
       ];
     }
     return [
@@ -5693,6 +5809,7 @@ export default function ChatView(props: ChatViewProps) {
           setBranchMismatchDismissTick((tick) => tick + 1);
         },
       },
+      ...heartbeatItems,
     ];
   })() as ComposerBannerStackItem[];
 
@@ -5953,6 +6070,7 @@ export default function ChatView(props: ChatViewProps) {
     turnCount: number,
     messageId: MessageId,
     restoreFiles?: boolean,
+    summary?: OrchestrationV2RollbackSummary,
   ) => {
     const localApi = readLocalApi();
     if (
@@ -6001,6 +6119,7 @@ export default function ChatView(props: ChatViewProps) {
       restoreFiles,
       // Keep the live checkpoint identity when command context refetches a bounded window.
       checkpoint: findRevertCheckpoint(serverProjection?.checkpoints ?? [], turnCount),
+      summary,
       draftTarget: composerDraftTarget,
       composerHasPendingAttachments: composerRef.current?.hasPendingAttachments() === true,
       createAssetUrl: createAttachmentAssetUrl,
@@ -6025,8 +6144,13 @@ export default function ChatView(props: ChatViewProps) {
     }
   };
   const onRevertToTurnCountStable = useStableCallback(onRevertToTurnCount);
-  const onConfirmRevert = (turnCount: number, messageId: MessageId, restoreFiles: boolean) => {
-    void onRevertToTurnCount(turnCount, messageId, restoreFiles);
+  const onConfirmRevert = (
+    turnCount: number,
+    messageId: MessageId,
+    restoreFiles: boolean,
+    summary: OrchestrationV2RollbackSummary | undefined,
+  ) => {
+    void onRevertToTurnCount(turnCount, messageId, restoreFiles, summary);
   };
   const onConfirmRevertStable = useStableCallback(onConfirmRevert);
 
@@ -8243,18 +8367,33 @@ export default function ChatView(props: ChatViewProps) {
                 {...(onOpenWorktreeSetupTerminal ? { onOpenWorktreeSetupTerminal } : {})}
                 isPreparingWorktree={!paintOnlyDisplayedTimeline && isPreparingWorktree}
                 footer={
-                  paintOnlyDisplayedTimeline ? null : pendingHandoff === null ? (
+                  paintOnlyDisplayedTimeline ? null : pendingHandoff === null &&
+                    pendingHeadMove === null ? (
                     threadStatusLine
                   ) : (
                     <>
-                      <div className="chat-content-lane">
-                        <HandoffRow
-                          environmentId={environmentId}
-                          endpoints={pendingHandoff}
-                          providers={providerStatuses}
-                          pending
-                        />
-                      </div>
+                      {pendingHandoff === null ? null : (
+                        <div className="chat-content-lane">
+                          <HandoffRow
+                            environmentId={environmentId}
+                            endpoints={pendingHandoff}
+                            providers={providerStatuses}
+                            pending
+                          />
+                        </div>
+                      )}
+                      {pendingHeadMove === null ? null : (
+                        <div className="chat-content-lane">
+                          <TimelineSystemDivider
+                            label={
+                              pendingHeadMove.summarize
+                                ? "Summarizing discarded turns…"
+                                : "Rewinding…"
+                            }
+                            icon={Undo2Icon}
+                          />
+                        </div>
+                      )}
                       {threadStatusLine}
                     </>
                   )
@@ -8898,7 +9037,11 @@ export default function ChatView(props: ChatViewProps) {
         </RightPanelSheet>
       ) : null}
 
-      <RevertConfirmHost threadKey={routeThreadKey} onConfirm={onConfirmRevertStable} />
+      <RevertConfirmHost
+        threadKey={routeThreadKey}
+        canSummarize={supportsRollbackSummary}
+        onConfirm={onConfirmRevertStable}
+      />
       <LinkPullRequestDialogHost />
       <ThreadVisitWatermark threadRef={routeThreadRef} />
       <ExpandedImageDialogHost threadKey={routeThreadKey} />

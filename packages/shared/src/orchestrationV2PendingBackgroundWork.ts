@@ -257,6 +257,20 @@ export function derivePendingBackgroundWork(input: {
     return [];
   }
 
+  return collectPendingBackgroundTasks({
+    providerThreads: input.providerThreads,
+    activeProviderThreadId: input.activeProviderThreadId,
+    turnItems: pendingBackgroundTurnItems(input),
+    pullRequests: input.pullRequests,
+  });
+}
+
+function collectPendingBackgroundTasks(input: {
+  readonly providerThreads: ReadonlyArray<PendingBackgroundWorkProviderThread>;
+  readonly activeProviderThreadId?: string | null | undefined;
+  readonly turnItems: ReadonlyArray<PendingBackgroundWorkTurnItem>;
+  readonly pullRequests?: ReadonlyArray<PendingBackgroundWorkPullRequest> | undefined;
+}): ReadonlyArray<PendingBackgroundWorkTask> {
   const byTaskId = new Map<string, PendingBackgroundWorkTask>();
 
   const providerThreads =
@@ -281,7 +295,7 @@ export function derivePendingBackgroundWork(input: {
     }
   }
 
-  for (const item of pendingBackgroundTurnItems(input)) {
+  for (const item of input.turnItems) {
     const taskId = nativeTaskIdFromTurnItem(item);
     if (byTaskId.has(taskId)) {
       continue;
@@ -309,4 +323,41 @@ function pullRequestWatchTasks(
           },
         ],
   );
+}
+
+/**
+ * Background work to show while a turn is still running: everything pending
+ * except what the timeline already shows as a live row, so no task appears in
+ * both places.
+ *
+ * The timeline keeps the in-progress steps of the runs in the current
+ * response in its live activity row, so `foregroundRunIds` names the items to
+ * leave out, and any roster task sharing their id. What remains is work that
+ * outlived its step: roster tasks that providers add after the starting tool
+ * call returns (Claude background tasks, Prime Agent `bash()` jobs) and active
+ * items left behind by earlier runs.
+ *
+ * Once the turn settles, `derivePendingBackgroundWork` takes over.
+ */
+export function deriveOutlivingBackgroundWork(input: {
+  readonly providerThreads: ReadonlyArray<PendingBackgroundWorkProviderThread>;
+  readonly turnItems: ReadonlyArray<PendingBackgroundWorkTurnItem>;
+  readonly activeProviderThreadId?: string | null;
+  readonly runs?: ReadonlyArray<PendingBackgroundWorkRun>;
+  /** Runs whose in-progress items the timeline already shows as live rows. */
+  readonly foregroundRunIds: ReadonlySet<string>;
+}): ReadonlyArray<PendingBackgroundWorkTask> {
+  const activeItems = pendingBackgroundTurnItems(input);
+  const isForeground = (item: PendingBackgroundWorkTurnItem) =>
+    item.runId !== undefined &&
+    item.runId !== null &&
+    input.foregroundRunIds.has(String(item.runId));
+  const foregroundTaskIds = new Set(
+    activeItems.filter(isForeground).map((item) => nativeTaskIdFromTurnItem(item)),
+  );
+  return collectPendingBackgroundTasks({
+    providerThreads: input.providerThreads,
+    activeProviderThreadId: input.activeProviderThreadId,
+    turnItems: activeItems.filter((item) => !isForeground(item)),
+  }).filter((task) => !foregroundTaskIds.has(task.taskId));
 }

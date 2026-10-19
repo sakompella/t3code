@@ -18,6 +18,7 @@ import {
   type OrchestrationV2ProviderSession,
   type OrchestrationV2ProviderThread,
   type OrchestrationV2RuntimeRequest,
+  type OrchestrationV2ServerCommand,
   type OrchestrationV2ThreadProjection,
   OrchestratorMcpCreateThreadsResult,
   OrchestratorMcpDelegateTaskResult,
@@ -54,7 +55,12 @@ import * as Schema from "effect/Schema";
 import * as Fiber from "effect/Fiber";
 import * as Stream from "effect/Stream";
 import { McpSchema, McpServer } from "effect/ai";
+import { FetchHttpClient } from "effect/http";
+import { HTML_RENDER_TOOL_NAME } from "@t3tools/shared/htmlRender";
+import { htmlRenderFromToolItem } from "@t3tools/shared/toolOutput";
 
+import { resolveAttachmentPathById, threadHtmlRenderAttachmentIds } from "../attachmentStore.ts";
+import * as ServerConfig from "../config.ts";
 import { ClaudeProviderCapabilitiesV2 } from "../orchestration-v2/Adapters/ClaudeAdapterV2.ts";
 import { CodexProviderCapabilitiesV2 } from "../orchestration-v2/Adapters/CodexAdapterV2.ts";
 import { CodexOrchestratorReplayHarness } from "../orchestration-v2/Adapters/CodexAdapterV2.testkit.ts";
@@ -79,6 +85,7 @@ import {
   materializeReplayTranscriptWorkspace,
 } from "@t3tools/provider-testing/replayTranscript";
 import * as ProviderRegistryMock from "../provider/testUtils/providerRegistryMock.ts";
+import * as PreviewBrowser from "../preview/PreviewBrowser.ts";
 import * as ProjectService from "../project/ProjectService.ts";
 import * as ScheduledTaskService from "../scheduledTasks/ScheduledTaskService.ts";
 import * as SecretRequests from "../secrets/SecretRequests.ts";
@@ -4756,6 +4763,372 @@ describe("orchestrator MCP toolkit", () => {
               ?.completionDelivery?.state,
           ).toBe("acknowledged");
         }).pipe(Effect.provide(layerTest));
+      }),
+    ),
+  );
+});
+
+describe("html_render", () => {
+  const primeSelection = {
+    instanceId: ProviderInstanceId.make("primeAgent"),
+    model: "prime-test",
+  } satisfies ModelSelection;
+  type Threads = ThreadManagementService.ThreadManagementService["Service"];
+  type RecordCommand = Extract<
+    OrchestrationV2ServerCommand,
+    { readonly type: "html_render.record" }
+  >;
+  /** Stands in for the orchestrator when the handler records a page. */
+  type RecordStep = (threads: Threads, command: RecordCommand) => ReturnType<Threads["dispatch"]>;
+
+  /** Stand-ins for the thread service; anything left out is the real one. */
+  interface ThreadStandIns {
+    readonly recordStep?: RecordStep;
+    readonly getTurnItem?: Threads["getTurnItem"];
+  }
+
+  const layerHtmlRender = (name: string, cwd: string, standIns: ThreadStandIns = {}) => {
+    const { recordStep, getTurnItem } = standIns;
+    const capturedTurns = Ref.makeUnsafe<ReadonlyArray<CapturedTurn>>([]);
+    const layerRegistry = ProviderAdapterRegistry.layerFromAdapters(
+      [
+        { instanceId: primeSelection.instanceId, driver: ProviderDriverKind.make("primeAgent") },
+        { instanceId: claudeInstanceId, driver: ProviderDriverKind.make("claudeAgent") },
+      ].map((provider) =>
+        makeDeterministicAdapter({
+          ...provider,
+          capabilities: ClaudeProviderCapabilitiesV2,
+          capturedTurns,
+          shouldComplete: () => false,
+          response: () => "",
+        }),
+      ),
+    );
+    const layerOrchestrator = ProviderReplayHarness.layerWithRegistry(
+      { name, runtimePolicyOverride: { cwd } },
+      layerRegistry,
+    );
+    const layerThreads = ThreadManagementService.layer.pipe(
+      Layer.provide(layerOrchestrator),
+      Layer.provide(ServerSettings.layerTest()),
+      Layer.provide(CommandReceiptStore.layer.pipe(Layer.provide(SqlitePersistence.layerMemory))),
+    );
+    const layerRecordingThreads =
+      recordStep === undefined && getTurnItem === undefined
+        ? layerThreads
+        : Layer.effect(
+            ThreadManagementService.ThreadManagementService,
+            ThreadManagementService.ThreadManagementService.pipe(
+              Effect.map((threads): Threads => ({
+                ...threads,
+                dispatch: (command) =>
+                  command.type === "html_render.record" && recordStep !== undefined
+                    ? recordStep(threads, command)
+                    : threads.dispatch(command),
+                getTurnItem: getTurnItem ?? threads.getTurnItem,
+              })),
+            ),
+          ).pipe(Layer.provide(layerThreads));
+    return McpHttpServer.layerHtmlToolkit.pipe(
+      Layer.provideMerge(McpServer.McpServer.layer),
+      Layer.provideMerge(Layer.merge(layerOrchestrator, layerRecordingThreads)),
+      Layer.provide(layerRegistry),
+      Layer.provide(PreviewBrowser.layer),
+      Layer.provideMerge(ServerConfig.layerTest(cwd, { prefix: `t3-mcp-${name}-` })),
+      Layer.provide(NodeServices.layer),
+      // The preview browser is not installed in a fresh home, so nothing downloads.
+      Layer.provide(FetchHttpClient.layer),
+    );
+  };
+
+  /** Starts a run that stays active, so its thread can publish pages. */
+  const startRun = (threadId: ThreadId, selection: ModelSelection, cwd: string) =>
+    Effect.gen(function* () {
+      const orchestrator = yield* Orchestrator.OrchestratorV2;
+      const created = yield* orchestrator.dispatch({
+        type: "thread.create",
+        createdBy: "user",
+        creationSource: "web",
+        commandId: CommandId.make(`command:${threadId}:create`),
+        threadId,
+        projectId,
+        title: "HTML render",
+        modelSelection: selection,
+        runtimeMode: "full-access",
+        interactionMode: "default",
+        branch: null,
+        worktreePath: cwd,
+      });
+      yield* orchestrator.dispatch({
+        type: "message.dispatch",
+        createdBy: "user",
+        creationSource: "web",
+        commandId: CommandId.make(`command:${threadId}:start`),
+        threadId,
+        messageId: MessageId.make(`message:${threadId}:start`),
+        text: "Chart the release.",
+        attachments: [],
+        modelSelection: selection,
+        dispatchMode: { type: "start_immediately" },
+      });
+      yield* orchestrator
+        .streamStoredEventsFrom({ threadId, afterSequence: created.sequence })
+        .pipe(
+          Stream.filter(
+            (stored) =>
+              stored.event.type === "provider-turn.updated" &&
+              stored.event.payload.status === "running",
+          ),
+          Stream.runHead,
+          Effect.flatMap(
+            Option.match({
+              onNone: () => Effect.die("The provider turn did not start."),
+              onSome: () => Effect.void,
+            }),
+          ),
+        );
+    });
+
+  const callHtmlRender = (threadId: ThreadId, selection: ModelSelection) =>
+    McpServer.McpServer.pipe(
+      Effect.flatMap((server) =>
+        server.callTool({
+          name: "html_render",
+          arguments: { html: "<p>Release</p>", title: "Release", height: 240 },
+        }),
+      ),
+      Effect.provideService(McpInvocationContext.McpInvocationContext, {
+        environmentId: EnvironmentId.make("environment:mcp-html-render"),
+        requestNamespace: `mcp-provider-session:${threadId}`,
+        thread: {
+          threadId,
+          providerSessionId: `mcp-provider-session:${threadId}`,
+          providerInstanceId: selection.instanceId,
+        },
+        client: undefined,
+        capabilities: new Set<McpInvocationContext.McpCapability>(["orchestration"]),
+        issuedAt: 1,
+      }),
+      Effect.provideService(McpSchema.McpServerClient, client),
+    );
+
+  /** What the thread shows inline, what deleting it removes, and whether the page file exists. */
+  const readPages = (threadId: ThreadId, attachmentId: string) =>
+    Effect.gen(function* () {
+      const orchestrator = yield* Orchestrator.OrchestratorV2;
+      const config = yield* ServerConfig.ServerConfig;
+      const toolItems = (yield* orchestrator.getThreadProjection(threadId)).turnItems.filter(
+        (item) => item.type === "dynamic_tool",
+      );
+      return {
+        inline: toolItems.flatMap((item) => {
+          const render = item.status === "completed" ? htmlRenderFromToolItem(item) : undefined;
+          return render === undefined ? [] : [render];
+        }),
+        attachmentIds: threadHtmlRenderAttachmentIds(threadId, toolItems),
+        stored:
+          resolveAttachmentPathById({ attachmentsDir: config.attachmentsDir, attachmentId }) !==
+          null,
+      };
+    });
+
+  it.live("shows a page published from Prime Agent's kernel inline, once", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const cwd = yield* checkpointWorkspace("html-render-kernel");
+        yield* Effect.gen(function* () {
+          const renderFrom = (threadId: ThreadId, selection: ModelSelection) =>
+            Effect.gen(function* () {
+              yield* startRun(threadId, selection, cwd);
+              const result = yield* callHtmlRender(threadId, selection);
+              expect(result.isError).toBe(false);
+              const published = htmlRenderFromToolItem({
+                toolName: HTML_RENDER_TOOL_NAME,
+                output: result.structuredContent,
+              });
+              if (published === undefined) return yield* Effect.die("No page was published.");
+              return { published, ...(yield* readPages(threadId, published.attachmentId)) };
+            });
+
+          const prime = yield* renderFrom(
+            ThreadId.make("thread-html-render-prime"),
+            primeSelection,
+          );
+          expect(prime.inline).toEqual([prime.published]);
+          expect(prime.attachmentIds).toEqual([prime.published.attachmentId]);
+
+          // Claude's own mcp__t3-code__html_render row carries the page, so T3 adds none.
+          const claude = yield* renderFrom(
+            ThreadId.make("thread-html-render-claude"),
+            claudeSelection,
+          );
+          expect(claude.inline).toEqual([]);
+          expect(claude.stored).toBe(true);
+        }).pipe(Effect.provide(layerHtmlRender("html-render-kernel", cwd)));
+      }),
+    ),
+  );
+
+  it.live("refuses a page whose thread was deleted while it was being published", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const cwd = yield* checkpointWorkspace("html-render-deleted");
+        const threadId = ThreadId.make("thread-html-render-deleted");
+        const attachmentId = yield* Deferred.make<string>();
+        yield* Effect.gen(function* () {
+          yield* startRun(threadId, primeSelection, cwd);
+          const result = yield* callHtmlRender(threadId, primeSelection);
+          expect(result.isError).toBe(true);
+          expect(declaredFailure(result)).toMatchObject({ code: "orchestration_error" });
+          const pages = yield* readPages(threadId, yield* Deferred.await(attachmentId));
+          expect(pages).toEqual({ inline: [], attachmentIds: [], stored: false });
+        }).pipe(
+          Effect.provide(
+            layerHtmlRender("html-render-deleted", cwd, {
+              recordStep: (threads, command) =>
+                Deferred.succeed(attachmentId, command.htmlRender.attachmentId).pipe(
+                  Effect.andThen(
+                    threads.dispatch({
+                      type: "thread.delete",
+                      commandId: CommandId.make(`command:${command.threadId}:delete`),
+                      threadId: command.threadId,
+                    }),
+                  ),
+                  Effect.andThen(threads.dispatch(command)),
+                ),
+            }),
+          ),
+        );
+      }),
+    ),
+  );
+
+  it.live("keeps a recorded page when the call is cancelled before the record returns", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const cwd = yield* checkpointWorkspace("html-render-cancel-recorded");
+        const threadId = ThreadId.make("thread-html-render-cancel-recorded");
+        const recorded = yield* Deferred.make<string>();
+        const release = yield* Deferred.make<void>();
+        yield* Effect.gen(function* () {
+          yield* startRun(threadId, primeSelection, cwd);
+          const call = yield* callHtmlRender(threadId, primeSelection).pipe(Effect.forkChild);
+          const attachmentId = yield* Deferred.await(recorded);
+          const cancelling = yield* Fiber.interrupt(call).pipe(Effect.forkChild);
+          yield* Deferred.succeed(release, undefined);
+          yield* Fiber.join(cancelling);
+          const pages = yield* readPages(threadId, attachmentId);
+          expect(pages.attachmentIds).toEqual([attachmentId]);
+          expect(pages.stored).toBe(true);
+        }).pipe(
+          Effect.provide(
+            // The record commits, then its reply fails to come back.
+            layerHtmlRender("html-render-cancel-recorded", cwd, {
+              recordStep: (threads, command) =>
+                threads.dispatch(command).pipe(
+                  Effect.andThen(Deferred.succeed(recorded, command.htmlRender.attachmentId)),
+                  Effect.andThen(Deferred.await(release)),
+                  Effect.andThen(
+                    Effect.fail(
+                      new Orchestrator.OrchestratorDispatchError({
+                        commandId: command.commandId,
+                        commandType: command.type,
+                        cause: "The reply was lost.",
+                      }),
+                    ),
+                  ),
+                ),
+            }),
+          ),
+        );
+      }),
+    ),
+  );
+
+  it.live("keeps a recorded page when neither the record's reply nor a re-read comes back", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const cwd = yield* checkpointWorkspace("html-render-unknown");
+        const threadId = ThreadId.make("thread-html-render-unknown");
+        const recorded = yield* Deferred.make<string>();
+        yield* Effect.gen(function* () {
+          yield* startRun(threadId, primeSelection, cwd);
+          const result = yield* callHtmlRender(threadId, primeSelection);
+          expect(result.isError).toBe(true);
+          const attachmentId = yield* Deferred.await(recorded);
+          const pages = yield* readPages(threadId, attachmentId);
+          expect(pages.attachmentIds).toEqual([attachmentId]);
+          expect(pages.stored).toBe(true);
+        }).pipe(
+          Effect.provide(
+            layerHtmlRender("html-render-unknown", cwd, {
+              // The record commits, then its reply is lost.
+              recordStep: (threads, command) =>
+                threads.dispatch(command).pipe(
+                  Effect.andThen(Deferred.succeed(recorded, command.htmlRender.attachmentId)),
+                  Effect.andThen(
+                    Effect.fail(
+                      new Orchestrator.OrchestratorDispatchError({
+                        commandId: command.commandId,
+                        commandType: command.type,
+                        cause: "The reply was lost.",
+                      }),
+                    ),
+                  ),
+                ),
+              getTurnItem: ({ threadId: lookedUp }) =>
+                Effect.fail(
+                  new Orchestrator.OrchestratorProjectionError({
+                    threadId: lookedUp,
+                    cause: "The read failed.",
+                  }),
+                ),
+            }),
+          ),
+        );
+      }),
+    ),
+  );
+
+  it.live("removes an unrecorded page when the call is cancelled during its record", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const cwd = yield* checkpointWorkspace("html-render-cancel-unrecorded");
+        const threadId = ThreadId.make("thread-html-render-cancel-unrecorded");
+        const recording = yield* Deferred.make<string>();
+        const release = yield* Deferred.make<void>();
+        yield* Effect.gen(function* () {
+          yield* startRun(threadId, primeSelection, cwd);
+          const call = yield* callHtmlRender(threadId, primeSelection).pipe(Effect.forkChild);
+          const attachmentId = yield* Deferred.await(recording);
+          const cancelling = yield* Fiber.interrupt(call).pipe(Effect.forkChild);
+          yield* Deferred.succeed(release, undefined);
+          yield* Fiber.join(cancelling);
+          expect(yield* readPages(threadId, attachmentId)).toEqual({
+            inline: [],
+            attachmentIds: [],
+            stored: false,
+          });
+        }).pipe(
+          Effect.provide(
+            // The record is refused before it commits.
+            layerHtmlRender("html-render-cancel-unrecorded", cwd, {
+              recordStep: (_threads, command) =>
+                Deferred.succeed(recording, command.htmlRender.attachmentId).pipe(
+                  Effect.andThen(Deferred.await(release)),
+                  Effect.andThen(
+                    Effect.fail(
+                      new Orchestrator.OrchestratorDispatchError({
+                        commandId: command.commandId,
+                        commandType: command.type,
+                        cause: "The record was refused.",
+                      }),
+                    ),
+                  ),
+                ),
+            }),
+          ),
+        );
       }),
     ),
   );

@@ -12,6 +12,7 @@ import {
   RunAttemptId,
   RunId,
   CheckpointScopeId,
+  CommandId,
   ProjectId,
   ProviderInstanceId,
   ProviderSessionId,
@@ -63,6 +64,7 @@ const layerCheckpointRollbackService = CheckpointRollbackService.layer.pipe(
     ),
   ),
 );
+const requestId = CommandId.make("rollback-request");
 
 it.effect.each(["initial", "waiting"])(
   "rejects a non-ready checkpoint from %s before opening a session or restoring files",
@@ -132,6 +134,7 @@ it.effect.each(["initial", "waiting"])(
       const rollback = yield* service
         .execute({
           threadId,
+          requestId,
           providerThreadId,
           checkpointId,
           scopeId,
@@ -154,6 +157,7 @@ it.effect.each(["initial", "waiting"])(
           threadId,
           {
             threadId,
+            requestId,
             providerThreadId,
             checkpointId,
             scopeId,
@@ -233,6 +237,7 @@ it.effect("rejects a rollback when another provider thread became active", () =>
     const error = yield* service
       .execute({
         threadId,
+        requestId,
         providerThreadId: requestedProviderThreadId,
         checkpointId,
         scopeId,
@@ -313,6 +318,7 @@ it.effect("rejects a rollback when provider selection changed before execution",
     const error = yield* service
       .execute({
         threadId,
+        requestId,
         providerThreadId,
         checkpointId,
         scopeId,
@@ -357,7 +363,10 @@ it.effect("rejects an unavailable rollback target before opening a session", () 
     scope: { id: scopeId, cwd: process.cwd() },
     runsToRollback: [],
     targetAttempt: undefined,
-    rolledBackAttemptIds: [],
+    outsideConversationAttemptIds: [],
+    keptRuns: [],
+    otherProviderThreads: [],
+    discardedHandoffs: [],
     staleCheckpoints: [],
     providerTurns: [],
   } as unknown as ProjectionStore.ProjectionCheckpointRollbackContext;
@@ -392,7 +401,14 @@ it.effect("rejects an unavailable rollback target before opening a session", () 
   return Effect.gen(function* () {
     const service = yield* CheckpointRollbackService.CheckpointRollbackServiceV2;
     const error = yield* service
-      .execute({ threadId, providerThreadId, checkpointId, scopeId, restoreFiles: false })
+      .execute({
+        threadId,
+        requestId,
+        providerThreadId,
+        checkpointId,
+        scopeId,
+        restoreFiles: false,
+      })
       .pipe(Effect.flip);
     assert.equal(open.mock.calls.length, 0);
     assert.equal(error.reason, "provider-turn-unavailable");
@@ -452,7 +468,10 @@ it.effect.each([
       scope: { id: scopeId, cwd: worktreePath },
       runsToRollback: [],
       targetAttempt: undefined,
-      rolledBackAttemptIds: [],
+      outsideConversationAttemptIds: [],
+      keptRuns: [],
+      otherProviderThreads: [],
+      discardedHandoffs: [],
       staleCheckpoints: [],
       rootNodes: [],
       providerTurns: [],
@@ -552,7 +571,7 @@ it.effect.each([
           ? yield* cleanupEffect.pipe(Effect.forkChild({ startImmediately: true }))
           : undefined;
       const rollback = yield* service
-        .execute({ threadId, providerThreadId, checkpointId, scopeId, restoreFiles })
+        .execute({ threadId, requestId, providerThreadId, checkpointId, scopeId, restoreFiles })
         .pipe(Effect.forkChild({ startImmediately: true }));
       if (order === "cleanup-first") assert.deepEqual(calls, []);
       if (order === "rollback-first") yield* Deferred.await(openEntered);
@@ -595,9 +614,10 @@ it.effect.each([
   { restoreFiles: true, shared: "historical" },
   { restoreFiles: false, shared: "none", targetOrdinal: 1 },
   { restoreFiles: false, shared: "none", targetOrdinal: 1, multipleTurns: true },
+  { restoreFiles: false, shared: "none", summary: { instructions: "Keep decisions." } },
 ])(
   "rewinds safely with %s",
-  ({ restoreFiles, shared, targetOrdinal = 0, multipleTurns = false }) => {
+  ({ restoreFiles, shared, targetOrdinal = 0, multipleTurns = false, summary }) => {
     const threadId = ThreadId.make("rewind-files");
     const providerThreadId = ProviderThreadId.make("rewind-provider");
     const providerSessionId = ProviderSessionId.make("rewind-session");
@@ -650,7 +670,21 @@ it.effect.each([
       rootNodes: [],
       targetAttempt:
         targetOrdinal === 0 ? undefined : { id: "attempt-1", providerTurnId: "turn-1" },
-      rolledBackAttemptIds: ["attempt-3"],
+      outsideConversationAttemptIds: ["attempt-3"],
+      keptRuns:
+        targetOrdinal === 0
+          ? []
+          : [
+              {
+                id: "run-1",
+                ordinal: 1,
+                providerThreadId,
+                activeAttemptId: "attempt-1",
+                activeProviderTurnId: "turn-1",
+              },
+            ],
+      otherProviderThreads: [],
+      discardedHandoffs: [],
       staleCheckpoints: [],
       checkpoint: {
         id: checkpointId,
@@ -728,6 +762,7 @@ it.effect.each([
                   Effect.gen(function* () {
                     const count = yield* resolveCodexRollbackTurnCount(input);
                     assert.equal(count, 2 - targetOrdinal);
+                    assert.deepEqual(input.summary, summary);
                     calls.push("provider");
                     return { providerThread };
                   }),
@@ -741,19 +776,342 @@ it.effect.each([
       const service = yield* CheckpointRollbackService.CheckpointRollbackServiceV2;
       if (restoreFiles && shared !== "none") {
         const error = yield* Effect.flip(
-          service.execute({ threadId, providerThreadId, checkpointId, scopeId, restoreFiles }),
+          service.execute({
+            threadId,
+            requestId,
+            providerThreadId,
+            checkpointId,
+            scopeId,
+            restoreFiles,
+          }),
         );
         assert.equal(error.reason, "shared-workspace");
         assert.deepEqual(calls, []);
         return;
       }
-      yield* service.execute({ threadId, providerThreadId, checkpointId, scopeId, restoreFiles });
+      yield* service.execute({
+        threadId,
+        requestId,
+        providerThreadId,
+        checkpointId,
+        scopeId,
+        restoreFiles,
+        ...(summary === undefined ? {} : { summary }),
+      });
       assert.deepEqual(
         calls,
         restoreFiles ? ["provider", "files", "projection"] : ["provider", "projection"],
       );
     }).pipe(Effect.provide(layerTest));
   },
+);
+
+/**
+ * Runs 1..n alternate provider threads as `providers` lists them; `p` is the
+ * active one. The handoff `p` received with run `carrierOrdinal` holds one
+ * message from each run in `handoffRuns`. Runs in `rolledBack` were rolled
+ * back earlier.
+ */
+const rollbackAcrossProviders = (input: {
+  readonly providers: ReadonlyArray<"c" | "p">;
+  readonly targetOrdinal: number;
+  readonly carrierOrdinal: number;
+  readonly handoffRuns: ReadonlyArray<number>;
+  readonly rolledBack?: ReadonlyArray<number>;
+  readonly firstRunOrdinal?: number;
+  readonly rollbackSummary?: string;
+  readonly pendingHeadMoveRequestId?: CommandId;
+}) => {
+  const threadId = ThreadId.make("rollback-across-providers");
+  const providerSessionId = ProviderSessionId.make("rollback-across-providers-session");
+  const instanceId = ProviderInstanceId.make("rollback-across-providers-instance");
+  const checkpointId = CheckpointId.make("rollback-across-providers-checkpoint");
+  const scopeId = CheckpointScopeId.make("rollback-across-providers-scope");
+  const activeProviderThread = {
+    id: ProviderThreadId.make("p"),
+    providerSessionId,
+    providerInstanceId: instanceId,
+    firstRunOrdinal: input.firstRunOrdinal ?? input.providers.indexOf("p") + 1,
+  };
+  const ordinals = input.providers.map((_, index) => index + 1);
+  const providerTurns = ordinals.map((ordinal) => ({
+    id: `turn-${ordinal}`,
+    providerThreadId: input.providers[ordinal - 1],
+    runAttemptId: `attempt-${ordinal}`,
+    ordinal: input.providers.slice(0, ordinal).filter((p) => p === input.providers[ordinal - 1])
+      .length,
+    status: "completed",
+  }));
+  const handoff = {
+    id: "handoff",
+    threadId,
+    targetRunId: `run-${input.carrierOrdinal}`,
+    toProviderThreadId: activeProviderThread.id,
+    status: "ready",
+    history: {
+      messages: input.handoffRuns.map((ordinal) => ({ runId: `run-${ordinal}` })),
+      coverage: "",
+      omittedItems: 0,
+    },
+    delivery: { nativeThreadId: "native", status: "inline", itemIds: [] },
+  };
+  const runs = ordinals.map((ordinal) => ({
+    id: `run-${ordinal}`,
+    ordinal,
+    providerThreadId: input.providers[ordinal - 1],
+    status: input.rolledBack?.includes(ordinal) ? "rolled_back" : "completed",
+    rootNodeId: null,
+    activeAttemptId: `attempt-${ordinal}`,
+  }));
+  const targetAttemptId = `attempt-${input.targetOrdinal}`;
+  const runsToRollback = runs.filter(
+    (run) => run.ordinal > input.targetOrdinal && run.status !== "rolled_back",
+  );
+  // What getCheckpointRollbackContext reads for this history.
+  const context = {
+    thread: {
+      worktreePath: process.cwd(),
+      activeProviderThreadId: activeProviderThread.id,
+      modelSelection: { instanceId, model: "test" },
+      ...(input.pendingHeadMoveRequestId === undefined
+        ? {}
+        : { pendingHeadMove: { requestId: input.pendingHeadMoveRequestId, summarize: true } }),
+    },
+    providerThread: activeProviderThread,
+    providerSession: undefined,
+    checkpoint: { id: checkpointId, scopeId, status: "ready", appRunOrdinal: input.targetOrdinal },
+    scope: { id: scopeId, cwd: process.cwd() },
+    targetAttempt:
+      input.targetOrdinal === 0 ? undefined : { id: targetAttemptId, providerTurnId: null },
+    providerTurns: providerTurns.filter(
+      (turn) =>
+        turn.providerThreadId === activeProviderThread.id || turn.runAttemptId === targetAttemptId,
+    ),
+    outsideConversationAttemptIds: runs
+      .filter(
+        (run) => run.status === "rolled_back" || run.ordinal < activeProviderThread.firstRunOrdinal,
+      )
+      .map((run) => run.activeAttemptId),
+    keptRuns: runs
+      .filter((run) => run.ordinal <= input.targetOrdinal && run.status !== "rolled_back")
+      .map((run) => ({
+        id: run.id,
+        ordinal: run.ordinal,
+        providerThreadId: run.providerThreadId,
+        activeAttemptId: run.activeAttemptId,
+        activeProviderTurnId: null,
+      })),
+    runsToRollback,
+    otherProviderThreads: [],
+    discardedHandoffs: runsToRollback.some((run) => run.id === handoff.targetRunId)
+      ? [handoff]
+      : [],
+    rootNodes: [],
+    staleCheckpoints: [],
+  } as unknown as ProjectionStore.ProjectionCheckpointRollbackContext;
+  const rollbacks: Array<ProviderAdapter.ProviderAdapterV2RollbackThreadInput> = [];
+  const written: Array<OrchestrationV2DomainEvent> = [];
+  const testLayer = layerCheckpointRollbackService.pipe(
+    Layer.provide(
+      Layer.mergeAll(
+        Layer.effect(ThreadCommandExecutor.ThreadCommandExecutor, KeyedLock.make<ThreadId>()),
+        Layer.mock(CheckpointService.CheckpointServiceV2)({}),
+        Layer.mock(EventSink.EventSinkV2)({
+          write: ({ events }) =>
+            Effect.sync(() => {
+              written.push(...events);
+              return [];
+            }),
+        }),
+        IdAllocator.layer,
+        Layer.mock(ProjectionStore.ProjectionStoreV2)({
+          getThread: () => Effect.succeed(context.thread),
+          getCheckpointRollbackContext: () => Effect.succeed(context),
+        }),
+        Layer.mock(ProviderSessionManager.ProviderSessionManagerV2)({
+          open: () =>
+            Effect.succeed({
+              rollbackThread: (rollback: ProviderAdapter.ProviderAdapterV2RollbackThreadInput) =>
+                Effect.sync(() => {
+                  rollbacks.push(rollback);
+                  return {
+                    providerThread: activeProviderThread,
+                    ...(input.rollbackSummary === undefined
+                      ? {}
+                      : { rollbackSummary: input.rollbackSummary }),
+                  };
+                }),
+            } as never),
+        }),
+        Layer.mock(RuntimePolicy.RuntimePolicyV2)({ resolve: () => Effect.succeed({} as never) }),
+      ),
+    ),
+  );
+  return Effect.gen(function* () {
+    const service = yield* CheckpointRollbackService.CheckpointRollbackServiceV2;
+    yield* service.execute({
+      threadId,
+      requestId,
+      providerThreadId: activeProviderThread.id,
+      checkpointId,
+      scopeId,
+      restoreFiles: false,
+    });
+    const handoffUpdate = written.find((event) => event.type === "context-handoff.updated");
+    const threadUpdate = written.find((event) => event.type === "provider-thread.updated");
+    return {
+      rollback: rollbacks[0]!,
+      lastRunOrdinal:
+        threadUpdate?.type === "provider-thread.updated"
+          ? threadUpdate.payload.lastRunOrdinal
+          : undefined,
+      rolledBackRunIds: written.flatMap((event) =>
+        event.type === "run.updated" && event.payload.status === "rolled_back"
+          ? [event.payload.id]
+          : [],
+      ),
+      handoff:
+        handoffUpdate?.type === "context-handoff.updated" ? handoffUpdate.payload : undefined,
+      written,
+    };
+  }).pipe(Effect.provide(testLayer));
+};
+
+it.effect(
+  "rewinds the active provider thread to its start for a target of an earlier provider",
+  () =>
+    Effect.gen(function* () {
+      // Two runs on one provider, then a switch: the handoff covered both.
+      const result = yield* rollbackAcrossProviders({
+        providers: ["c", "c", "p"],
+        targetOrdinal: 1,
+        carrierOrdinal: 3,
+        handoffRuns: [1, 2],
+      });
+      assert.equal(result.rollback.target.type, "thread_start");
+      assert.deepEqual(
+        result.rollback.providerThreadTurns.map((turn) => String(turn.id)),
+        ["turn-3"],
+      );
+      assert.isNull(result.lastRunOrdinal);
+      assert.deepEqual(result.rolledBackRunIds, ["run-2", "run-3"]);
+      // The next turn sends the handoff again, without the discarded run.
+      assert.equal(result.handoff?.status, "ready");
+      assert.isUndefined(result.handoff?.delivery);
+      assert.deepEqual(
+        result.handoff?.history?.messages.map((message) => String(message.runId)),
+        ["run-1"],
+      );
+    }),
+);
+
+it.effect.each([
+  { targetOrdinal: 2, handoffStatus: "ready", delivered: false },
+  { targetOrdinal: 1, handoffStatus: "superseded", delivered: true },
+])(
+  "rewinds a provider thread that ran before and after another one to its last turn at or before %s",
+  ({ targetOrdinal, handoffStatus, delivered }) =>
+    Effect.gen(function* () {
+      // Back on `p` after a run on `c`: the handoff with run 3 covered run 2.
+      const result = yield* rollbackAcrossProviders({
+        providers: ["p", "c", "p"],
+        targetOrdinal,
+        carrierOrdinal: 3,
+        handoffRuns: [2],
+      });
+      assert.equal(result.rollback.target.type, "provider_turn");
+      assert.equal(
+        result.rollback.target.type === "provider_turn"
+          ? result.rollback.target.providerTurn.id
+          : undefined,
+        "turn-1",
+      );
+      assert.equal(result.lastRunOrdinal, 1);
+      assert.equal(result.handoff?.status, handoffStatus);
+      assert.equal(result.handoff?.delivery !== undefined, delivered);
+    }),
+);
+
+it.effect(
+  "ignores turns of a native conversation an earlier rollback dropped from the active provider thread",
+  () =>
+    Effect.gen(function* () {
+      // `p` ran 1 and 2, `c` ran 3, a rollback to 1 dropped `p`'s native
+      // conversation, and run 4 rebuilt it from a full handoff of run 1.
+      const result = yield* rollbackAcrossProviders({
+        providers: ["p", "p", "c", "p"],
+        rolledBack: [2, 3],
+        firstRunOrdinal: 4,
+        targetOrdinal: 1,
+        carrierOrdinal: 4,
+        handoffRuns: [1],
+      });
+      assert.equal(result.rollback.target.type, "thread_start");
+      assert.deepEqual(
+        result.rollback.providerThreadTurns.map((turn) => String(turn.id)),
+        ["turn-4"],
+      );
+      assert.deepEqual(result.rolledBackRunIds, ["run-4"]);
+      assert.equal(result.handoff?.status, "ready");
+      assert.isUndefined(result.handoff?.delivery);
+    }),
+);
+
+it.effect.each([
+  { pendingRequest: requestId, cleared: true },
+  { pendingRequest: CommandId.make("newer-rollback"), cleared: false },
+])(
+  "records the provider's summary after the kept run and ends the head move it belongs to (%s)",
+  ({ pendingRequest, cleared }) =>
+    Effect.gen(function* () {
+      const result = yield* rollbackAcrossProviders({
+        providers: ["p", "p", "p"],
+        targetOrdinal: 1,
+        carrierOrdinal: 3,
+        handoffRuns: [],
+        rollbackSummary: "Kept: the secret code.",
+        pendingHeadMoveRequestId: pendingRequest,
+      });
+      const summaries = result.written.flatMap((event) =>
+        event.type === "turn-item.updated" && event.payload.type === "rollback_summary"
+          ? [event.payload]
+          : [],
+      );
+      assert.deepEqual(
+        summaries.map((item) => ({
+          rollbackRequestId: item.rollbackRequestId,
+          rewoundToRunId: item.rewoundToRunId,
+          runId: item.runId,
+          summary: item.summary,
+        })),
+        [
+          {
+            rollbackRequestId: requestId,
+            rewoundToRunId: RunId.make("run-1"),
+            runId: null,
+            summary: "Kept: the secret code.",
+          },
+        ],
+      );
+      const headMoveEnds = result.written.filter(
+        (event) =>
+          event.type === "thread.metadata-updated" && event.payload.pendingHeadMove === null,
+      );
+      assert.equal(headMoveEnds.length, cleared ? 1 : 0);
+      if (cleared) assert.equal(result.written.at(-1), headMoveEnds[0]);
+    }),
+);
+
+it.effect("records no summary row when the provider left none", () =>
+  Effect.gen(function* () {
+    const result = yield* rollbackAcrossProviders({
+      providers: ["p", "p"],
+      targetOrdinal: 1,
+      carrierOrdinal: 2,
+      handoffRuns: [],
+    });
+    assert.isFalse(result.written.some((event) => event.type === "turn-item.updated"));
+  }),
 );
 
 it.effect.skipIf(!symlinksSupported)(
@@ -1060,6 +1418,7 @@ const seedRollbackHistory = Effect.gen(function* () {
       const service = yield* CheckpointRollbackService.CheckpointRollbackServiceV2;
       yield* service.execute({
         threadId,
+        requestId,
         providerThreadId,
         scopeId,
         checkpointId: checkpointId(ordinal),

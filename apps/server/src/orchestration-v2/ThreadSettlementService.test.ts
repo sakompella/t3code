@@ -163,36 +163,24 @@ describe("isAutoSettlementCandidate", () => {
     ).toBe(true);
   });
 
-  it("keeps snoozed threads parked until a fresh failure or timer wake", () => {
+  it("keeps snoozed threads parked until the timer ends, whatever they did meanwhile", () => {
     const snoozed = shell({
       snoozedUntil: at(60 * 60 * 1_000),
       snoozedAt: at(-60 * 60 * 1_000),
     });
     expect(ThreadSettlementService.isAutoSettlementCandidate(snoozed, NOW_MS)).toBe(false);
-    expect(
-      ThreadSettlementService.isAutoSettlementCandidate(
-        shell({ ...snoozed, status: "failed", latestRunCompletedAt: at(-30 * 60 * 1_000) }),
-        NOW_MS,
-      ),
-    ).toBe(true);
-    expect(
-      ThreadSettlementService.isAutoSettlementCandidate(
-        shell({ ...snoozed, status: "failed", latestRunCompletedAt: at(-2 * 60 * 60 * 1_000) }),
-        NOW_MS,
-      ),
-    ).toBe(false);
-    expect(
-      ThreadSettlementService.isAutoSettlementCandidate(
-        shell({ ...snoozed, status: "failed", latestRunCompletedAt: snoozed.snoozedAt }),
-        NOW_MS,
-      ),
-    ).toBe(false);
-    expect(
-      ThreadSettlementService.isAutoSettlementCandidate(
-        shell({ ...snoozed, status: "failed", latestRunCompletedAt: null }),
-        NOW_MS,
-      ),
-    ).toBe(false);
+    for (const afterSnooze of [
+      { status: "failed" as const, latestRunCompletedAt: at(-30 * 60 * 1_000) },
+      { latestRunCompletedAt: at(-30 * 60 * 1_000) },
+    ]) {
+      expect(
+        ThreadSettlementService.isAutoSettlementCandidate(
+          shell({ ...snoozed, ...afterSnooze }),
+          NOW_MS,
+        ),
+      ).toBe(false);
+    }
+    // Timer expiry is the only way out; `NOW_MS` passing the wake time is enough.
     expect(
       ThreadSettlementService.isAutoSettlementCandidate(
         shell({ ...snoozed, snoozedUntil: at(-1) }),
@@ -459,6 +447,43 @@ describe("resolveAutoSettlementAt", () => {
         thread: shell({ latestUserMessageAt: at(-DAY_MS) }),
       }),
     ).toBeNull();
+  });
+
+  it("does not count routine heartbeat checks as activity, but counts their failures", () => {
+    // The user's last run ended 4 days ago; a heartbeat checked an hour ago.
+    const heartbeatChecked = (status: OrchestrationV2ThreadShell["status"]) =>
+      shell({
+        status,
+        latestUserMessageAt: at(-4 * DAY_MS - 60_000),
+        latestRunTrigger: "heartbeat",
+        latestRunRequestedAt: at(-60 * 60 * 1_000),
+        latestRunStartedAt: at(-60 * 60 * 1_000),
+        latestRunCompletedAt: at(-59 * 60 * 1_000),
+        latestTaskRunCompletedAt: at(-4 * DAY_MS),
+      });
+    const input = {
+      thread: heartbeatChecked("completed"),
+      pullRequest: null,
+      nowMs: NOW_MS,
+      autoSettleAfterDays: 2,
+      autoSettleOnMerge: true,
+    };
+    expect(ThreadSettlementService.resolveAutoSettlementAt(input)).toEqual(at(-4 * DAY_MS));
+    // A failed check is news, so it is activity like any run.
+    expect(
+      ThreadSettlementService.resolveAutoSettlementAt({
+        ...input,
+        thread: heartbeatChecked("failed"),
+      }),
+    ).toBeNull();
+    // A check after a merge does not stand for the user acting after it.
+    expect(
+      ThreadSettlementService.resolveAutoSettlementAt({
+        ...input,
+        autoSettleAfterDays: null,
+        pullRequest: { state: "merged", mergedAt: DateTime.formatIso(at(-2 * 60 * 60 * 1_000)) },
+      }),
+    ).toEqual(at(-4 * DAY_MS));
   });
 });
 
@@ -1404,7 +1429,11 @@ describe("ThreadSettlementServiceV2 single-thread sweeps", () => {
 });
 
 describe("isSnoozed", () => {
+  // The fork overrides upstream, which woke a snoozed thread early on a pending
+  // request, a failure or a completed run. Here a snooze ends only at its
+  // deadline, like the client's `effectiveSnoozed` (FORK.md, "Snooze is strict").
   const snoozed = { snoozedAt: at(-2 * DAY_MS), snoozedUntil: at(DAY_MS) };
+
   it("keeps a run requested and completed after snoozing parked until the timer", () => {
     const thread = shell({
       ...snoozed,
@@ -1427,16 +1456,33 @@ describe("isSnoozed", () => {
     ).toBeNull();
   });
 
-  it("keeps quiet and interrupted threads snoozed until the timer expires", () => {
-    expect(ThreadSettlementService.isSnoozed(shell(snoozed), NOW_MS)).toBe(true);
+  const duringSnooze = at(-DAY_MS);
+
+  it("stays snoozed whatever the thread did since the snooze began", () => {
+    const activity: ReadonlyArray<Partial<SettlementShell>> = [
+      {},
+      { status: "completed", latestRunCompletedAt: duringSnooze },
+      { status: "failed", latestRunCompletedAt: duringSnooze },
+      { status: "failed", latestRunCompletedAt: null },
+      { status: "interrupted", latestRunCompletedAt: duringSnooze },
+      { pendingRuntimeRequest: { kind: "approval" } as never },
+    ];
+    for (const overrides of activity) {
+      expect(ThreadSettlementService.isSnoozed(shell({ ...snoozed, ...overrides }), NOW_MS)).toBe(
+        true,
+      );
+    }
+  });
+
+  it("ends at the deadline, and is never set without one", () => {
     expect(
-      ThreadSettlementService.isSnoozed(
-        shell({ ...snoozed, status: "interrupted", latestRunCompletedAt: at(-DAY_MS) }),
-        NOW_MS,
-      ),
-    ).toBe(true);
+      ThreadSettlementService.isSnoozed(shell({ ...snoozed, snoozedUntil: at(0) }), NOW_MS),
+    ).toBe(false);
     expect(
       ThreadSettlementService.isSnoozed(shell({ ...snoozed, snoozedUntil: at(-1) }), NOW_MS),
+    ).toBe(false);
+    expect(
+      ThreadSettlementService.isSnoozed(shell({ snoozedUntil: null, snoozedAt: null }), NOW_MS),
     ).toBe(false);
   });
 });
