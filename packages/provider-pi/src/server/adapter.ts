@@ -735,7 +735,10 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
       );
       const { trackBackgroundJobs, completeBackgroundJob } = backgroundJobs;
       const hasPendingBackgroundWork = () =>
-        childThreads.hasLiveChildren() || backgroundJobs.hasPendingJobs() || pendingWake !== null;
+        childThreads.hasLiveChildren() ||
+        backgroundJobs.hasPendingJobs() ||
+        pendingWake !== null ||
+        quotaParkedUntil !== null;
       // Answering a dialog and terminalizing a turn both publish lifecycle
       // events. Pi can settle immediately after `extension_ui_response`, so
       // serialize the two paths to stop `turn.terminal` from overtaking the
@@ -757,7 +760,7 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
       let daemonLostSession = false;
       let unsolicitedActivityDetected = false;
       let pendingWake: PiWake | null = null;
-      /** When Prime Agent's quota park resumes the session; cleared by the next reply that works. */
+      /** Idle release cancels Prime Agent's quota wake; keep it loaded until a reply works. */
       let quotaParkedUntil: DateTime.Utc | null = null;
       let rollbackBarrier: Deferred.Deferred<
         void,

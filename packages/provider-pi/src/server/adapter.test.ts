@@ -10059,6 +10059,8 @@ describe("PiAdapterV2 with the Prime Agent flavor", () => {
           /^Waiting for quota until .+\. Prime Agent resumes on its own\.$/,
         );
         assert.equal(notices[0]!.tone, "warning");
+        assert.isTrue(yield* runtime.hasPendingBackgroundWork!);
+        assert.isTrue(yield* runtime.hasPendingBackgroundWorkForThread!(providerThread));
         assert.isFalse(
           seen.some(
             (event) =>
@@ -10068,6 +10070,47 @@ describe("PiAdapterV2 with the Prime Agent flavor", () => {
           ),
         );
       }
+    }).pipe(Effect.scoped, Effect.provide(layerTest)),
+  );
+
+  it.effect("reports a quota-parked session as pending work until its resumed reply works", () =>
+    Effect.gen(function* () {
+      yield* TestClock.setTime(
+        DateTime.toEpochMillis(DateTime.makeUnsafe(QUOTA_PARK_RESUME_AT)) - 1_000,
+      );
+      const fake = yield* makeFakePi;
+      const { runtime, takeEvent, providerThread, offers } = yield* openPrimeThreadWithWakes(fake);
+      yield* startTurn(runtime, providerThread);
+      yield* fake.takeRequest("prompt");
+      yield* fake.emit({ type: "agent_start" });
+      yield* emitQuotaRefusedReply(fake, firstParkError, 1_000);
+      yield* fake.takeRequest("get_state");
+      yield* drainUntilTerminal(takeEvent);
+
+      assert.isTrue(yield* runtime.hasPendingBackgroundWork!);
+      assert.isTrue(yield* runtime.hasPendingBackgroundWorkForThread!(providerThread));
+      yield* TestClock.adjust("2 seconds");
+      assert.isTrue(yield* runtime.hasPendingBackgroundWork!);
+
+      yield* fake.emit({ type: "agent_start" });
+      yield* emitAssistantReply(fake, "Quota is back; continuing the work.");
+      yield* fake.emit({ type: "agent_end", messages: [] });
+      yield* Queue.take(offers);
+      yield* startTurn(
+        runtime,
+        providerThread,
+        "default",
+        [],
+        "Quota reset",
+        undefined,
+        2,
+        THREAD_ID,
+        "provider",
+      );
+      yield* fake.takeRequest("get_state");
+      yield* drainUntilTerminal(takeEvent);
+      assert.isFalse(yield* runtime.hasPendingBackgroundWork!);
+      assert.isFalse(yield* runtime.hasPendingBackgroundWorkForThread!(providerThread));
     }).pipe(Effect.scoped, Effect.provide(layerTest)),
   );
 
