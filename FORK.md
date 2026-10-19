@@ -8,6 +8,19 @@
 2. **Maintainability.** Keep code simple. Delete workarounds that a better fix replaces. Don't keep fork code because it already exists.
 3. **Closeness to upstream `main`.** A minor concern. Prefer upstream's features and patterns when they do the job, and avoid needless divergence, but never at the cost of 1 or 2.
 
+## Topic branches
+
+The fork is kept as topic branches on upstream `main`. `FORK-TOPICS` lists them in merge order as `<topic> <parent>`, where the parent is `upstream` or an earlier topic, and topic X lives on branch `topic/X`. Today there are two: `meta` (this file, `FORK-TOPICS` and `scripts/fork-topics.py`) on upstream, and `fork` (everything else) on `meta`. More topics get carved out of `fork` once each builds on its own.
+
+**Rules.** The daily sync rebuilds the topics on `upstream/main`; nothing rebases `feat/prime-agent-on-main`. Every worker branch starts from the topic it changes and lands into that topic with `--no-ff` (`scripts/fork-topics.py land <branch> <topic>`), never into `feat/prime-agent-on-main`, never fast-forwarded or squashed.
+
+- `feat/prime-agent-on-main` is the integration branch: upstream `main` plus one `--no-ff` merge per topic. `scripts/fork-topics.py rebuild` rebases each topic onto its parent's new tip and builds `integration/candidate`. After the checks pass, `promote` tags it `integration/YYYYMMDD-N` (UTC date), and feat is reset to that tag. Nobody commits on feat. Deploy only from an `integration/*` tag.
+- A worker branch starts with `git worktree add -b <branch> <path> topic/<X>`. A change that needs several stacked topics starts from the highest one. `land` rebases the branch onto the topic if the topic was rebuilt meanwhile, so the branch must not be checked out anywhere else then.
+- A fix for an upstream change is an ordinary commit on the topic that owns the code. Never edit a landing merge: a rebuild replays merges from their parents and would drop the edit.
+- A topic with more than 20 commits above its parent is collapsed into one commit (`collapse <topic>`). The originals stay under `archive/topic/`, landed worker tips under `archive/worker/`, and the history before the migration under the tag `archive/fork-history-20261019`. `Squashed-from:` trailers name the original commits. To find who wrote an older fork line, blame the archive tag.
+- A new topic is a `<name> <parent>` line in `FORK-TOPICS` on `topic/meta` plus `topic/<name>` created on its parent. A carve also moves its code out of `topic/fork` and must pass `rebuild --same-tree-as <last tag>`.
+- Only `archive/*` tags and deployed `integration/*` tags are pushed to `origin`.
+
 ## Prime Agent
 
 - **Don't change Prime Agent.** No fork, no local Nix patches. The owner uses it for most of their work outside T3. Fix integration problems in T3.
