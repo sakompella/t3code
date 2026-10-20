@@ -662,6 +662,8 @@ const make = Effect.gen(function* () {
           !deleted &&
           settings.worktreeAfterDays !== null &&
           activityAt < now - settings.worktreeAfterDays * DAY_MS;
+        // Wakes (heartbeats, subagent and job results) run on a settled thread
+        // without un-settling it, so the settled clock restarts at its last run.
         const settledFor =
           deleted || thread.settledAt === null
             ? null
@@ -1066,10 +1068,13 @@ const make = Effect.gen(function* () {
       }),
     );
     yield* forkParked(
+      // A deleted thread's worktree waits for its sessions to stop. The
+      // recheck keeps a worktree whose session is live, so no other session
+      // update can free one. Pi, Prime Agent and OpenCode report each failed
+      // turn as "error" on a session that stays live.
       Stream.runForEach(events, (event) =>
         (event.type === "thread.deleted" ||
-          (event.type === "provider-session.updated" &&
-            (event.payload.status === "stopped" || event.payload.status === "error"))) &&
+          (event.type === "provider-session.updated" && event.payload.status === "stopped")) &&
         anyWorktreePolicy(lastSettings, (rules) => rules.worktreeOnDelete)
           ? requestSweep
           : Effect.void,

@@ -14,6 +14,7 @@ import * as Deferred from "effect/Deferred";
 import * as Fiber from "effect/Fiber";
 import * as TestClock from "effect/testing/TestClock";
 import * as Layer from "effect/Layer";
+import * as Logger from "effect/Logger";
 import * as Option from "effect/Option";
 
 import * as SqlitePersistence from "../persistence/Sqlite.ts";
@@ -412,8 +413,19 @@ describe("ThreadTitleRegenerationService", () => {
         });
         const requestId = yield* armRegeneration({ command: "command:title:failure:1", threadId });
 
-        yield* titleRegeneration.execute({ threadId, requestId, kind: { type: "regenerate" } });
+        const logged: Array<unknown> = [];
+        const capture = Logger.make(({ message }) => {
+          const [text, fields] = Array.isArray(message) ? message : [message];
+          if (text === "Thread title generation failed") logged.push(fields);
+        });
+        yield* titleRegeneration
+          .execute({ threadId, requestId, kind: { type: "regenerate" } })
+          .pipe(Effect.provide(Logger.layer([capture])));
 
+        assert.lengthOf(logged, 1);
+        const { cause } = logged[0] as { readonly cause: unknown };
+        assert.isString(cause);
+        assert.include(cause as string, "model unavailable");
         assert.equal(harness.generateThreadTitle.mock.calls.length, 1);
         const projection = yield* threads.getThreadProjection(threadId);
         assert.equal(projection.thread.title, "Seed title");

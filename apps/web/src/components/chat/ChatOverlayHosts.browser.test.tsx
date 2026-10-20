@@ -30,7 +30,7 @@ describe("RevertConfirmHost", () => {
     const onConfirm = vi.fn();
     const host = (threadKey: string) => (
       <AppAtomRegistryProvider>
-        <RevertConfirmHost threadKey={threadKey} onConfirm={onConfirm} />
+        <RevertConfirmHost threadKey={threadKey} canSummarize={false} onConfirm={onConfirm} />
       </AppAtomRegistryProvider>
     );
     await act(() => root.render(host("env:a")));
@@ -43,7 +43,7 @@ describe("RevertConfirmHost", () => {
       (button) => button.textContent === "Revert and keep changes",
     );
     await act(() => keep?.click());
-    expect(onConfirm).toHaveBeenCalledExactlyOnceWith(2, messageId, false);
+    expect(onConfirm).toHaveBeenCalledExactlyOnceWith(2, messageId, false, undefined);
     await vi.waitFor(() => expect(dialog()).toBeNull());
 
     await act(() => openRevertConfirm("env:a", { turnCount: 3, messageId }));

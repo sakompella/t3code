@@ -9,7 +9,7 @@ describe("thinkingCapabilitiesForPiModel", () => {
         reasoning: true,
         thinkingLevelMap: { off: null, xhigh: "extra_high", max: null },
       },
-      "xhigh",
+      ["xhigh"],
     );
     const descriptors = capabilities.optionDescriptors ?? [];
     const thinking = descriptors[0];
@@ -34,7 +34,7 @@ describe("thinkingCapabilitiesForPiModel", () => {
         reasoning: true,
         thinkingLevelMap: { xhigh: "extra_high", max: null },
       },
-      "max",
+      ["max"],
     );
     const thinking = capabilities.optionDescriptors?.[0];
     assert.equal(thinking?.type, "select");

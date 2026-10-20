@@ -32,6 +32,7 @@ import { restrictToFirstScrollableAncestor, restrictToVerticalAxis } from "@dnd-
 import { CSS } from "@dnd-kit/utilities";
 import {
   canSnooze,
+  effectiveSettled,
   effectiveSnoozed,
   hasQueuedTurnStart,
   QUEUED_TURN_START_GRACE_MS,
@@ -201,8 +202,10 @@ import {
   isSidebarNestedLinkClick,
   isSidebarThreadWorking,
   isTrailingDoubleClick,
+  keepComposerFocusOnThreadRowPress,
   orderItemsByPreferredIds,
   planSidebarThreadDrop,
+  sidebarDropHoldsPlacement,
   reduceSidebarProjectScopeMenuState,
   resolveAdjacentThreadId,
   resolveSidebarSweepKeys,
@@ -624,7 +627,7 @@ function partitionSidebarThreads(input: SidebarThreadPartitionInput) {
     } else {
       const section = resolveSidebarThreadSection({
         snoozed: supportsSnooze && effectiveSnoozed(thread, { now: preciseNow }),
-        settled: supportsSettlement && thread.settledOverride === "settled",
+        settled: supportsSettlement && effectiveSettled(thread),
         pinned: thread.pinnedAt != null,
       });
       (section === "snoozed"
@@ -694,7 +697,7 @@ function isOptimisticDropReleased(input: {
   }
   const canonicalSection = effectiveSnoozed(thread, { now })
     ? "snoozed"
-    : thread.settledOverride === "settled"
+    : effectiveSettled(thread)
       ? "settled"
       : thread.pinnedAt != null
         ? "pinned"
@@ -706,7 +709,7 @@ function isOptimisticDropReleased(input: {
     return true;
   }
   if (optimisticDrop.order === null) {
-    // Settle also emits unpin/unsnooze events. Wait for the entire move
+    // Settle also clears the pin. Wait for the entire move
     // before releasing the projected fields and sort timestamps.
     if (
       canonicalSection === optimisticDrop.section &&
@@ -1362,6 +1365,7 @@ const SidebarDraftRow = memo(function SidebarDraftRow(props: {
           props.isActive ? "bg-sidebar-row-active" : draftSurfaceClassName,
         )}
         onClick={handleActivate}
+        onMouseDown={keepComposerFocusOnThreadRowPress}
         onContextMenu={handleContextMenu}
         onKeyDown={handleKeyDown}
       >
@@ -1538,6 +1542,8 @@ type SidebarThreadRowProps = {
   dragOverPinned: boolean;
   sweepAction: SidebarSweepAction | null;
   snoozeWakeLabelText: string | null;
+  // When a snooze timer ran out; drives the Woke pill until the user visits
+  // the thread.
   wokeAt: string | null;
   isActive: boolean;
   openPullRequestsInRightPanel: boolean;
@@ -1573,7 +1579,7 @@ type SidebarThreadRowProps = {
   onFileDropThreads?: ((threadRef: ScopedThreadRef, files: File[]) => void) | undefined;
 };
 
-const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowProps) {
+export const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowProps) {
   const {
     isRenaming,
     onCancelRename,
@@ -1650,6 +1656,13 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
 
   const isUnread = hasUnseenCompletion({ ...thread, lastVisitedAt });
   const status = resolveSidebarThreadStatus(thread);
+  // A woken thread reappears at its original position (the sort is
+  // deliberately static), so the pill has to carry the weight. Snoozing is
+  // an explicit act, so the pill clears only when the user re-engages:
+  // visiting after the timer ran out, clicking the pill, sending a message,
+  // settling, archiving, or a change request state that settles the thread.
+  // An unparseable visit timestamp counts as never-visited, so corrupt local
+  // data cannot eat the wake signal.
   const lastVisitedDate = lastVisitedAt === undefined ? null : parseTimestampDate(lastVisitedAt);
   const wokeAtDate = props.wokeAt === null ? null : parseTimestampDate(props.wokeAt);
   const isWoke =
@@ -2109,6 +2122,7 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
                 aria-busy={isRegeneratingTitle || undefined}
                 className={cn(rowSurfaceClassName, "flex h-9 items-center gap-2.5 px-2.5")}
                 onClick={handleClick}
+                onMouseDown={keepComposerFocusOnThreadRowPress}
                 onDoubleClick={handleDoubleClick}
                 onKeyDown={handleKeyDown}
                 onContextMenu={handleContextMenu}
@@ -2268,6 +2282,7 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
               aria-busy={isRegeneratingTitle || undefined}
               className={rowSurfaceClassName}
               onClick={handleClick}
+              onMouseDown={keepComposerFocusOnThreadRowPress}
               onDoubleClick={handleDoubleClick}
               onKeyDown={handleKeyDown}
               onContextMenu={handleContextMenu}
@@ -3728,15 +3743,12 @@ export default function Sidebar() {
       sourceSection: activeSection,
       section: target.section,
       occurredAt: new Date().toISOString(),
-      clearsSnooze:
-        plan.kind === "pin" ||
-        plan.kind === "settle" ||
-        (plan.kind === "move-active" && plan.unsnooze),
+      clearsSnooze: plan.kind === "move-active" && plan.unsnooze,
       order: plan.kind === "settle" ? null : plan.order,
       keysAtDrop: target.section === "active" ? activeKeysById : pinnedKeysById,
       assignedKeys: new Map(assignments.map(({ id, orderKey }) => [id, orderKey])),
     };
-    setOptimisticDrop(drop);
+    if (sidebarDropHoldsPlacement(activeSection, plan)) setOptimisticDrop(drop);
     void (async () => {
       const run = async (
         operation: Promise<AtomCommandResult<unknown, unknown>>,
