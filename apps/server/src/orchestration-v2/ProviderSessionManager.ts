@@ -1963,52 +1963,56 @@ export const layerWithOptions = (
        * the write and its retries, so a released session's pump never writes
        * after release removed it, over what its replacement stored.
        */
-      const storeSessionChildThreadEvent = (
-        entry: LiveSessionEntry,
-        threadId: ThreadId,
-        event: ProviderAdapter.ProviderAdapterV2Event,
-      ) =>
-        Effect.gen(function* () {
-          const current = (yield* Ref.get(sessions)).get(
-            sessionKey(entry.runtime.providerSessionId),
-          );
-          if (current?.runtime !== entry.runtime) return;
-          yield* providerEventIngestor
-            .ingestNormalized({
-              providerSessionId: entry.runtime.providerSessionId,
-              providerInstanceId: entry.runtime.instanceId,
-              threadId,
-              event,
-            })
-            .pipe(
-              // A failed SQL commit surfaces as a defect.
-              Effect.catchDefect((defect) =>
-                Effect.fail(
-                  new ProviderEventIngestor.ProviderEventPublishError({
-                    providerSessionId: entry.runtime.providerSessionId,
-                    eventCount: 1,
-                    cause: defect,
-                  }),
-                ),
-              ),
-              // A malformed event fails the same way every time.
-              Effect.retry({
-                schedule: Schedule.exponential("20 millis"),
-                times: 3,
-                while: (error) => error._tag === "ProviderEventPublishError",
-              }),
-              Effect.catchCause((cause) =>
-                Cause.hasInterruptsOnly(cause)
-                  ? Effect.interrupt
-                  : Effect.logError("orchestration-v2.session-child-thread.store-failed", {
-                      providerSessionId: entry.runtime.providerSessionId,
-                      threadId,
-                      eventType: event.type,
-                      error: String(Cause.squash(cause)),
-                    }),
-              ),
+      const storeSessionChildThreadEvent =
+        /* Runs once per child-thread event; avoid a span per event. */
+        Effect.fnUntraced(
+          function* (
+            entry: LiveSessionEntry,
+            threadId: ThreadId,
+            event: ProviderAdapter.ProviderAdapterV2Event,
+          ) {
+            const current = (yield* Ref.get(sessions)).get(
+              sessionKey(entry.runtime.providerSessionId),
             );
-        }).pipe(entry.requestEventPermit.withPermits(1));
+            if (current?.runtime !== entry.runtime) return;
+            yield* providerEventIngestor
+              .ingestNormalized({
+                providerSessionId: entry.runtime.providerSessionId,
+                providerInstanceId: entry.runtime.instanceId,
+                threadId,
+                event,
+              })
+              .pipe(
+                // A failed SQL commit surfaces as a defect.
+                Effect.catchDefect((defect) =>
+                  Effect.fail(
+                    new ProviderEventIngestor.ProviderEventPublishError({
+                      providerSessionId: entry.runtime.providerSessionId,
+                      eventCount: 1,
+                      cause: defect,
+                    }),
+                  ),
+                ),
+                // A malformed event fails the same way every time.
+                Effect.retry({
+                  schedule: Schedule.exponential("20 millis"),
+                  times: 3,
+                  while: (error) => error._tag === "ProviderEventPublishError",
+                }),
+                Effect.catchCause((cause) =>
+                  Cause.hasInterruptsOnly(cause)
+                    ? Effect.interrupt
+                    : Effect.logError("orchestration-v2.session-child-thread.store-failed", {
+                        providerSessionId: entry.runtime.providerSessionId,
+                        threadId,
+                        eventType: event.type,
+                        error: String(Cause.squash(cause)),
+                      }),
+                ),
+              );
+          },
+          (effect, entry) => effect.pipe(entry.requestEventPermit.withPermits(1)),
+        );
 
       const startEventPump = (entry: LiveSessionEntry) => {
         let stoppedByProvider = false;
@@ -2022,8 +2026,9 @@ export const layerWithOptions = (
           ThreadId,
           ReturnType<typeof makeAssistantStreamingFilter>
         >();
-        const sessionChildThreadOf = (event: ProviderAdapter.ProviderAdapterV2Event) =>
-          Effect.gen(function* () {
+        const sessionChildThreadOf =
+          /* Runs once per adapter event; avoid a span per event. */
+          Effect.fnUntraced(function* (event: ProviderAdapter.ProviderAdapterV2Event) {
             if (entry.runtime.childThreadScope !== "session") return undefined;
             if (
               event.type === "app_thread.created" &&

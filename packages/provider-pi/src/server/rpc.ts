@@ -470,28 +470,30 @@ export const makePiRpcConnection = Effect.fnUntraced(function* (options: PiRpcSp
   // answers, or whether it is a response at all. Fail every pending request: a
   // wrong guess would leave the right one hanging until its timeout. The
   // callers' requests are rare and short, so a spurious failure is cheap.
-  const rejectOversized = (frame: Extract<PiFrame, { _tag: "Oversized" }>) =>
-    Effect.gen(function* () {
-      yield* Effect.logWarning("Dropping oversized pi stdout record.", {
-        chars: frame.chars,
-        maxChars: maxRecordChars,
-        failedRequests: pendingRequests.size,
-      });
-      for (const [id, pending] of pendingRequests) {
-        pendingRequests.delete(id);
-        yield* Deferred.fail(
-          pending.deferred,
-          new PiRpcRecordTooLargeError({
-            operation: pending.operation,
-            chars: frame.chars,
-            maxChars: maxRecordChars,
-          }),
-        );
-      }
+  const rejectOversized = Effect.fn("PiRpc.rejectOversized")(function* (
+    frame: Extract<PiFrame, { _tag: "Oversized" }>,
+  ) {
+    yield* Effect.logWarning("Dropping oversized pi stdout record.", {
+      chars: frame.chars,
+      maxChars: maxRecordChars,
+      failedRequests: pendingRequests.size,
     });
+    for (const [id, pending] of pendingRequests) {
+      pendingRequests.delete(id);
+      yield* Deferred.fail(
+        pending.deferred,
+        new PiRpcRecordTooLargeError({
+          operation: pending.operation,
+          chars: frame.chars,
+          maxChars: maxRecordChars,
+        }),
+      );
+    }
+  });
 
-  const routeFrame = (frame: PiFrame) =>
-    Effect.gen(function* () {
+  const routeFrame =
+    /* Protocol records include streaming deltas; avoid a span per frame. */
+    Effect.fnUntraced(function* (frame: PiFrame) {
       if (frame._tag === "Oversized") return yield* rejectOversized(frame);
       const record = parsePiRecord(frame.text);
       if (record === undefined) {

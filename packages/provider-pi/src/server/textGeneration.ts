@@ -30,18 +30,20 @@ const SETTLE_POLL_INTERVAL = Duration.millis(100);
  * with `agent_settled`. Prime Agent has no such event, so after its first
  * `agent_end` this polls `get_state` until retries and post-run work finish.
  */
-const waitForPromptSettled = (flavor: PiFlavor, connection: PiRpcConnection) =>
-  Effect.gen(function* () {
-    const terminalEvent = flavor.settleSignal === "agent_settled" ? "agent_settled" : "agent_end";
-    while (true) {
-      const event = yield* Queue.take(connection.events);
-      if (event["type"] === terminalEvent) break;
-    }
-    if (flavor.settleSignal === "agent_settled") return;
-    while (!piStateIsIdle(yield* connection.request({ type: "get_state" }))) {
-      yield* Effect.sleep(SETTLE_POLL_INTERVAL);
-    }
-  });
+const waitForPromptSettled = Effect.fn("PiTextGeneration.waitForPromptSettled")(function* (
+  flavor: PiFlavor,
+  connection: PiRpcConnection,
+) {
+  const terminalEvent = flavor.settleSignal === "agent_settled" ? "agent_settled" : "agent_end";
+  while (true) {
+    const event = yield* Queue.take(connection.events);
+    if (event["type"] === terminalEvent) break;
+  }
+  if (flavor.settleSignal === "agent_settled") return;
+  while (!piStateIsIdle(yield* connection.request({ type: "get_state" }))) {
+    yield* Effect.sleep(SETTLE_POLL_INTERVAL);
+  }
+});
 
 export const makePiTextGeneration = Effect.fn("makePiTextGeneration")(function* (
   flavor: PiFlavor,

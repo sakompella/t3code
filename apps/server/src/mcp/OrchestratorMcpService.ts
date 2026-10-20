@@ -1701,18 +1701,17 @@ const make = Effect.gen(function* () {
     );
 
   /** Fails unless work on these settings runs within `limits`. */
-  const assertRunsWithin = (
+  const assertRunsWithin = Effect.fn("OrchestratorMcpService.assertRunsWithin")(function* (
     limits: {
       readonly runtimeMode: RuntimeMode;
       readonly interactionMode: ProviderInteractionMode;
     },
     settings: Parameters<typeof runModes>[0],
-  ) =>
-    Effect.gen(function* () {
-      const modes = yield* runModes(settings);
-      yield* resolveRuntimeMode(limits.runtimeMode, modes.runtimeMode);
-      yield* resolveInteractionMode(limits.interactionMode, modes.interactionMode);
-    });
+  ) {
+    const modes = yield* runModes(settings);
+    yield* resolveRuntimeMode(limits.runtimeMode, modes.runtimeMode);
+    yield* resolveInteractionMode(limits.interactionMode, modes.interactionMode);
+  });
 
   /**
    * Its webhook URL starts runs, so only a caller that may start one sees it: never a client
@@ -1754,7 +1753,9 @@ const make = Effect.gen(function* () {
    * or the task is bound to the caller's own thread and runs no broader than
    * that thread already does.
    */
-  const assertMayManageScheduledTask = (
+  const assertMayManageScheduledTask = Effect.fn(
+    "OrchestratorMcpService.assertMayManageScheduledTask",
+  )(function* (
     caller: {
       readonly parent: Pick<OrchestrationV2ThreadProjection, "thread"> | undefined;
       readonly limits: {
@@ -1763,17 +1764,16 @@ const make = Effect.gen(function* () {
       };
     },
     task: Pick<ScheduledTask, "threadId" | "modelSelection" | "runtimeMode" | "interactionMode">,
-  ) =>
-    Effect.gen(function* () {
-      const ownModes =
-        caller.parent !== undefined && task.threadId === caller.parent.thread.id
-          ? yield* runModes(caller.parent.thread)
-          : undefined;
-      for (const settings of yield* scheduledTaskRunModes(task)) {
-        if (ownModes !== undefined && withinLimits(ownModes, yield* runModes(settings))) continue;
-        yield* assertRunsWithin(caller.limits, settings);
-      }
-    });
+  ) {
+    const ownModes =
+      caller.parent !== undefined && task.threadId === caller.parent.thread.id
+        ? yield* runModes(caller.parent.thread)
+        : undefined;
+    for (const settings of yield* scheduledTaskRunModes(task)) {
+      if (ownModes !== undefined && withinLimits(ownModes, yield* runModes(settings))) continue;
+      yield* assertRunsWithin(caller.limits, settings);
+    }
+  });
 
   const loadScheduledTask = Effect.fn("OrchestratorMcpService.loadScheduledTask")(function* (
     scheduledTaskId: ScheduledTask["id"],

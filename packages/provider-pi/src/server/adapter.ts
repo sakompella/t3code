@@ -601,51 +601,53 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
             ]),
       ];
       let sessionNoticesShown = false;
-      const launchProcess = (processScope: Scope.Scope, resumeSessionFile?: string) =>
-        Effect.gen(function* () {
-          const launch = buildPiRpcLaunch({
-            launchArgs,
-            environment: options.environment,
-            mcpSession,
-            extensionPath,
-            ...(flavor.kernelMcp === null ? {} : { kernelMcp: { skillPath } }),
-            ...(resumeSessionFile === undefined ? {} : { resumeSessionFile }),
-            runtimeMode: input.runtimePolicy.runtimeMode,
-          });
-          const scopedLaunch = yield* agentScope.wrap({
-            command: binary,
-            args: launch.args,
-            name: flavor.defaultBinary,
-            threadId: input.threadId,
-            env: launch.env,
-          });
-          return yield* makePiRpcConnection({
-            command: scopedLaunch.command,
-            args: scopedLaunch.args,
-            cwd,
-            env: launch.env,
-            terminationGrace: flavor.terminationGrace,
-          }).pipe(
-            Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner),
-            Scope.provide(processScope),
-            Effect.mapError(
-              (cause) =>
-                new ProviderAdapter.ProviderAdapterOpenSessionError({
-                  driver,
-                  providerSessionId: input.providerSessionId,
-                  cause,
-                }),
-            ),
-          );
+      const launchProcess = Effect.fn("PiAdapterV2.launchProcess")(function* (
+        processScope: Scope.Scope,
+        resumeSessionFile?: string,
+      ) {
+        const launch = buildPiRpcLaunch({
+          launchArgs,
+          environment: options.environment,
+          mcpSession,
+          extensionPath,
+          ...(flavor.kernelMcp === null ? {} : { kernelMcp: { skillPath } }),
+          ...(resumeSessionFile === undefined ? {} : { resumeSessionFile }),
+          runtimeMode: input.runtimePolicy.runtimeMode,
         });
+        const scopedLaunch = yield* agentScope.wrap({
+          command: binary,
+          args: launch.args,
+          name: flavor.defaultBinary,
+          threadId: input.threadId,
+          env: launch.env,
+        });
+        return yield* makePiRpcConnection({
+          command: scopedLaunch.command,
+          args: scopedLaunch.args,
+          cwd,
+          env: launch.env,
+          terminationGrace: flavor.terminationGrace,
+        }).pipe(
+          Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner),
+          Scope.provide(processScope),
+          Effect.mapError(
+            (cause) =>
+              new ProviderAdapter.ProviderAdapterOpenSessionError({
+                driver,
+                providerSessionId: input.providerSessionId,
+                cause,
+              }),
+          ),
+        );
+      });
       /**
        * Starts the process on a thread's existing session and waits until it
        * has opened it. While the previous worker is still stopping, the daemon
        * refuses the session and the process exits; that refusal is retried on
        * the same session.
        */
-      const launchProcessOnSession = (sessionFile: string) =>
-        Effect.gen(function* () {
+      const launchProcessOnSession = Effect.fn("PiAdapterV2.launchProcessOnSession")(
+        function* (sessionFile: string) {
           const processScope = yield* Scope.fork(scope);
           const connection = yield* launchProcess(processScope, sessionFile);
           yield* connection.request({ type: "get_state" }, PI_SESSION_TIMEOUT_MS).pipe(
@@ -658,22 +660,22 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
             ),
           );
           return connection;
-        }).pipe(
-          Effect.tapError((error) =>
-            (error._tag === "PiSessionLeaseHeldError" ? Effect.logInfo : Effect.logWarning)(
-              `${name} could not start on the thread's session`,
-              {
-                providerSessionId: input.providerSessionId,
-                errorTag: error._tag,
-                detail: error.message,
-              },
-            ),
+        },
+        Effect.tapError((error) =>
+          (error._tag === "PiSessionLeaseHeldError" ? Effect.logInfo : Effect.logWarning)(
+            `${name} could not start on the thread's session`,
+            {
+              providerSessionId: input.providerSessionId,
+              errorTag: error._tag,
+              detail: error.message,
+            },
           ),
-          Effect.retry({
-            while: (error) => error._tag === "PiSessionLeaseHeldError",
-            schedule: SESSION_LEASE_RETRY,
-          }),
-        );
+        ),
+        Effect.retry({
+          while: (error) => error._tag === "PiSessionLeaseHeldError",
+          schedule: SESSION_LEASE_RETRY,
+        }),
+      );
       /** The session file the process is known to be on; null while a replacement is in flight. */
       let liveSession: string | null = null;
       /** A session the process could not start on; the thread falls back to a new one. */
@@ -4162,38 +4164,40 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
                 Effect.gen(function* () {
                   // RPC responses bypass the pump. Drain preceding native events
                   // before deciding whether this rewind can replace their binding.
-                  const commitAfterDrain = <A, E, R>(commit: Effect.Effect<A, E, R>) =>
-                    Effect.gen(function* () {
-                      const queued = yield* Queue.offer(connection.events, {
-                        type: "t3.rollback_barrier",
-                        barrier,
-                      });
-                      if (!queued)
-                        return yield* protocolError("Pi transport closed during rollback");
-                      yield* Deferred.await(barrier);
-                      return yield* sessionEventPermit.withPermits(1)(
-                        Effect.gen(function* () {
-                          if (pendingWake !== null) {
-                            yield* stopPendingWake(pendingWake);
-                            return yield* protocolError(
-                              "Native Pi work started while rollback was changing the session",
-                            );
-                          }
-                          if (
-                            threadState !== state ||
-                            state.activeTurn !== null ||
-                            closed ||
-                            stopRequested
-                          )
-                            return yield* protocolError(
-                              "Pi rollback ownership changed during its rewind",
-                            );
-                          const result = yield* commit;
-                          rollbackBarrier = null;
-                          return result;
-                        }),
-                      );
+                  const commitAfterDrain = Effect.fn("PiAdapterV2.commitAfterDrain")(function* <
+                    A,
+                    E,
+                    R,
+                  >(commit: Effect.Effect<A, E, R>) {
+                    const queued = yield* Queue.offer(connection.events, {
+                      type: "t3.rollback_barrier",
+                      barrier,
                     });
+                    if (!queued) return yield* protocolError("Pi transport closed during rollback");
+                    yield* Deferred.await(barrier);
+                    return yield* sessionEventPermit.withPermits(1)(
+                      Effect.gen(function* () {
+                        if (pendingWake !== null) {
+                          yield* stopPendingWake(pendingWake);
+                          return yield* protocolError(
+                            "Native Pi work started while rollback was changing the session",
+                          );
+                        }
+                        if (
+                          threadState !== state ||
+                          state.activeTurn !== null ||
+                          closed ||
+                          stopRequested
+                        )
+                          return yield* protocolError(
+                            "Pi rollback ownership changed during its rewind",
+                          );
+                        const result = yield* commit;
+                        rollbackBarrier = null;
+                        return result;
+                      }),
+                    );
+                  });
                   if (flavor.rollback === "tree" && navigateTreeAvailable === null) {
                     navigateTreeAvailable = yield* request({ type: "get_commands" }).pipe(
                       Effect.map(hasPiNavigateTreeCommand),
