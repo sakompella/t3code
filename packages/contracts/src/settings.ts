@@ -1334,6 +1334,28 @@ export const resolveProjectProviderInstanceEnabled = (
     : isUnconfiguredDefaultInstanceEnabled(instanceId);
 };
 
+/**
+ * `providers` as new threads in `projectId` see them: the project's own switch
+ * for an instance replaces the machine-wide `enabled` the snapshot reports.
+ */
+export const applyProjectProviderEnablement = <
+  Provider extends { readonly instanceId: ProviderInstanceId; readonly enabled: boolean },
+>(
+  providers: ReadonlyArray<Provider>,
+  settings: Pick<ServerSettings, "projectSettingsOverrides">,
+  projectId: ProjectId | null,
+): ReadonlyArray<Provider> => {
+  const overrides =
+    projectId === null
+      ? undefined
+      : settings.projectSettingsOverrides[projectId]?.providerInstances;
+  if (overrides === undefined) return providers;
+  return providers.map((provider) => {
+    const enabled = overrides[provider.instanceId]?.enabled;
+    return enabled === undefined ? provider : { ...provider, enabled };
+  });
+};
+
 export const ServerSettingsOperation = Schema.Literals([
   "normalize",
   "check-exists",

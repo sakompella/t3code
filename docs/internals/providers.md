@@ -36,6 +36,26 @@ Forks use Pi's CLI in the destination directory because RPC session switching re
 session's cwd. Provider switches still use portable handoff summaries.
 See the [adapter](../../packages/provider-pi/src/server/adapter.ts).
 
+Prime Agent is a hard fork of Pi and runs through the same adapter with a
+[flavor](../../packages/provider-pi/src/server/flavor.ts). It forked before Pi added
+`agent_settled` and `get_entries`. After `agent_end` it can still retry, compact, or run queued
+work, and no event marks the end, so the adapter polls `get_state` until
+`sessionActions.active` clears; Prime Agent keeps that set through the whole retry chain. Turn
+boundaries for rollback come from new user entries in `get_fork_messages`. Every tool call is one
+`ipython` cell, and a failed cell reports `isError` on its result while the event's own flag stays
+false. A parent usually ends its run right after `rlm.spawn` and is woken again by the child's
+reply, so its turn settles while the child's subagent item stays running on the spawning run; that
+active item keeps the run's event stream open and drives the background-work banner. The kernel
+reports a detached `bash()` job only when it finishes, so the adapter lists un-awaited handles from
+the cell that started them as `pendingBackgroundTasks` until the `async_bash_completion` notice. Prime Agent also wakes itself with no
+turn (heartbeats, schedules, finished background commands, agent messages). It uses the same
+buffered provider continuation as Pi's extension wakes, but offers it only once the agent replies,
+so the run's notice can name what woke it. Prime Agent rollback moves
+the branch head in place instead of forking a new session file. RPC has no tree navigation, so the
+injected extension registers a hidden `/t3-navigate-tree` command that calls `ctx.navigateTree` and
+reports back through a marked `notify`; the adapter only sends it when `get_commands` lists it,
+since an unknown slash command would reach the model as a prompt.
+
 Antigravity separates account profiles per instance while sharing installed executables across the
 environment. It forces file-based credential storage because the native macOS keychain entry would
 otherwise be shared across instances. The launch environment removes ambient Google credentials,

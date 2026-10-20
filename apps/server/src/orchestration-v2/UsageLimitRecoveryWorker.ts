@@ -47,12 +47,8 @@ export function limitRecoveryCommand(
       },
     };
   }
-  if (
-    !recovery.autoResume ||
-    resetMs > nowMs ||
-    (thread.snoozedUntil != null && DateTime.toEpochMillis(thread.snoozedUntil) > nowMs)
-  )
-    return null;
+  // Snooze only hides the thread. The provider's reset time alone makes a retry due.
+  if (!recovery.autoResume || resetMs > nowMs) return null;
   const deliveryIdentity = `${identity}:${recovery.requestId ?? "legacy"}`;
   return {
     type: "message.dispatch",

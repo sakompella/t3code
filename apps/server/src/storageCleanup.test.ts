@@ -32,12 +32,16 @@ import { CodexProviderCapabilitiesV2 } from "./orchestration-v2/Adapters/CodexAd
 import { ServerActivation } from "./serverActivation.ts";
 import { describe, expect, it } from "@effect/vitest";
 import {
+  EventId,
   ProjectId,
+  ProviderDriverKind,
   ProviderInstanceId,
+  ProviderSessionId,
   RunId,
   RuntimeRequestId,
   ThreadId,
   type OrchestrationV2DomainEvent,
+  type OrchestrationV2ProviderSession,
   type OrchestrationV2ThreadShell,
 } from "@t3tools/contracts";
 import * as DateTime from "effect/DateTime";
@@ -452,6 +456,27 @@ const pausedMeasurementFixture = (storageCleanup?: StorageCleanupSettings) =>
     measuredPath = yield* fs.realPath(fixture.worktree);
     return { ...fixture, measuring, resume };
   });
+const sessionUpdated = (
+  index: number,
+  status: OrchestrationV2ProviderSession["status"],
+): OrchestrationV2DomainEvent => ({
+  id: EventId.make(`event-${index}`),
+  type: "provider-session.updated",
+  threadId: ThreadId.make("thread-1"),
+  occurredAt: at(0),
+  payload: {
+    id: ProviderSessionId.make(`session-${index}`),
+    driver: ProviderDriverKind.make("codex"),
+    providerInstanceId: ProviderInstanceId.make("codex"),
+    status,
+    cwd: "/elsewhere",
+    model: null,
+    capabilities: CodexProviderCapabilitiesV2,
+    createdAt: at(0),
+    updatedAt: at(0),
+    lastError: null,
+  },
+});
 const cleanupTestLayer = GitVcsDriver.layer.pipe(
   Layer.provideMerge(ServerConfig.layerTest(process.cwd(), { prefix: "storage-cleanup-" })),
   Layer.provideMerge(NodeServices.layer),
@@ -1314,6 +1339,33 @@ describe("storage cleanup reports and local file policies", () => {
         expect(yield* fs.readFileString(`${worktree}/notes.txt`)).toBe("untracked\n");
       }),
     ),
+  );
+  it.live.each([
+    ["running", "ready", 1],
+    ["ready", "error", 1],
+    ["stopped", "ready", 2],
+  ] as const)(
+    "session updates to %s or %s during a sweep make %i sweep(s) in total",
+    ([first, second, sweeps]) =>
+      runCleanupTest(
+        Effect.gen(function* () {
+          const fixture = yield* pausedMeasurementFixture();
+          const handled = yield* Deferred.make<void>();
+          yield* fixture.activate(
+            Stream.fromEffect(Deferred.await(fixture.measuring)).pipe(
+              Stream.flatMap(() => Stream.range(0, 19)),
+              Stream.map((index) => sessionUpdated(index, index % 2 === 0 ? first : second)),
+              Stream.concat(
+                Stream.fromEffect(Deferred.succeed(handled, undefined)).pipe(Stream.drain),
+              ),
+            ),
+          );
+          yield* Deferred.await(handled);
+          yield* Deferred.succeed(fixture.resume, undefined);
+          yield* fixture.service.drain;
+          expect(fixture.snapshotReads()).toBe(sweeps);
+        }),
+      ),
   );
   it.live("does not measure a worktree kept for an open provider session", () =>
     runCleanupTest(

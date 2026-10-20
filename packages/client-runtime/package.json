@@ -283,6 +283,10 @@
       "types": "./src/state/subagentRuntime.ts",
       "default": "./src/state/subagentRuntime.ts"
     },
+    "./state/subagent-tree": {
+      "types": "./src/state/subagentTree.ts",
+      "default": "./src/state/subagentTree.ts"
+    },
     "./state/thread-sort": {
       "types": "./src/state/threadSort.ts",
       "default": "./src/state/threadSort.ts"
@@ -315,6 +319,14 @@
       "types": "./src/state/composerDispatch.ts",
       "default": "./src/state/composerDispatch.ts"
     },
+    "./state/thread-background-work": {
+      "types": "./src/state/threadBackgroundWork.ts",
+      "default": "./src/state/threadBackgroundWork.ts"
+    },
+    "./state/thread-heartbeats": {
+      "types": "./src/state/threadHeartbeats.ts",
+      "default": "./src/state/threadHeartbeats.ts"
+    },
     "./state/thread-subagents": {
       "types": "./src/state/threadSubagents.ts",
       "default": "./src/state/threadSubagents.ts"
@@ -322,6 +334,10 @@
     "./state/thread-undo": {
       "types": "./src/state/threadUndo.ts",
       "default": "./src/state/threadUndo.ts"
+    },
+    "./state/run-fold": {
+      "types": "./src/state/runFold.ts",
+      "default": "./src/state/runFold.ts"
     },
     "./state/thread-settled": {
       "types": "./src/state/threadSettled.ts",
@@ -354,6 +370,10 @@
     "./work-log/tool-presentation": {
       "types": "./src/work-log/toolPresentation.ts",
       "default": "./src/work-log/toolPresentation.ts"
+    },
+    "./work-log/entry-code": {
+      "types": "./src/work-log/entryCode.ts",
+      "default": "./src/work-log/entryCode.ts"
     },
     "./work-log/command-label": {
       "types": "./src/work-log/commandLabel.ts",
