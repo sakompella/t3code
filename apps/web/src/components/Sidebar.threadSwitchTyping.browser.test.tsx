@@ -186,6 +186,7 @@ function ThreadView() {
           snoozeWakeLabelText={null}
           wokeAt={null}
           isActive={threadKey === "b"}
+          isRouteThread={threadKey === "b"}
           openPullRequestsInRightPanel={false}
           jumpLabel={null}
           currentEnvironmentId={environmentId}
