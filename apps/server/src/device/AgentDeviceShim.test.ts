@@ -78,7 +78,7 @@ describe("agent-device shim", () => {
       const lines = (yield* fs.readFileString(path.join(shimDir, "agent-device.cmd"))).split(
         "\r\n",
       );
-      const setlocal = lines.indexOf("setlocal");
+      const setlocal = lines.indexOf("setlocal EnableExtensions DisableDelayedExpansion");
       const assignment = lines.indexOf('set "ELECTRON_RUN_AS_NODE=1"');
       expect(setlocal).toBeGreaterThan(-1);
       expect(assignment).toBeGreaterThan(setlocal);
