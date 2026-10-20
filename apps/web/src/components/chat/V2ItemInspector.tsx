@@ -97,7 +97,7 @@ function StructuredValue({
   readonly language?: "typescript";
   readonly code?: WorkEntryCode | undefined;
 }) {
-  const { resolvedTheme } = useTheme();
+  const resolvedTheme = useRenderedAppearance();
   const text = typeof value === "string" ? value : JSON.stringify(value, null, 2);
   const isJson = highlightJson && isJsonText(text);
   if (!text) return null;
