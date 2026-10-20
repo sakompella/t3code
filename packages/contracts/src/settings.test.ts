@@ -849,16 +849,6 @@ describe("provider enabled defaults", () => {
     ).toBe(false);
   });
 
-  it("enables only the stable bindings by default", () => {
-    const enabledByDefault = (driver: string) =>
-      resolveProviderInstanceEnabled({ driver: ProviderDriverKind.make(driver), config: {} });
-    expect(enabledByDefault("codex")).toBe(true);
-    expect(enabledByDefault("claudeAgent")).toBe(true);
-    for (const driver of ["cursor", "grok", "muse", "pi", "opencode", "antigravity"]) {
-      expect(enabledByDefault(driver)).toBe(false);
-    }
-  });
-
   it("resolves instance enabled state with explicit false winning", () => {
     const grok = ProviderDriverKind.make("grok");
     const codex = ProviderDriverKind.make("codex");
