@@ -6,7 +6,7 @@ import type {
   Project,
   ThreadId,
 } from "@t3tools/contracts";
-import { ProviderInstanceId, RuntimeRequestId } from "@t3tools/contracts";
+import { ProviderInstanceId, RunId, RuntimeRequestId } from "@t3tools/contracts";
 import * as DateTime from "effect/DateTime";
 
 import { projectThreadAwarenessV2 } from "./agentAwareness.ts";
@@ -29,6 +29,9 @@ describe("projectThreadAwarenessV2", () => {
         | "pendingRuntimeRequest"
         | "lineage"
         | "settledOverride"
+        | "activeRunId"
+        | "latestRunId"
+        | "latestRunTrigger"
       >
     > = {},
   ) => ({
@@ -42,7 +45,11 @@ describe("projectThreadAwarenessV2", () => {
     modelSelection: { instanceId: ProviderInstanceId.make("codex"), model: "gpt-5.4" },
     status: "running" as const,
     pendingRuntimeRequest: null,
+    snoozedUntil: null,
     settledOverride: null,
+    activeRunId: null,
+    latestRunId: null,
+    latestRunTrigger: null,
     updatedAt,
     ...overrides,
   });
@@ -52,6 +59,7 @@ describe("projectThreadAwarenessV2", () => {
       projectThreadAwarenessV2({
         environmentId: "env-1" as EnvironmentId,
         project,
+        now: updatedAt,
         thread: v2Thread(),
       }),
     ).toMatchObject({ phase: "running", headline: "Agent is working" });
@@ -64,6 +72,7 @@ describe("projectThreadAwarenessV2", () => {
         projectThreadAwarenessV2({
           environmentId: "env-1" as EnvironmentId,
           project,
+          now: updatedAt,
           thread: v2Thread({
             status,
             lineage: {
@@ -82,6 +91,7 @@ describe("projectThreadAwarenessV2", () => {
       projectThreadAwarenessV2({
         environmentId: "env-1" as EnvironmentId,
         project,
+        now: updatedAt,
         thread: v2Thread({ status: "cancelled", activityRunStatus: "running" }),
       }),
     ).toMatchObject({ phase: "running", headline: "Agent is working" });
@@ -103,6 +113,7 @@ describe("projectThreadAwarenessV2", () => {
       projectThreadAwarenessV2({
         environmentId: "env-1" as EnvironmentId,
         project,
+        now: updatedAt,
         thread: v2Thread({ status: "completed", pendingBackgroundTasks: tasks }),
       }),
     ).toMatchObject({ phase });
@@ -113,6 +124,7 @@ describe("projectThreadAwarenessV2", () => {
       projectThreadAwarenessV2({
         environmentId: "env-1" as EnvironmentId,
         project,
+        now: updatedAt,
         thread: v2Thread({
           pendingRuntimeRequest: {
             id: RuntimeRequestId.make("request-1"),
@@ -128,6 +140,7 @@ describe("projectThreadAwarenessV2", () => {
     const input = {
       environmentId: "env-1" as EnvironmentId,
       project,
+      now: updatedAt,
       thread: v2Thread({
         pendingRuntimeRequest: {
           id: RuntimeRequestId.make("request-async"),
@@ -151,6 +164,7 @@ describe("projectThreadAwarenessV2", () => {
       projectThreadAwarenessV2({
         environmentId: "env-1" as EnvironmentId,
         project,
+        now: updatedAt,
         thread: v2Thread({
           pendingRuntimeRequest: {
             id: RuntimeRequestId.make("request-auth-refresh"),
@@ -160,5 +174,130 @@ describe("projectThreadAwarenessV2", () => {
         }),
       }),
     ).toMatchObject({ phase: "running", headline: "Agent is working" });
+  });
+
+  describe("while snoozed", () => {
+    const WAKE = "2026-05-22T18:00:00.000Z";
+    const snoozedThread = (overrides: Parameters<typeof v2Thread>[0] = {}) => ({
+      ...v2Thread(overrides),
+      snoozedUntil: DateTime.makeUnsafe(WAKE),
+    });
+    const awareness = (
+      thread: ReturnType<typeof snoozedThread>,
+      now: string = NOW,
+    ): ReturnType<typeof projectThreadAwarenessV2> =>
+      projectThreadAwarenessV2({
+        environmentId: "env-1" as EnvironmentId,
+        project,
+        thread,
+        now: DateTime.makeUnsafe(now),
+      });
+
+    it.each([
+      ["a run in progress", { status: "running" }],
+      ["a finished run", { status: "completed" }],
+      ["a failed run", { status: "failed" }],
+      [
+        "a question",
+        {
+          pendingRuntimeRequest: {
+            id: RuntimeRequestId.make("request-snoozed-input"),
+            kind: "user_input",
+            createdAt: updatedAt,
+          },
+        },
+      ],
+      [
+        "an approval",
+        {
+          pendingRuntimeRequest: {
+            id: RuntimeRequestId.make("request-snoozed-approval"),
+            kind: "command",
+            createdAt: updatedAt,
+          },
+        },
+      ],
+    ] as const)("publishes nothing for %s", (_case, overrides) => {
+      expect(awareness(snoozedThread(overrides))).toBeNull();
+    });
+
+    it("publishes again from the moment the snooze timer ends", () => {
+      const thread = snoozedThread({ status: "completed" });
+      expect(awareness(thread, "2026-05-22T17:59:59.999Z")).toBeNull();
+      expect(awareness(thread, WAKE)).toMatchObject({ phase: "completed" });
+    });
+  });
+
+  describe("a heartbeat run, which is a routine check", () => {
+    const heartbeatRun = RunId.make("run-heartbeat");
+    const heartbeat = (overrides: Parameters<typeof v2Thread>[0] = {}) =>
+      projectThreadAwarenessV2({
+        environmentId: "env-1" as EnvironmentId,
+        project,
+        now: DateTime.makeUnsafe(NOW),
+        thread: v2Thread({
+          latestRunId: heartbeatRun,
+          latestRunTrigger: "heartbeat",
+          activeRunId: null,
+          ...overrides,
+        }),
+      });
+
+    it("publishes nothing while it starts, works or finishes", () => {
+      for (const activityRunStatus of ["preparing", "starting", "running"] as const) {
+        expect(heartbeat({ activityRunStatus, activeRunId: heartbeatRun })).toBeNull();
+      }
+      expect(heartbeat({ status: "completed" })).toBeNull();
+      expect(
+        heartbeat({
+          status: "completed",
+          pendingBackgroundTasks: [{ taskId: "child", kind: "subagent" }],
+        }),
+      ).toBeNull();
+    });
+
+    it("still publishes its failures and requests", () => {
+      expect(heartbeat({ status: "failed" })).toMatchObject({ phase: "failed" });
+      expect(
+        heartbeat({
+          status: "running",
+          activityRunStatus: "running",
+          activeRunId: heartbeatRun,
+          pendingRuntimeRequest: {
+            id: RuntimeRequestId.make("question"),
+            kind: "user_input",
+            createdAt: updatedAt,
+          },
+        }),
+      ).toMatchObject({ phase: "waiting_for_input" });
+      expect(
+        heartbeat({
+          status: "running",
+          activityRunStatus: "running",
+          activeRunId: heartbeatRun,
+          pendingRuntimeRequest: {
+            id: RuntimeRequestId.make("approval"),
+            kind: "command",
+            createdAt: updatedAt,
+          },
+        }),
+      ).toMatchObject({ phase: "waiting_for_approval" });
+    });
+
+    it("leaves a user's run that is still active ahead of it visible", () => {
+      expect(
+        heartbeat({
+          status: "queued",
+          activityRunStatus: "running",
+          activeRunId: RunId.make("run-user"),
+        }),
+      ).toMatchObject({ phase: "running" });
+    });
+
+    it("leaves runs someone asked for unchanged", () => {
+      expect(heartbeat({ status: "completed", latestRunTrigger: null })).toMatchObject({
+        phase: "completed",
+      });
+    });
   });
 });

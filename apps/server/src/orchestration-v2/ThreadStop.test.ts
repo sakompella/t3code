@@ -856,6 +856,56 @@ it.effect("thread.stop keeps a restart continuation of the stopped run from star
   }).pipe(Effect.provide(layerTest)),
 );
 
+it.effect("queue.resume is refused while the thread is rewinding", () =>
+  Effect.gen(function* () {
+    const orchestrator = yield* Orchestrator.OrchestratorV2;
+    const projections = yield* ProjectionStore.ProjectionStoreV2;
+    const threadId = ThreadId.make("thread:resume-while-rewinding");
+    yield* createWatchingThread(threadId, 13);
+    yield* send(threadId, "first", "start_immediately");
+    yield* send(threadId, "queued", "queue_after_active");
+    const now = yield* DateTime.now;
+    const { thread, runs } = yield* orchestrator.getThreadProjection(threadId);
+    const [first, queued] = runs;
+    yield* projections.apply({
+      id: EventId.make("event:resume-while-rewinding:first"),
+      type: "run.updated",
+      threadId,
+      runId: first!.id,
+      occurredAt: now,
+      payload: { ...first!, status: "completed", completedAt: now },
+    });
+    yield* projections.apply({
+      id: EventId.make("event:resume-while-rewinding:hold"),
+      type: "run.updated",
+      threadId,
+      runId: queued!.id,
+      occurredAt: now,
+      payload: { ...queued!, queueHeld: true },
+    });
+    yield* projections.apply({
+      id: EventId.make("event:resume-while-rewinding:head-move"),
+      type: "thread.metadata-updated",
+      threadId,
+      occurredAt: now,
+      payload: {
+        ...thread,
+        pendingHeadMove: { requestId: CommandId.make("rollback-in-progress"), summarize: true },
+        updatedAt: now,
+      },
+    });
+
+    const refused = yield* orchestrator
+      .dispatch({ type: "queue.resume", commandId: CommandId.make("resume-rewinding"), threadId })
+      .pipe(Effect.flip);
+    assert.match(String(refused.cause), /still rewinding/);
+    const after = (yield* orchestrator.getThreadProjection(threadId)).runs.find(
+      (run) => run.id === queued!.id,
+    );
+    assert.deepEqual([after?.status, after?.queueHeld], ["queued", true]);
+  }).pipe(Effect.provide(layerTest)),
+);
+
 it.effect.each(["thread.stop", "run.interrupt"] as const)(
   "a successful %s blocks a newer restart continuation when completion timestamps tie",
   (stopType) =>

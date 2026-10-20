@@ -1,8 +1,12 @@
 import {
   DEFAULT_MODEL_BY_PROVIDER,
+  newThreadRuntimeMode,
   ProjectId,
   ProviderDriverKind,
   ProviderInstanceId,
+  providerRuntimeMode,
+  RuntimeMode,
+  runtimeModesForNewThreads,
   type ServerProvider,
 } from "@t3tools/contracts";
 import { describe, expect, it } from "vite-plus/test";
@@ -734,5 +738,89 @@ describe("provider icon metadata", () => {
     ]);
     expect(entry?.acpRegistryIconUrl).toBe(iconUrl);
     expect(entry?.driverKind).toBe("acpRegistry");
+  });
+});
+
+describe("the default permissions a new thread runs with", () => {
+  const MODES = RuntimeMode.literals;
+  const kinds = [
+    { instanceId: "codex", supportedRuntimeModes: undefined },
+    { instanceId: "primeAgent", supportedRuntimeModes: ["full-access"] as const },
+    { instanceId: "claudeAgent", supportedRuntimeModes: ["approval-required", "auto"] as const },
+  ];
+  const states = (["ready", "warning", "error"] as const).flatMap((status) =>
+    [true, false].flatMap((enabled) =>
+      ([undefined, "unavailable"] as const).map((availability) => ({
+        status,
+        enabled,
+        availability,
+      })),
+    ),
+  );
+  const providerSets = states.flatMap((first) =>
+    states.flatMap((second) =>
+      states.map((third) =>
+        [first, second, third].map((state, index) => ({
+          ...provider({
+            provider: ProviderDriverKind.make(kinds[index]!.instanceId),
+            instanceId: kinds[index]!.instanceId,
+            ...state,
+            models: [model("default", false, true)],
+          }),
+          ...(kinds[index]!.supportedRuntimeModes === undefined
+            ? {}
+            : { supportedRuntimeModes: kinds[index]!.supportedRuntimeModes }),
+        })),
+      ),
+    ),
+  );
+
+  it("is the mode the provider that new threads start on runs, for any providers and default", () => {
+    for (const forward of providerSets) {
+      for (const providers of [forward, forward.toReversed()]) {
+        for (const instanceId of [null, "codex", "primeAgent", "claudeAgent", "removed"]) {
+          const defaultModelSelection =
+            instanceId === null
+              ? null
+              : { instanceId: ProviderInstanceId.make(instanceId), model: "default" };
+          const startsOn = resolveDefaultProviderModelSelection(providers, defaultModelSelection);
+          const startsOnModes = providers.find(
+            (candidate) => candidate.instanceId === startsOn?.instanceId,
+          )?.supportedRuntimeModes;
+          for (const defaultRuntimeMode of MODES) {
+            const target = { providers, defaultModelSelection, defaultRuntimeMode };
+            const expected =
+              startsOn === null
+                ? defaultRuntimeMode
+                : providerRuntimeMode(defaultRuntimeMode, startsOnModes);
+            const shown = newThreadRuntimeMode([target]);
+            if (shown !== expected) {
+              throw new Error(
+                JSON.stringify({ startsOn, defaultRuntimeMode, shown, expected, providers }),
+              );
+            }
+            expect(runtimeModesForNewThreads([target])).toContain(shown);
+          }
+        }
+      }
+    }
+  });
+
+  it("shows Supervised when an unset default starts on Codex ahead of the fork", () => {
+    const providers = providerSets[0]!.slice(0, 2);
+    for (const defaultModelSelection of [
+      null,
+      { instanceId: ProviderInstanceId.make("removed"), model: "default" },
+    ]) {
+      expect(
+        resolveDefaultProviderModelSelection(providers, defaultModelSelection)?.instanceId,
+      ).toBe("codex");
+      const target = {
+        providers,
+        defaultModelSelection,
+        defaultRuntimeMode: "approval-required" as const,
+      };
+      expect(newThreadRuntimeMode([target])).toBe("approval-required");
+    }
   });
 });

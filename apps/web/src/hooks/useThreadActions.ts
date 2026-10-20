@@ -705,13 +705,12 @@ export function useThreadActions() {
     const wokeAt = resolved
       ? threadWokeAt(resolved.thread, { now: new Date().toISOString() })
       : null;
-    // Settling also drops the pin and the snooze server-side, so Undo
-    // has to put those back as well.
+    // Settling drops the pin server-side, so Undo has to put it back. A
+    // snooze survives settling, so Undo leaves it alone.
     const pinOrderKey = resolved?.thread.pinnedAt != null ? resolved.thread.pinOrderKey : null;
     const wasPinned = resolved?.thread.pinnedAt != null;
-    const snoozedUntil = resolved?.thread.snoozedUntil ?? null;
-    // An older unpin/snooze Undo would re-pin or re-snooze, and the server
-    // treats either as a promotion that un-settles; settling supersedes them.
+    // An older unpin/snooze Undo would re-pin (a promotion that un-settles)
+    // or wake the thread; settling supersedes them.
     ThreadUndo.invalidate("pin", scopedThreadKey(target));
     ThreadUndo.invalidate("snooze", scopedThreadKey(target));
     const action = ThreadUndo.begin("settle", scopedThreadKey(target));
@@ -738,12 +737,6 @@ export function useThreadActions() {
             pinOrderKey == null ? {} : { orderKey: pinOrderKey },
           );
           if (pinned._tag !== "Success") return pinned;
-        }
-        if (snoozedUntil !== null) {
-          return snoozeThreadMutation({
-            environmentId: target.environmentId,
-            input: { threadId: target.threadId, snoozedUntil },
-          });
         }
         return unsettled;
       },

@@ -251,12 +251,17 @@ export const layerExecutor: Layer.Layer<
                 Effect.catch((error) =>
                   Effect.gen(function* () {
                     if (
-                      !("turnCompleted" in error) ||
-                      !error.turnCompleted ||
+                      !("turnEndedAs" in error) ||
+                      error.turnEndedAs === undefined ||
                       effect.request.type !== "provider-turn.steer"
                     ) {
                       return yield* error;
                     }
+                    // A Stop is the user's call: park the message in the held
+                    // queue instead of running it. Otherwise the turn ended on
+                    // its own and the message starts as the next run.
+                    const userStopped =
+                      error.turnEndedAs === "interrupted" || error.turnEndedAs === "cancelled";
                     const projection = yield* threads.getThreadRecords(
                       effect.threadId,
                       ["messages", "runs"],
@@ -282,10 +287,11 @@ export const layerExecutor: Layer.Layer<
                           : { modelSelection: run.modelSelection }),
                         dispatchMode: {
                           type:
-                            message.delegatedCompletion === undefined
+                            message.delegatedCompletion === undefined && !userStopped
                               ? "start_immediately"
                               : "queue_after_active",
                         },
+                        ...(userStopped ? { holdInQueue: true } : {}),
                         createdBy: message.createdBy,
                         creationSource: message.creationSource,
                         ...(message.delegatedCompletion === undefined
@@ -405,12 +411,16 @@ export const layerExecutor: Layer.Layer<
             return checkpointRollback
               .execute({
                 threadId: effect.threadId,
+                requestId: effect.commandId,
                 providerThreadId: effect.request.providerThreadId,
                 checkpointId: effect.request.checkpointId,
                 scopeId: effect.request.scopeId,
                 ...(effect.request.restoreFiles === undefined
                   ? {}
                   : { restoreFiles: effect.request.restoreFiles }),
+                ...(effect.request.summary === undefined
+                  ? {}
+                  : { summary: effect.request.summary }),
               })
               .pipe(
                 Effect.tapCause((cause) =>

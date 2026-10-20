@@ -1,4 +1,5 @@
 import {
+  CommandId,
   ContextHandoffId,
   MessageId,
   CheckpointId,
@@ -20,6 +21,7 @@ import {
   type OrchestrationV2TurnItem,
 } from "@t3tools/contracts";
 import { resolveUserMessagePresentation } from "@t3tools/client-runtime/user-message";
+import { workEntryLabelCode } from "@t3tools/client-runtime/work-log/entry-code";
 import { summarizeToolGroup } from "@t3tools/client-runtime/work-log/presentation";
 import * as DateTime from "effect/DateTime";
 import { describe, expect, it } from "vite-plus/test";
@@ -29,6 +31,7 @@ import {
   isContextHandoffActivityGroup,
   buildThreadFeed,
   createThreadFeedCache,
+  deriveTerminalAssistantMessageIds,
   deriveThreadFeedPresentation,
   threadFeedActivityIsVisible,
   threadFeedRunIsUnsettled,
@@ -447,6 +450,70 @@ describe("buildThreadFeed", () => {
     expect(presented.some((entry) => entry.type === "run-fold")).toBe(false);
   });
 
+  it("shows a routine notice as a quiet row that cannot expand to repeat itself", () => {
+    const activityFor = (
+      tone: "info" | "progress" | "warning" | undefined,
+      status: "running" | "completed" = "completed",
+    ) => {
+      const item = {
+        ...base("item-notice", "2026-06-20T00:00:02.000Z", 1),
+        status,
+        type: "system_notice" as const,
+        message: "Refined its harness: add a memory.",
+        ...(tone === undefined ? {} : { tone }),
+      };
+      return buildThreadFeed([projected(item, 0)]).flatMap((entry) =>
+        entry.type === "activity-group" ? entry.activities : [],
+      )[0];
+    };
+
+    expect(activityFor("info")).toMatchObject({ icon: "zap", canExpand: false, prominent: true });
+    expect(activityFor("progress", "running")).toMatchObject({ icon: "zap", canExpand: false });
+    expect(activityFor("warning")).toMatchObject({ icon: "warning", canExpand: false });
+    expect(activityFor(undefined)).toMatchObject({ icon: "warning", canExpand: false });
+  });
+
+  it.each([
+    { message: "Finished up", canExpand: false },
+    {
+      message:
+        "Refined its harness: Update local Windows SSH, exit-node, and RustDesk handoff state",
+      canExpand: true,
+    },
+    { message: "Refined\nits harness", canExpand: true },
+  ])("opens a notice to its whole message only when a row can cut it: $message", (testCase) => {
+    const item = {
+      ...base("item-notice", "2026-06-20T00:00:02.000Z", 1),
+      type: "system_notice" as const,
+      message: testCase.message,
+      tone: "info" as const,
+    };
+    const activity = buildThreadFeed([projected(item, 0)]).flatMap((entry) =>
+      entry.type === "activity-group" ? entry.activities : [],
+    )[0];
+    expect(activity?.canExpand).toBe(testCase.canExpand);
+    if (testCase.canExpand) expect(activity?.getFullDetail()).toBe(testCase.message);
+  });
+
+  it("drops a finished progress notice from the feed but keeps it while it runs", () => {
+    const feedFor = (status: "running" | "completed") =>
+      buildThreadFeed([
+        projected(
+          {
+            ...base("item-finishing", "2026-06-20T00:00:02.000Z", 1),
+            status,
+            type: "system_notice" as const,
+            message: "Finishing up…",
+            tone: "progress" as const,
+          },
+          0,
+        ),
+      ]);
+
+    expect(feedFor("running")).toHaveLength(1);
+    expect(feedFor("completed")).toHaveLength(0);
+  });
+
   it("presents a usage-limit stop as a warning while preserving its explanation", () => {
     const message = "Plan usage limit reached. Try again after reset.";
     const entries = buildThreadFeed([
@@ -842,6 +909,224 @@ describe("buildThreadFeed", () => {
           ),
       ),
     ).toBe(false);
+  });
+
+  it("keeps the reply before a steer visible when work folds", () => {
+    const reply = (id: string, updatedAt: string) => ({
+      ...assistantMessage(updatedAt),
+      id: TurnItemId.make(`item-${id}`),
+      messageId: MessageId.make(`message-${id}`),
+      text: id,
+    });
+    const steer = {
+      ...userMessage("2026-06-20T00:00:03.000Z"),
+      id: TurnItemId.make("item-steer"),
+      messageId: MessageId.make("message-steer"),
+      inputIntent: "steer" as const,
+      text: "Change course",
+    };
+    const feed = buildThreadFeed([
+      projected(userMessage(), 0),
+      projected(reply("opening", "2026-06-20T00:00:01.500Z"), 1),
+      projected(command(), 2),
+      projected(reply("before-steer", "2026-06-20T00:00:02.500Z"), 3),
+      projected(steer, 4),
+      projected({ ...command("2026-06-20T00:00:04.000Z"), id: TurnItemId.make("cmd-2") }, 5),
+      projected(reply("commentary", "2026-06-20T00:00:04.500Z"), 6),
+      projected(reply("final", "2026-06-20T00:00:05.000Z"), 7),
+    ]);
+    const collapsed = deriveThreadFeedPresentation(
+      feed,
+      {
+        runId,
+        status: "completed" as const,
+        startedAt: "2026-06-20T00:00:01.000Z",
+        completedAt: "2026-06-20T00:00:05.000Z",
+      },
+      new Set(),
+    );
+    expect(
+      collapsed.flatMap((entry) => (entry.type === "message" ? [entry.message.text] : [])),
+    ).toEqual(["Run checks", "opening", "before-steer", "Change course", "final"]);
+  });
+
+  describe("a run that received steers", () => {
+    const at = (second: number) => new Date(Date.UTC(2026, 5, 20, 0, 0, second)).toISOString();
+    const reply = (id: string, second: number) => ({
+      ...assistantMessage(at(second)),
+      id: TurnItemId.make(`item-${id}`),
+      messageId: MessageId.make(`message-${id}`),
+      text: id,
+    });
+    const steer = (id: string, second: number) => ({
+      ...userMessage(at(second)),
+      id: TurnItemId.make(`item-${id}`),
+      messageId: MessageId.make(`message-${id}`),
+      inputIntent: "steer" as const,
+      text: id,
+    });
+    const tool = (id: string, second: number) => ({
+      ...command(at(second)),
+      id: TurnItemId.make(id),
+    });
+    const feed = buildThreadFeed(
+      [
+        userMessage(at(1)),
+        reply("opening", 1),
+        tool("cmd-1", 2),
+        reply("reply-1", 3),
+        steer("steer-1", 4),
+        tool("cmd-2", 5),
+        reply("commentary", 6),
+        tool("cmd-3", 7),
+        reply("reply-2", 8),
+        steer("steer-2", 10),
+        tool("cmd-4", 20),
+        reply("reply-3", 30),
+      ].map((item, position) => projected(item, position)),
+    );
+    const latestRun = {
+      runId,
+      status: "completed" as const,
+      startedAt: at(1),
+      completedAt: at(40),
+    };
+    /** Visible messages and work, with each fold row shown as `fold: <label>`. */
+    const sequence = (entries: ReadonlyArray<ThreadFeedEntry>) =>
+      entries.map((entry) =>
+        entry.type === "run-fold"
+          ? `fold: ${entry.label}`
+          : entry.type === "message"
+            ? entry.message.text
+            : "work",
+      );
+    const foldKeys = (entries: ReadonlyArray<ThreadFeedEntry>) =>
+      entries.flatMap((entry) => (entry.type === "run-fold" ? [entry.foldKey] : []));
+
+    it("folds each segment separately, where its work happened, timed on its own", () => {
+      expect(sequence(deriveThreadFeedPresentation(feed, latestRun, new Set()))).toEqual([
+        "Run checks",
+        "opening",
+        // From the run's start to the first reply.
+        "fold: Worked for 2.0s",
+        "reply-1",
+        "steer-1",
+        "fold: Worked for 4.0s",
+        "reply-2",
+        "steer-2",
+        // From the last steer to the run's end.
+        "fold: Worked for 30s",
+        "reply-3",
+      ]);
+    });
+
+    it("expands one segment without expanding the others", () => {
+      const [, middle] = foldKeys(deriveThreadFeedPresentation(feed, latestRun, new Set()));
+      const expanded = deriveThreadFeedPresentation(feed, latestRun, new Set([middle!]));
+      expect(sequence(expanded)).toEqual([
+        "Run checks",
+        "opening",
+        "fold: Worked for 2.0s",
+        "reply-1",
+        "steer-1",
+        "fold: Worked for 4.0s",
+        "work",
+        "commentary",
+        "work",
+        "reply-2",
+        "steer-2",
+        "fold: Worked for 30s",
+        "reply-3",
+      ]);
+      expect(
+        expanded.flatMap((entry) =>
+          entry.type === "run-fold" && entry.expanded ? [entry.foldKey] : [],
+        ),
+      ).toEqual([middle]);
+    });
+
+    it("invalidates cached rows when a segment expands or collapses", () => {
+      const laterRunId = RunId.make("later-run");
+      const withLaterRun = [
+        ...feed,
+        ...buildThreadFeed([projected({ ...userMessage(at(50)), runId: laterRunId }, feed.length)]),
+      ];
+      const cache = createThreadFeedCache();
+      const present = (expandedFoldKeys: ReadonlySet<string>, cache?: ThreadFeedCache) =>
+        deriveThreadFeedPresentation(
+          withLaterRun,
+          latestRun,
+          expandedFoldKeys,
+          new Set(),
+          null,
+          false,
+          cache,
+        );
+      const collapsed = present(new Set(), cache);
+      const [, middle] = foldKeys(collapsed);
+      for (const keys of [new Set([middle!]), new Set<string>()]) {
+        const cached = present(keys, cache);
+        expect(sequence(cached)).toEqual(sequence(present(keys)));
+        expect(
+          cached.flatMap((entry) =>
+            entry.type === "run-fold" && entry.expanded ? [entry.foldKey] : [],
+          ),
+        ).toEqual([...keys]);
+      }
+    });
+
+    it("gives every segment a distinct key and row id", () => {
+      const folds = deriveThreadFeedPresentation(feed, latestRun, new Set()).filter(
+        (entry) => entry.type === "run-fold",
+      );
+      expect(new Set(folds.map((entry) => entry.foldKey)).size).toBe(3);
+      expect(new Set(folds.map((entry) => entry.id)).size).toBe(3);
+    });
+
+    it("keeps a single run-keyed fold for a run without steers", () => {
+      const unsteered = buildThreadFeed(
+        [
+          userMessage(at(1)),
+          tool("cmd-1", 2),
+          reply("commentary", 3),
+          tool("cmd-2", 4),
+          reply("final", 5),
+        ].map((item, position) => projected(item, position)),
+      );
+      const collapsed = deriveThreadFeedPresentation(unsteered, latestRun, new Set());
+      expect(sequence(collapsed)).toEqual([
+        "Run checks",
+        "fold: Worked for 39s",
+        "commentary",
+        "final",
+      ]);
+      expect(foldKeys(collapsed)).toEqual([runId]);
+    });
+  });
+
+  it("does not treat a system notice as a response boundary", () => {
+    const reply = (id: string, updatedAt: string) => ({
+      ...assistantMessage(updatedAt),
+      id: TurnItemId.make(`item-${id}`),
+      messageId: MessageId.make(`message-${id}`),
+      text: id,
+    });
+    const feed = buildThreadFeed([
+      projected(userMessage(), 0),
+      projected(reply("before-notice", "2026-06-20T00:00:02.000Z"), 1),
+      projected(
+        {
+          ...base("item-notice", "2026-06-20T00:00:03.000Z", 2),
+          type: "system_notice" as const,
+          message: "Refined its harness.",
+          tone: "info" as const,
+        },
+        2,
+      ),
+      projected(reply("final", "2026-06-20T00:00:04.000Z"), 3),
+    ]);
+
+    expect([...deriveTerminalAssistantMessageIds(feed)]).toEqual(["message-final"]);
   });
 
   it("keeps opening and final assistant messages around the first hidden work", () => {
@@ -1823,6 +2108,46 @@ describe("retained v2 feed presentation", () => {
     },
   );
 
+  it("keeps a rollback summary a separate collapsed row that fetches its text when expanded", () => {
+    const summary = projected(
+      {
+        ...base("rollback-summary", "2026-06-20T00:00:03.000Z", 2),
+        runId: null,
+        type: "rollback_summary",
+        rollbackRequestId: CommandId.make("rollback"),
+        rewoundToRunId: runId,
+      },
+      2,
+    );
+    const rows = deriveThreadFeedPresentation(
+      buildThreadFeed([
+        projected(userMessage(), 0),
+        projected(command("2026-06-20T00:00:02.000Z"), 1),
+        summary,
+        projected(command("2026-06-20T00:00:04.000Z"), 3),
+        projected(assistantMessage("2026-06-20T00:00:05.000Z"), 4),
+      ]),
+      null,
+      new Set(),
+    );
+    const groups = rows.filter(
+      (entry) =>
+        entry.type === "activity-group" &&
+        entry.activities.some((activity) => activity.projectedItem === summary),
+    );
+    expect(groups).toHaveLength(1);
+    expect(groups[0]).toMatchObject({
+      activities: [
+        {
+          summary: "Summary of discarded turns",
+          canExpand: true,
+          fetchesDetail: true,
+          detail: null,
+        },
+      ],
+    });
+  });
+
   it("keeps a standalone compaction visible and folds it with other completed work", () => {
     const compact = projected(
       {
@@ -2293,6 +2618,100 @@ describe("subagent continued by a later turn", () => {
   });
 });
 
+describe("code rows", () => {
+  const timestamp = "2026-06-20T00:00:02.000Z";
+  function pythonCell(
+    overrides: Partial<Extract<OrchestrationV2TurnItem, { type: "dynamic_tool" }>> = {},
+  ) {
+    return {
+      ...base("item-python", timestamp, 1),
+      type: "dynamic_tool" as const,
+      toolName: "python",
+      title: "import os",
+      input: { code: "import os\nprint(os.getcwd())" },
+      ...overrides,
+    } satisfies OrchestrationV2TurnItem;
+  }
+  // Items outside a run are never folded into a run summary.
+  const settledToggle = (...items: OrchestrationV2TurnItem[]) =>
+    deriveThreadFeedPresentation(
+      buildThreadFeed(items.map((item, index) => projected({ ...item, runId: null }, index))),
+      null,
+      new Set(),
+    ).find((entry) => entry.type === "work-toggle");
+  // A lone call is shown as its own row in place of the group header; the row highlights its label.
+  const standInCode = (entries: ReadonlyArray<ThreadFeedEntry>) => {
+    const row = entries
+      .flatMap((entry) => (entry.type === "activity-group" ? entry.activities : []))
+      .find((activity) => activity.groupStandIn !== undefined);
+    return row?.groupStandIn === undefined
+      ? undefined
+      : {
+          live: row.live,
+          label: row.groupStandIn.label,
+          code: workEntryLabelCode(row.workEntry, row.groupStandIn.label),
+        };
+  };
+
+  it("labels a Python cell with the code as the provider spelled it", () => {
+    const feed = buildThreadFeed([projected(pythonCell(), 0)]);
+    const activity = feed[0]?.type === "activity-group" ? feed[0].activities[0] : null;
+    // Prose labels capitalize the first letter; code must not change.
+    expect(workEntryRowLabel(activity!.workEntry)).toBe("import os");
+  });
+
+  it("highlights a lone call's row as code", () => {
+    const settled = (item: OrchestrationV2TurnItem) =>
+      standInCode(
+        deriveThreadFeedPresentation(
+          buildThreadFeed([projected({ ...item, runId: null }, 0)]),
+          null,
+          new Set(),
+        ),
+      );
+    expect(settled(pythonCell())).toMatchObject({
+      label: "import os",
+      code: { code: "import os", language: "python" },
+    });
+    expect(settled({ ...command(), input: "/bin/zsh -lc 'ls -la src'" })).toMatchObject({
+      label: "ls -la src",
+      code: { code: "ls -la src", language: "shellscript" },
+    });
+  });
+
+  it("leaves a group of several calls as prose", () => {
+    const toggle = settledToggle(command("2026-06-20T00:00:02.000Z"), {
+      ...command("2026-06-20T00:00:03.000Z"),
+      id: TurnItemId.make("item-command-2"),
+    });
+    expect(toggle).toMatchObject({ summary: "Ran 2 commands" });
+    expect(toggle).not.toHaveProperty("summaryCode");
+  });
+
+  it("highlights a running Python cell but keeps the 'Running vp' label as prose", () => {
+    const startedAt = "2026-06-20T00:00:01.000Z";
+    const live = (item: OrchestrationV2TurnItem) =>
+      deriveThreadFeedPresentation(
+        buildThreadFeed([
+          projected({ ...userMessage(), runId: null }, 0),
+          projected({ ...item, runId: null, status: "running", completedAt: null }, 1),
+        ]),
+        null,
+        new Set(),
+        new Set(),
+        startedAt,
+        true,
+      );
+
+    expect(standInCode(live(pythonCell()))).toMatchObject({
+      live: true,
+      label: "import os",
+      code: { code: "import os", language: "python" },
+    });
+    expect(standInCode(live(command()))).toMatchObject({ label: "Running vp", code: null });
+  });
+});
+
 describe("pending user input answers", () => {
   it("preserves exact editor text, including a deliberately cleared answer", () => {
     const question = { ...singleSelectQuestion, initialAnswer: "  Proposed message\n" };
@@ -2532,6 +2951,41 @@ it("renders automatic completion as a neutral activity while retaining its detai
     ),
   ).toBe(true);
   expect(buildThreadFeed([projected(userMessage(), 0)])[0]?.type).toBe("message");
+});
+
+it.each([
+  { detail: "make build\n\nExit code 0", canExpand: true },
+  { detail: undefined, canExpand: false },
+  { detail: "  ", canExpand: false },
+])("lets a notification with detail $detail expand: $canExpand", ({ detail, canExpand }) => {
+  const item = {
+    ...base("notification", "2026-06-20T00:00:01.000Z", 0),
+    type: "notification" as const,
+    source: { kind: "command" as const },
+    outcome: "completed" as const,
+    summary: "Background command finished",
+    ...(detail === undefined ? {} : { detail }),
+  };
+  const activity = buildThreadFeed([projected(item, 0)]).flatMap((entry) =>
+    entry.type === "activity-group" ? entry.activities : [],
+  )[0];
+  expect(activity?.canExpand).toBe(canExpand);
+});
+
+it("lets a notification expand to a summary that a row can cut off", () => {
+  const summary = "Background command finished: make build && make test && make deploy-preview";
+  const item = {
+    ...base("notification", "2026-06-20T00:00:01.000Z", 0),
+    type: "notification" as const,
+    source: { kind: "command" as const },
+    outcome: "completed" as const,
+    summary,
+  };
+  const activity = buildThreadFeed([projected(item, 0)]).flatMap((entry) =>
+    entry.type === "activity-group" ? entry.activities : [],
+  )[0];
+  expect(activity?.canExpand).toBe(true);
+  expect(activity?.getFullDetail()).toBe(summary);
 });
 
 it("uses a compact reasoning preview and a short expanded heading", () => {

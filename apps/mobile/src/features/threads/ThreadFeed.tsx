@@ -11,6 +11,7 @@ import {
 } from "../../lib/enrichedLinkPresentation";
 import { ThreadContextDivider } from "./thread-context-divider";
 import { ThreadHandoffDivider, ThreadHandoffRow } from "./thread-handoff-row";
+import { ThreadPendingHeadMoveRow } from "./thread-pending-head-move-row";
 import { SecretRequestCard } from "./SecretRequestCard";
 import { AppActivityIndicator } from "../../components/ui/AppActivityIndicator";
 import {
@@ -178,8 +179,10 @@ import {
   resolveMarkdownLinkIcon,
   resolveMarkdownLinkPresentation,
 } from "../../lib/markdownLinks";
+import { runFoldSegmentKeyIsForRun } from "@t3tools/client-runtime/state/run-fold";
 import {
   createThreadFeedCache,
+  deriveTerminalAssistantMessageIds,
   failedFeedRunIds,
   deriveThreadFeedPresentation,
   threadFeedRunIsUnsettled,
@@ -995,7 +998,7 @@ function renderFeedEntry(
     readonly onCopyWorkRow: (rowId: string, value: string) => void;
     readonly onToggleWorkGroup: (groupId: string, anchorKey?: string) => void;
     readonly onToggleWorkRow: (rowId: string, anchorKey?: string, groupId?: string) => void;
-    readonly onToggleTurnFold: (runId: RunId) => void;
+    readonly onToggleTurnFold: (foldKey: string) => void;
     readonly onPressPreview: (source: FilePreviewSource) => void;
     readonly onPressVideo: (attachment: ChatFileAttachment, sourceIdentifier: string) => void;
     readonly markdownLinkHandlers: MarkdownLinkHandlers;
@@ -1025,7 +1028,7 @@ function renderFeedEntry(
       <Pressable
         accessibilityRole="button"
         accessibilityState={{ expanded: entry.expanded }}
-        onPress={() => props.onToggleTurnFold(entry.runId)}
+        onPress={() => props.onToggleTurnFold(entry.foldKey)}
         hitSlop={4}
         className="mb-1 min-h-11 flex-row items-center gap-2 border-b border-border-subtle px-2"
         style={{
@@ -1088,6 +1091,7 @@ function renderFeedEntry(
         hiddenCount={entry.hiddenCount}
         iconSubtleColor={iconSubtleColor}
         summary={entry.summary}
+        summaryCode={entry.summaryCode}
         summaryKind={entry.summaryKind}
         themeAppearance={props.themeAppearance}
         toolSurface={entry.toolSurface}
@@ -1735,14 +1739,14 @@ export const ThreadFeed = memo(function ThreadFeed(props: ThreadFeedProps) {
     readonly copiedRowId: string | null;
     readonly expandedWorkGroups: Record<string, boolean>;
     readonly expandedWorkRows: Record<string, boolean>;
-    readonly expandedTurnIds: ReadonlySet<RunId>;
+    readonly expandedFoldKeys: ReadonlySet<string>;
   }>({
     copiedRowId: null,
     expandedWorkGroups: {},
     expandedWorkRows: {},
-    expandedTurnIds: new Set(),
+    expandedFoldKeys: new Set(),
   });
-  const { copiedRowId, expandedWorkGroups, expandedWorkRows, expandedTurnIds } = interactionState;
+  const { copiedRowId, expandedWorkGroups, expandedWorkRows, expandedFoldKeys } = interactionState;
   const [expandedFile, setExpandedFile] = useState<FilePreviewSource | null>(null);
   const [expandedVideo, setExpandedVideo] = useState<VideoPreviewSource | null>(null);
   const fileShareSourceIdentifier = useId();
@@ -2159,7 +2163,7 @@ export const ThreadFeed = memo(function ThreadFeed(props: ThreadFeedProps) {
     deriveThreadFeedPresentation(
       props.feed,
       props.latestRun,
-      expandedTurnIds,
+      expandedFoldKeys,
       new Set(
         Object.entries(expandedWorkGroups)
           .filter(([, expanded]) => expanded)
@@ -2194,15 +2198,7 @@ export const ThreadFeed = memo(function ThreadFeed(props: ThreadFeedProps) {
     { anchorOffset: anchorTopInset + CHAT_LIST_ANCHOR_OFFSET },
   );
   const failedRunIds = failedFeedRunIds(props.feed, props.latestRun);
-  const terminalAssistantMessageIds = (() => {
-    const terminalIdsByTurn = new Map<RunId, string>();
-    for (const entry of props.feed) {
-      if (entry.type === "message" && entry.message.role === "assistant" && entry.message.runId) {
-        terminalIdsByTurn.set(entry.message.runId, entry.message.id);
-      }
-    }
-    return new Set(terminalIdsByTurn.values());
-  })();
+  const terminalAssistantMessageIds = deriveTerminalAssistantMessageIds(props.feed);
   useEffect(() => {
     const previous = previousLatestTurnRef.current;
     previousLatestTurnRef.current = props.latestRun;
@@ -2211,23 +2207,31 @@ export const ThreadFeed = memo(function ThreadFeed(props: ThreadFeedProps) {
     }
     if (props.latestRun.runId === previous.runId) {
       if (previous.status === "running" && props.latestRun.status === "interrupted") {
-        const interruptedTurnId = props.latestRun.runId;
+        const interruptedRunId = props.latestRun.runId;
+        const interruptedKeys = [
+          interruptedRunId,
+          ...presentedFeed.flatMap((entry) =>
+            entry.type === "run-fold" && entry.runId === interruptedRunId ? [entry.foldKey] : [],
+          ),
+        ];
         setInteractionState((current) => ({
           ...current,
-          expandedTurnIds: new Set(current.expandedTurnIds).add(interruptedTurnId),
+          expandedFoldKeys: new Set([...current.expandedFoldKeys, ...interruptedKeys]),
         }));
       }
       return;
     }
     setInteractionState((current) => {
-      if (!current.expandedTurnIds.has(previous.runId)) {
-        return current;
-      }
-      const next = new Set(current.expandedTurnIds);
-      next.delete(previous.runId);
-      return { ...current, expandedTurnIds: next };
+      const next = new Set(
+        [...current.expandedFoldKeys].filter(
+          (key) => !runFoldSegmentKeyIsForRun(key, previous.runId),
+        ),
+      );
+      return next.size === current.expandedFoldKeys.size
+        ? current
+        : { ...current, expandedFoldKeys: next };
     });
-  }, [props.latestRun]);
+  }, [presentedFeed, props.latestRun]);
 
   useEffect(() => {
     return () => {
@@ -2280,7 +2284,7 @@ export const ThreadFeed = memo(function ThreadFeed(props: ThreadFeedProps) {
     if (disclosureAnchorKeyRef.current !== null) {
       settleDisclosureAfterLayout();
     }
-  }, [expandedTurnIds, expandedWorkGroups, expandedWorkRows, settleDisclosureAfterLayout]);
+  }, [expandedFoldKeys, expandedWorkGroups, expandedWorkRows, settleDisclosureAfterLayout]);
 
   const handleItemSizeChanged = () => {
     if (disclosureAnchorKeyRef.current !== null) {
@@ -2344,16 +2348,16 @@ export const ThreadFeed = memo(function ThreadFeed(props: ThreadFeedProps) {
     });
   };
 
-  const onToggleTurnFold = (runId: RunId) => {
-    suspendEndScrollMaintenanceForDisclosure(`run-fold:${runId}`);
+  const onToggleTurnFold = (foldKey: string) => {
+    suspendEndScrollMaintenanceForDisclosure(`run-fold:${foldKey}`);
     setInteractionState((current) => {
-      const next = new Set(current.expandedTurnIds);
-      if (next.has(runId)) {
-        next.delete(runId);
+      const next = new Set(current.expandedFoldKeys);
+      if (next.has(foldKey)) {
+        next.delete(foldKey);
       } else {
-        next.add(runId);
+        next.add(foldKey);
       }
-      return { ...current, expandedTurnIds: next };
+      return { ...current, expandedFoldKeys: next };
     });
   };
 
@@ -2613,15 +2617,22 @@ export const ThreadFeed = memo(function ThreadFeed(props: ThreadFeedProps) {
               </>
             }
             ListFooterComponent={
-              props.pendingHandoff ? (
-                <ThreadHandoffDivider
+              <>
+                {props.pendingHandoff ? (
+                  <ThreadHandoffDivider
+                    environmentId={props.environmentId}
+                    endpoints={props.pendingHandoff}
+                    iconColor={iconSubtleColor}
+                    surfaceColor={screenColor}
+                    label="Context handoff pending"
+                  />
+                ) : null}
+                <ThreadPendingHeadMoveRow
                   environmentId={props.environmentId}
-                  endpoints={props.pendingHandoff}
+                  threadId={props.threadId}
                   iconColor={iconSubtleColor}
-                  surfaceColor={screenColor}
-                  label="Context handoff pending"
                 />
-              ) : null
+              </>
             }
             contentContainerStyle={{
               paddingTop: 12,
