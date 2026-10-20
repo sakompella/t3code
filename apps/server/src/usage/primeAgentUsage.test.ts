@@ -77,6 +77,7 @@ describe("Prime Agent usage scans", () => {
                   provider: "primeAgent" as const,
                   records: first.records,
                   tailRecords: first.tailRecords,
+                  malformedRecords: first.malformedRecords,
                   position: first.position,
                 },
               ],
