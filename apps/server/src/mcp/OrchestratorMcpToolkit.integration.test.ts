@@ -4833,6 +4833,7 @@ describe("html_render", () => {
       Layer.provideMerge(McpServer.McpServer.layer),
       Layer.provideMerge(Layer.merge(layerOrchestrator, layerRecordingThreads)),
       Layer.provide(layerRegistry),
+      Layer.provide(McpProviderSessions.layer),
       Layer.provide(PreviewBrowser.layer),
       Layer.provideMerge(ServerConfig.layerTest(cwd, { prefix: `t3-mcp-${name}-` })),
       Layer.provide(NodeServices.layer),
