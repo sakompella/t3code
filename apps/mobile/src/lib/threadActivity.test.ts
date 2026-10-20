@@ -1045,6 +1045,36 @@ describe("buildThreadFeed", () => {
       ).toEqual([middle]);
     });
 
+    it("invalidates cached rows when a segment expands or collapses", () => {
+      const laterRunId = RunId.make("later-run");
+      const withLaterRun = [
+        ...feed,
+        ...buildThreadFeed([projected({ ...userMessage(at(50)), runId: laterRunId }, feed.length)]),
+      ];
+      const cache = createThreadFeedCache();
+      const present = (expandedFoldKeys: ReadonlySet<string>, cache?: ThreadFeedCache) =>
+        deriveThreadFeedPresentation(
+          withLaterRun,
+          latestRun,
+          expandedFoldKeys,
+          new Set(),
+          null,
+          false,
+          cache,
+        );
+      const collapsed = present(new Set(), cache);
+      const [, middle] = foldKeys(collapsed);
+      for (const keys of [new Set([middle!]), new Set<string>()]) {
+        const cached = present(keys, cache);
+        expect(sequence(cached)).toEqual(sequence(present(keys)));
+        expect(
+          cached.flatMap((entry) =>
+            entry.type === "run-fold" && entry.expanded ? [entry.foldKey] : [],
+          ),
+        ).toEqual([...keys]);
+      }
+    });
+
     it("gives every segment a distinct key and row id", () => {
       const folds = deriveThreadFeedPresentation(feed, latestRun, new Set()).filter(
         (entry) => entry.type === "run-fold",

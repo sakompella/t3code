@@ -1342,7 +1342,7 @@ function settleSupersededReasoning(
 interface ThreadFeedPresentationBuild {
   readonly feed: ReadonlyArray<ThreadFeedEntry>;
   readonly latestRun: ThreadFeedLatestRun | null;
-  readonly expandedRunIds: ReadonlySet<RunId>;
+  readonly expandedFoldKeys: ReadonlySet<string>;
   readonly expandedWorkGroupIds: ReadonlySet<string>;
   readonly activeWorkStartedAt: string | null;
   readonly runlessWorkActive: boolean;
@@ -1384,7 +1384,7 @@ function presentationRestart(
   previous: ThreadFeedPresentationBuild | null,
   feed: ReadonlyArray<ThreadFeedEntry>,
   latestRun: ThreadFeedLatestRun | null,
-  expandedRunIds: ReadonlySet<RunId>,
+  expandedFoldKeys: ReadonlySet<string>,
   expandedWorkGroupIds: ReadonlySet<string>,
   activeWorkStartedAt: string | null,
   runlessWorkActive: boolean,
@@ -1394,7 +1394,7 @@ function presentationRestart(
     !latestRunsEqual(previous.latestRun, latestRun) ||
     previous.activeWorkStartedAt !== activeWorkStartedAt ||
     previous.runlessWorkActive !== runlessWorkActive ||
-    !setsEqual(previous.expandedRunIds, expandedRunIds) ||
+    !setsEqual(previous.expandedFoldKeys, expandedFoldKeys) ||
     !setsEqual(previous.expandedWorkGroupIds, expandedWorkGroupIds)
   ) {
     return null;
@@ -1427,7 +1427,7 @@ export function deriveThreadFeedPresentation(
     previous,
     feed,
     latestRun,
-    expandedRunIds,
+    expandedFoldKeys,
     expandedWorkGroupIds,
     activeWorkStartedAt,
     runlessWorkActive,
@@ -1600,7 +1600,7 @@ export function deriveThreadFeedPresentation(
     cache.presentation = {
       feed,
       latestRun,
-      expandedRunIds,
+      expandedFoldKeys,
       expandedWorkGroupIds,
       activeWorkStartedAt,
       runlessWorkActive,
