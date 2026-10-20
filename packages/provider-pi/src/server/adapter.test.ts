@@ -2639,6 +2639,7 @@ describe("PiAdapterV2", () => {
       const wholeFile = "/fake/forked-whole.jsonl";
       forkFake.queueEntries(UNCAPTURED_TURN_TREE);
       forkFake.queueState({ sessionFile: wholeFile });
+      fake.queueState({ sessionFile: wholeFile });
       const whole = yield* forkAtFirst(
         uncapturedTurns(source.id, { startedAt: 60, completedAt: 100 }),
         ThreadId.make("fork-whole"),
