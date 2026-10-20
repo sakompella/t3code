@@ -834,7 +834,7 @@ async function rewindToMessage(input: {
       throw new Error("Make room for this message's attachments in the composer before rewinding.");
     }
     const commandId = CommandId.make(randomUUID());
-    await waitForRevertedMessage(input.routeThreadRef, message.id, commandId, async () => {
+    await waitForRevertedMessage(input.routeThreadRef, input.turnCount, commandId, async () => {
       const result = await input.revertThreadCheckpoint({
         environmentId,
         input: {

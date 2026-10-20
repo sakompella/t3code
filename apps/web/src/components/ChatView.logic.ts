@@ -1075,18 +1075,30 @@ export async function waitForStartedServerThread(
  */
 export async function waitForRevertedMessage(
   threadRef: ScopedThreadRef,
-  messageId: MessageId,
+  turnCount: number,
   requestId: CommandId,
   revert: () => Promise<void>,
 ): Promise<void> {
   const threadAtom = environmentThreadDetails.stateAtom(threadRef);
   const readProjection = () => Option.getOrNull(appAtomRegistry.get(threadAtom).data);
-  if (!readProjection()?.messages.some((message) => message.id === messageId)) {
-    throw new Error("The message to rewind is no longer available.");
+  const initial = readProjection();
+  // Paging can omit the edited message and its run, but the latest runs stay.
+  // Without a settled run after the target, another rewind already removed it.
+  if (
+    !initial?.runs.some(
+      (run) =>
+        run.ordinal > turnCount &&
+        (run.status === "completed" ||
+          run.status === "interrupted" ||
+          run.status === "failed" ||
+          run.status === "cancelled"),
+    )
+  ) {
+    throw new Error("The thread has changed. Select a message to rewind again.");
   }
   // A newer rollback replaces ours as the thread's request, so ours is over
   // once the thread names any request other than the one before it.
-  const previousRequestId = readProjection()?.thread.rollbackRequestId;
+  const previousRequestId = initial.thread.rollbackRequestId;
   return new Promise<void>((resolve, reject) => {
     let settled = false;
     let accepted = false;

@@ -2238,27 +2238,18 @@ describe("worktree setup visibility", () => {
 
 describe("waitForRevertedMessage", () => {
   const threadRef = { environmentId: EnvironmentId.make("env-1"), threadId: ThreadId.make("t") };
-  const messageId = MessageId.make("message-2");
   const requestId = CommandId.make("rollback-1");
 
   function projectionAtom() {
     const base = makeThreadProjectionFixture();
     const projection = {
       ...base,
-      messages: [
-        {
-          id: messageId,
-          threadId: base.thread.id,
-          runId: RunId.make("run-2"),
-          nodeId: null,
-          role: "user",
-          text: "second",
-          attachments: [],
-          streaming: false,
-          createdAt: base.updatedAt,
-          updatedAt: base.updatedAt,
-        },
-      ],
+      runs: [1, 2, 3, 4].map((ordinal) => ({
+        id: RunId.make(`run-${ordinal}`),
+        threadId: base.thread.id,
+        ordinal,
+        status: "completed",
+      })),
     } as unknown as ReturnType<typeof makeThreadProjectionFixture>;
     const state = Atom.make({ data: Option.some(projection) });
     vi.spyOn(environmentThreadDetails, "stateAtom").mockReturnValue(state as never);
@@ -2289,7 +2280,7 @@ describe("waitForRevertedMessage", () => {
   it("follows a slow rollback past any fixed deadline until the server ends it", async () => {
     vi.useFakeTimers();
     const { state, projection } = projectionAtom();
-    const outcome = track(waitForRevertedMessage(threadRef, messageId, requestId, async () => {}));
+    const outcome = track(waitForRevertedMessage(threadRef, 1, requestId, async () => {}));
     setThread(state, projection, {
       rollbackRequestId: requestId,
       pendingHeadMove: { requestId, summarize: true },
@@ -2305,7 +2296,7 @@ describe("waitForRevertedMessage", () => {
 
   it("rejects with the server's reason when the rollback fails", async () => {
     const { state, projection } = projectionAtom();
-    const waiting = waitForRevertedMessage(threadRef, messageId, requestId, async () => {});
+    const waiting = waitForRevertedMessage(threadRef, 1, requestId, async () => {});
     await Promise.resolve();
     setThread(state, projection, {
       rollbackRequestId: requestId,
@@ -2324,14 +2315,14 @@ describe("waitForRevertedMessage", () => {
       rollbackFailure: { requestId: earlier, message: "Old failure." },
       pendingHeadMove: null,
     });
-    const outcome = track(waitForRevertedMessage(threadRef, messageId, requestId, async () => {}));
+    const outcome = track(waitForRevertedMessage(threadRef, 1, requestId, async () => {}));
     await new Promise((resolve) => setTimeout(resolve, 0));
     expect(outcome.value).toBe("pending");
   });
 
   it("ends when a later rollback already replaced this one in the projection", async () => {
     const { state, projection } = projectionAtom();
-    const outcome = track(waitForRevertedMessage(threadRef, messageId, requestId, async () => {}));
+    const outcome = track(waitForRevertedMessage(threadRef, 1, requestId, async () => {}));
     const later = CommandId.make("rollback-2");
     setThread(state, projection, {
       rollbackRequestId: later,
@@ -2339,6 +2330,47 @@ describe("waitForRevertedMessage", () => {
     });
     await new Promise((resolve) => setTimeout(resolve, 0));
     expect(outcome.value).toBe("done");
+  });
+
+  it("rewinds to a message paged out of the bounded projection", async () => {
+    const { state, projection } = projectionAtom();
+    // The edited message and its run are paged out; only the latest run is retained.
+    const bounded = {
+      ...projection,
+      messages: [],
+      runs: [{ ...projection.runs[3]!, id: RunId.make("run-9"), ordinal: 9, status: "cancelled" }],
+    } as typeof projection;
+    appAtomRegistry.set(state, { data: Option.some(bounded) });
+    const revert = vi.fn(async () => {});
+    const outcome = track(waitForRevertedMessage(threadRef, 0, requestId, revert));
+    setThread(state, bounded, {
+      rollbackRequestId: requestId,
+      pendingHeadMove: { requestId, summarize: false },
+    });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(revert).toHaveBeenCalledOnce();
+    expect(outcome.value).toBe("pending");
+
+    setThread(state, bounded, { rollbackRequestId: requestId, pendingHeadMove: null });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(outcome.value).toBe("done");
+  });
+
+  it("rejects a stale edit another client already rewound, without sending it", async () => {
+    const { state, projection } = projectionAtom();
+    appAtomRegistry.set(state, {
+      data: Option.some({
+        ...projection,
+        runs: projection.runs.map((run) =>
+          run.ordinal > 1 ? { ...run, status: "rolled_back" as const } : run,
+        ),
+      }),
+    });
+    const revert = vi.fn(async () => {});
+    await expect(waitForRevertedMessage(threadRef, 1, requestId, revert)).rejects.toThrow(
+      "The thread has changed.",
+    );
+    expect(revert).not.toHaveBeenCalled();
   });
 });
 
