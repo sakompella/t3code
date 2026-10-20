@@ -6558,7 +6558,7 @@ it.layer(layerTest)("snooze queued runs", (it) => {
   );
 
   it.effect.each(["notification", "user"] as const)(
-    "a %s message on a snoozed thread keeps the snooze only when automatic",
+    "a %s message on a snoozed thread keeps the snooze",
     (kind) =>
       Effect.gen(function* () {
         const orchestrator = yield* Orchestrator.OrchestratorV2;
@@ -6606,11 +6606,7 @@ it.layer(layerTest)("snooze queued runs", (it) => {
             : {}),
         });
         const thread = (yield* orchestrator.getThreadProjection(threadId)).thread;
-        if (kind === "user") {
-          assert.isNull(thread.snoozedUntil);
-        } else {
-          assert.equal(DateTime.formatIso(thread.snoozedUntil!), snoozedUntil);
-        }
+        assert.equal(DateTime.formatIso(thread.snoozedUntil!), snoozedUntil);
       }),
   );
 });
