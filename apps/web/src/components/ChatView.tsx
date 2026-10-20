@@ -67,7 +67,6 @@ import {
   type EnvironmentId,
   type MessageId,
   type ModelSelection,
-  type OrchestrationV2ProviderTurn,
   type ProjectScript,
   type PreviewAnnotationPayload,
   ProviderInstanceId,
@@ -75,7 +74,6 @@ import {
   type ScopedThreadRef,
   type ThreadId,
   type RunId,
-  type RunAttemptId,
   type RuntimeRequestId,
   PROVIDER_SEND_TURN_MAX_ATTACHMENTS,
   ProviderInteractionMode,
@@ -207,6 +205,7 @@ import {
   deriveActivePlanState,
   selectComposerTasksPlan,
   deriveActiveWorkStartedAt,
+  deriveAvailableRevertTurnCounts,
   deriveCanInterruptRunningThread,
   findLatestProposedPlan,
   findRevertCheckpoint,
@@ -3030,44 +3029,7 @@ export default function ChatView(props: ChatViewProps) {
     panelAnimationDurationMs,
   );
   const turnDiffSummaries = useThreadCheckpointSummaries(routeThreadDetailRef);
-  const availableRevertTurnCounts = (() => {
-    const available = new Set<number>();
-    const providerThread = serverProjection?.providerThreads.find(
-      (candidate) => candidate.id === serverProjection.thread.activeProviderThreadId,
-    );
-    if (
-      !providerThread?.providerSessionId ||
-      providerThread.providerInstanceId !== serverProjection?.thread.modelSelection.instanceId
-    )
-      return available;
-    available.add(0);
-    const attemptsById = new Map(serverProjection.attempts.map((attempt) => [attempt.id, attempt]));
-    const providerTurnsById = new Map<
-      OrchestrationV2ProviderTurn["id"],
-      OrchestrationV2ProviderTurn
-    >();
-    const latestTurnByAttempt = new Map<RunAttemptId, OrchestrationV2ProviderTurn>();
-    for (const turn of serverProjection.providerTurns) {
-      providerTurnsById.set(turn.id, turn);
-      if (turn.runAttemptId === null) continue;
-      const latest = latestTurnByAttempt.get(turn.runAttemptId);
-      if (latest === undefined || turn.ordinal > latest.ordinal) {
-        latestTurnByAttempt.set(turn.runAttemptId, turn);
-      }
-    }
-    for (const run of serverProjection.runs) {
-      if (run.activeAttemptId === null) continue;
-      const attempt = attemptsById.get(run.activeAttemptId);
-      const providerTurn =
-        latestTurnByAttempt.get(run.activeAttemptId) ??
-        (attempt?.providerTurnId == null
-          ? undefined
-          : providerTurnsById.get(attempt.providerTurnId));
-      // A ready file checkpoint alone cannot restore the provider conversation.
-      if (providerTurn?.providerThreadId === providerThread.id) available.add(run.ordinal);
-    }
-    return available;
-  })();
+  const availableRevertTurnCounts = deriveAvailableRevertTurnCounts(serverProjection);
   // A paged history window cannot identify the first loaded run as the thread start.
   const threadStartCheckpointReady =
     !serverThreadHistory.hasMoreHistory &&
