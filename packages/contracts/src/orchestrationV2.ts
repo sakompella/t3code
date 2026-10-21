@@ -318,11 +318,9 @@ export const OrchestrationV2CheckpointCapabilities = Schema.Struct({
   providerCanReadConversationSnapshot: Schema.Boolean,
   /**
    * Rollback can leave the agent a summary of the turns it discards.
-   * Sessions persisted before this field existed decode to unsupported.
+   * Absent means unsupported, so adapters without it leave it out.
    */
-  providerCanSummarizeRollback: Schema.Boolean.pipe(
-    Schema.withDecodingDefault(Effect.succeed(false)),
-  ),
+  providerCanSummarizeRollback: Schema.optional(Schema.Boolean),
 });
 export type OrchestrationV2CheckpointCapabilities =
   typeof OrchestrationV2CheckpointCapabilities.Type;
