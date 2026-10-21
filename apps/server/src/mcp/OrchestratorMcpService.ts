@@ -58,6 +58,7 @@ import {
   type ProviderOptionDescriptor,
   type ProviderOptionSelection,
   ProviderRequestKind,
+  providerRuntimeMode,
   type RuntimeMode,
   type ScheduledTask,
   type ScheduledTaskUpsertInput,
@@ -678,6 +679,14 @@ function interactionModeRank(mode: ProviderInteractionMode): number {
   return mode === "plan" ? 0 : 1;
 }
 
+/**
+ * The mode a new thread runs in: the requested mode, else the parent's, never
+ * broader than the parent's. Pass `target` when the thread runs on a known
+ * provider. A provider runs a mode it does not offer in another one, so an
+ * explicit request for one is refused, and an inherited one steps down to the
+ * broadest mode the provider offers. A provider whose every mode is broader
+ * than the parent's is refused.
+ */
 export function resolveRuntimeMode(
   parentMode: RuntimeMode,
   requested: OrchestratorMcpRuntimeMode | undefined,
@@ -701,16 +710,21 @@ export function resolveRuntimeMode(
     return Effect.fail(
       failure(
         "invalid_request",
-        `Provider ${target?.modelSelection.instanceId} does not offer runtime mode ${resolved}, so it would run as approval-required. Use one of: ${supported.join(", ")}.`,
+        `Provider ${target?.modelSelection.instanceId} does not offer runtime mode ${resolved}. Use one of: ${supported.join(", ")}.`,
       ),
     );
   }
-  return Effect.succeed(
-    supported
-      .filter((mode) => runtimeModeRank(mode) <= runtimeModeRank(resolved))
-      .toSorted((left, right) => runtimeModeRank(right) - runtimeModeRank(left))[0] ??
-      "approval-required",
-  );
+  const broadestAllowed = supported
+    .filter((mode) => runtimeModeRank(mode) <= runtimeModeRank(resolved))
+    .toSorted((left, right) => runtimeModeRank(right) - runtimeModeRank(left))[0];
+  return broadestAllowed === undefined
+    ? Effect.fail(
+        failure(
+          "runtime_mode_escalation_denied",
+          `Provider ${target?.modelSelection.instanceId} offers only ${supported.join(", ")}, which is broader than parent mode ${parentMode}.`,
+        ),
+      )
+    : Effect.succeed(broadestAllowed);
 }
 
 export function resolveInteractionMode(
@@ -995,6 +1009,7 @@ function turnItemText(item: OrchestrationV2TurnItem): string | null {
     case "error":
       return item.failure.message;
     case "compaction":
+    case "rollback_summary":
       return item.summary ?? null;
     case "handoff":
       return item.summary ?? `${item.strategy} handoff to ${item.toProviderInstanceId}`;
@@ -1710,8 +1725,10 @@ const make = Effect.gen(function* () {
   );
 
   const scheduledTaskRunModes = Effect.fn("OrchestratorMcpService.scheduledTaskRunModes")(
-    function* (task: ScheduledTask) {
-      const modes = [{ runtimeMode: task.runtimeMode, interactionMode: task.interactionMode }];
+    function* (
+      task: Pick<ScheduledTask, "threadId" | "modelSelection" | "runtimeMode" | "interactionMode">,
+    ) {
+      const modes: Array<Parameters<typeof runModes>[0]> = [task];
       if (task.threadId === null) return modes;
       const bound = yield* threadManagement
         .getThreadShell(task.threadId)
@@ -1729,6 +1746,45 @@ const make = Effect.gen(function* () {
   ) =>
     runtimeModeRank(modes.runtimeMode) <= runtimeModeRank(limits.runtimeMode) &&
     interactionModeRank(modes.interactionMode) <= interactionModeRank(limits.interactionMode);
+
+  const offeredRuntimeModes = (modelSelection: ModelSelection) =>
+    loadProviders.pipe(
+      Effect.map(
+        (providers) =>
+          providers.find((provider) => provider.instanceId === modelSelection.instanceId)
+            ?.supportedRuntimeModes,
+      ),
+    );
+
+  /**
+   * The modes work on these settings runs in. A provider that does not offer
+   * the stored runtime mode runs it in another (see `RuntimePolicyV2`), so
+   * that one is what a caller's limits are compared with.
+   */
+  const runModes = (settings: {
+    readonly runtimeMode: RuntimeMode;
+    readonly interactionMode: ProviderInteractionMode;
+    readonly modelSelection: ModelSelection;
+  }) =>
+    offeredRuntimeModes(settings.modelSelection).pipe(
+      Effect.map((offered) => ({
+        runtimeMode: providerRuntimeMode(settings.runtimeMode, offered),
+        interactionMode: settings.interactionMode,
+      })),
+    );
+
+  /** Fails unless work on these settings runs within `limits`. */
+  const assertRunsWithin = Effect.fn("OrchestratorMcpService.assertRunsWithin")(function* (
+    limits: {
+      readonly runtimeMode: RuntimeMode;
+      readonly interactionMode: ProviderInteractionMode;
+    },
+    settings: Parameters<typeof runModes>[0],
+  ) {
+    const modes = yield* runModes(settings);
+    yield* resolveRuntimeMode(limits.runtimeMode, modes.runtimeMode);
+    yield* resolveInteractionMode(limits.interactionMode, modes.interactionMode);
+  });
 
   /**
    * Its webhook URL starts runs, so only a caller that may start one sees it: never a client
@@ -1751,7 +1807,10 @@ const make = Effect.gen(function* () {
         caller.parent === undefined
           ? scope.client?.access !== "read-only"
           : Exit.isSuccess(yield* Effect.exit(assertLiveCaller(scope, caller.parent)));
-      const modes = yield* scheduledTaskRunModes(task).pipe(Effect.option);
+      const modes = yield* scheduledTaskRunModes(task).pipe(
+        Effect.flatMap((settings) => Effect.forEach(settings, runModes)),
+        Effect.option,
+      );
       return scheduledTaskSummary(
         task,
         live &&
@@ -1762,16 +1821,36 @@ const make = Effect.gen(function* () {
   );
 
   /**
-   * A scheduled task the caller may change: one whose runs execute at modes no
-   * broader than the caller's own, so editing its prompt cannot run work above
-   * the caller's limits.
+   * Fails unless the caller may manage `task`, by the rule that let it create
+   * one: every mode the task's runs execute at is within the caller's limits,
+   * or the task is bound to the caller's own thread and runs no broader than
+   * that thread already does.
    */
+  const assertMayManageScheduledTask = Effect.fn(
+    "OrchestratorMcpService.assertMayManageScheduledTask",
+  )(function* (
+    caller: {
+      readonly parent: Pick<OrchestrationV2ThreadProjection, "thread"> | undefined;
+      readonly limits: {
+        readonly runtimeMode: RuntimeMode;
+        readonly interactionMode: ProviderInteractionMode;
+      };
+    },
+    task: Pick<ScheduledTask, "threadId" | "modelSelection" | "runtimeMode" | "interactionMode">,
+  ) {
+    const ownModes =
+      caller.parent !== undefined && task.threadId === caller.parent.thread.id
+        ? yield* runModes(caller.parent.thread)
+        : undefined;
+    for (const settings of yield* scheduledTaskRunModes(task)) {
+      if (ownModes !== undefined && withinLimits(ownModes, yield* runModes(settings))) continue;
+      yield* assertRunsWithin(caller.limits, settings);
+    }
+  });
+
   const loadScheduledTask = Effect.fn("OrchestratorMcpService.loadScheduledTask")(function* (
     scheduledTaskId: ScheduledTask["id"],
-    limits: {
-      readonly runtimeMode: RuntimeMode;
-      readonly interactionMode: ProviderInteractionMode;
-    },
+    caller: Parameters<typeof assertMayManageScheduledTask>[0],
   ): Effect.fn.Return<ScheduledTask, OrchestratorMcpFailure> {
     const { tasks } = yield* scheduledTasks
       .list()
@@ -1784,10 +1863,7 @@ const make = Effect.gen(function* () {
     if (task === undefined) {
       return yield* failure("task_not_found", `Scheduled task ${scheduledTaskId} was not found.`);
     }
-    for (const modes of yield* scheduledTaskRunModes(task)) {
-      yield* resolveRuntimeMode(limits.runtimeMode, modes.runtimeMode);
-      yield* resolveInteractionMode(limits.interactionMode, modes.interactionMode);
-    }
+    yield* assertMayManageScheduledTask(caller, task);
     return task;
   });
 
@@ -1810,6 +1886,13 @@ const make = Effect.gen(function* () {
       }
       const modelSelection =
         parent?.thread.modelSelection ?? (yield* projectDefaultModelSelection(project));
+      // A bound task runs on this thread; an unbound task creates new work.
+      const runtimeMode = bindToCurrentThread
+        ? limits.runtimeMode
+        : yield* resolveRuntimeMode(limits.runtimeMode, undefined, {
+            modelSelection,
+            supportedRuntimeModes: yield* offeredRuntimeModes(modelSelection),
+          });
       const derivedTitle = input.prompt.split("\n")[0]?.trim() ?? "";
       const title =
         input.title ?? (derivedTitle.length > 0 ? derivedTitle.slice(0, 80) : "Scheduled task");
@@ -1822,7 +1905,7 @@ const make = Effect.gen(function* () {
         threadId: bindToCurrentThread && parent !== undefined ? parent.thread.id : null,
         workspaceStrategy: scheduledTaskWorkspaceStrategy(bindToCurrentThread),
         modelSelection,
-        runtimeMode: limits.runtimeMode,
+        runtimeMode,
         interactionMode: limits.interactionMode,
         createdBy: "agent",
         creationSource: "mcp",
@@ -1869,7 +1952,7 @@ const make = Effect.gen(function* () {
     updateScheduledTask: Effect.fn("OrchestratorMcpService.updateScheduledTask")(
       function* (scope, input) {
         const { parent, limits } = yield* loadCaller(scope);
-        const existing = yield* loadScheduledTask(input.scheduledTaskId, limits);
+        const existing = yield* loadScheduledTask(input.scheduledTaskId, { parent, limits });
         yield* assertLiveCallerForOtherProject(scope, parent, existing.projectId);
         if (
           input.bindToCurrentThread === true &&
@@ -1893,6 +1976,10 @@ const make = Effect.gen(function* () {
           input.bindToCurrentThread === undefined
             ? existing.workspaceStrategy
             : scheduledTaskWorkspaceStrategy(input.bindToCurrentThread);
+        // A new binding changes where runs execute, so it must pass the same rule.
+        if (threadId !== existing.threadId) {
+          yield* assertMayManageScheduledTask({ parent, limits }, { ...existing, threadId });
+        }
         const upsertInput: ScheduledTaskUpsertInput = {
           id: existing.id,
           title: input.title ?? existing.title,
@@ -1921,7 +2008,7 @@ const make = Effect.gen(function* () {
     deleteScheduledTask: Effect.fn("OrchestratorMcpService.deleteScheduledTask")(
       function* (scope, input) {
         const { parent, limits } = yield* loadCaller(scope);
-        const existing = yield* loadScheduledTask(input.scheduledTaskId, limits);
+        const existing = yield* loadScheduledTask(input.scheduledTaskId, { parent, limits });
         yield* assertLiveCallerForOtherProject(scope, parent, existing.projectId);
         yield* scheduledTasks
           .delete({ id: existing.id })
@@ -2326,11 +2413,7 @@ const make = Effect.gen(function* () {
           .getThreadShell(threadId)
           .pipe(Effect.mapError(threadManagementFailure));
         if (shell !== null && shell.deletedAt === null) {
-          yield* resolveRuntimeMode(parentProjection.thread.runtimeMode, shell.runtimeMode);
-          yield* resolveInteractionMode(
-            parentProjection.thread.interactionMode,
-            shell.interactionMode,
-          );
+          yield* assertRunsWithin(parentProjection.thread, shell);
         }
         const { subagents } = yield* threadManagement
           .getThreadRecords(threadId, ["subagents"])
@@ -2429,6 +2512,7 @@ const make = Effect.gen(function* () {
         Effect.provideService(DispatchModeLimit, {
           runtimeMode: parentProjection.thread.runtimeMode,
           interactionMode: parentProjection.thread.interactionMode,
+          callerThreadId: parentProjection.thread.id,
           refused,
         }),
         Effect.catch((error) =>
@@ -2817,8 +2901,7 @@ const make = Effect.gen(function* () {
     sendToThread: Effect.fn("OrchestratorMcpService.sendToThread")(function* (scope, input) {
       const { parent, limits, target } = yield* loadScopedThread(scope, input.threadId);
       yield* assertLiveCallerForOtherThread(scope, parent, target);
-      yield* resolveRuntimeMode(limits.runtimeMode, target.thread.runtimeMode);
-      yield* resolveInteractionMode(limits.interactionMode, target.thread.interactionMode);
+      if (target.thread.id !== parent?.thread.id) yield* assertRunsWithin(limits, target.thread);
 
       const mode = input.mode ?? "auto";
       const key = yield* requestKey(input.clientRequestId);
@@ -2909,8 +2992,7 @@ const make = Effect.gen(function* () {
     interruptThread: Effect.fn("OrchestratorMcpService.interruptThread")(function* (scope, input) {
       const { parent, limits, target } = yield* loadScopedThread(scope, input.threadId);
       yield* assertLiveCallerForOtherThread(scope, parent, target);
-      yield* resolveRuntimeMode(limits.runtimeMode, target.thread.runtimeMode);
-      yield* resolveInteractionMode(limits.interactionMode, target.thread.interactionMode);
+      if (target.thread.id !== parent?.thread.id) yield* assertRunsWithin(limits, target.thread);
       const key = yield* requestKey(input.clientRequestId);
       const result = yield* threadManagement
         .interruptThread({

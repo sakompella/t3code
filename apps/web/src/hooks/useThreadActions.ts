@@ -726,9 +726,14 @@ export function useThreadActions() {
     const wokeAt = resolved
       ? threadWokeAt(resolved.thread, { now: new Date().toISOString() })
       : null;
-    const undoPlan = ThreadUndo.planThreadUndo("settle", resolved?.thread);
-    // An older unpin/snooze Undo would re-pin or re-snooze, and the server
-    // treats either as a promotion that un-settles; settling supersedes them.
+    // Settling drops the pin server-side, so Undo has to put it back. A
+    // snooze survives settling, so Undo leaves it alone.
+    const undoPlan = ThreadUndo.planThreadUndo(
+      "settle",
+      resolved && { ...resolved.thread, snoozedUntil: null },
+    );
+    // An older unpin/snooze Undo would re-pin (a promotion that un-settles)
+    // or wake the thread; settling supersedes them.
     ThreadUndo.invalidate("pin", scopedThreadKey(target));
     ThreadUndo.invalidate("snooze", scopedThreadKey(target));
     const action = ThreadUndo.begin("settle", scopedThreadKey(target));

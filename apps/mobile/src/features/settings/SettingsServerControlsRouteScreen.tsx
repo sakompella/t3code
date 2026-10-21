@@ -13,11 +13,13 @@ import {
   PROJECT_SCOPED_SERVER_SETTING_KEYS,
   type ProjectScopedServerSettingKey,
 } from "@t3tools/contracts";
+import { useAtomValue } from "@effect/atom-react";
 import { useRef, useState } from "react";
 import { View } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 
 import { RUNTIME_MODE_CHOICES } from "../threads/thread-settings-options";
+import { environmentPresentations } from "../../state/presentation";
 import { SettingsScreen } from "./components/SettingsScreen";
 import {
   AndroidSettingsEnvironmentFilter,
@@ -32,6 +34,8 @@ import { SettingsProjectOverridesSection } from "./components/SettingsProjectOve
 import { useSettingsEnvironmentFilter } from "./settings-environment-filter";
 import { useSettingsWriter } from "./useSettingsWriter";
 import {
+  displayedDefaultRuntimeMode,
+  offeredDefaultRuntimeModes,
   planMobileScopedSettingsClear,
   planMobileScopedSettingsPatch,
   resolveMobileSettingsTargets,
@@ -166,6 +170,16 @@ function ServerSettingsDetail(props: { readonly page: SettingsPage }) {
   const reference = displayTargets[0] ?? null;
   const uniform = <K extends keyof ServerSettings>(key: K) =>
     uniformMobileSetting(displayTargets, key);
+  // A default a provider does not offer runs as the mode shown here.
+  const providersByEnvironment = useAtomValue(environmentPresentations.providersByEnvironmentAtom);
+  const offeredDefaultModes = offeredDefaultRuntimeModes(displayTargets, providersByEnvironment);
+  const defaultRuntimeModeChoices = RUNTIME_MODE_CHOICES.filter((choice) =>
+    offeredDefaultModes.includes(choice.mode),
+  );
+  const shownDefaultRuntimeMode = displayedDefaultRuntimeMode(
+    displayTargets,
+    providersByEnvironment,
+  );
   // `uniform` folds a real null into "mixed"; nullable keys need the distinction.
   const isMixed = (key: keyof ServerSettings) =>
     reference === null ||
@@ -333,17 +347,17 @@ function ServerSettingsDetail(props: { readonly page: SettingsPage }) {
                   <SettingsSection
                     title="Default permissions"
                     trailing={
-                      pendingWrites === 0 && uniform("defaultRuntimeMode") === null ? (
+                      pendingWrites === 0 && shownDefaultRuntimeMode === null ? (
                         <MixedValuesLabel projectSelected={projectSelected} />
                       ) : null
                     }
                   >
-                    {RUNTIME_MODE_CHOICES.map((choice, index) => (
+                    {defaultRuntimeModeChoices.map((choice, index) => (
                       <SettingsChoiceRow
                         key={choice.mode}
                         label={choice.label}
                         description={choice.description}
-                        selected={uniform("defaultRuntimeMode") === choice.mode}
+                        selected={shownDefaultRuntimeMode === choice.mode}
                         separated={index > 0}
                         disabled={disabledFor("defaultRuntimeMode")}
                         onPress={() => write({ defaultRuntimeMode: choice.mode })}

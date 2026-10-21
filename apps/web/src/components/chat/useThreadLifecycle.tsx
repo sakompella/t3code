@@ -75,12 +75,12 @@ interface ThreadLifecycleInput {
   readonly activeThreadRef: ScopedThreadRef | null;
   readonly activeThreadKey: string | null;
   readonly activeThreadShell: EnvironmentThreadShell | null;
-  readonly activeLatestRun: EnvironmentThreadShell["latestRun"];
   readonly activeProjectCwd: string | null;
   readonly serverConfig: EnvironmentServerConfig | null;
   readonly runtimeMode: RuntimeMode;
   readonly isWorking: boolean;
   readonly pendingBackgroundTasks: Parameters<typeof backgroundWorkBannerItem>[0]["tasks"];
+  readonly subagents: Parameters<typeof backgroundWorkBannerItem>[0]["subagents"];
   readonly activePendingApproval: PendingThreadRequests["activePendingApproval"];
   readonly activePendingUserInput: PendingThreadRequests["activePendingUserInput"];
   readonly localCheckoutBranchMismatch: {
@@ -125,12 +125,12 @@ export function useThreadLifecycle(input: ThreadLifecycleInput) {
     activeThreadRef,
     activeThreadKey,
     activeThreadShell,
-    activeLatestRun,
     activeProjectCwd,
     serverConfig,
     runtimeMode,
     isWorking,
     pendingBackgroundTasks,
+    subagents,
     activePendingApproval,
     activePendingUserInput,
     localCheckoutBranchMismatch,
@@ -214,7 +214,6 @@ export function useThreadLifecycle(input: ThreadLifecycleInput) {
     wokeAt: activeThreadWokeAt,
     settled: activeThreadShell?.settledOverride === "settled",
     lastVisitedAt: activeThreadLastVisitedAt,
-    latestRunCompletedAt: activeLatestRun?.completedAt ?? null,
   });
   const activeThreadSettled =
     supportsSettlement && activeThreadShell?.settledOverride === "settled";
@@ -385,7 +384,10 @@ export function useThreadLifecycle(input: ThreadLifecycleInput) {
   });
   // The interrupt path also accepts a completed run while its provider still
   // has background work.
-  const activeBackgroundTasks = !isWorking && activeThread ? pendingBackgroundTasks : [];
+  // While a turn runs, the banner lists only work that outlived the step that
+  // started it. Its Stop would send the same interrupt as the composer's Stop,
+  // so the banner shows no Stop then.
+  const activeBackgroundTasks = activeThread ? pendingBackgroundTasks : [];
   const [stoppingBackgroundWorkKey, setStoppingBackgroundWorkKey] = useState<string | null>(null);
   const isStoppingBackgroundWork =
     stoppingBackgroundWorkKey === `${environmentId}:${activeThreadId}`;
@@ -529,6 +531,8 @@ export function useThreadLifecycle(input: ThreadLifecycleInput) {
     ? backgroundWorkBannerItem({
         threadId: activeThread.id,
         tasks: activeBackgroundTasks,
+        subagents,
+        turnRunning: isWorking,
         stopDisabled: !canOperateThread || isStoppingBackgroundWork,
         stopping: isStoppingBackgroundWork,
         onStop: handleStopBackgroundWorkStable,

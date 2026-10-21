@@ -452,7 +452,10 @@ describe("mobile model options", () => {
         resolveNewTaskModelSelection({
           draftSelection: null,
           projectDefaultSelection: resolveDefaultableModelSelection(changedConfig, selection, null),
+          configuredDefaultSelection: selection,
           stickySelection: null,
+          config: changedConfig,
+          projectId: null,
           modelOptions: options,
         }),
       ).toBe(selection);
@@ -541,8 +544,12 @@ describe("mobile model options", () => {
     const sticky = { instanceId: ProviderInstanceId.make("codex"), model: "sticky" };
     const providerDefault = {
       selection: { instanceId: ProviderInstanceId.make("codex"), model: "default" },
+      providerKey: "codex",
       isDefault: true,
     } as ModelOption;
+    const config = {
+      providers: [{ instanceId: "codex", enabled: true, status: "ready" }],
+    } as unknown as ServerConfig;
     const resolve = (
       draftSelection: ModelSelection | null,
       projectDefaultSelection: ModelSelection | null,
@@ -551,7 +558,10 @@ describe("mobile model options", () => {
       resolveNewTaskModelSelection({
         draftSelection,
         projectDefaultSelection,
+        configuredDefaultSelection: projectDefaultSelection,
         stickySelection,
+        config,
+        projectId: null,
         modelOptions: [providerDefault],
       });
 
@@ -565,7 +575,10 @@ describe("mobile model options", () => {
       resolveNewTaskModelSelection({
         draftSelection: null,
         projectDefaultSelection: null,
+        configuredDefaultSelection: null,
         stickySelection: null,
+        config,
+        projectId: null,
         modelOptions: [unavailable],
       }),
     ).toBeNull();
