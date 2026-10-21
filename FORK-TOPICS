@@ -6,4 +6,5 @@ image-scaling upstream   # images over 2000 px scaled before Claude and Pi/Prime
 electron-run-as-node upstream   # ELECTRON_RUN_AS_NODE only for the children that run Electron as Node
 failed-turn-sweep upstream   # a failed turn does not start a worktree cleanup sweep
 provider-switch-guidance upstream   # agent instructions: switch provider only for a missing capability
-fork    meta       # everything else, until it is carved into topics (see FORK.md, Topic branches)
+syntax-highlighting-web meta   # syntax highlighting of shell and Python tool rows on web, and the shared entryCode.ts
+fork    syntax-highlighting-web   # everything else, until it is carved into topics (see FORK.md, Topic branches)
