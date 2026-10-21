@@ -16,6 +16,7 @@ import {
   resolveProjectStatusIndicator,
   resolveSidebarSweepKeys,
   resolveSidebarThreadStatus,
+  resolveSidebarThreadSection,
   resolveSidebarV2TopStatus,
   resolveThreadStatusPill,
   resolveWorkingStartedAt,
@@ -24,6 +25,7 @@ import {
   sortInboxThreadsByReturn,
   resolveSidebarDropTarget,
   planSidebarThreadDrop,
+  sidebarDropHoldsPlacement,
   sortPinnedThreadsForSidebar,
   sortProjectsForSidebar,
   sortScopedProjectsForSidebar,
@@ -941,18 +943,10 @@ describe("navigation after parking a thread", () => {
     ["snooze", null, "2099-01-01T00:00:00.000Z", "thread", true],
     ["snooze", null, null, "thread", false],
     ["snooze", null, "2026-09-12T09:00:00.000Z", "thread", false],
-    ["snooze", null, "2099-01-01T00:00:00.000Z", "thread", false, true],
     ["snooze", null, "2099-01-01T00:00:00.000Z", "other-thread", false],
   ] as const)(
     "%s with state %s / %s on %s navigates: %s",
-    (
-      action,
-      settledOverride,
-      snoozedUntil,
-      currentThreadKey,
-      expected,
-      hasPendingApprovals: boolean = false,
-    ) => {
+    (action, settledOverride, snoozedUntil, currentThreadKey, expected) => {
       expect(
         shouldNavigateAfterThreadPark({
           threadKey: "thread",
@@ -962,11 +956,6 @@ describe("navigation after parking a thread", () => {
           thread: {
             settledOverride,
             snoozedUntil,
-            snoozedAt: null,
-            session: null,
-            latestTurn: null,
-            hasPendingApprovals,
-            hasPendingUserInput: false,
           },
         }),
       ).toBe(expected);
@@ -1264,6 +1253,62 @@ describe("Working shelf (beta)", () => {
         unsettle: false,
         unsnooze: false,
       });
+    });
+
+    it("holds a dropped row only where the server will actually put it", () => {
+      // Each source row's lifecycle beneath its shelf, as the server keeps it.
+      const sources = {
+        snoozed: { snoozed: true, settled: true, pinned: true },
+        active: { snoozed: false, settled: false, pinned: false },
+        pinned: { snoozed: false, settled: false, pinned: true },
+        settled: { snoozed: false, settled: true, pinned: false },
+      } as const;
+      const destinations = {
+        pinned: { section: "pinned", pinnedOrder: ["p1", "z1"], activeOrder: [] },
+        settled: { section: "settled", pinnedOrder: ["p1"], activeOrder: ["a1"] },
+        active: { section: "active", pinnedOrder: ["p1"], activeOrder: ["a1", "z1"] },
+      } as const;
+      const outcomes: Record<string, SidebarSection> = {};
+      for (const [from, lifecycle] of Object.entries(sources) as Array<
+        [keyof typeof sources, (typeof sources)[keyof typeof sources]]
+      >) {
+        for (const [to, target] of Object.entries(destinations)) {
+          if (from === to) continue;
+          const plan = planSidebarThreadDrop({
+            activeKey: "z1",
+            activeSection: from,
+            activePinned: lifecycle.pinned,
+            activeSettled: lifecycle.settled,
+            pinnedOrder: ["p1"],
+            pinnedKeysById: new Map([["p1", "m"]]),
+            activeOrder: ["a1"],
+            activeKeysById: new Map([["a1", "f"]]),
+            target,
+          });
+          // The server's rules: pin un-settles, settle drops the pin, and only
+          // an explicit unsnooze ends a snooze.
+          const landed = resolveSidebarThreadSection({
+            snoozed: lifecycle.snoozed && !(plan.kind === "move-active" && plan.unsnooze),
+            settled:
+              plan.kind === "settle" ||
+              (lifecycle.settled &&
+                !(plan.kind === "pin" || (plan.kind === "move-active" && plan.unsettle))),
+            pinned:
+              plan.kind === "pin" ||
+              (lifecycle.pinned &&
+                plan.kind !== "settle" &&
+                !(plan.kind === "move-active" && plan.unpin)),
+          });
+          outcomes[`${from}->${to}`] = landed;
+          // A held placement that the canonical shelf never reaches would stay
+          // on screen for as long as the snooze lasts.
+          if (sidebarDropHoldsPlacement(from, plan)) expect(landed).toBe(to);
+        }
+      }
+      expect(outcomes["snoozed->pinned"]).toBe("snoozed");
+      expect(outcomes["snoozed->settled"]).toBe("snoozed");
+      expect(outcomes["snoozed->active"]).toBe("active");
+      expect(sidebarDropHoldsPlacement("active", { kind: "settle" })).toBe(true);
     });
   });
 });

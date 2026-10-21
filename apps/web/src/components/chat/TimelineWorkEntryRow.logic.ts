@@ -167,6 +167,7 @@ export function workEntryIconName(workEntry: TimelineWorkEntry): WorkEntryIconNa
         return "terminal";
       case "monitor":
         return "eye";
+      case "heartbeat":
       case "background_task":
         return "zap";
       case "system":
@@ -178,6 +179,10 @@ export function workEntryIconName(workEntry: TimelineWorkEntry): WorkEntryIconNa
   }
   if (workEntry.itemType === "user_input_request" || workEntry.itemType === "approval_request") {
     return "message-circle";
+  }
+  // The info tone's check mark would claim a notice that is still running is done.
+  if (workEntry.itemType === "system_notice" && workEntry.toolLifecycleStatus === "inProgress") {
+    return "zap";
   }
   if (workEntry.toolSurface) return workEntry.toolSurface;
   if (
