@@ -151,6 +151,29 @@ describe("queued messages keep a settled thread active", () => {
   });
 });
 
+describe("a settled thread whose wake needs the user leaves the settled shelf", () => {
+  it("lists a settled thread blocked on approval in the active block", () => {
+    const layout = buildThreadListV2Items({
+      threads: [
+        makeThread({ id: ThreadId.make("settled"), title: "Settled", settledOverride: "settled" }),
+        makeThread({
+          id: ThreadId.make("settled-approval"),
+          title: "Settled, asks approval",
+          settledOverride: "settled",
+          hasPendingApprovals: true,
+        }),
+      ],
+      environmentId: null,
+      searchQuery: "",
+      now: NOW,
+    });
+    expect(layout.items.map((item) => [item.thread.id, item.variant] as const)).toEqual([
+      ["settled-approval", "card"],
+      ["settled", "slim"],
+    ]);
+  });
+});
+
 describe("sortThreadsForListV2", () => {
   it("honors a saved active order and leaves new threads above it", () => {
     const sorted = sortThreadsForListV2([
@@ -1089,6 +1112,7 @@ describe("cross-section thread drops", () => {
       unsettle: true,
       unsnooze: true,
     });
+    // Pinning never ends a snooze, even when the pin is dropped from the snoozed shelf.
     expect(threadDropLifecycle(thread, "pinned", NOW)).toEqual({
       pin: true,
       unpin: false,
@@ -1320,7 +1344,7 @@ describe("thread list Woke marker", () => {
     expect(resolveThreadListV2WokeAt({ ...thread, snoozedUntil: null }, { now: NOW })).toBeNull();
   });
 
-  it("keeps an early failure wake acknowledged after the scheduled time passes", () => {
+  it("does not wake early on a failure; the timer wake survives a visit before it", () => {
     const completedAt = isoAt(BASE_MS - 2 * MINUTE_MS);
     const failed = makeThread({
       ...thread,
@@ -1342,13 +1366,13 @@ describe("thread list Woke marker", () => {
         assistantMessageId: null,
       },
     });
-    expect(resolveThreadListV2WokeAt(failed, { now: NOW })).toBe(completedAt);
+    expect(resolveThreadListV2WokeAt(failed, { now: NOW })).toBeNull();
     expect(
       resolveThreadListV2WokeAt(
         { ...failed, lastVisitedAt: completedAt },
         { now: isoAt(BASE_MS + 2 * MINUTE_MS) },
       ),
-    ).toBeNull();
+    ).toBe(failed.snoozedUntil);
   });
 
   it("updates a recycled row at the wake boundary even without a new shell or minute tick", () => {

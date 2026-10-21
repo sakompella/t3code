@@ -38,7 +38,11 @@ import type {
 } from "@t3tools/client-runtime/state/thread-requests";
 import type { ThreadRunSummary, ThreadRuntimeSummary } from "@t3tools/client-runtime/state/shell";
 import { threadRuntimeHasInterruptibleRun } from "@t3tools/client-runtime/state/thread-execution";
-import { turnItemIsWorkspacePreparation } from "@t3tools/client-runtime/state/turn-item-presentation";
+import {
+  systemNoticeIsRoutine,
+  turnItemIsFinishedProgressNotice,
+  turnItemIsWorkspacePreparation,
+} from "@t3tools/client-runtime/state/turn-item-presentation";
 
 import {
   isImageAttachment,
@@ -363,6 +367,7 @@ export function hasActionableProposedPlan(plan: LatestProposedPlanState | null):
 const STANDALONE_V2_ITEM_TYPES = new Set<OrchestrationV2ProjectedTurnItem["item"]["type"]>([
   "fork",
   "handoff",
+  "rollback_summary",
   "run_interrupt_request",
   "run_interrupt_result",
   "secret_request",
@@ -544,7 +549,7 @@ function projectedWorkEntry(row: OrchestrationV2ProjectedTurnItem): WorkLogEntry
       return {
         ...common,
         label: item.message,
-        sourceActivityKind: "runtime.warning",
+        ...(systemNoticeIsRoutine(item) ? {} : { sourceActivityKind: "runtime.warning" }),
       };
     case "error": {
       const presentation = providerErrorPresentation(item);
@@ -658,6 +663,7 @@ export function deriveTimelineEntriesFromVisibleTurnItems(
   for (const row of input.visibleTurnItems) {
     const { item } = row;
     if (turnItemIsWorkspacePreparation(item)) continue;
+    if (turnItemIsFinishedProgressNotice(item)) continue;
     if (item.type === "todo_list" || item.type === "checkpoint") continue;
     if (item.type === "user_message" && foldedAnswerMessageIds.has(item.messageId)) continue;
     const createdAt = projectedItemCreatedAt(row);
@@ -1107,6 +1113,50 @@ export function deriveRevertTurnCountByUserMessageId(input: {
       byUserMessageId.set(message.id, target);
   }
   return byUserMessageId;
+}
+
+/**
+ * Run ordinals the server can roll back to (`Orchestrator.dispatchCheckpointRollback`,
+ * `CheckpointRollbackService`). A target may be a turn of an earlier provider: the active
+ * provider thread then rewinds to its own last turn at or before it, or to its start.
+ */
+export function deriveAvailableRevertTurnCounts(
+  projection:
+    | Pick<
+        OrchestrationV2ThreadProjection,
+        "thread" | "providerThreads" | "providerTurns" | "attempts" | "runs"
+      >
+    | null
+    | undefined,
+): ReadonlySet<number> {
+  const available = new Set<number>();
+  const providerThread = projection?.providerThreads.find(
+    (candidate) => candidate.id === projection.thread.activeProviderThreadId,
+  );
+  if (
+    !providerThread?.providerSessionId ||
+    providerThread.providerInstanceId !== projection?.thread.modelSelection.instanceId
+  )
+    return available;
+  available.add(0);
+  const attemptsById = new Map(projection.attempts.map((attempt) => [attempt.id, attempt]));
+  const providerTurnIds = new Set(projection.providerTurns.map((turn) => turn.id));
+  const attemptsWithTurn = new Set(
+    projection.providerTurns.flatMap((turn) =>
+      turn.runAttemptId === null ? [] : [turn.runAttemptId],
+    ),
+  );
+  for (const run of projection.runs) {
+    if (run.activeAttemptId === null) continue;
+    const attemptTurnId = attemptsById.get(run.activeAttemptId)?.providerTurnId;
+    // A ready file checkpoint alone cannot restore the provider conversation.
+    if (
+      attemptsWithTurn.has(run.activeAttemptId) ||
+      (attemptTurnId != null && providerTurnIds.has(attemptTurnId))
+    )
+      available.add(run.ordinal);
+  }
+  return available;
 }
 
 export function findRevertCheckpoint(

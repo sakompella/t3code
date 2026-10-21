@@ -517,6 +517,43 @@ describe("applyOrchestrationV2ProjectionEvent", () => {
     expect(next?.visibleTurnItems).toEqual([inheritedRow]);
     expect(next?.visibleTurnItems[0]).toBe(inheritedRow);
   });
+
+  it.each([{ partialTimeline: false }, { partialTimeline: true }])(
+    "drops a turn item that moved to another thread, as a fresh load would (%o)",
+    (options) => {
+      const moved = commandItem("item-moved", "running", 2);
+      const stays = commandItem("item-stays", "done", 1);
+      const row = (item: OrchestrationV2TurnItem, position: number) => ({
+        position,
+        visibility: "local" as const,
+        sourceThreadId: threadId,
+        sourceItemId: item.id,
+        item,
+      });
+      const projection = {
+        ...emptyProjection,
+        runs: [run],
+        turnItems: [stays, moved],
+        visibleTurnItems: [row(stays, 0), row(moved, 1)],
+      };
+      const freshLoad = { ...projection, turnItems: [stays], visibleTurnItems: [row(stays, 0)] };
+      // The server tells the item's old thread where it went.
+      const event = {
+        id: "event-moved",
+        type: "turn-item.updated",
+        threadId,
+        occurredAt: now,
+        payload: { ...moved, threadId: ThreadId.make("thread-new-home"), runId: null },
+      } as OrchestrationV2DomainEvent;
+
+      const next = applyOrchestrationV2ProjectionEvent(projection, event, {
+        ...options,
+        latestLocalTurnOrdinal: 2,
+      });
+      expect(next?.turnItems).toEqual(freshLoad.turnItems);
+      expect(next?.visibleTurnItems).toEqual(freshLoad.visibleTurnItems);
+    },
+  );
 });
 
 it("does not scan every row against every run for a streaming item update", () => {

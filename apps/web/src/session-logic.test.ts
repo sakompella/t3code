@@ -25,6 +25,7 @@ import { describe, expect, it } from "vite-plus/test";
 
 import {
   deriveActivePlanState,
+  deriveAvailableRevertTurnCounts,
   deriveCanInterruptRunningThread,
   deriveTimelineEntriesFromVisibleTurnItems,
   deriveTimelineEntriesFromVisibleTurnItemsWithState,
@@ -392,6 +393,59 @@ describe("V2 session presentation", () => {
           }),
         ),
       ).toEqual({ "user-1": 0, "user-2": 1 });
+    });
+
+    it("offers a target turn of an earlier provider after a provider switch", () => {
+      // Codex ran run 1; Prime Agent, now active, ran runs 2 and 3.
+      const base = makeThreadProjectionFixture();
+      const primeAgent = ProviderInstanceId.make("prime-agent");
+      const providerThreadFor = (ordinal: number) =>
+        ProviderThreadId.make(ordinal === 1 ? "codex-thread" : "prime-agent-thread");
+      const providerThread = (instanceId: ProviderInstanceId, ordinal: number) => ({
+        id: providerThreadFor(ordinal),
+        providerInstanceId: instanceId,
+        providerSessionId: `${instanceId}-session`,
+      });
+      const ordinals = [1, 2, 3];
+      const projection = {
+        ...base,
+        thread: {
+          ...base.thread,
+          providerInstanceId: primeAgent,
+          modelSelection: { instanceId: primeAgent, model: "claude-opus" },
+          activeProviderThreadId: providerThreadFor(2),
+        },
+        providerThreads: [
+          providerThread(base.thread.providerInstanceId, 1),
+          providerThread(primeAgent, 2),
+        ],
+        runs: ordinals.map((ordinal) => ({
+          id: runId(ordinal),
+          ordinal,
+          activeAttemptId: RunAttemptId.make(`attempt-${ordinal}`),
+        })),
+        attempts: ordinals.map((ordinal) => ({
+          id: RunAttemptId.make(`attempt-${ordinal}`),
+          providerTurnId: null,
+        })),
+        providerTurns: ordinals.map((ordinal) => ({
+          id: `turn-${ordinal}`,
+          providerThreadId: providerThreadFor(ordinal),
+          runAttemptId: RunAttemptId.make(`attempt-${ordinal}`),
+          ordinal,
+        })),
+      } as unknown as ReturnType<typeof makeThreadProjectionFixture>;
+
+      expect(
+        Object.fromEntries(
+          deriveRevertTurnCountByUserMessageId({
+            timelineEntries: ordinals.flatMap(turn),
+            checkpoints: ordinals.map((ordinal) => checkpoint(ordinal)),
+            threadStartCheckpointReady: true,
+            availableRevertTurnCounts: deriveAvailableRevertTurnCounts(projection),
+          }),
+        ),
+      ).toEqual({ "user-1": 0, "user-2": 1, "user-3": 2 });
     });
 
     it("leaves inherited history uneditable and restores the first local run to thread start", () => {
@@ -1441,7 +1495,7 @@ describe("HTML renders in the timeline", () => {
         startedAt: DateTime.formatIso(at(0)),
         completedAt: DateTime.formatIso(at(5)),
       },
-      ...(expanded ? { expandedRunIds: new Set([runId]) } : {}),
+      ...(expanded ? { expandedFoldKeys: new Set<string>([runId]) } : {}),
       isWorking: false,
       activeTurnStartedAt: null,
       turnDiffSummaries: [],
