@@ -3,6 +3,7 @@ import { SubagentStatusDot } from "./SubagentStatusDot";
 import { ThreadSubagentGroup } from "./thread-subagent-group";
 import { ProposedPlanCard } from "./ProposedPlanCard";
 import {
+  WorkLogCodeLabel,
   WorkLogLabel,
   WorkLogBlock,
   WorkLogRows,
@@ -11,6 +12,13 @@ import {
 } from "./work-log-layout";
 import { QuestionAnswerHistory } from "./QuestionAnswerHistory";
 import { ThreadCommandOutput, useCommandOutputStreaming } from "./thread-command-output";
+import { HighlightedCodeText } from "./HighlightedCodeText";
+import { workLogCodeResult } from "./work-log-code-result";
+import {
+  workEntryBodyCode,
+  workEntryLabelCode,
+  type WorkEntryCode,
+} from "@t3tools/client-runtime/work-log/entry-code";
 import {
   getQuestionAnswerPreview,
   hasQuestionAnswer,
@@ -107,6 +115,8 @@ import { useAssetUrl } from "../../state/assets";
 import { PullRequestGlyph } from "../pull-requests/pullRequestGlyphs";
 
 const SHIMMER_WIDTH = 72;
+// Highlighted code keeps its token colors, so the sweep brightens it from this level.
+const CODE_UNDER_SWEEP_OPACITY = 0.62;
 const SHIMMER_SWEEP_MS = 1_350;
 const SHIMMER_PAUSE_MS = 1_450;
 const SHIMMER_ICON_AND_GAP_WIDTH = 30;
@@ -200,6 +210,9 @@ export function ThreadDisclosureChevron(props: {
 }
 
 function ShimmerWorkContent(props: {
+  readonly code?: WorkEntryCode;
+  /** The base layer under a sweeping highlight; code keeps its colors, so it dims instead. */
+  readonly dimmed?: boolean;
   readonly textClassName?: string;
   readonly compact?: boolean;
   readonly environmentId?: EnvironmentId;
@@ -233,23 +246,41 @@ function ShimmerWorkContent(props: {
           )}
         </View>
       ) : null}
-      <Text
-        className={cn(
-          "min-w-0 shrink",
-          props.compact ? "text-xs" : "text-sm",
-          props.highlighted ? "text-foreground" : "text-foreground-muted",
-          props.textClassName,
-        )}
-        numberOfLines={1}
-        onTextLayout={props.onTextLayout}
-      >
-        {props.label}
-      </Text>
+      {props.code ? (
+        <HighlightedCodeText
+          code={props.code.code}
+          language={props.code.language}
+          theme={props.themeAppearance ?? "light"}
+          kind="label"
+          numberOfLines={1}
+          className={cn(
+            "min-w-0 shrink text-xs",
+            props.highlighted ? "text-foreground" : "text-foreground-muted",
+          )}
+          opacity={props.dimmed ? CODE_UNDER_SWEEP_OPACITY : 1}
+          onTextLayout={props.onTextLayout}
+        />
+      ) : (
+        <Text
+          className={cn(
+            "min-w-0 shrink",
+            props.compact ? "text-xs" : "text-sm",
+            props.highlighted ? "text-foreground" : "text-foreground-muted",
+            props.textClassName,
+          )}
+          numberOfLines={1}
+          onTextLayout={props.onTextLayout}
+        >
+          {props.label}
+        </Text>
+      )}
     </View>
   );
 }
 
 export function ShimmeringWorkContent(props: {
+  /** When the label is code, it renders highlighted and the sweep brightens it. */
+  readonly code?: WorkEntryCode | undefined;
   readonly className?: string;
   readonly textClassName?: string;
   readonly compact?: boolean;
@@ -321,12 +352,16 @@ export function ShimmeringWorkContent(props: {
     outputRange: [SHIMMER_WIDTH, -contentWidth, -contentWidth],
   });
 
+  const sweeping = !reducedMotion && appIsActive && screenIsFocused && contentWidth > 0;
+
   return (
     <View
       className={cn("min-w-0 flex-1 overflow-hidden", props.className)}
       onLayout={(event) => setAvailableWidth(event.nativeEvent.layout.width)}
     >
       <ShimmerWorkContent
+        code={props.code}
+        dimmed={sweeping}
         textClassName={props.textClassName}
         compact={props.compact}
         environmentId={props.environmentId}
@@ -339,7 +374,7 @@ export function ShimmeringWorkContent(props: {
         toolIcon={props.toolIcon}
         onTextLayout={(event) => setTextWidth(event.nativeEvent.lines[0]?.width ?? 0)}
       />
-      {!reducedMotion && appIsActive && screenIsFocused && contentWidth > 0 ? (
+      {sweeping ? (
         <NativeAnimated.View
           pointerEvents="none"
           accessible={false}
@@ -378,6 +413,7 @@ export function ShimmeringWorkContent(props: {
               style={{ width: availableWidth, transform: [{ translateX: counterSweepTranslateX }] }}
             >
               <ShimmerWorkContent
+                code={props.code}
                 textClassName={props.textClassName}
                 compact={props.compact}
                 environmentId={props.environmentId}
@@ -994,29 +1030,30 @@ const ThreadWorkLogRow = function ThreadWorkLogRow(
     call && shownItem.type === "command_execution" && shownItem.exitCode
       ? shownItem.exitCode
       : null;
-  const fullDetail =
-    expanded && !reasoning && !call
-      ? fetchedItem && !isRead
-        ? formatItemFullDetail(row.projectedItem, fetchedItem)
-        : row.getFullDetail()
-      : null;
+  const rollbackSummary = shownItem.type === "rollback_summary" ? shownItem : null;
   const outputImages = expanded && fetchedItem ? turnItemOutputImages(fetchedItem) : [];
   const viewedImagePath = workEntryViewedImagePath(row.workEntry);
   const fetchedOutput =
     !expanded || streamsOutput
       ? null
-      : shownItem.type === "file_search" || shownItem.type === "web_search"
-        ? turnItemOutputText(shownItem)
-        : fetchedItem
-          ? (turnItemOutputText(fetchedItem) ??
-            (outputImages.length > 0 || viewedImagePath ? null : "No output."))
+      : rollbackSummary
+        ? rollbackSummary.summary !== undefined
+          ? null
           : fetchedDetail.error
-            ? `Couldn't load output: ${fetchedDetail.error}`
-            : row.fetchesDetail
-              ? fetchedDetail.data
-                ? "Output is no longer available."
-                : "Loading output…"
-              : null;
+            ? `Couldn't load summary: ${fetchedDetail.error}`
+            : "Loading summary…"
+        : shownItem.type === "file_search" || shownItem.type === "web_search"
+          ? turnItemOutputText(shownItem)
+          : fetchedItem
+            ? (turnItemOutputText(fetchedItem) ??
+              (outputImages.length > 0 || viewedImagePath ? null : "No output."))
+            : fetchedDetail.error
+              ? `Couldn't load output: ${fetchedDetail.error}`
+              : row.fetchesDetail
+                ? fetchedDetail.data
+                  ? "Output is no longer available."
+                  : "Loading output…"
+                : null;
   const exitLine =
     failedExitCode === null ? null : (
       <Text className="mt-1.5 font-mono text-2xs leading-normal text-danger-foreground">
@@ -1031,6 +1068,9 @@ const ThreadWorkLogRow = function ThreadWorkLogRow(
   const accessiblePreview = [previewText, answerPreview].filter(Boolean).join(": ");
   const displayText = row.groupStandIn?.label ?? workEntryRowLabel(row.workEntry, expanded);
   const isSystemNotice = row.projectedItem.item.type === "system_notice";
+  const labelCode = isSystemNotice ? null : workEntryLabelCode(row.workEntry, displayText);
+  // Code rows show their source when expanded, not the item's JSON.
+  const bodyCode = expanded && !reasoning ? workEntryBodyCode(row.workEntry, displayText) : null;
   const isUsageLimit =
     row.projectedItem.item.type === "error" &&
     row.projectedItem.item.failure.class === "usage_limit" &&
@@ -1039,6 +1079,13 @@ const ThreadWorkLogRow = function ThreadWorkLogRow(
     !isSystemNotice && !isUsageLimit && (row.icon === "alert" || row.icon === "warning");
   const failed = row.status === "failure";
   const toolIcon = row.workEntry.toolIcon ?? row.workEntry.toolSource?.icon;
+  const fullDetail =
+    expanded && !reasoning && !rollbackSummary && !bodyCode && !call
+      ? fetchedItem && !isRead
+        ? formatItemFullDetail(row.projectedItem, fetchedItem)
+        : row.getFullDetail()
+      : null;
+  const codeResult = bodyCode ? workLogCodeResult(shownItem, failed) : null;
   const icon = reasoning ? "brain" : (toolPresentation?.icon ?? workRowSymbolName(row.icon));
 
   return (
@@ -1085,6 +1132,7 @@ const ThreadWorkLogRow = function ThreadWorkLogRow(
             icon={icon}
             iconSubtleColor={props.iconSubtleColor}
             label={displayText}
+            code={labelCode ?? undefined}
             showIcon
             themeAppearance={props.themeAppearance}
             toolIcon={toolIcon}
@@ -1116,22 +1164,26 @@ const ThreadWorkLogRow = function ThreadWorkLogRow(
                 />
               )}
             </WorkLogIconSlot>
-            <WorkLogLabel
-              tone={isUsageLimit ? "warning" : iconIsDestructive ? "danger" : "default"}
-            >
-              {displayText}
-              {answerPreview ? (
-                <Text
-                  className={
-                    !expanded &&
-                    row.workEntry.questionAnswer &&
-                    hasQuestionAnswer(row.workEntry.questionAnswer)
-                      ? "text-foreground"
-                      : "text-foreground-subtle"
-                  }
-                >{`  ${answerPreview}`}</Text>
-              ) : null}
-            </WorkLogLabel>
+            {labelCode ? (
+              <WorkLogCodeLabel code={labelCode} theme={props.themeAppearance} />
+            ) : (
+              <WorkLogLabel
+                tone={isUsageLimit ? "warning" : iconIsDestructive ? "danger" : "default"}
+              >
+                {isSystemNotice ? row.summary : displayText}
+                {answerPreview ? (
+                  <Text
+                    className={
+                      !expanded &&
+                      row.workEntry.questionAnswer &&
+                      hasQuestionAnswer(row.workEntry.questionAnswer)
+                        ? "text-foreground"
+                        : "text-foreground-subtle"
+                    }
+                  >{`  ${answerPreview}`}</Text>
+                ) : null}
+              </WorkLogLabel>
+            )}
           </>
         )}
 
@@ -1170,6 +1222,8 @@ const ThreadWorkLogRow = function ThreadWorkLogRow(
 
       {expanded &&
       (reasoning ||
+        rollbackSummary ||
+        bodyCode ||
         fullDetail ||
         call ||
         fetchedOutput ||
@@ -1180,7 +1234,7 @@ const ThreadWorkLogRow = function ThreadWorkLogRow(
           entering={WORK_LOG_DETAIL_ENTER_TRANSITION}
           exiting={WORK_LOG_DETAIL_EXIT_TRANSITION}
           layout={WORK_LOG_LAYOUT_TRANSITION}
-          className={reasoning ? "ml-7 py-1" : "pb-1 pt-0.5"}
+          className={reasoning || rollbackSummary ? "ml-7 py-1" : "pb-1 pt-0.5"}
         >
           {row.workEntry.questionAnswer ? (
             <QuestionAnswerHistory
@@ -1220,6 +1274,30 @@ const ThreadWorkLogRow = function ThreadWorkLogRow(
           >
             {reasoning ? (
               props.renderReasoning(reasoning.text)
+            ) : rollbackSummary?.summary ? (
+              props.renderReasoning(rollbackSummary.summary)
+            ) : bodyCode ? (
+              <>
+                <HighlightedCodeText
+                  selectable
+                  code={bodyCode.code}
+                  language={bodyCode.language}
+                  theme={props.themeAppearance}
+                  kind="body"
+                  className="text-2xs leading-normal text-foreground-muted"
+                />
+                {codeResult ? (
+                  <Text
+                    selectable
+                    className={cn(
+                      "mt-1.5 font-mono text-2xs leading-normal",
+                      failed ? "text-danger-foreground" : "text-foreground-muted",
+                    )}
+                  >
+                    {codeResult}
+                  </Text>
+                ) : null}
+              </>
             ) : call ? (
               [
                 call.command,
@@ -1269,7 +1347,7 @@ const ThreadWorkLogRow = function ThreadWorkLogRow(
                 {fetchedOutput}
               </Text>
             ) : null}
-            {streamsOutput ? null : exitLine}
+            {streamsOutput || bodyCode ? null : exitLine}
           </ScrollView>
           {streamsOutput ? (
             <>
@@ -1279,7 +1357,7 @@ const ThreadWorkLogRow = function ThreadWorkLogRow(
                 itemId={row.projectedItem.sourceItemId}
                 themeAppearance={props.themeAppearance}
               />
-              {exitLine}
+              {bodyCode ? null : exitLine}
             </>
           ) : null}
         </Animated.View>
@@ -1295,6 +1373,7 @@ export function ThreadWorkGroupToggle(props: {
   readonly hiddenCount: number;
   readonly iconSubtleColor: import("react-native").ColorValue;
   readonly summary: string;
+  readonly summaryCode?: WorkEntryCode | undefined;
   readonly summaryKind: ToolGroupSummaryKind;
   readonly summaryToolIcon?: "browser" | "device" | "t3-code" | "pull-request" | "brain";
   readonly themeAppearance: "light" | "dark";
@@ -1356,6 +1435,7 @@ export function ThreadWorkGroupToggle(props: {
                 icon={icon}
                 iconSubtleColor={props.iconSubtleColor}
                 label={props.summary}
+                code={props.summaryCode}
                 showIcon
                 themeAppearance={props.themeAppearance}
                 toolIcon={props.toolIcon}
@@ -1371,7 +1451,15 @@ export function ThreadWorkGroupToggle(props: {
                     themeAppearance={props.themeAppearance}
                   />
                 </WorkLogIconSlot>
-                <WorkLogLabel key={props.rowSizing.textSizeKey}>{props.summary}</WorkLogLabel>
+                {props.summaryCode ? (
+                  <WorkLogCodeLabel
+                    key={props.rowSizing.textSizeKey}
+                    code={props.summaryCode}
+                    theme={props.themeAppearance}
+                  />
+                ) : (
+                  <WorkLogLabel key={props.rowSizing.textSizeKey}>{props.summary}</WorkLogLabel>
+                )}
               </>
             )}
             <ThreadDisclosureChevron

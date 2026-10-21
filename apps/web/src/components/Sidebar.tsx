@@ -25,6 +25,7 @@ import { SortableContext } from "@dnd-kit/sortable";
 import { restrictToFirstScrollableAncestor, restrictToVerticalAxis } from "@dnd-kit/modifiers";
 import {
   canSnooze,
+  effectiveSettled,
   effectiveSnoozed,
   threadWokeAt,
 } from "@t3tools/client-runtime/state/thread-settled";
@@ -148,6 +149,7 @@ import {
   isTrailingDoubleClick,
   orderItemsByPreferredIds,
   planSidebarThreadDrop,
+  sidebarDropHoldsPlacement,
   reduceSidebarProjectScopeMenuState,
   resolveAdjacentThreadId,
   resolveSidebarSweepKeys,
@@ -548,7 +550,7 @@ function partitionSidebarThreads(input: SidebarThreadPartitionInput) {
     } else {
       const section = resolveSidebarThreadSection({
         snoozed: supportsSnooze && effectiveSnoozed(thread, { now: preciseNow }),
-        settled: supportsSettlement && thread.settledOverride === "settled",
+        settled: supportsSettlement && effectiveSettled(thread),
         pinned: thread.pinnedAt != null,
       });
       (section === "snoozed"
@@ -618,7 +620,7 @@ function isOptimisticDropReleased(input: {
   }
   const canonicalSection = effectiveSnoozed(thread, { now })
     ? "snoozed"
-    : thread.settledOverride === "settled"
+    : effectiveSettled(thread)
       ? "settled"
       : thread.pinnedAt != null
         ? "pinned"
@@ -630,7 +632,7 @@ function isOptimisticDropReleased(input: {
     return true;
   }
   if (optimisticDrop.order === null) {
-    // Settle also emits unpin/unsnooze events. Wait for the entire move
+    // Settle also clears the pin. Wait for the entire move
     // before releasing the projected fields and sort timestamps.
     if (
       canonicalSection === optimisticDrop.section &&
@@ -1826,15 +1828,12 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
       sourceSection: activeSection,
       section: target.section,
       occurredAt: new Date().toISOString(),
-      clearsSnooze:
-        plan.kind === "pin" ||
-        plan.kind === "settle" ||
-        (plan.kind === "move-active" && plan.unsnooze),
+      clearsSnooze: plan.kind === "move-active" && plan.unsnooze,
       order: plan.kind === "settle" ? null : plan.order,
       keysAtDrop: target.section === "active" ? activeKeysById : pinnedKeysById,
       assignedKeys: new Map(assignments.map(({ id, orderKey }) => [id, orderKey])),
     };
-    setOptimisticDrop(drop);
+    if (sidebarDropHoldsPlacement(activeSection, plan)) setOptimisticDrop(drop);
     void (async () => {
       const run = async (
         operation: Promise<AtomCommandResult<unknown, unknown>>,

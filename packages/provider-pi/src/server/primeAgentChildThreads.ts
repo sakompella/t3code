@@ -1,0 +1,946 @@
+import type {
+  NodeId,
+  ProviderDriverKind,
+  ProviderInstanceId,
+  ProviderThreadId,
+  ThreadId,
+  OrchestrationV2ExecutionNode,
+  OrchestrationV2TurnItem,
+} from "@t3tools/contracts";
+import * as DateTime from "effect/DateTime";
+import * as Effect from "effect/Effect";
+import * as Option from "effect/Option";
+import * as Predicate from "effect/Predicate";
+import type * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
+import {
+  makeSubagentChildThread,
+  makeSubagentConversationArtifacts,
+  subagentThreadTitle,
+} from "@t3tools/provider-core/server/subagentProjection";
+import {
+  piRecordField as recordField,
+  piRecordNumber as recordNumber,
+  piRecordString as recordString,
+  type PiRpcRecord,
+  type PiRpcConnection,
+} from "./rpc.ts";
+import type { ActivePiTurn, PiChildTranscript, PiItemHooks } from "./adapterState.ts";
+
+/**
+ * One child as T3 last saw it. A child's entry outlives its task: Prime Agent
+ * keeps a finished child's session, so the entry keeps the lineage (which turn
+ * owns the child and where its own children nest) after `terminal`.
+ */
+interface PiRlmChildState {
+  readonly snapshot: unknown;
+  readonly startedAt: DateTime.Utc;
+  /** The task is over and its outcome is on the card. */
+  readonly terminal: boolean;
+  /** When a finished child started working again on a follow-up message, outside its task card. */
+  readonly followUpStartedAt: DateTime.Utc | null;
+  readonly turn: ActivePiTurn;
+  /** The child's card as last emitted. */
+  card: SubagentCard | null;
+}
+
+type SubagentCard = Extract<OrchestrationV2TurnItem, { readonly type: "subagent" }>;
+
+/**
+ * What the adapter did with one roster update. Dropped updates leave no
+ * trace in the thread, so each reason names a distinct way a card can go
+ * missing or stay stale.
+ */
+type RlmChildDecision =
+  | {
+      readonly outcome: "emitted";
+      readonly turn: ActivePiTurn;
+      /** Which turn won: the child's own, its parent's, or the one now running. */
+      readonly routedVia: "known-child" | "parent-child" | "current-turn";
+    }
+  | {
+      /** A finished child's retained session started or finished follow-up work. */
+      readonly outcome: "follow-up";
+      readonly turn: ActivePiTurn;
+    }
+  | {
+      readonly outcome: "dropped";
+      readonly reason:
+        | "missing-child-id"
+        | "no-turn"
+        | "terminal-for-unseen-child"
+        | "terminal-already-settled";
+    };
+
+/** Where an update came from: the live roster, a Stop, or a notice stored in the parent's history. */
+type RlmChildUpdateSource = "rlm_child_update" | "interrupt" | "transcript_notice";
+
+/**
+ * The roster status a message Prime Agent stores in the parent says its
+ * child ended with. It sends one only when a child fails, is cancelled, or
+ * finishes without having replied; a child that replied ends silently.
+ */
+function noticedChildEnd(
+  message: unknown,
+): { readonly childId: string; readonly snapshot: Record<string, unknown> } | undefined {
+  const details = recordField(message, "details");
+  const childId = recordString(details, "childId");
+  if (childId === undefined || recordString(message, "role") !== "custom") return undefined;
+  switch (recordString(message, "customType")) {
+    case "rlm_child_failure":
+      return { childId, snapshot: { status: "error", error: recordString(details, "error") } };
+    case "rlm_child_terminal_notice":
+      switch (recordString(details, "kind")) {
+        case "completed_without_reply":
+          return {
+            childId,
+            snapshot: {
+              status: "done",
+              answerPreview: recordString(details, "lastAssistantTextPreview"),
+            },
+          };
+        case "cancelled":
+          return {
+            childId,
+            snapshot: { status: "cancelled", error: recordString(details, "reason") },
+          };
+        default:
+          return undefined;
+      }
+    default:
+      return undefined;
+  }
+}
+
+function rlmChildStatus(
+  status: string | undefined,
+): "pending" | "running" | "completed" | "failed" | "cancelled" {
+  switch (status) {
+    case "queued":
+      return "pending";
+    case "done":
+      return "completed";
+    case "error":
+      return "failed";
+    case "cancelled":
+      return "cancelled";
+    default:
+      return "running";
+  }
+}
+
+/**
+ * Whether a roster entry says its session is working. Prime Agent keeps a
+ * finished child's status `done` and reports later work through `activity`.
+ */
+function rlmChildIsWorking(snapshot: unknown): boolean {
+  return recordString(recordField(snapshot, "activity"), "kind") !== undefined;
+}
+
+/** A short live status line: the child's own progress note, else what it is doing. */
+function rlmChildProgress(snapshot: unknown): string | undefined {
+  const note = recordString(snapshot, "progressNote");
+  if (note !== undefined && note.length > 0) return note.slice(0, 200);
+  const activity = recordField(snapshot, "activity");
+  const kind = recordString(activity, "kind");
+  if (kind === undefined) return undefined;
+  const toolName = recordString(activity, "toolName");
+  return toolName === undefined ? kind : `${kind} ${toolName}`;
+}
+
+export function makePrimeAgentChildThreads(input: {
+  readonly driver: ProviderDriverKind;
+  readonly instanceId: ProviderInstanceId;
+  readonly name: string;
+  readonly childThreads: boolean;
+  /** The T3 thread and Pi thread the session is on, for updates that arrive with no turn. */
+  readonly sessionThread: () => {
+    readonly threadId: ThreadId;
+    readonly providerThreadId: ProviderThreadId | null;
+  };
+  readonly idAllocator: IdAllocator.IdAllocatorV2["Service"];
+  readonly request: PiRpcConnection["request"];
+  readonly contentText: (content: unknown) => string;
+  readonly items: Pick<
+    PiItemHooks,
+    | "emit"
+    | "providerRef"
+    | "baseItemFields"
+    | "itemOrdinal"
+    | "emitToolItem"
+    | "adoptSnapshot"
+    | "completeOpenStreamItems"
+    | "settleOpenTools"
+  >;
+}) {
+  const {
+    driver,
+    instanceId,
+    name,
+    childThreads,
+    sessionThread,
+    idAllocator,
+    request,
+    contentText,
+  } = input;
+  const {
+    emit,
+    providerRef,
+    baseItemFields,
+    itemOrdinal,
+    emitToolItem,
+    adoptSnapshot,
+    completeOpenStreamItems,
+    settleOpenTools,
+  } = input.items;
+  const rlmChildren = new Map<string, PiRlmChildState>();
+  const rlmTranscripts = new Map<string, PiChildTranscript>();
+  const observedTranscripts = new Map<string, PiChildTranscript>();
+  const openChildTranscript = Effect.fnUntraced(function* (input: {
+    readonly turn: ActivePiTurn;
+    readonly childId: string;
+    readonly subagentId: NodeId;
+    /** The parent child's transcript, for a nested child. */
+    readonly parentTranscript: PiChildTranscript | undefined;
+    readonly snapshot: unknown;
+    readonly title: string | null;
+    readonly prompt: string;
+    readonly now: DateTime.Utc;
+  }) {
+    const { turnInput } = input.turn;
+    const parentThreadId = input.parentTranscript?.childThreadId ?? turnInput.threadId;
+    const childThreadId = idAllocator.derive.threadFromProviderThread({
+      driver,
+      nativeThreadId: `${turnInput.providerThread.id}:rlm:${input.childId}`,
+    });
+    const childRootNodeId = idAllocator.derive.nodeFromProviderItem({
+      driver,
+      nativeItemId: `rlm:${input.childId}:thread-root`,
+    });
+    const model = recordString(input.snapshot, "model");
+    const appThread = makeSubagentChildThread({
+      parentThread: turnInput.appThread,
+      childThreadId,
+      parentNodeId: input.subagentId,
+      activeProviderThreadId: null,
+      providerInstanceId: instanceId,
+      modelSelection:
+        model !== undefined && model !== turnInput.modelSelection.model
+          ? { instanceId: instanceId, model }
+          : turnInput.modelSelection,
+      title: subagentThreadTitle({
+        parentTitle: turnInput.appThread.title,
+        prompt: input.prompt,
+        title: input.title,
+        ordinal: rlmTranscripts.size + 1,
+      }),
+      now: input.now,
+      createdBy: "agent",
+      creationSource: "provider",
+    });
+    const transcript: PiChildTranscript = {
+      scope: {
+        threadId: childThreadId,
+        runId: null,
+        rootNodeId: childRootNodeId,
+        providerThreadId: null,
+        providerTurnId: null,
+        idPrefix: `rlm:${input.childId}`,
+      },
+      childThreadId,
+      childRootNodeId,
+      parentThreadId,
+      itemOrdinals: new Map(),
+      nextItemOrdinal: 0,
+      messageOrdinal: 0,
+      streamItems: new Map(),
+      toolArgs: new Map(),
+      toolStartedAt: new Map(),
+      openTools: new Map(),
+      status: null,
+      observedSessionId: null,
+      failedSessionIds: new Set(),
+      finalReply: null,
+      agentMessageItemIds: new Map(),
+    };
+    rlmTranscripts.set(input.childId, transcript);
+    // A nested child's thread names its parent child's thread as its parent,
+    // as a nested Codex subagent's does.
+    yield* emit({
+      type: "app_thread.created",
+      driver,
+      appThread: { ...appThread, lineage: { ...appThread.lineage, parentThreadId } },
+    });
+    return transcript;
+  });
+
+  /** The child thread's root turn carries the child's status for clients. */
+  const emitChildRootNode = (
+    transcript: PiChildTranscript,
+    status: OrchestrationV2ExecutionNode["status"],
+    nativeTaskId: string,
+    startedAt: DateTime.Utc,
+    completedAt: DateTime.Utc | null,
+  ) =>
+    Effect.suspend(() => {
+      if (transcript.status === status) return Effect.void;
+      transcript.status = status;
+      return emit({
+        type: "node.updated",
+        driver,
+        node: {
+          id: transcript.childRootNodeId,
+          threadId: transcript.childThreadId,
+          runId: null,
+          parentNodeId: null,
+          rootNodeId: transcript.childRootNodeId,
+          kind: "root_turn",
+          status,
+          countsForRun: false,
+          providerThreadId: null,
+          providerTurnId: null,
+          nativeItemRef: providerRef(nativeTaskId),
+          runtimeRequestId: null,
+          checkpointScopeId: null,
+          startedAt,
+          completedAt,
+        },
+      });
+    });
+
+  /** A user turn in a child: its task from the parent, or a later agent message. */
+  const emitChildUserMessage = Effect.fnUntraced(function* (
+    transcript: PiChildTranscript,
+    message: unknown,
+  ) {
+    const text = contentText(recordField(message, "content")).trim();
+    if (text.length === 0) return;
+    const timestamp = recordNumber(message, "timestamp");
+    // Timestamps keep a replayed history and the live stream from
+    // emitting the same message twice. Where they differ in form, the
+    // message's own id does the same.
+    const agentMessageId = recordString(recordField(message, "details"), "id");
+    const nativeItemId =
+      (agentMessageId === undefined
+        ? undefined
+        : transcript.agentMessageItemIds.get(agentMessageId)) ??
+      `${transcript.scope.idPrefix}:u${timestamp ?? transcript.nextItemOrdinal}`;
+    if (agentMessageId !== undefined) {
+      transcript.agentMessageItemIds.set(agentMessageId, nativeItemId);
+    }
+    const now = yield* DateTime.now;
+    const artifacts = makeSubagentConversationArtifacts({
+      messageId: idAllocator.derive.messageFromProviderItem({ driver, nativeItemId }),
+      senderThreadId: transcript.parentThreadId,
+      turnItemId: idAllocator.derive.turnItemFromProviderItem({ driver, nativeItemId }),
+      threadId: transcript.childThreadId,
+      rootNodeId: transcript.childRootNodeId,
+      providerThreadId: null,
+      providerTurnId: null,
+      nativeItemRef: providerRef(nativeItemId),
+      role: "user",
+      text,
+      ordinal: itemOrdinal(transcript, nativeItemId),
+      now: Option.getOrElse(DateTime.make(timestamp ?? Number.NaN), () => now),
+    });
+    yield* emit({ type: "message.updated", driver, message: artifacts.message });
+    yield* emit({ type: "turn_item.updated", driver, turnItem: artifacts.turnItem });
+  });
+
+  /**
+   * Routes one event of an observed child session onto its thread. The
+   * child's RPC drops events like the main one, so assistant text comes
+   * from message snapshots, and each message is keyed by its own timestamp:
+   * a lost `message_start` cannot shift ids, and replaying history over
+   * live events is idempotent.
+   */
+  const observeChildEvent = Effect.fnUntraced(function* (
+    transcript: PiChildTranscript,
+    event: PiRpcRecord,
+  ) {
+    switch (event["type"]) {
+      case "message_update":
+      case "message_end": {
+        const message = event["message"];
+        const role = recordString(message, "role");
+        if (role === "assistant") {
+          transcript.messageOrdinal =
+            recordNumber(message, "timestamp") ?? transcript.messageOrdinal + 1;
+          const final = event["type"] === "message_end";
+          yield* adoptSnapshot(transcript, message, final);
+          if (final) {
+            yield* completeOpenStreamItems(transcript);
+            const text = contentText(recordField(message, "content")).trim();
+            if (text.length > 0) transcript.finalReply = text;
+          }
+          return;
+        }
+        if (event["type"] === "message_end" && role !== "toolResult") {
+          // Custom messages show only when the agent marks them for display.
+          if (role === "user" || recordField(message, "display") === true) {
+            yield* emitChildUserMessage(transcript, message);
+          }
+        }
+        return;
+      }
+      case "tool_execution_start":
+      case "tool_execution_update":
+        yield* emitToolItem(
+          transcript,
+          event,
+          event["type"] === "tool_execution_start" ? "start" : "update",
+        );
+        return;
+      case "tool_execution_end":
+        yield* emitToolItem(transcript, event, "end");
+        return;
+      default:
+        return;
+    }
+  });
+
+  /** Replays `observe`'s history as the events that would have produced it. */
+  const replayChildHistory = Effect.fnUntraced(function* (
+    transcript: PiChildTranscript,
+    messages: ReadonlyArray<unknown>,
+  ) {
+    for (const message of messages) {
+      const role = recordString(message, "role");
+      if (role === "toolResult") {
+        yield* observeChildEvent(transcript, {
+          type: "tool_execution_end",
+          toolCallId: recordString(message, "toolCallId"),
+          toolName: recordString(message, "toolName"),
+          result: {
+            content: recordField(message, "content"),
+            details: recordField(message, "details"),
+          },
+          isError: recordField(message, "isError") === true,
+        });
+        continue;
+      }
+      yield* observeChildEvent(transcript, { type: "message_end", message });
+      const content = role === "assistant" ? recordField(message, "content") : undefined;
+      for (const block of Array.isArray(content) ? content : []) {
+        if (recordField(block, "type") !== "toolCall") continue;
+        yield* observeChildEvent(transcript, {
+          type: "tool_execution_start",
+          toolCallId: recordString(block, "id"),
+          toolName: recordString(block, "name"),
+          args: recordField(block, "arguments"),
+        });
+      }
+    }
+  });
+
+  /**
+   * Ends a child's transcript for good: open text closes (which also turns
+   * its pending flushes into no-ops) and tools without an end event settle
+   * as `toolStatus`. The child's RPC drops events, so none of this can wait
+   * for the stream to say so.
+   */
+  const finalizeChildTranscript = Effect.fnUntraced(function* (
+    transcript: PiChildTranscript,
+    toolStatus: "completed" | "failed" | "interrupted",
+  ) {
+    yield* completeOpenStreamItems(transcript);
+    yield* settleOpenTools(transcript, toolStatus);
+  });
+
+  const stopObservingChild = Effect.fnUntraced(function* (
+    transcript: PiChildTranscript,
+    sessionIsAlive: boolean,
+  ) {
+    const sessionId = transcript.observedSessionId;
+    if (sessionId === null) return;
+    transcript.observedSessionId = null;
+    observedTranscripts.delete(sessionId);
+    if (sessionIsAlive) {
+      yield* request({ type: "unobserve", activeSessionId: sessionId }).pipe(Effect.ignore);
+    }
+  });
+
+  /**
+   * Ends a child's observation once the child is terminal. While its
+   * session is still reachable, its history is read one last time so a lost
+   * end event does not cut the final answer; what is still open after that
+   * settles to match the child's outcome.
+   */
+  const finishChildObservation = Effect.fnUntraced(function* (
+    transcript: PiChildTranscript,
+    status: OrchestrationV2ExecutionNode["status"],
+    sessionIsAlive: boolean,
+  ) {
+    const sessionId = transcript.observedSessionId;
+    if (sessionIsAlive && sessionId !== null) {
+      const observed = yield* request({ type: "observe", activeSessionId: sessionId }).pipe(
+        Effect.option,
+      );
+      if (Option.isSome(observed)) {
+        const history = recordField(observed.value, "messages");
+        yield* replayChildHistory(transcript, Array.isArray(history) ? history : []);
+      }
+    }
+    yield* finalizeChildTranscript(
+      transcript,
+      status === "completed" || status === "failed" ? status : "interrupted",
+    );
+    yield* stopObservingChild(transcript, sessionIsAlive);
+  });
+
+  /**
+   * Streams a running child's session into its thread: one observation per
+   * live child, started when its session id first shows up. A failed
+   * `observe` is not retried for the same session.
+   */
+  const syncChildObservation = Effect.fnUntraced(function* (
+    transcript: PiChildTranscript,
+    snapshot: unknown,
+  ) {
+    const sessionId = recordString(snapshot, "activeSessionId");
+    if (
+      sessionId === undefined ||
+      transcript.observedSessionId === sessionId ||
+      transcript.failedSessionIds.has(sessionId)
+    ) {
+      return;
+    }
+    yield* stopObservingChild(transcript, true);
+    const observed = yield* request({ type: "observe", activeSessionId: sessionId }).pipe(
+      Effect.option,
+    );
+    if (Option.isNone(observed)) {
+      transcript.failedSessionIds.add(sessionId);
+      yield* Effect.logWarning(`${name} could not observe a child session`, { sessionId });
+      return;
+    }
+    transcript.observedSessionId = sessionId;
+    observedTranscripts.set(sessionId, transcript);
+    const history = recordField(observed.value, "messages");
+    yield* replayChildHistory(transcript, Array.isArray(history) ? history : []);
+  });
+
+  /**
+   * Logs one line per roster update with what became of it. The trace file
+   * only keeps log lines written inside a span (as span events), so the line
+   * gets a span of its own.
+   */
+  const traceRlmChildUpdate = (
+    snapshot: unknown,
+    currentTurn: ActivePiTurn | null,
+    source: RlmChildUpdateSource,
+    decision: RlmChildDecision,
+  ) => {
+    const session = sessionThread();
+    const turn = decision.outcome === "dropped" ? null : decision.turn;
+    return Effect.logInfo("orchestration-v2.prime-agent-rlm-child-update").pipe(
+      Effect.annotateLogs({
+        driver,
+        source,
+        childId: recordString(snapshot, "id") ?? null,
+        parentChildId: recordString(snapshot, "parentId") ?? null,
+        reportedStatus: recordString(snapshot, "status") ?? null,
+        status:
+          source === "interrupt" ? "interrupted" : rlmChildStatus(recordString(snapshot, "status")),
+        outcome: decision.outcome,
+        reason: decision.outcome === "dropped" ? decision.reason : null,
+        routedVia: decision.outcome === "emitted" ? decision.routedVia : null,
+        threadId: turn?.turnInput.threadId ?? session.threadId,
+        runId: turn?.turnInput.runId ?? null,
+        providerThreadId: turn?.turnInput.providerThread.id ?? session.providerThreadId,
+        providerTurnId: turn?.providerTurn.id ?? null,
+        currentRunId: currentTurn?.turnInput.runId ?? null,
+      }),
+      Effect.withSpan("orchestration-v2.prime-agent-rlm-child-update"),
+    );
+  };
+
+  /**
+   * Ends a finished child's follow-up. Its card keeps the outcome of the
+   * original task; the transcript closes and the thread's root turn settles.
+   */
+  const endChildFollowUp = Effect.fnUntraced(function* (
+    childId: string,
+    child: PiRlmChildState,
+    status: OrchestrationV2ExecutionNode["status"],
+    sessionIsAlive: boolean,
+  ) {
+    rlmChildren.set(childId, { ...child, followUpStartedAt: null });
+    const transcript = rlmTranscripts.get(childId);
+    if (transcript === undefined) return;
+    yield* finishChildObservation(transcript, status, sessionIsAlive);
+    yield* emitChildRootNode(
+      transcript,
+      status,
+      `rlm:${childId}`,
+      child.followUpStartedAt ?? child.startedAt,
+      yield* DateTime.now,
+    );
+  });
+
+  /**
+   * A terminal update for a child whose task already finished. Prime Agent
+   * keeps such a child's session, so this is either follow-up work (still
+   * `done`, with activity) or roster churn that must not rewrite the card.
+   */
+  const emitRetainedChildUpdate = Effect.fnUntraced(function* (
+    childId: string,
+    previous: PiRlmChildState,
+    snapshot: unknown,
+    status: OrchestrationV2ExecutionNode["status"],
+    currentTurn: ActivePiTurn | null,
+    source: RlmChildUpdateSource,
+  ) {
+    const working = status === "completed" && rlmChildIsWorking(snapshot);
+    if (!working && previous.followUpStartedAt === null) {
+      yield* traceRlmChildUpdate(snapshot, currentTurn, source, {
+        outcome: "dropped",
+        reason: "terminal-already-settled",
+      });
+      return;
+    }
+    yield* traceRlmChildUpdate(snapshot, currentTurn, source, {
+      outcome: "follow-up",
+      turn: previous.turn,
+    });
+    if (!working) {
+      yield* endChildFollowUp(childId, { ...previous, snapshot }, status, true);
+      return;
+    }
+    const followUpStartedAt = previous.followUpStartedAt ?? (yield* DateTime.now);
+    rlmChildren.set(childId, { ...previous, snapshot, followUpStartedAt });
+    const transcript = rlmTranscripts.get(childId);
+    if (transcript === undefined) return;
+    // The child thread shows it working again, as a resumed Claude subagent's does.
+    yield* emitChildRootNode(transcript, "running", `rlm:${childId}`, followUpStartedAt, null);
+    yield* syncChildObservation(transcript, snapshot);
+  });
+
+  /**
+   * A nested child's card is drawn in its parent child's thread, where the
+   * parent spawned it, not on the root thread's timeline. Its task node stays
+   * on the root thread for the subagent tree, so the card hangs off that
+   * thread's root turn instead.
+   */
+  const nestedCardFields = (
+    parentTranscript: PiChildTranscript,
+    nativeTaskId: string,
+    startedAt: DateTime.Utc,
+    updatedAt: DateTime.Utc,
+  ) => ({
+    ...baseItemFields(parentTranscript, nativeTaskId, startedAt, updatedAt),
+    nodeId: parentTranscript.childRootNodeId,
+  });
+
+  /** Emits a child's card and keeps it. A card that changed thread names the one it left. */
+  const emitCard = Effect.fnUntraced(function* (child: PiRlmChildState, card: SubagentCard) {
+    const movedFromThreadId = child.card?.threadId;
+    child.card = card;
+    yield* emit({
+      type: "turn_item.updated",
+      driver,
+      turnItem: card,
+      ...(movedFromThreadId === undefined || movedFromThreadId === card.threadId
+        ? {}
+        : { movedFromThreadId }),
+    });
+  });
+
+  /**
+   * A nested child seen before its parent child starts under the root. Once
+   * T3 has the parent child's thread, the nested child's thread and card move
+   * under it on the nested child's next update, whatever its status. The
+   * thread changes only its parent, so the user's edits to it stay, and the
+   * card keeps its outcome.
+   */
+  const moveUnderParentChild = Effect.fnUntraced(function* (
+    childId: string,
+    child: PiRlmChildState,
+    parentTranscript: PiChildTranscript,
+    now: DateTime.Utc,
+  ) {
+    const transcript = rlmTranscripts.get(childId);
+    if (transcript !== undefined && transcript.parentThreadId !== parentTranscript.childThreadId) {
+      transcript.parentThreadId = parentTranscript.childThreadId;
+      yield* emit({
+        type: "app_thread.reparented",
+        driver,
+        threadId: transcript.childThreadId,
+        parentThreadId: transcript.parentThreadId,
+      });
+    }
+    const card = child.card;
+    if (card === null || card.threadId === parentTranscript.childThreadId) return;
+    yield* emitCard(child, {
+      ...card,
+      ...nestedCardFields(parentTranscript, `rlm:${childId}`, child.startedAt, now),
+    });
+  });
+
+  /** Mirrors one `rlm_child_update` roster snapshot onto T3's subagent surfaces. */
+  const emitRlmChild = Effect.fnUntraced(function* (
+    snapshot: unknown,
+    currentTurn: ActivePiTurn | null,
+    source: RlmChildUpdateSource = "rlm_child_update",
+  ) {
+    const statusOverride = source === "interrupt" ? "interrupted" : undefined;
+    const childId = recordString(snapshot, "id");
+    if (childId === undefined) {
+      yield* traceRlmChildUpdate(snapshot, currentTurn, source, {
+        outcome: "dropped",
+        reason: "missing-child-id",
+      });
+      return;
+    }
+    const emittedAt = yield* DateTime.now;
+    const previous = rlmChildren.get(childId);
+    // Nested children report through the root session with their parent
+    // child's id. Their first update can arrive after the root turn settled.
+    const parentChildId = recordString(snapshot, "parentId");
+    const parentChild = parentChildId === undefined ? undefined : rlmChildren.get(parentChildId);
+    const parentTranscript =
+      parentChildId === undefined ? undefined : rlmTranscripts.get(parentChildId);
+    // A child outlives the run that spawned it; its record stays on that run.
+    // A nested child's record goes to its parent child's run while the parent
+    // is still on its task and that run's turn did not fail or get interrupted
+    // (either ends the run's listener at once). Otherwise it goes to the live
+    // turn, as a resumed Claude task does, so the record has a run to land on.
+    const parentRunEnded = (candidate: ActivePiTurn) =>
+      candidate !== currentTurn && (candidate.interrupted || candidate.failure !== null);
+    const launchingTurn =
+      parentChild !== undefined && !parentChild.terminal && !parentRunEnded(parentChild.turn)
+        ? parentChild.turn
+        : (currentTurn ?? parentChild?.turn ?? null);
+    const turn = previous?.turn ?? launchingTurn;
+    if (turn === null) {
+      yield* traceRlmChildUpdate(snapshot, currentTurn, source, {
+        outcome: "dropped",
+        reason: "no-turn",
+      });
+      return;
+    }
+    const status = statusOverride ?? rlmChildStatus(recordString(snapshot, "status"));
+    const terminal = status !== "pending" && status !== "running";
+    if (previous !== undefined && parentTranscript !== undefined) {
+      yield* moveUnderParentChild(childId, previous, parentTranscript, emittedAt);
+    }
+    // A child that finished in an earlier turn already shows its outcome.
+    // Later roster churn (the parent deleting it, a resynced roster) must
+    // not rewrite that card from an unrelated turn.
+    if (previous?.terminal && terminal) {
+      yield* emitRetainedChildUpdate(childId, previous, snapshot, status, currentTurn, source);
+      return;
+    }
+    if (previous === undefined && terminal) {
+      yield* traceRlmChildUpdate(snapshot, currentTurn, source, {
+        outcome: "dropped",
+        reason: "terminal-for-unseen-child",
+      });
+      return;
+    }
+    yield* traceRlmChildUpdate(snapshot, currentTurn, source, {
+      outcome: "emitted",
+      turn,
+      routedVia:
+        previous !== undefined
+          ? "known-child"
+          : turn === parentChild?.turn
+            ? "parent-child"
+            : "current-turn",
+    });
+    const state: PiRlmChildState = {
+      snapshot,
+      startedAt: previous?.startedAt ?? emittedAt,
+      terminal,
+      followUpStartedAt: null,
+      turn,
+      card: previous?.card ?? null,
+    };
+    rlmChildren.set(childId, state);
+    const nativeTaskId = `rlm:${childId}`;
+    const subagentId = idAllocator.derive.nodeFromProviderItem({
+      driver,
+      nativeItemId: nativeTaskId,
+    });
+    const title = recordString(snapshot, "sessionName") ?? null;
+    const prompt = recordString(snapshot, "label") ?? title ?? "child agent";
+    const progress = terminal ? undefined : rlmChildProgress(snapshot);
+    const completedAt = terminal ? emittedAt : null;
+    // Nesting under the parent subagent's node is what lets clients
+    // draw Prime Agent's subagent tree.
+    const parentNodeId =
+      parentChildId === undefined
+        ? turn.turnInput.rootNodeId
+        : idAllocator.derive.nodeFromProviderItem({
+            driver,
+            nativeItemId: `rlm:${parentChildId}`,
+          });
+    const previousStatus =
+      previous === undefined
+        ? undefined
+        : rlmChildStatus(recordString(previous.snapshot, "status"));
+    // The task's node in the parent run, as Claude and Codex give theirs.
+    if (previousStatus !== status) {
+      yield* emit({
+        type: "node.updated",
+        driver,
+        node: {
+          id: subagentId,
+          threadId: turn.turnInput.threadId,
+          runId: turn.turnInput.runId,
+          parentNodeId,
+          rootNodeId: turn.turnInput.rootNodeId,
+          kind: "subagent",
+          status,
+          countsForRun: false,
+          providerThreadId: turn.turnInput.providerThread.id,
+          providerTurnId: turn.providerTurn.id,
+          nativeItemRef: providerRef(nativeTaskId),
+          runtimeRequestId: null,
+          checkpointScopeId: null,
+          startedAt: state.startedAt,
+          completedAt,
+        },
+      });
+    }
+    const transcript = childThreads
+      ? (rlmTranscripts.get(childId) ??
+        (yield* openChildTranscript({
+          turn,
+          childId,
+          subagentId,
+          parentTranscript,
+          snapshot,
+          title,
+          prompt,
+          now: emittedAt,
+        })))
+      : undefined;
+    if (transcript !== undefined) {
+      // Close the transcript before the root reports the outcome.
+      if (terminal) yield* finishChildObservation(transcript, status, statusOverride === undefined);
+      yield* emitChildRootNode(transcript, status, nativeTaskId, state.startedAt, completedAt);
+    }
+    // Prime Agent clips its answer preview; the reply T3 observed is whole.
+    const result = terminal
+      ? (recordString(snapshot, "error") ??
+        transcript?.finalReply ??
+        recordString(snapshot, "answerPreview") ??
+        null)
+      : null;
+    yield* emit({
+      type: "subagent.updated",
+      driver,
+      subagent: {
+        id: subagentId,
+        threadId: turn.turnInput.threadId,
+        runId: turn.turnInput.runId,
+        parentNodeId,
+        origin: "provider_native",
+        createdBy: "agent",
+        driver,
+        providerInstanceId: instanceId,
+        providerThreadId: turn.turnInput.providerThread.id,
+        childThreadId: transcript?.childThreadId ?? null,
+        nativeTaskRef: providerRef(nativeTaskId),
+        prompt,
+        title,
+        model: recordString(snapshot, "model") ?? null,
+        status,
+        ...(progress === undefined ? {} : { progress }),
+        result,
+        startedAt: state.startedAt,
+        completedAt,
+        updatedAt: emittedAt,
+      },
+    });
+    yield* emitCard(state, {
+      ...(parentTranscript === undefined
+        ? baseItemFields(turn, nativeTaskId, state.startedAt, emittedAt)
+        : nestedCardFields(parentTranscript, nativeTaskId, state.startedAt, emittedAt)),
+      status,
+      title,
+      completedAt,
+      type: "subagent",
+      subagentId,
+      origin: "provider_native",
+      driver,
+      providerInstanceId: instanceId,
+      childThreadId: transcript?.childThreadId ?? null,
+      prompt,
+      ...(progress === undefined ? {} : { progress }),
+      result,
+    });
+    if (transcript !== undefined && !terminal) {
+      yield* syncChildObservation(transcript, snapshot);
+    }
+  });
+
+  const handleEvent = Effect.fnUntraced(function* (event: PiRpcRecord, turn: ActivePiTurn | null) {
+    switch (event["type"]) {
+      case "rlm_child_update":
+        yield* emitRlmChild(event["child"], turn);
+        return;
+      case "observed_session_event": {
+        const sessionId = recordString(event, "activeSessionId");
+        const transcript = sessionId === undefined ? undefined : observedTranscripts.get(sessionId);
+        const observed = event["event"];
+        if (transcript !== undefined && Predicate.isObject(observed))
+          yield* observeChildEvent(transcript, observed);
+        return;
+      }
+      case "observed_session_closed": {
+        const sessionId = recordString(event, "activeSessionId");
+        const transcript = sessionId === undefined ? undefined : observedTranscripts.get(sessionId);
+        if (sessionId !== undefined && transcript !== undefined) {
+          transcript.failedSessionIds.add(sessionId);
+          yield* finalizeChildTranscript(transcript, "interrupted");
+          yield* stopObservingChild(transcript, false);
+        }
+        return;
+      }
+    }
+  });
+
+  /**
+   * Settles a child from the notice Prime Agent stored for its parent, for
+   * when the roster update that said so was dropped. A child already settled
+   * keeps its card.
+   */
+  const settleFromNotice = Effect.fnUntraced(function* (message: unknown) {
+    const noticed = noticedChildEnd(message);
+    const child = noticed === undefined ? undefined : rlmChildren.get(noticed.childId);
+    if (noticed === undefined || child === undefined || child.terminal) return;
+    yield* emitRlmChild(
+      {
+        ...(Predicate.isObject(child.snapshot) ? child.snapshot : {}),
+        activity: undefined,
+        ...noticed.snapshot,
+      },
+      null,
+      "transcript_notice",
+    );
+  });
+
+  const interrupt = (turn?: ActivePiTurn) =>
+    Effect.forEach(
+      Array.from(rlmChildren).filter(
+        ([, child]) =>
+          (!child.terminal || child.followUpStartedAt !== null) &&
+          (turn === undefined || child.turn === turn),
+      ),
+      ([childId, child]) =>
+        child.terminal
+          ? endChildFollowUp(childId, child, "interrupted", false)
+          : emitRlmChild(child.snapshot, null, "interrupt"),
+      { discard: true },
+    );
+  return {
+    handleEvent,
+    settleFromNotice,
+    interrupt,
+    hasLiveChildren: () =>
+      Array.from(rlmChildren.values()).some(
+        (child) => !child.terminal || child.followUpStartedAt !== null,
+      ),
+  };
+}

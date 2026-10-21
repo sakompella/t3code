@@ -439,6 +439,7 @@ export const ClaudeProviderCapabilitiesV2 = {
     providerCanRollbackConversation: true,
     providerRollbackReturnsSnapshot: true,
     providerCanReadConversationSnapshot: false,
+    providerCanSummarizeRollback: false,
   },
   identity: {
     nativeThreadIds: "strong",
