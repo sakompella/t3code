@@ -52,12 +52,28 @@ export const selfInvocationArgs = (
 ): ReadonlyArray<string> =>
   invocation.entrypoint === undefined ? args : [invocation.entrypoint, ...args];
 
-export const resolveNodeExecutable = Effect.fn("nodeRuntime.resolveNodeExecutable")(function* (
+export interface NodeRuntime {
+  /** A binary that runs JavaScript the way `node` does when given `env`. */
+  readonly command: string;
+  /**
+   * The environment that makes `command` behave as Node: `ELECTRON_RUN_AS_NODE`
+   * when it is the Electron binary, otherwise empty. Set it on the one child
+   * that runs `command`; the server itself does not leak it to other children.
+   */
+  readonly env: Readonly<Record<string, string>>;
+}
+
+export const ELECTRON_RUN_AS_NODE_ENV = { ELECTRON_RUN_AS_NODE: "1" } as const;
+
+export const resolveNodeRuntime = Effect.fn("nodeRuntime.resolveNodeRuntime")(function* (
   feature: typeof NodeRuntimeFeature.Type,
   environment?: NodeJS.ProcessEnv,
 ) {
   const executablePath = yield* HostProcess.ExecutablePath;
-  if (!(yield* HostProcess.IsExecutable)) return executablePath;
+  if (!(yield* HostProcess.IsExecutable)) {
+    const env: NodeRuntime["env"] = (yield* HostProcess.IsElectron) ? ELECTRON_RUN_AS_NODE_ENV : {};
+    return { command: executablePath, env } satisfies NodeRuntime;
+  }
 
   const fs = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
@@ -88,5 +104,13 @@ export const resolveNodeExecutable = Effect.fn("nodeRuntime.resolveNodeExecutabl
     return yield* new NodeRuntimeUnavailableError({ feature });
   }
   // Launchers such as Vite+ dispatch by argv[0]; keep the node name intact.
-  return nodePath;
+  return { command: nodePath, env: {} } satisfies NodeRuntime;
+});
+
+/** The command alone, for callers that only check Node is available. */
+export const resolveNodeExecutable = Effect.fn("nodeRuntime.resolveNodeExecutable")(function* (
+  feature: typeof NodeRuntimeFeature.Type,
+  environment?: NodeJS.ProcessEnv,
+) {
+  return (yield* resolveNodeRuntime(feature, environment)).command;
 });
