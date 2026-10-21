@@ -218,4 +218,27 @@ layer("CommandPolicyV2", (it) => {
       assert.equal(result, "portable_context");
     }),
   );
+
+  it.effect("accepts a rollback summary only from a provider that can summarize", () =>
+    Effect.gen(function* () {
+      const policy = yield* CommandPolicy.CommandPolicyV2;
+      const ensure = (providerCanSummarizeRollback: boolean, summarize: boolean) =>
+        policy.ensureRollback({
+          commandId,
+          threadId,
+          providerInstanceId: ProviderInstanceId.make("codex"),
+          capabilities: capabilities((current) => ({
+            ...current,
+            checkpointing: { ...current.checkpointing, providerCanSummarizeRollback },
+          })),
+          summarize,
+        });
+
+      const error = yield* ensure(false, true).pipe(Effect.flip);
+      assert.instanceOf(error, CommandPolicy.CommandPolicyCapabilityUnsupportedError);
+      assert.equal(error.capability, "rollback_summary");
+      yield* ensure(false, false);
+      yield* ensure(true, true);
+    }),
+  );
 });

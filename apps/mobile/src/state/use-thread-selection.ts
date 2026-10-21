@@ -3,6 +3,7 @@ import { useRoute, type RouteProp } from "@react-navigation/native";
 import { useState } from "react";
 import {
   EnvironmentId,
+  orchestrationV2MessageRunTrigger,
   ThreadId,
   type OrchestrationV2ThreadProjection,
   type OrchestrationV2ThreadShell,
@@ -17,6 +18,7 @@ import {
   deriveLatestThreadRun,
   deriveThreadRuntime,
 } from "@t3tools/client-runtime/state/thread-execution";
+import { latestTaskRun } from "@t3tools/shared/orchestrationV2ThreadError";
 import * as Option from "effect/Option";
 
 import { scopedThreadKey } from "../lib/scopedEntities";
@@ -48,7 +50,7 @@ function latestUserMessageAt(
 ): OrchestrationV2ThreadShell["latestUserMessageAt"] {
   for (let index = projection.messages.length - 1; index >= 0; index -= 1) {
     const message = projection.messages[index];
-    if (message?.role === "user") {
+    if (message?.role === "user" && orchestrationV2MessageRunTrigger(message) === null) {
       return message.createdAt;
     }
   }
@@ -63,6 +65,7 @@ function threadDetailToShell(
   const thread = projection.thread;
   const latestRun = deriveLatestThreadRun(projection);
   const runtime = deriveThreadRuntime(projection);
+  const taskRun = latestTaskRun(projection);
   const pendingRequest =
     projection.runtimeRequests.find((request) => request.status === "pending") ?? null;
   return presentThreadShell(environmentId, {
@@ -84,6 +87,9 @@ function threadDetailToShell(
     createdBy: thread.createdBy,
     creationSource: thread.creationSource,
     latestRunId: latestRun?.runId ?? null,
+    latestRunTrigger: latestRun?.trigger ?? null,
+    latestTaskRunCompletedAt: taskRun?.completedAt ?? null,
+    latestTaskRunStatus: taskRun?.status ?? null,
     activeRunId: runtime?.activeRunId ?? null,
     status: runtime?.status ?? "idle",
     pendingRuntimeRequest:

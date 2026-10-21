@@ -58,6 +58,7 @@ export const CommandPolicyCapability = Schema.Literals([
   "fork_from_turn",
   "rollback",
   "rollback_snapshot",
+  "rollback_summary",
   "context_handoff",
   "strong_terminal_status",
 ]);
@@ -243,7 +244,7 @@ export interface CommandPolicyV2Shape {
     },
   ) => Effect.Effect<ForkExecutionPolicyV2, CommandPolicyV2Error>;
   readonly ensureRollback: (
-    input: CapabilityCheckInput,
+    input: CapabilityCheckInput & { readonly summarize: boolean },
   ) => Effect.Effect<void, CommandPolicyV2Error>;
   readonly ensureContextHandoff: (
     input: CapabilityCheckInput & {
@@ -353,6 +354,15 @@ const ensureRollback: CommandPolicyV2Shape["ensureRollback"] = (input) => {
         input,
         "rollback_snapshot",
         "rollback must return a providerInstanceId thread snapshot",
+      ),
+    );
+  }
+  if (input.summarize && !input.capabilities.checkpointing.providerCanSummarizeRollback) {
+    return Effect.fail(
+      unsupported(
+        input,
+        "rollback_summary",
+        "providerInstanceId cannot summarize the turns a rollback discards",
       ),
     );
   }
