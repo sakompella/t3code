@@ -10,7 +10,7 @@
 
 ## Topic branches
 
-The fork is kept as topic branches on upstream `main`. `FORK-TOPICS` lists them in merge order as `<topic> <parent>`, where the parent is `upstream` or an earlier topic, and topic X lives on branch `topic/X`. Today there are seven, in merge order:
+The fork is kept as topic branches on upstream `main`. `FORK-TOPICS` lists them in merge order as `<topic> <parent>`, where the parent is `upstream` or an earlier topic, and topic X lives on branch `topic/X`. Today there are eight, in merge order:
 
 - `meta` on upstream: this file, `FORK-TOPICS` and `scripts/fork-topics.py`.
 - `tailwind-src-scan` on upstream: Tailwind scans only `apps/web/src`.
@@ -18,13 +18,14 @@ The fork is kept as topic branches on upstream `main`. `FORK-TOPICS` lists them 
 - `electron-run-as-node` on upstream: `ELECTRON_RUN_AS_NODE` goes only to the children that run Electron as Node.
 - `failed-turn-sweep` on upstream: a failed turn does not start a worktree cleanup sweep.
 - `provider-switch-guidance` on upstream: agent instructions delegate to another provider only for a missing capability.
-- `fork` on `meta`: everything else, mostly the Prime Agent provider.
+- `syntax-highlighting-web` on `meta`: syntax highlighting of shell and Python tool rows on web, plus `entryCode.ts`, which mobile and the Prime tool display also use.
+- `fork` on `syntax-highlighting-web`: everything else, mostly the Prime Agent provider.
 
 The feature list below covers every topic and stays in this file. More topics get carved out of `fork` once each builds on its own from whole hunks. When two features share a hunk, an ordinary refactor commit on `fork` first moves their lines apart. A topic whose code `fork` imports goes on `meta`, and `fork` is restacked on it. What blocks the next carves (checked 2026-10-21):
 
-- Prime Agent provider: upstream plus every `packages/` change of `fork` leaves 9 `apps/server` errors. They come from exhaustive switches over new variants (the `rollback_summary` item, the `html_render.record` command, the `app_thread.reparented` event) and the required `now` of `ProjectThreadAwarenessV2Input`. So the server halves of rollback summaries, `html_render` records and nested subagents would have to come with it.
+- Prime Agent provider: upstream plus every `packages/` change of `fork` leaves 9 `apps/server` errors. Four come from exhaustive switches over new variants (the `rollback_summary` item, the `html_render.record` command, the `app_thread.reparented` event). Five are callers without the `now` that `packages/shared/src/agentAwareness.ts` requires for snooze, in a hunk shared with heartbeat fields. So the server halves of rollback summaries, `html_render` records, nested subagents and snooze would have to come with it, unless they are split off first.
 - Rollback: its contracts and most of its server half now carve cleanly. `ChatView.tsx` shares an import hunk with heartbeats. Hunks in `WireProjection.ts` (subagent text), `V2ItemInspector.tsx` (long notices), mobile `thread-work-log.tsx` (syntax highlighting) and `threadActivity.ts` (run-fold), and the `pendingHeadMove` guard in `Orchestrator.ts` (failed-steer queue) are shared too.
-- Syntax highlighting: the web half and `entryCode.ts` carve cleanly. On mobile, `thread-work-log.tsx` shares hunks with rollback summaries and notice labels, and `threadActivity.ts` imports `pythonCellLabel` (the Prime tool display) in the same statement as the highlighting helpers.
+- Syntax highlighting on mobile: `thread-work-log.tsx` shares hunks with rollback summaries and notice labels, and `threadActivity.ts` imports `pythonCellLabel` (the Prime tool display) in the same statement as the highlighting helpers.
 - The thread-switch typing fix shares a `Sidebar.tsx` import hunk with snooze and settle.
 
 **Rules.** The daily sync rebuilds the topics on `upstream/main`; nothing rebases `feat/prime-agent-on-main`. Every worker branch starts from the topic it changes and lands into that topic with `--no-ff` (`scripts/fork-topics.py land <branch> <topic>`), never into `feat/prime-agent-on-main`, never fast-forwarded or squashed.
