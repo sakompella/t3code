@@ -316,6 +316,7 @@ export const CodexProviderCapabilitiesV2 = {
     providerCanRollbackConversation: true,
     providerRollbackReturnsSnapshot: true,
     providerCanReadConversationSnapshot: true,
+    providerCanSummarizeRollback: false,
   },
   identity: {
     nativeThreadIds: "strong",
