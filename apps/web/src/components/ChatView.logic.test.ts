@@ -742,7 +742,10 @@ describe("waitForRevertedMessage", () => {
     return { state, projection };
   }
 
-  afterEach(() => vi.restoreAllMocks());
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.restoreAllMocks();
+  });
 
   function setThread(
     state: ReturnType<typeof projectionAtom>["state"],
@@ -794,6 +797,7 @@ describe("waitForRevertedMessage", () => {
   });
 
   it("waits until the projection has seen this rollback, ignoring an earlier one's end", async () => {
+    vi.useFakeTimers();
     const { state, projection } = projectionAtom();
     const earlier = CommandId.make("rollback-0");
     setThread(state, projection, {
@@ -802,11 +806,12 @@ describe("waitForRevertedMessage", () => {
       pendingHeadMove: null,
     });
     const outcome = track(waitForRevertedMessage(threadRef, 1, requestId, async () => {}));
-    await new Promise((resolve) => setTimeout(resolve, 0));
+    await vi.advanceTimersByTimeAsync(0);
     expect(outcome.value).toBe("pending");
   });
 
   it("ends when a later rollback already replaced this one in the projection", async () => {
+    vi.useFakeTimers();
     const { state, projection } = projectionAtom();
     const outcome = track(waitForRevertedMessage(threadRef, 1, requestId, async () => {}));
     const later = CommandId.make("rollback-2");
@@ -814,11 +819,12 @@ describe("waitForRevertedMessage", () => {
       rollbackRequestId: later,
       pendingHeadMove: { requestId: later, summarize: false },
     });
-    await new Promise((resolve) => setTimeout(resolve, 0));
+    await vi.advanceTimersByTimeAsync(0);
     expect(outcome.value).toBe("done");
   });
 
   it("rewinds to a message paged out of the bounded projection", async () => {
+    vi.useFakeTimers();
     const { state, projection } = projectionAtom();
     // The edited message and its run are paged out; only the latest run is retained.
     const bounded = {
@@ -833,12 +839,12 @@ describe("waitForRevertedMessage", () => {
       rollbackRequestId: requestId,
       pendingHeadMove: { requestId, summarize: false },
     });
-    await new Promise((resolve) => setTimeout(resolve, 0));
+    await vi.advanceTimersByTimeAsync(0);
     expect(revert).toHaveBeenCalledOnce();
     expect(outcome.value).toBe("pending");
 
     setThread(state, bounded, { rollbackRequestId: requestId, pendingHeadMove: null });
-    await new Promise((resolve) => setTimeout(resolve, 0));
+    await vi.advanceTimersByTimeAsync(0);
     expect(outcome.value).toBe("done");
   });
 

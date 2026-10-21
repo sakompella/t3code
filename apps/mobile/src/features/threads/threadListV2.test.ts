@@ -1344,7 +1344,7 @@ describe("thread list Woke marker", () => {
     expect(resolveThreadListV2WokeAt({ ...thread, snoozedUntil: null }, { now: NOW })).toBeNull();
   });
 
-  it("keeps an early failure wake acknowledged after the scheduled time passes", () => {
+  it("does not wake early on a failure; the timer wake survives a visit before it", () => {
     const completedAt = isoAt(BASE_MS - 2 * MINUTE_MS);
     const failed = makeThread({
       ...thread,
@@ -1366,13 +1366,13 @@ describe("thread list Woke marker", () => {
         assistantMessageId: null,
       },
     });
-    expect(resolveThreadListV2WokeAt(failed, { now: NOW })).toBe(completedAt);
+    expect(resolveThreadListV2WokeAt(failed, { now: NOW })).toBeNull();
     expect(
       resolveThreadListV2WokeAt(
         { ...failed, lastVisitedAt: completedAt },
         { now: isoAt(BASE_MS + 2 * MINUTE_MS) },
       ),
-    ).toBeNull();
+    ).toBe(failed.snoozedUntil);
   });
 
   it("updates a recycled row at the wake boundary even without a new shell or minute tick", () => {
