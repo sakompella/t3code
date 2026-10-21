@@ -248,7 +248,6 @@ const PiProviderCapabilitiesV2 = {
     // rollback is enabled; rollbackThread returns the updated provider thread.
     providerRollbackReturnsSnapshot: true,
     providerCanReadConversationSnapshot: true,
-    providerCanSummarizeRollback: false,
   },
   identity: {
     nativeThreadIds: "strong",
