@@ -2,6 +2,7 @@ import type {
   DeviceServiceState,
   EnvironmentId,
   MessageId,
+  OrchestrationV2RollbackSummary,
   ScopedThreadRef,
   ThreadId,
 } from "@t3tools/contracts";
@@ -13,6 +14,7 @@ import { appAtomRegistry } from "~/rpc/atomRegistry";
 import { useRightPanelStore } from "~/rightPanelStore";
 import { DeviceSetup } from "../device/DeviceSetup";
 import { PullRequestThreadDialog } from "../PullRequestThreadDialog";
+import { EditFromHereActions } from "./EditFromHereActions";
 import {
   AlertDialog,
   AlertDialogClose,
@@ -193,13 +195,19 @@ export function openRevertConfirm(threadKey: string, pending: PendingRevert): vo
 
 export function RevertConfirmHost(props: {
   readonly threadKey: string;
-  readonly onConfirm: (turnCount: number, messageId: MessageId, restoreFiles: boolean) => void;
+  readonly canSummarize: boolean;
+  readonly onConfirm: (
+    turnCount: number,
+    messageId: MessageId,
+    restoreFiles: boolean,
+    summary: OrchestrationV2RollbackSummary | undefined,
+  ) => void;
 }) {
   const pending = useThreadOverlay(revertConfirmAtom, props.threadKey);
-  const confirm = (restoreFiles: boolean) => {
+  const confirm = (restoreFiles: boolean, summary: OrchestrationV2RollbackSummary | undefined) => {
     if (pending === null) return;
     closeThreadOverlay(revertConfirmAtom);
-    props.onConfirm(pending.turnCount, pending.messageId, restoreFiles);
+    props.onConfirm(pending.turnCount, pending.messageId, restoreFiles, summary);
   };
   return (
     <AlertDialog
@@ -216,13 +224,11 @@ export function RevertConfirmHost(props: {
             “Revert files too” also undoes your own edits.
           </AlertDialogDescription>
         </AlertDialogHeader>
-        <AlertDialogFooter>
-          <AlertDialogClose render={<Button variant="outline" />}>Cancel</AlertDialogClose>
-          <Button variant="destructive-outline" onClick={() => confirm(true)}>
-            Revert files too
-          </Button>
-          <Button onClick={() => confirm(false)}>Revert and keep changes</Button>
-        </AlertDialogFooter>
+        <EditFromHereActions
+          key={pending?.messageId}
+          canSummarize={props.canSummarize}
+          onConfirm={confirm}
+        />
       </AlertDialogPopup>
     </AlertDialog>
   );
