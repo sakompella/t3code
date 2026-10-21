@@ -1,5 +1,4 @@
 import { makeAssistantStreamingFilter } from "./assistantStreaming.ts";
-import { resolveProjectSettings } from "@t3tools/shared/projectSettings";
 import {
   isOrchestrationV2WorkActive,
   CommandId,
@@ -62,6 +61,8 @@ export interface ProviderEventRoutingState {
   readonly ownedProviderThreadIds: ReadonlySet<ProviderThreadId>;
   readonly ownedProviderTurns: ReadonlyMap<ProviderTurnId, ProviderThreadId>;
   readonly inheritedBackgroundTurnItems: ReadonlyMap<TurnItemId, OrchestrationV2Run["id"]>;
+  // The subagent rows behind inherited subagent items, which report on their own events.
+  readonly inheritedBackgroundSubagents: ReadonlyMap<NodeId, OrchestrationV2Run["id"]>;
   readonly rootProviderTurnId: ProviderTurnId | null;
 }
 
@@ -75,6 +76,8 @@ export interface ProviderEventRouteIdentity {
 export interface InheritedBackgroundTurnItemRoute {
   readonly id: TurnItemId;
   readonly runId: OrchestrationV2Run["id"];
+  /** Set for a subagent item, so its `subagent.updated` events are inherited with it. */
+  readonly subagentId?: NodeId;
 }
 
 type ProviderTerminalEvent = Extract<
@@ -142,7 +145,13 @@ export function selectInheritedBackgroundTurnItems(input: {
     settledPriorRunIds.has(turnItem.runId) &&
     backgroundCapableTurnItemTypes.has(turnItem.type) &&
     !isSettledTurnItemStatus(turnItem.status)
-      ? [{ id: turnItem.id, runId: turnItem.runId }]
+      ? [
+          {
+            id: turnItem.id,
+            runId: turnItem.runId,
+            ...(turnItem.type === "subagent" ? { subagentId: turnItem.subagentId } : {}),
+          },
+        ]
       : [],
   );
 }
@@ -346,9 +355,37 @@ export function makeProviderEventRoutingState(input: {
     inheritedBackgroundTurnItems: new Map(
       (input.inheritedBackgroundTurnItems ?? []).map((item) => [item.id, item.runId]),
     ),
+    inheritedBackgroundSubagents: new Map(
+      (input.inheritedBackgroundTurnItems ?? []).flatMap((item) =>
+        item.subagentId === undefined ? [] : [[item.subagentId, item.runId] as const],
+      ),
+    ),
     rootProviderTurnId: input.providerTurnId,
   };
 }
+
+/**
+ * Every run on a session sees every `subagent.updated`, and only the run that
+ * owns the subagent keeps it. Logging each subscriber's verdict shows which
+ * run took an update, or that none did.
+ */
+const logSubagentRouting = (
+  subagent: OrchestrationV2Subagent,
+  route: ProviderEventRouteIdentity,
+  accepted: boolean,
+) =>
+  Effect.logDebug("orchestration-v2.subagent-update-routing").pipe(
+    Effect.annotateLogs({
+      accepted,
+      subscriberRunId: route.runId,
+      subscriberThreadId: route.threadId,
+      subagentId: subagent.id,
+      subagentRunId: subagent.runId,
+      subagentThreadId: subagent.threadId,
+      subagentProviderThreadId: subagent.providerThreadId,
+      status: subagent.status,
+    }),
+  );
 
 export function routeProviderEvent(
   event: ProviderAdapter.ProviderAdapterV2Event,
@@ -398,6 +435,8 @@ export function routeProviderEvent(
         },
       ];
     }
+    case "app_thread.reparented":
+      return [ownsChildThread(event.threadId), state];
     case "provider_thread.updated": {
       const belongs =
         state.ownedProviderThreadIds.has(event.providerThread.id) ||
@@ -447,6 +486,25 @@ export function routeProviderEvent(
         return [false, { ...state, ownedThreadIds, ownedProviderThreadIds, ownedProviderTurns }];
       }
       const belongs = ownsRun(event.subagent.runId) || ownsChildThread(event.subagent.threadId);
+      if (!belongs) {
+        // A child outlives the run that launched it. Like its turn item, its
+        // updates reach the one live run that inherited it, so a terminal
+        // update still closes the card after the origin run stopped listening.
+        const inheritedRunId = state.inheritedBackgroundSubagents.get(event.subagent.id);
+        const isInheritedSubagent =
+          event.subagent.threadId === input.threadId &&
+          event.subagent.runId !== null &&
+          event.subagent.runId === inheritedRunId;
+        if (!isInheritedSubagent) {
+          return [false, state];
+        }
+        if (!isSettledSubagentStatus(event.subagent.status)) {
+          return [true, state];
+        }
+        const inheritedBackgroundSubagents = new Map(state.inheritedBackgroundSubagents);
+        inheritedBackgroundSubagents.delete(event.subagent.id);
+        return [true, { ...state, inheritedBackgroundSubagents }];
+      }
       const coordinator = event.subagent;
       // Resumes reattribute child threads to the live run, which may not have observed their creation.
       const adopted =
@@ -913,12 +971,9 @@ export const layer: Layer.Layer<
           threadDisposition: "reusable",
         });
         const responseStreamingMode = yield* Effect.gen(function* () {
-          const responseStreamingMode = yield* serverSettings.getSettings.pipe(
-            Effect.map(
-              (settings) =>
-                resolveProjectSettings(settings, input.appThread.projectId).settings
-                  .responseStreamingMode,
-            ),
+          const responseStreamingMode = yield* ServerSettings.readResponseStreamingMode(
+            serverSettings.getSettings,
+            input.appThread.projectId,
           );
           yield* checkpointService
             .captureBaseline({
@@ -1292,6 +1347,9 @@ export const layer: Layer.Layer<
               const previous = yield* Ref.get(eventRouting);
               const [accepted, routing] = routeProviderEvent(event, routeIdentity, previous);
               yield* Ref.set(eventRouting, routing);
+              if (event.type === "subagent.updated") {
+                yield* logSubagentRouting(event.subagent, routeIdentity, accepted);
+              }
               if (
                 event.type === "subagent.updated" &&
                 event.subagent.childThreadId !== null &&
@@ -1497,7 +1555,7 @@ export const layer: Layer.Layer<
                 const completedAt = yield* DateTime.now;
                 yield* Effect.logWarning("orchestration V2 provider event ingestion failed", {
                   runId: input.run.id,
-                  cause,
+                  cause: Cause.pretty(cause),
                 });
                 if (yield* Ref.get(rootRunFinalized)) return;
                 const providerThread = yield* Ref.get(latestProviderThread);
@@ -1687,7 +1745,7 @@ export const layer: Layer.Layer<
           Effect.catchCause((cause) =>
             Effect.logError("orchestration V2 provider turn start failed", {
               runId: input.run.id,
-              cause,
+              cause: Cause.pretty(cause),
             }).pipe(
               Effect.andThen(Fiber.interrupt(providerEventFiber)),
               Effect.andThen(Ref.get(latestProviderThread)),

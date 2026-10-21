@@ -1,5 +1,6 @@
 import { assert, it } from "@effect/vitest";
-import { RunId, ThreadId, TurnItemId } from "@t3tools/contracts";
+import { CommandId, RunId, ThreadId, TurnItemId } from "@t3tools/contracts";
+import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as SqlClient from "effect/sql/SqlClient";
@@ -54,5 +55,44 @@ it.effect("reuses an item's position without attempting another allocation inser
       yield* positions.allocate({ ...input, threadId: ThreadId.make("thread:other") }),
       1,
     );
+  }).pipe(Effect.provide(layerTest)),
+);
+
+it.effect("places a rollback summary after the run the conversation was rewound to", () =>
+  Effect.gen(function* () {
+    const sql = yield* SqlClient.SqlClient;
+    const positions = yield* TurnItemPositionStore.TurnItemPositionStoreV2;
+    const threadId = ThreadId.make("thread:rollback-summary-position");
+    yield* sql`
+      INSERT INTO orchestration_v2_projection_runs
+        (run_id, thread_id, ordinal, provider, status, requested_at, payload_json)
+      VALUES ('run:kept', ${threadId}, 3, 'primeAgent', 'completed', '2026-10-18T00:00:00.000Z', '{}')
+    `;
+    const summary = (id: string, rewoundToRunId: RunId | null) =>
+      ({
+        id: TurnItemId.make(id),
+        threadId,
+        runId: null,
+        nodeId: null,
+        providerThreadId: null,
+        providerTurnId: null,
+        nativeItemRef: null,
+        parentItemId: null,
+        ordinal: 0,
+        status: "completed",
+        title: null,
+        startedAt: null,
+        completedAt: null,
+        updatedAt: DateTime.makeUnsafe("2026-10-18T00:00:00.000Z"),
+        type: "rollback_summary",
+        rollbackRequestId: CommandId.make(`rollback:${id}`),
+        rewoundToRunId,
+      }) as const;
+    const afterKeptRun = yield* positions.normalize(
+      summary("item:after-run-3", RunId.make("run:kept")),
+    );
+    const atThreadStart = yield* positions.normalize(summary("item:at-start", null));
+    assert.equal(afterKeptRun.ordinal, 3_000_001);
+    assert.equal(atThreadStart.ordinal, 1);
   }).pipe(Effect.provide(layerTest)),
 );

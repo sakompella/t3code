@@ -370,6 +370,15 @@ export function applyOrchestrationV2ProjectionEvent(
     case "plan.updated":
       return { ...base, plans: upsertEntity(base.plans, event.payload) };
     case "turn-item.updated": {
+      // An item that names another thread moved there. The server tells its old
+      // thread, and a fresh load of this thread no longer has it.
+      if (event.payload.threadId !== projection.thread.id) {
+        return {
+          ...base,
+          turnItems: base.turnItems.filter((item) => item.id !== event.payload.id),
+          visibleTurnItems: removeVisibleItem(base.visibleTurnItems, event.payload.id),
+        };
+      }
       const payload = restoreTurnItemBodies(event.payload, latestBodies(projection));
       // Streamed updates land on the newest items, so search from the end.
       let itemIndex = projection.turnItems.length - 1;

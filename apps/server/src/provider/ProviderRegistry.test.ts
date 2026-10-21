@@ -606,6 +606,93 @@ it.layer(
       );
     });
 
+    it.each(["pi", "primeAgent"] as const)(
+      "keeps %s commands and skills through a probe that discovered nothing",
+      (driver) => {
+        const previousProvider = {
+          instanceId: ProviderInstanceId.make(driver),
+          driver: ProviderDriverKind.make(driver),
+          status: "ready",
+          enabled: true,
+          installed: true,
+          auth: { status: "authenticated", type: driver },
+          checkedAt: "2026-10-03T00:00:00.000Z",
+          version: "1.0.0",
+          models: [],
+          slashCommands: [{ name: "compact" }, { name: "ant-account" }],
+          skills: [
+            {
+              name: "architect",
+              path: "/Users/me/.agents/skills/architect/SKILL.md",
+              enabled: true,
+              scope: "user",
+            },
+          ],
+        } as const satisfies ServerProvider;
+        const emptyProbe = {
+          ...previousProvider,
+          checkedAt: "2026-10-03T00:01:00.000Z",
+          auth: { status: "unknown" },
+          slashCommands: [],
+          skills: [],
+        } satisfies ServerProvider;
+
+        const merged = ProviderRegistry.mergeProviderSnapshot(previousProvider, emptyProbe);
+        assert.deepStrictEqual(merged.slashCommands, previousProvider.slashCommands);
+        assert.deepStrictEqual(merged.skills, previousProvider.skills);
+
+        const failedProbe = {
+          ...emptyProbe,
+          status: "error",
+          message: "Failed to execute the CLI health check.",
+        } satisfies ServerProvider;
+        assert.deepStrictEqual(
+          ProviderRegistry.mergeProviderSnapshot(previousProvider, failedProbe).skills,
+          previousProvider.skills,
+        );
+      },
+    );
+
+    it.each(["pi", "primeAgent"] as const)(
+      "replaces %s commands once discovery completes and clears them for a missing CLI",
+      (driver) => {
+        const previousProvider = {
+          instanceId: ProviderInstanceId.make(driver),
+          driver: ProviderDriverKind.make(driver),
+          status: "ready",
+          enabled: true,
+          installed: true,
+          auth: { status: "authenticated", type: driver },
+          checkedAt: "2026-10-03T00:00:00.000Z",
+          version: "1.0.0",
+          models: [],
+          slashCommands: [{ name: "compact" }, { name: "retired" }],
+          skills: [{ name: "retired", path: "/skills/retired/SKILL.md", enabled: true }],
+        } as const satisfies ServerProvider;
+        const discovered = {
+          ...previousProvider,
+          slashCommands: [{ name: "compact" }],
+          skills: [],
+        } satisfies ServerProvider;
+        const merged = ProviderRegistry.mergeProviderSnapshot(previousProvider, discovered);
+        assert.deepStrictEqual(merged.slashCommands, [{ name: "compact" }]);
+        assert.deepStrictEqual(merged.skills, []);
+
+        const missing = {
+          ...previousProvider,
+          status: "error",
+          installed: false,
+          auth: { status: "unknown" },
+          slashCommands: [],
+          skills: [],
+        } satisfies ServerProvider;
+        assert.deepStrictEqual(
+          ProviderRegistry.mergeProviderSnapshot(previousProvider, missing).skills,
+          [],
+        );
+      },
+    );
+
     it("does not bring back models the installed CLI is too old to run", () => {
       const pendingProvider = {
         instanceId: ProviderInstanceId.make("claudeAgent"),
