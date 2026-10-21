@@ -773,11 +773,7 @@ describe("buildThreadFeed", () => {
         ].map((item, position) => projected(item, position)),
       );
       const collapsed = deriveThreadFeedPresentation(unsteered, latestRun, new Set());
-      expect(sequence(collapsed)).toEqual([
-        "Run checks",
-        "fold: Worked for 39s",
-        "final",
-      ]);
+      expect(sequence(collapsed)).toEqual(["Run checks", "fold: Worked for 39s", "final"]);
       expect(foldKeys(collapsed)).toEqual([runId]);
     });
   });
