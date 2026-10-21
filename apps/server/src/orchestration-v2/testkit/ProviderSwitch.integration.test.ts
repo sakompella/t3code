@@ -393,6 +393,7 @@ const waitForIdle = Effect.fn("ProviderSwitchTest.waitForIdle")(function* (
   const orchestrator = yield* Orchestrator.OrchestratorV2;
   const eventSink = yield* EventSink.EventSinkV2;
   const isIdle = (projection: OrchestrationV2ThreadProjection) =>
+    !projection.thread.pendingHeadMove &&
     projection.runs.every(
       (run) => !["queued", "starting", "running", "waiting"].includes(run.status),
     );
@@ -3065,7 +3066,7 @@ describe("orchestration v2 provider switching", () => {
               scopeId: checkpoint.scopeId,
               restoreFiles: false,
             });
-            yield* (yield* EffectWorker.OrchestrationEffectWorkerV2).drain();
+            yield* waitForIdle(threadId);
             if (behindClaudeTurn) {
               // Promoting a queued run is a separate path from an immediate dispatch.
               yield* orchestrator.dispatch(
@@ -3105,7 +3106,7 @@ describe("orchestration v2 provider switching", () => {
               scopeId: checkpoint.scopeId,
               restoreFiles: false,
             });
-            yield* (yield* EffectWorker.OrchestrationEffectWorkerV2).drain();
+            yield* waitForIdle(threadId);
             return [returned, forked, generationAfterReturn] as const;
           }).pipe(
             Effect.provide(
