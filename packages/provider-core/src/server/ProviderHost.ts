@@ -7,6 +7,7 @@ import type {
 import * as Context from "effect/Context";
 import type * as Effect from "effect/Effect";
 import type * as Option from "effect/Option";
+import type { PlatformError } from "effect/PlatformError";
 import type * as Scope from "effect/Scope";
 import type * as Stream from "effect/Stream";
 
@@ -29,6 +30,12 @@ export interface ProviderCredentials {
   readonly remove: Effect.Effect<void, ProviderCredentialError>;
 }
 
+/** Image bytes with the MIME type they are in, which scaling can change. */
+export interface ProviderImage {
+  readonly data: Uint8Array;
+  readonly mimeType: string;
+}
+
 export class ProviderHost extends Context.Service<
   ProviderHost,
   {
@@ -49,6 +56,16 @@ export class ProviderHost extends Context.Service<
      * resolve inside the attachments directory.
      */
     readonly resolveAttachmentPath: (attachment: ChatAttachment) => string | null;
+    /**
+     * An image file as a provider should inline it. A long side over 2000 px is
+     * scaled down to 2000, because Anthropic rejects requests with many larger
+     * images. The file on disk is unchanged, and so is the path shown to the
+     * agent.
+     */
+    readonly readImageForProvider: (
+      path: string,
+      mimeType: string,
+    ) => Effect.Effect<ProviderImage, PlatformError>;
     readonly credentials: (
       namespace: string,
       bindingId: string,
