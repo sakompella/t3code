@@ -1,3 +1,4 @@
+import type { BackgroundWorkPillSegment } from "@t3tools/client-runtime/state/thread-background-work";
 import type { SubagentPillSegment } from "@t3tools/client-runtime/state/thread-subagents";
 import { formatDuration } from "@t3tools/shared/orchestrationTiming";
 import { GlassContainer, GlassView } from "expo-glass-effect";
@@ -77,6 +78,8 @@ export function FloatingWorkingControl(props: {
   readonly onScrollToEnd: () => void;
   readonly agents: SubagentPillSegment | null;
   readonly onOpenAgents: () => void;
+  /** Commands and other background work left running by the turn. */
+  readonly background: BackgroundWorkPillSegment | null;
   readonly queuedCount: number;
   readonly onOpenQueue: () => void;
   readonly lift?: SharedValue<number>;
@@ -95,6 +98,9 @@ export function FloatingWorkingControl(props: {
   const [previewWidth, setPreviewWidth] = useState(0);
   const agents = props.agents;
   const hasAgents = agents !== null;
+  const background = props.background;
+  const hasBackground = background !== null;
+  const [backgroundWidth, setBackgroundWidth] = useState(0);
   const labelWidth = Math.max(
     0,
     Math.min(overlayWidth, windowWidth) -
@@ -103,6 +109,7 @@ export function FloatingWorkingControl(props: {
       (action !== null ? actionWidth : 0) -
       (hasQueue ? queueWidth : 0) -
       (hasAgents ? agentsWidth : 0) -
+      (hasBackground ? backgroundWidth : 0) -
       (hasPreview ? previewWidth : 0),
   );
   const separationProgress = useSharedValue(props.showScrollToEnd ? 1 : 0);
@@ -138,7 +145,7 @@ export function FloatingWorkingControl(props: {
     capsuleWidth.value = first ? width : withTiming(width, CONTROL_TIMING);
   };
   const hasStatus = props.status !== null;
-  const hasCapsule = hasStatus || hasQueue || hasAgents || hasPreview;
+  const hasCapsule = hasStatus || hasQueue || hasAgents || hasBackground || hasPreview;
   useEffect(() => {
     if (!hasStatus) {
       measuredWidthRef.current = null;
@@ -241,6 +248,22 @@ export function FloatingWorkingControl(props: {
           </Text>
         </Pressable>
       ) : null}
+      {background !== null ? (
+        <View
+          accessible
+          accessibilityLabel={background.accessibilityLabel}
+          onLayout={(event) => setBackgroundWidth(event.nativeEvent.layout.width)}
+          className="h-11 flex-row items-center gap-1.5 px-3"
+        >
+          {hasStatus || hasPreview || hasAgents ? (
+            <View className="mr-1 h-4 w-px bg-border" />
+          ) : null}
+          <SymbolView name="terminal" size={13} tintColorClassName="accent-foreground-muted" />
+          <Text className="font-t3-medium text-xs tabular-nums" numberOfLines={1}>
+            {background.label}
+          </Text>
+        </View>
+      ) : null}
       {hasQueue ? (
         <Pressable
           accessibilityRole="button"
@@ -251,7 +274,7 @@ export function FloatingWorkingControl(props: {
           style={{ maxWidth: Math.min(overlayWidth, windowWidth) * 0.45 }}
           className="h-11 flex-row items-center gap-2 px-3 active:opacity-70"
         >
-          {hasStatus || hasPreview || hasAgents ? (
+          {hasStatus || hasPreview || hasAgents || hasBackground ? (
             <View className="mr-1 h-4 w-px bg-border" />
           ) : null}
           <SymbolView name="list.number" size={13} tintColorClassName="accent-foreground-muted" />
