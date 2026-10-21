@@ -82,6 +82,11 @@ Add the environment as a custom MCP app in ChatGPT's apps settings:
    need a client ID or secret.
 4. Create the app, then approve the sign-in page that opens.
 
+If ChatGPT reaches the server through a tunnel that rewrites the resource URL
+and sign-in fails with `invalid_target`, put that URL in the server's
+`T3CODE_MCP_OAUTH_EXTRA_RESOURCES` variable (comma-separated for several) and
+restart the server.
+
 ## Other agents and bots
 
 Any agent that supports remote MCP servers over HTTP with OAuth can connect. Give
