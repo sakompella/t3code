@@ -2,7 +2,7 @@ import { useLayoutEffect } from "react";
 import type { RunId } from "@t3tools/contracts";
 import type { TimelineEntry } from "../../session-logic";
 import {
-  timelineTurnFoldRunIdsByEntryId,
+  timelineTurnFoldKeysByEntryId,
   type MessagesTimelineRow,
   type TimelineLatestRun,
 } from "./MessagesTimeline.logic";
@@ -13,7 +13,7 @@ import { readThreadFindPosition } from "./threadFindPosition";
 export function useThreadFindPositionReader({
   findPositionReaderRef,
   timelineViewportElement,
-  findFoldRunIds,
+  findFoldKeys,
   timelineEntries,
   latestRun,
   runningRunId,
@@ -24,7 +24,7 @@ export function useThreadFindPositionReader({
 }: {
   readonly findPositionReaderRef: React.RefObject<ThreadFindPositionReader | null> | undefined;
   readonly timelineViewportElement: HTMLDivElement | null;
-  readonly findFoldRunIds: ReadonlyMap<string, RunId> | null;
+  readonly findFoldKeys: ReadonlyMap<string, string> | null;
   readonly timelineEntries: ReadonlyArray<TimelineEntry>;
   readonly latestRun: TimelineLatestRun | null;
   readonly runningRunId: RunId | null;
@@ -36,9 +36,9 @@ export function useThreadFindPositionReader({
   useLayoutEffect(() => {
     if (!findPositionReaderRef || !timelineViewportElement) return;
     const read: ThreadFindPositionReader = (query) => {
-      const foldRunIds =
-        findFoldRunIds ??
-        timelineTurnFoldRunIdsByEntryId({
+      const foldKeys =
+        findFoldKeys ??
+        timelineTurnFoldKeysByEntryId({
           timelineEntries,
           latestRun,
           runningRunId,
@@ -59,16 +59,16 @@ export function useThreadFindPositionReader({
               continue;
             }
             const entry = timelineEntries.find((entry) => {
-              const runId =
+              const owner =
                 row.kind === "turn-fold"
-                  ? foldRunIds.get(entry.id)
+                  ? foldKeys.get(entry.id)
                   : entry.kind === "message"
                     ? entry.message.runId
                     : entry.kind === "proposed-plan"
                       ? entry.proposedPlan.runId
                       : null;
               return (
-                runId === row.runId &&
+                owner === (row.kind === "turn-fold" ? row.foldKey : row.runId) &&
                 (entry.kind !== "message" || entry.message.role === "assistant") &&
                 (row.kind !== "attempt-fold" || entry.attempt?.id === row.attemptId)
               );
@@ -87,7 +87,7 @@ export function useThreadFindPositionReader({
     };
   }, [
     contentInsetEndAdjustment,
-    findFoldRunIds,
+    findFoldKeys,
     findPositionReaderRef,
     isWorking,
     latestRun,

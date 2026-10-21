@@ -1,6 +1,8 @@
 import {
   OrchestrationV2AppThread,
   OrchestrationV2TurnItem,
+  type OrchestrationV2PendingBackgroundTask,
+  type OrchestrationV2ProviderHeartbeat,
   type OrchestrationV2ThreadProjection,
   type ScopedThreadRef,
 } from "@t3tools/contracts";
@@ -18,6 +20,11 @@ import {
   deriveThreadCheckpointSummaries,
   type ThreadCheckpointSummary,
 } from "./threadCheckpoints.ts";
+import {
+  backgroundWorkTasksEqual,
+  deriveRunningTurnBackgroundWork,
+} from "./threadBackgroundWork.ts";
+import { deriveThreadHeartbeats, heartbeatsEqual } from "./threadHeartbeats.ts";
 import type {
   EnvironmentThread,
   EnvironmentThreadStructure,
@@ -356,6 +363,35 @@ export function createEnvironmentThreadDetailAtoms<E>(
       (get) => Option.getOrNull(get(threadStateValueAtomFamily(key)).data)?.updatedAt ?? null,
     ).pipe(Atom.setIdleTTL(0), Atom.withLabel(`environment-thread-updated-at:${key}`)),
   );
+
+  const runningTurnBackgroundWorkAtomFamily = Atom.family((key: string) => {
+    const none: ReadonlyArray<OrchestrationV2PendingBackgroundTask> = [];
+    let value = none;
+    return Atom.make((get) => {
+      const projection = Option.getOrNull(get(threadStateValueAtomFamily(key)).data);
+      const next = projection === null ? none : deriveRunningTurnBackgroundWork(projection);
+      // Fresh task objects every projection update; keep the old array when unchanged.
+      if (!backgroundWorkTasksEqual(value, next)) value = next;
+      return value;
+    }).pipe(
+      Atom.setIdleTTL(0),
+      Atom.withLabel(`environment-thread-running-turn-background-work:${key}`),
+    );
+  });
+
+  const heartbeatsAtomFamily = Atom.family((key: string) => {
+    const none: ReadonlyArray<OrchestrationV2ProviderHeartbeat> = [];
+    let value = none;
+    return Atom.make((get) => {
+      const projection = Option.getOrNull(get(threadStateValueAtomFamily(key)).data);
+      const next = projection === null ? none : deriveThreadHeartbeats(projection);
+      // A heartbeat's next run changes with the thread's provider thread, and every
+      // other projection update would otherwise hand clients fresh objects.
+      if (!heartbeatsEqual(value, next)) value = next;
+      return value;
+    }).pipe(Atom.setIdleTTL(0), Atom.withLabel(`environment-thread-heartbeats:${key}`));
+  });
+
   const worktreePathAtomFamily = Atom.family((key: string) =>
     Atom.make(
       (get) =>
@@ -426,6 +462,9 @@ export function createEnvironmentThreadDetailAtoms<E>(
     turnSubagentsAtom: (ref: ScopedThreadRef) => turnSubagentsAtomFamily(threadKey(ref)),
     checkpointSummariesAtom: (ref: ScopedThreadRef) =>
       checkpointSummariesAtomFamily(threadKey(ref)),
+    runningTurnBackgroundWorkAtom: (ref: ScopedThreadRef) =>
+      runningTurnBackgroundWorkAtomFamily(threadKey(ref)),
+    heartbeatsAtom: (ref: ScopedThreadRef) => heartbeatsAtomFamily(threadKey(ref)),
     stateAtom: (ref: ScopedThreadRef) => threadStateValueAtomFamily(threadKey(ref)),
     threadAtom: (ref: ScopedThreadRef) => threadAtomFamily(threadKey(ref)),
     quietThreadAtom: (ref: ScopedThreadRef) => quietThreadAtomFamily(threadKey(ref)),

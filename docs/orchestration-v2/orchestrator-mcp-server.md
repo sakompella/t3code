@@ -397,10 +397,10 @@ unresolved. Web and desktop show the resolved thread’s current title. Mobile
 relabels local matches; cross-environment links can retain the written label.
 
 List and read results report `snoozed` and `snoozedUntil`, and
-`t3_thread_list` filters on `snoozed`. The server's `isSnoozed` follows the
-client's `effectiveSnoozed`, so agents and the sidebar agree: a snoozed thread
-wakes early only when it has a pending request or fails after snoozing. Completed
-runs, background wakes, and delegated completions keep it snoozed.
+`t3_thread_list` filters on `snoozed`. The server's `isSnoozed` and the
+client's `effectiveSnoozed` share one rule, so agents and the sidebar agree: a
+snoozed thread stays snoozed until its wake time or an explicit unsnooze,
+whatever it does or receives meanwhile.
 
 ### `t3_thread_update`
 

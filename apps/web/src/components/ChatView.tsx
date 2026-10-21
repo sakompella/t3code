@@ -42,11 +42,14 @@ import {
   latestRootProviderFailure,
 } from "@t3tools/shared/orchestrationV2ThreadError";
 import type { UsageLimitSourceSnapshots } from "@t3tools/contracts";
+import { Undo2Icon } from "lucide-react";
 import { feedbackBannerItem } from "./chat/ComposerFeedback";
 import { useUsageLimitsPanel } from "./chat/useUsageLimitsPanel";
 import { useWorktreeSetup } from "./chat/useWorktreeSetup";
 import { useChatShortcuts } from "./chat/useChatShortcuts";
 import { ChatBannerLane } from "./chat/ChatBannerLane";
+import { heartbeatBannerItem } from "./chat/ComposerHeartbeat";
+import { deriveOutlivingBackgroundWork } from "@t3tools/shared/orchestrationV2PendingBackgroundWork";
 import * as Schema from "effect/Schema";
 import {
   AuthOrchestrationOperateScope,
@@ -82,9 +85,17 @@ import {
   resolveWorkflowOpening,
   workflowOpeningParentThreadId,
 } from "@t3tools/client-runtime/state/subagentRuntime";
-import { threadSupportsProviderHandoff } from "@t3tools/client-runtime/state/thread-workflows";
+import {
+  threadSupportsProviderHandoff,
+  threadSupportsRollbackSummary,
+} from "@t3tools/client-runtime/state/thread-workflows";
 import { resolvePendingHandoff } from "@t3tools/client-runtime/handoff";
 import { HandoffRow } from "./chat/V2LifecycleRow";
+import { TimelineSystemDivider } from "./chat/TimelineSystemDivider";
+import {
+  deriveThreadHeartbeats,
+  presentHeartbeats,
+} from "@t3tools/client-runtime/state/thread-heartbeats";
 import {
   codexFeedbackMessage,
   isCompleteTurnItemRow,
@@ -259,6 +270,7 @@ import type { MessagesTimelineHistoryControls } from "./chat/MessagesTimeline";
 import { ThreadTimeline } from "./chat/ThreadTimeline";
 import { ProviderSubagentBar } from "./chat/ProviderSubagentBar";
 import { getTriggerDisplayModelName } from "./chat/providerIconUtils";
+import { deriveTimelineLiveRunIds } from "./chat/MessagesTimeline.logic";
 import {
   overlayComposerIsResting,
   resolveComposerTimelineInset,
@@ -635,9 +647,11 @@ export default function ChatView(props: ChatViewProps) {
     Record<string, LocalThreadErrorEntry>
   >({});
   const [isConnecting, _setIsConnecting] = useState(false);
-  const isRevertingCheckpoint = useComposerDraftStore((store) =>
-    store.rewindingThreadKeys.has(routeThreadKey),
-  );
+  const pendingHeadMove = serverProjection?.thread.pendingHeadMove ?? null;
+  // The server field covers rewinds started in another tab or before a reload.
+  const isRevertingCheckpoint =
+    useComposerDraftStore((store) => store.rewindingThreadKeys.has(routeThreadKey)) ||
+    pendingHeadMove !== null;
 
   const workspaceFileDragRouteKey = `${routeThreadKey}:${draftId ?? ""}`;
   const [workspaceFileDragRoute, setWorkspaceFileDragRoute] = useState(workspaceFileDragRouteKey);
@@ -756,6 +770,7 @@ export default function ChatView(props: ChatViewProps) {
   const isProviderSubagent =
     serverThread !== null && isProviderNativeSubagentThread(serverThread.source);
   const supportsProviderSwitchingViaHandoff = threadSupportsProviderHandoff(serverProjection);
+  const supportsRollbackSummary = threadSupportsRollbackSummary(serverProjection);
   const activeLatestRun = isServerThread ? serverLatestRun : (activeThread?.latestRun ?? null);
   const activeActivityRun = isServerThread ? serverActivityRun : (activeThread?.latestRun ?? null);
   const activeRuntime = isServerThread ? serverRuntime : (activeThread?.runtime ?? null);
@@ -1411,7 +1426,6 @@ export default function ChatView(props: ChatViewProps) {
     activeThreadLiveTokenUsage,
     activeProviderThread,
   );
-  const pendingBackgroundTasks = deriveThreadPendingBackgroundTasks(serverProjection);
   const activeWorkStartedAt =
     deriveActiveWorkStartedAt(activeActivityRun, activeRuntime, localDispatchStartedAt) ??
     runlessWorkStartedAt;
@@ -1499,6 +1513,26 @@ export default function ChatView(props: ChatViewProps) {
       }) as const,
   );
   const timelineEntries = isServerThread ? serverTimelineEntries : draftTimelineEntries;
+  // The runs the timeline presents as live, from the inputs it gets, so the
+  // banner leaves out exactly the work the live row shows.
+  const timelineLiveRunIds = deriveTimelineLiveRunIds({
+    timelineEntries,
+    latestRun: activeActivityRun,
+    runningRunId: activeRuntime?.activeRunId ?? null,
+    isWorking,
+  });
+  // One derivation per projection update: while a turn runs, everything the
+  // timeline's live row does not already show; once settled, everything pending.
+  const pendingBackgroundTasks =
+    isWorking && serverProjection !== null
+      ? deriveOutlivingBackgroundWork({
+          providerThreads: serverProjection.providerThreads,
+          turnItems: serverProjection.turnItems,
+          activeProviderThreadId: serverProjection.thread.activeProviderThreadId,
+          runs: serverProjection.runs,
+          foregroundRunIds: timelineLiveRunIds,
+        })
+      : deriveThreadPendingBackgroundTasks(serverProjection);
   const timelineMessages = timelineEntries.flatMap((entry) =>
     entry.kind === "message" ? [entry.message] : [],
   );
@@ -2460,12 +2494,12 @@ export default function ChatView(props: ChatViewProps) {
     activeThreadRef,
     activeThreadKey,
     activeThreadShell,
-    activeLatestRun,
     activeProjectCwd,
     serverConfig,
     runtimeMode,
     isWorking,
     pendingBackgroundTasks,
+    subagents: serverProjection?.subagents ?? [],
     activePendingApproval,
     activePendingUserInput,
     localCheckoutBranchMismatch,
@@ -2600,11 +2634,21 @@ export default function ChatView(props: ChatViewProps) {
           },
         })
       : null;
+  // Configuration, not work: shown quietly, and never part of the background list.
+  const heartbeatPresentation = presentHeartbeats(
+    serverProjection === null ? [] : deriveThreadHeartbeats(serverProjection),
+    new Date(`${nowMinute}:00.000Z`),
+  );
+  const heartbeatBanner =
+    heartbeatPresentation === null || !activeThread
+      ? null
+      : heartbeatBannerItem(activeThread.id, heartbeatPresentation);
   const composerBannerItems = (() => {
     const limitRecoveryItems = limitRecoveryBanner === null ? [] : [limitRecoveryBanner];
     const backgroundWorkItems = [childInputBanner, goalBanner, backgroundWorkBanner].filter(
       (item) => item !== null,
     );
+    const heartbeatItems = heartbeatBanner === null ? [] : [heartbeatBanner];
     const usageLimitsItems = usageLimitsBanner === null ? [] : [usageLimitsBanner];
     const projectCloneItems = projectCloneBannerItem === null ? [] : [projectCloneBannerItem];
     if (!localCheckoutBranchMismatch || !showBranchMismatchBanner || !activeBranchMismatchKey) {
@@ -2615,6 +2659,7 @@ export default function ChatView(props: ChatViewProps) {
         ...projectCloneItems,
         ...systemComposerBannerItems,
         ...backgroundWorkItems,
+        ...heartbeatItems,
       ];
     }
     return [
@@ -2635,6 +2680,7 @@ export default function ChatView(props: ChatViewProps) {
           setBranchMismatchDismissTick((tick) => tick + 1);
         },
       }),
+      ...heartbeatItems,
     ];
   })() as ComposerBannerStackItem[];
 
@@ -3296,18 +3342,33 @@ export default function ChatView(props: ChatViewProps) {
                 {...(onOpenWorktreeSetupTerminal ? { onOpenWorktreeSetupTerminal } : {})}
                 isPreparingWorktree={!paintOnlyDisplayedTimeline && isPreparingWorktree}
                 footer={
-                  paintOnlyDisplayedTimeline ? null : pendingHandoff === null ? (
+                  paintOnlyDisplayedTimeline ? null : pendingHandoff === null &&
+                    pendingHeadMove === null ? (
                     threadStatusLine
                   ) : (
                     <>
-                      <div className="chat-content-lane">
-                        <HandoffRow
-                          environmentId={environmentId}
-                          endpoints={pendingHandoff}
-                          providers={providerStatuses}
-                          pending
-                        />
-                      </div>
+                      {pendingHandoff === null ? null : (
+                        <div className="chat-content-lane">
+                          <HandoffRow
+                            environmentId={environmentId}
+                            endpoints={pendingHandoff}
+                            providers={providerStatuses}
+                            pending
+                          />
+                        </div>
+                      )}
+                      {pendingHeadMove === null ? null : (
+                        <div className="chat-content-lane">
+                          <TimelineSystemDivider
+                            label={
+                              pendingHeadMove.summarize
+                                ? "Summarizing discarded turns…"
+                                : "Rewinding…"
+                            }
+                            icon={Undo2Icon}
+                          />
+                        </div>
+                      )}
                       {threadStatusLine}
                     </>
                   )
@@ -3884,7 +3945,11 @@ export default function ChatView(props: ChatViewProps) {
         </ChatRightPanel>
       ) : null}
 
-      <RevertConfirmHost threadKey={routeThreadKey} onConfirm={onConfirmRevertStable} />
+      <RevertConfirmHost
+        threadKey={routeThreadKey}
+        canSummarize={supportsRollbackSummary}
+        onConfirm={onConfirmRevertStable}
+      />
       <LinkPullRequestDialogHost />
       <ThreadVisitWatermark threadRef={routeThreadRef} />
       <ExpandedImageDialogHost threadKey={routeThreadKey} />

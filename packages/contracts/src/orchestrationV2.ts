@@ -302,12 +302,28 @@ export const OrchestrationV2ContextCapabilities = Schema.Struct({
 });
 export type OrchestrationV2ContextCapabilities = typeof OrchestrationV2ContextCapabilities.Type;
 
+/**
+ * Asks the provider to summarize the turns a rollback discards, so the agent
+ * keeps what it learned. `instructions` steer the summary.
+ */
+export const OrchestrationV2RollbackSummary = Schema.Struct({
+  instructions: Schema.optional(TrimmedNonEmptyString),
+});
+export type OrchestrationV2RollbackSummary = typeof OrchestrationV2RollbackSummary.Type;
+
 export const OrchestrationV2CheckpointCapabilities = Schema.Struct({
   appCanCheckpointFilesystem: Schema.Boolean,
   supportsNestedCheckpointScopes: Schema.Boolean,
   providerCanRollbackConversation: Schema.Boolean,
   providerRollbackReturnsSnapshot: Schema.Boolean,
   providerCanReadConversationSnapshot: Schema.Boolean,
+  /**
+   * Rollback can leave the agent a summary of the turns it discards.
+   * Sessions persisted before this field existed decode to unsupported.
+   */
+  providerCanSummarizeRollback: Schema.Boolean.pipe(
+    Schema.withDecodingDefault(Effect.succeed(false)),
+  ),
 });
 export type OrchestrationV2CheckpointCapabilities =
   typeof OrchestrationV2CheckpointCapabilities.Type;
@@ -411,6 +427,8 @@ export const OrchestrationV2AppThread = Schema.Struct({
   snoozedUntil: Schema.optional(Schema.NullOr(Schema.DateTimeUtc)),
   snoozedAt: Schema.optional(Schema.NullOr(Schema.DateTimeUtc)),
   lastSnoozeWakeAt: Schema.optional(Schema.NullOr(Schema.DateTimeUtc)),
+  /** The latest moment a snooze effectively ended early. See `snoozeEndedAt` on the shell. */
+  snoozeEndedAt: Schema.optional(Schema.NullOr(Schema.DateTimeUtc)),
   limitRecovery: Schema.optional(Schema.NullOr(OrchestrationV2LimitRecovery)),
   pinnedAt: Schema.optional(Schema.NullOr(Schema.DateTimeUtc)),
   autoSettleDisabledAt: Schema.optional(Schema.NullOr(Schema.DateTimeUtc)),
@@ -433,6 +451,19 @@ export const OrchestrationV2AppThread = Schema.Struct({
       Schema.Struct({
         requestId: CommandId,
         message: TrimmedNonEmptyString,
+      }),
+    ),
+  ),
+  /**
+   * A move of the conversation head (a rollback) the provider is still
+   * carrying out, which can take as long as its summary model call. Cleared
+   * when it completes or fails.
+   */
+  pendingHeadMove: Schema.optional(
+    Schema.NullOr(
+      Schema.Struct({
+        requestId: CommandId,
+        summarize: Schema.Boolean,
       }),
     ),
   ),
@@ -844,6 +875,23 @@ export const OrchestrationV2PendingBackgroundTask = kindUnionWithFallback(
 );
 export type OrchestrationV2PendingBackgroundTask = typeof OrchestrationV2PendingBackgroundTask.Type;
 
+/**
+ * A recurring prompt the provider's session runs on its own while it stays
+ * alive (a Prime Agent heartbeat). It is configuration, not pending work: it
+ * never keeps a thread working and is not part of the background roster.
+ * `schedule` is the provider's own text, such as "every 15m".
+ */
+export const OrchestrationV2ProviderHeartbeat = Schema.Struct({
+  id: TrimmedNonEmptyString,
+  /** The heartbeat's label, or the start of its prompt. */
+  description: Schema.optional(TrimmedNonEmptyString),
+  schedule: TrimmedNonEmptyString,
+  paused: Schema.Boolean,
+  /** When it fires next. Absent while paused or when the provider has not planned one. */
+  nextRunAt: Schema.optional(IsoDateTime),
+});
+export type OrchestrationV2ProviderHeartbeat = typeof OrchestrationV2ProviderHeartbeat.Type;
+
 export const OrchestrationV2ProviderThreadNativeMetadata = Schema.Struct({
   modelSelection: Schema.optional(ModelSelection),
   title: Schema.optional(Schema.NullOr(TrimmedNonEmptyString)),
@@ -896,6 +944,10 @@ export const OrchestrationV2ProviderThread = Schema.Struct({
     }),
   ),
   pendingBackgroundTasks: Schema.optional(Schema.Array(OrchestrationV2PendingBackgroundTask)).pipe(
+    Schema.withDecodingDefault(Effect.succeed([])),
+  ),
+  /** Heartbeats the provider's live session runs. Cleared when the session ends. */
+  heartbeats: Schema.optional(Schema.Array(OrchestrationV2ProviderHeartbeat)).pipe(
     Schema.withDecodingDefault(Effect.succeed([])),
   ),
   contextUsage: Schema.optional(Schema.NullOr(ThreadTokenUsageSnapshot)).pipe(
@@ -1036,12 +1088,24 @@ const SubagentNotificationSource = Schema.Struct({
   childThreadId: Schema.optional(ThreadId),
 });
 const CommandNotificationSource = Schema.Struct({ kind: Schema.Literal("command") });
+/** A provider's own recurring prompt (a Prime Agent heartbeat) that fired. */
+const HeartbeatNotificationSource = Schema.Struct({
+  kind: Schema.Literal("heartbeat"),
+  /** The provider's id for the heartbeat, as `OrchestrationV2ProviderHeartbeat.id`. */
+  heartbeatId: Schema.optional(TrimmedNonEmptyString),
+});
 
 /**
- * Sources are stored and sent in the shape clients before `subagent` and `command` existed decode,
- * since they reject a kind they do not know: a command is `background_command`, and a subagent is
- * `background_task` with `work: "subagent"`, a field those clients ignore. Encoding picks the first
- * member that fits, so those come first.
+ * What a notification reports on. Several pieces of work of one kind share
+ * that kind; mixed or unnamed work is `background_task`.
+ *
+ * Sources are stored and sent in the shape clients before `subagent` and
+ * `command` existed decode, since they reject a kind they do not know: a
+ * command is `background_command`, and a subagent or heartbeat is
+ * `background_task` with `work: "subagent"` or `work: "heartbeat"`, a field
+ * those clients ignore. Encoding picks the first member that fits, so those
+ * come first. The plain members after them decode values that were already
+ * decoded once.
  */
 export const OrchestrationV2NotificationSource = kindUnionWithFallback(
   [
@@ -1068,9 +1132,28 @@ export const OrchestrationV2NotificationSource = kindUnionWithFallback(
         })),
       }),
     ),
+    Schema.Struct({
+      kind: Schema.Literal("background_task"),
+      work: Schema.Literal("heartbeat"),
+      heartbeatId: HeartbeatNotificationSource.fields.heartbeatId,
+    }).pipe(
+      Schema.decodeTo(Schema.toType(HeartbeatNotificationSource), {
+        decode: SchemaGetter.transform(({ heartbeatId }) =>
+          heartbeatId === undefined
+            ? { kind: "heartbeat" as const }
+            : { kind: "heartbeat" as const, heartbeatId },
+        ),
+        encode: SchemaGetter.transform(({ heartbeatId }) => ({
+          kind: "background_task" as const,
+          work: "heartbeat" as const,
+          ...(heartbeatId === undefined ? {} : { heartbeatId }),
+        })),
+      }),
+    ),
     Schema.Struct({ kind: Schema.Literal("background_command").transform("command") }),
     SubagentNotificationSource,
     CommandNotificationSource,
+    HeartbeatNotificationSource,
     Schema.Struct({ kind: Schema.Literal("monitor") }),
     Schema.Struct({ kind: Schema.Literal("background_task") }),
     Schema.Struct({ kind: Schema.Literal("system") }),
@@ -1118,6 +1201,42 @@ export const OrchestrationV2ConversationMessage = Schema.Struct({
   ),
 });
 export type OrchestrationV2ConversationMessage = typeof OrchestrationV2ConversationMessage.Type;
+
+/**
+ * What started a run when nobody sent it a message: `heartbeat` is the
+ * provider's own recurring prompt. A heartbeat run is a routine check, so its
+ * finishing is not a finished task. Its failures and requests still are.
+ */
+export const OrchestrationV2RunTrigger = Schema.Literal("heartbeat");
+export type OrchestrationV2RunTrigger = typeof OrchestrationV2RunTrigger.Type;
+
+/**
+ * A heartbeat run that completed: a routine check, so its end is neither a
+ * finished task, unread news, nor thread activity. A heartbeat run that
+ * failed, was interrupted or is still going is not routine.
+ */
+export function isOrchestrationV2RoutineRun(run: {
+  readonly status: OrchestrationV2ShellThreadStatus;
+  readonly trigger?: OrchestrationV2RunTrigger | null | undefined;
+}): boolean {
+  return run.status === "completed" && run.trigger === "heartbeat";
+}
+
+/** The trigger of the run a message starts, or null for a message someone sent. */
+export function orchestrationV2MessageRunTrigger(
+  message: Pick<OrchestrationV2ConversationMessage, "notification">,
+): OrchestrationV2RunTrigger | null {
+  return message.notification?.source.kind === "heartbeat" ? "heartbeat" : null;
+}
+
+/** The trigger of a run, read from the message that started it. */
+export function orchestrationV2RunTrigger(
+  messages: ReadonlyArray<Pick<OrchestrationV2ConversationMessage, "id" | "notification">>,
+  run: Pick<OrchestrationV2Run, "userMessageId">,
+): OrchestrationV2RunTrigger | null {
+  const message = messages.find((candidate) => candidate.id === run.userMessageId);
+  return message === undefined ? null : orchestrationV2MessageRunTrigger(message);
+}
 
 export const OrchestrationV2PlanStep = Schema.Struct({
   id: TrimmedNonEmptyString,
@@ -1283,6 +1402,17 @@ export const OrchestrationV2UserMessageInputIntent = Schema.Literals([
 ]);
 export type OrchestrationV2UserMessageInputIntent =
   typeof OrchestrationV2UserMessageInputIntent.Type;
+
+/**
+ * How a system notice reads. An absent tone means `warning`, which is what
+ * every notice was before tones existed.
+ * - `warning`: something the user should notice.
+ * - `info`: a routine event, shown as a quiet row.
+ * - `progress`: a quiet status line for work in flight; once it completes it
+ *   carries no information and clients stop showing it.
+ */
+export const OrchestrationV2SystemNoticeTone = Schema.Literals(["warning", "info", "progress"]);
+export type OrchestrationV2SystemNoticeTone = typeof OrchestrationV2SystemNoticeTone.Type;
 
 const OrchestrationV2TurnItemBaseFields = {
   toolNonExecutionKind: Schema.optional(Schema.String),
@@ -1456,6 +1586,7 @@ export const OrchestrationV2TurnItem = Schema.Union([
     ...OrchestrationV2TurnItemBaseFields,
     type: Schema.Literal("system_notice"),
     message: Schema.String,
+    tone: Schema.optional(OrchestrationV2SystemNoticeTone),
   }),
   Schema.Struct({
     ...OrchestrationV2TurnItemBaseFields,
@@ -1538,6 +1669,18 @@ export const OrchestrationV2TurnItem = Schema.Union([
     output: Schema.optional(Schema.Unknown),
     /** Set on the wire when output was withheld; fetch it with getTurnItem. */
     outputOmitted: Schema.optional(Schema.Boolean),
+  }),
+  Schema.Struct({
+    ...OrchestrationV2TurnItemBaseFields,
+    type: Schema.Literal("rollback_summary"),
+    rollbackRequestId: CommandId,
+    /**
+     * The run the conversation was rewound to, null for the thread start. A
+     * later rollback that discards that run discards this summary too.
+     */
+    rewoundToRunId: Schema.NullOr(RunId),
+    /** What the provider kept of the discarded turns. Omitted on the wire; fetch it with getTurnItem. */
+    summary: Schema.optional(Schema.String),
   }),
 ]);
 export type OrchestrationV2TurnItem = typeof OrchestrationV2TurnItem.Type;
@@ -1829,6 +1972,19 @@ export const OrchestrationV2ThreadShell = Schema.Struct({
   latestRunStartedAt: Schema.optional(Schema.NullOr(Schema.DateTimeUtc)),
   latestRunCompletedAt: Schema.optional(Schema.NullOr(Schema.DateTimeUtc)),
   latestRunStopRequested: Schema.optional(Schema.Boolean),
+  /** Null for a run someone asked for. Omitted by servers that predate it. */
+  latestRunTrigger: Schema.optional(Schema.NullOr(OrchestrationV2RunTrigger)),
+  /**
+   * When the latest run that is not routine (see isOrchestrationV2RoutineRun)
+   * ended: what unread state and auto-settle read once a heartbeat check has
+   * run since. Omitted by servers that predate it.
+   */
+  latestTaskRunCompletedAt: Schema.optional(Schema.NullOr(Schema.DateTimeUtc)),
+  /**
+   * The status of that same run, so a client can tell a completed task from
+   * one that failed or was interrupted. Omitted by servers that predate it.
+   */
+  latestTaskRunStatus: Schema.optional(Schema.NullOr(OrchestrationV2RunStatus)),
   activeRunId: Schema.NullOr(RunId),
   activityRunStartedAt: Schema.optional(Schema.NullOr(Schema.DateTimeUtc)),
   activityRunStatus: Schema.optional(
@@ -1842,6 +1998,7 @@ export const OrchestrationV2ThreadShell = Schema.Struct({
   usageLimitResetAt: Schema.optional(Schema.NullOr(IsoDateTime)),
   pendingRuntimeRequest: Schema.NullOr(OrchestrationV2PendingRuntimeRequestSummary),
   latestVisibleMessage: Schema.NullOr(OrchestrationV2LatestVisibleMessageSummary),
+  /** The latest message someone sent; a heartbeat's prompt is not one. */
   latestUserMessageAt: Schema.NullOr(Schema.DateTimeUtc),
   /**
    * The last message the user wrote. Wakes and agent messages also use the
@@ -1866,6 +2023,13 @@ export const OrchestrationV2ThreadShell = Schema.Struct({
   unsettledAt: Schema.optional(Schema.NullOr(Schema.DateTimeUtc)),
   snoozedUntil: Schema.optional(Schema.NullOr(Schema.DateTimeUtc)),
   snoozedAt: Schema.optional(Schema.NullOr(Schema.DateTimeUtc)),
+  /**
+   * When a snooze last effectively ended early: the earlier of the deadline
+   * and the user's unsnooze, kept after the unsnooze clears the deadline.
+   * Work that finished by then was hidden or already seen. Omitted by servers
+   * that predate it; an absent value means no early end is recorded.
+   */
+  snoozeEndedAt: Schema.optional(Schema.NullOr(Schema.DateTimeUtc)),
   limitRecovery: Schema.optional(Schema.NullOr(OrchestrationV2LimitRecovery)),
   pinnedAt: Schema.optional(Schema.NullOr(Schema.DateTimeUtc)),
   autoSettleDisabledAt: Schema.optional(Schema.NullOr(Schema.DateTimeUtc)),
@@ -1951,6 +2115,7 @@ export const OrchestrationV2AppThreadJson = OrchestrationV2AppThread.mapFields((
   snoozedUntil: Schema.optional(Schema.NullOr(Schema.DateTimeUtcFromString)),
   snoozedAt: Schema.optional(Schema.NullOr(Schema.DateTimeUtcFromString)),
   lastSnoozeWakeAt: Schema.optional(Schema.NullOr(Schema.DateTimeUtcFromString)),
+  snoozeEndedAt: Schema.optional(Schema.NullOr(Schema.DateTimeUtcFromString)),
   pinnedAt: Schema.optional(Schema.NullOr(Schema.DateTimeUtcFromString)),
   autoSettleDisabledAt: Schema.optional(Schema.NullOr(Schema.DateTimeUtcFromString)),
   lastVisitedAt: Schema.NullOr(Schema.DateTimeUtcFromString).pipe(
@@ -2219,6 +2384,7 @@ export const OrchestrationV2TurnItemJson = Schema.Union([
     ...OrchestrationV2TurnItemJsonBaseFields,
     type: Schema.Literal("system_notice"),
     message: Schema.String,
+    tone: Schema.optional(OrchestrationV2SystemNoticeTone),
   }),
   Schema.Struct({
     ...OrchestrationV2TurnItemJsonBaseFields,
@@ -2302,6 +2468,18 @@ export const OrchestrationV2TurnItemJson = Schema.Union([
     /** Set on the wire when output was withheld; fetch it with getTurnItem. */
     outputOmitted: Schema.optional(Schema.Boolean),
   }),
+  Schema.Struct({
+    ...OrchestrationV2TurnItemJsonBaseFields,
+    type: Schema.Literal("rollback_summary"),
+    rollbackRequestId: CommandId,
+    /**
+     * The run the conversation was rewound to, null for the thread start. A
+     * later rollback that discards that run discards this summary too.
+     */
+    rewoundToRunId: Schema.NullOr(RunId),
+    /** What the provider kept of the discarded turns. Omitted on the wire; fetch it with getTurnItem. */
+    summary: Schema.optional(Schema.String),
+  }),
 ]);
 export type OrchestrationV2TurnItemJson = typeof OrchestrationV2TurnItemJson.Type;
 
@@ -2365,6 +2543,7 @@ export const OrchestrationV2ThreadShellJson = OrchestrationV2ThreadShell.mapFiel
   latestRunRequestedAt: Schema.optional(Schema.NullOr(Schema.DateTimeUtcFromString)),
   latestRunStartedAt: Schema.optional(Schema.NullOr(Schema.DateTimeUtcFromString)),
   latestRunCompletedAt: Schema.optional(Schema.NullOr(Schema.DateTimeUtcFromString)),
+  latestTaskRunCompletedAt: Schema.optional(Schema.NullOr(Schema.DateTimeUtcFromString)),
   activityRunStartedAt: Schema.optional(Schema.NullOr(Schema.DateTimeUtcFromString)),
   pendingRuntimeRequest: Schema.NullOr(OrchestrationV2PendingRuntimeRequestSummaryJson),
   latestVisibleMessage: Schema.NullOr(OrchestrationV2LatestVisibleMessageSummaryJson),
@@ -2377,6 +2556,7 @@ export const OrchestrationV2ThreadShellJson = OrchestrationV2ThreadShell.mapFiel
   unsettledAt: Schema.optional(Schema.NullOr(Schema.DateTimeUtcFromString)),
   snoozedUntil: Schema.optional(Schema.NullOr(Schema.DateTimeUtcFromString)),
   snoozedAt: Schema.optional(Schema.NullOr(Schema.DateTimeUtcFromString)),
+  snoozeEndedAt: Schema.optional(Schema.NullOr(Schema.DateTimeUtcFromString)),
   pinnedAt: Schema.optional(Schema.NullOr(Schema.DateTimeUtcFromString)),
   autoSettleDisabledAt: Schema.optional(Schema.NullOr(Schema.DateTimeUtcFromString)),
   lastVisitedAt: Schema.optional(Schema.NullOr(Schema.DateTimeUtcFromString)),
@@ -2807,6 +2987,11 @@ export const OrchestrationV2Command = Schema.Union([
     usageLimitContinuationOfRunId: Schema.optional(RunId),
     manualContinuationOfRunId: Schema.optional(RunId),
     usageLimitRecoveryRequestId: Schema.optional(CommandId),
+    /**
+     * Queue the message as a held run even when nothing is running, so the
+     * user decides when it is sent (the state Stop gives queued messages).
+     */
+    holdInQueue: Schema.optional(Schema.Boolean),
     deliveryIntent: Schema.optional(Schema.Literals(["auto", "steer", "restart"])),
     delegatedCompletion: Schema.optional(
       Schema.Struct({
@@ -2933,6 +3118,8 @@ export const OrchestrationV2Command = Schema.Union([
   Schema.Struct({
     type: Schema.Literal("checkpoint.rollback"),
     restoreFiles: Schema.optional(Schema.Boolean),
+    /** Omitted means the discarded turns leave no summary behind. */
+    summary: Schema.optional(OrchestrationV2RollbackSummary),
     commandId: CommandId,
     threadId: ThreadId,
     scopeId: CheckpointScopeId,
@@ -3014,6 +3201,19 @@ export const OrchestrationV2Command = Schema.Union([
 ]);
 export type OrchestrationV2Command = typeof OrchestrationV2Command.Type;
 
+/** A page an agent published with T3's `html_render` tool, as the tool returns it. */
+export const PublishedHtmlRender = Schema.Struct({
+  attachmentId: Schema.String,
+  title: Schema.String,
+  height: Schema.Number,
+  heights: Schema.optional(Schema.Array(Schema.Tuple([Schema.Int, Schema.Int]))),
+});
+export type PublishedHtmlRender = typeof PublishedHtmlRender.Type;
+
+/** The tool item `html_render.record` adds for a page; one per page. */
+export const htmlRenderTurnItemId = (attachmentId: string) =>
+  TurnItemId.make(`turn-item:html-render:${attachmentId}`);
+
 /**
  * Commands only the server dispatches. They stay out of
  * `OrchestrationV2Command`, the `dispatchCommand` payload, so no client can
@@ -3077,6 +3277,17 @@ const OrchestrationV2InternalCommand = Schema.Union([
     reason: Schema.String,
     placeholder: Schema.optional(Schema.String),
     secretStatus: OrchestrationV2SecretRequestStatus,
+  }),
+  /**
+   * Records a published page as its own `html_render` tool item in the run, for
+   * agents that call T3's tools from code, whose tool items never name the tool.
+   */
+  Schema.Struct({
+    type: Schema.Literal("html_render.record"),
+    commandId: CommandId,
+    threadId: ThreadId,
+    runId: RunId,
+    htmlRender: PublishedHtmlRender,
   }),
 ]);
 export type OrchestrationV2InternalCommand = typeof OrchestrationV2InternalCommand.Type;
