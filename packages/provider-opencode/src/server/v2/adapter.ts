@@ -171,7 +171,6 @@ const OpenCode2ProviderCapabilities = {
     providerCanRollbackConversation: true,
     providerRollbackReturnsSnapshot: true,
     providerCanReadConversationSnapshot: true,
-    providerCanSummarizeRollback: false,
   },
   identity: {
     nativeThreadIds: "strong",

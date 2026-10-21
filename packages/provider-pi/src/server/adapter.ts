@@ -243,7 +243,6 @@ const PiProviderCapabilitiesV2 = {
     // CommandPolicy requires a snapshot for rollback; rollbackThread returns the updated provider thread.
     providerRollbackReturnsSnapshot: true,
     providerCanReadConversationSnapshot: true,
-    providerCanSummarizeRollback: false,
   },
   identity: {
     nativeThreadIds: "strong",
