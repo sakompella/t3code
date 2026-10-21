@@ -1,5 +1,5 @@
 import { effectiveSnoozed } from "@t3tools/client-runtime/state/thread-settled";
-import { isOrchestrationV2RoutineRun } from "@t3tools/contracts";
+import { isOrchestrationV2RoutineRun, type OrchestrationV2ThreadShell } from "@t3tools/contracts";
 import type { EnvironmentThreadShell } from "@t3tools/client-runtime/state/models";
 
 import { resolveSidebarThreadStatus, type SidebarThreadStatus } from "./Sidebar.logic";
@@ -37,7 +37,7 @@ export function observeThreadForNotification(
     | "hasPendingApprovals"
     | "hasPendingUserInput"
     | "pendingSubagentRequest"
-  >,
+  > & Pick<OrchestrationV2ThreadShell, "latestRunStopRequested">,
   prior: ThreadNotificationMemory | undefined,
   now: string,
 ): ThreadNotificationObservation {
@@ -48,6 +48,10 @@ export function observeThreadForNotification(
       ? `${thread.latestRun?.runId ?? ""}:${status}`
       : null;
   const ended = endedWork(thread, status);
+  const stopped =
+    thread.latestRunStopRequested === true &&
+    thread.latestRun !== null &&
+    !isOrchestrationV2RoutineRun(thread.latestRun);
   const completion = ended?.at ?? prior?.completion ?? null;
   const memory = { attention, completion };
   const kind =
@@ -55,7 +59,7 @@ export function observeThreadForNotification(
       ? null
       : attention && attention !== prior.attention
         ? "input"
-        : ended?.isCompletion && (prior.completion === null || ended.at > prior.completion)
+        : ended?.isCompletion && !stopped && (prior.completion === null || ended.at > prior.completion)
           ? "completion"
           : null;
   return { status, memory, kind };

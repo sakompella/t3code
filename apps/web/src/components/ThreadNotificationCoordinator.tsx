@@ -139,16 +139,11 @@ function EnvironmentNotifications({
       }
       const thread = presentThreadShell(environmentId, rawThread, subagentRequest);
       const observation = observeThreadForNotification(
-        thread,
+        { ...thread, latestRunStopRequested: rawThread.latestRunStopRequested },
         previous.current.get(thread.id),
         now,
       );
-      const { status, memory } = observation;
-      // A run the user stopped ends as completed; it is not news.
-      const kind =
-        observation.kind === "completion" && rawThread.latestRunStopRequested === true
-          ? null
-          : observation.kind;
+      const { status, memory, kind } = observation;
       next.set(thread.id, { ...memory, raw: rawThread, subagentRequest });
       if (!kind || thread.archivedAt !== null) continue;
       const title =
