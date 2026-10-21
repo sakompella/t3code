@@ -191,7 +191,7 @@ type CheckpointCapabilities = {
   providerCanRollbackConversation: boolean;
   providerRollbackReturnsSnapshot: boolean;
   providerCanReadConversationSnapshot: boolean;
-  providerCanSummarizeRollback: boolean;
+  providerCanSummarizeRollback?: boolean;
 };
 ```
 
