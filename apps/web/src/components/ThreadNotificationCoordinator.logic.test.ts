@@ -65,6 +65,25 @@ describe("observeThreadForNotification", () => {
     expect(observe(thread).kind).toBe(kind);
   });
 
+  it("remembers a stopped task without announcing its completion", () => {
+    const stopped = observe({ ...FINISHED, latestRunStopRequested: true });
+    expect(stopped.kind).toBeNull();
+    expect(observe(FINISHED, stopped.memory).kind).toBeNull();
+  });
+
+  it("does not use a stopped heartbeat to silence a completed task", () => {
+    const heartbeat: ObservedThread = {
+      ...FINISHED,
+      latestRun: { ...FINISHED.latestRun!, runId: RunId.make("heartbeat"), trigger: "heartbeat" },
+      latestRunStopRequested: true,
+      latestTaskRunCompletedAt: FINISHED.latestRun!.completedAt,
+      latestTaskRunStatus: "completed",
+    };
+    const completed = observe(heartbeat);
+    expect(completed.kind).toBe("completion");
+    expect(observe(heartbeat, completed.memory).kind).toBeNull();
+  });
+
   it("stays quiet about a thread it sees for the first time", () => {
     expect(observeThreadForNotification(FINISHED, undefined, NOW).kind).toBeNull();
   });
