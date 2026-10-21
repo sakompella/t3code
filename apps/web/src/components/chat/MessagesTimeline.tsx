@@ -74,6 +74,7 @@ import { claudeSkillInvocation, isJavaScriptReplTool } from "@t3tools/shared/too
 import { observeVisibleAnimation } from "../../lib/visibleAnimation";
 import {
   createContext,
+  Fragment,
   memo,
   use,
   useContext,
@@ -286,6 +287,12 @@ import {
   formatUpcomingTimestamp,
 } from "../../timestampFormat";
 import { FetchedToolOutput, V2ItemInspector } from "./V2ItemInspector";
+import { HighlightedCode } from "./HighlightedCode";
+import {
+  workEntryBodyCode,
+  workEntryLabelCode,
+  type WorkEntryCode,
+} from "@t3tools/client-runtime/work-log/entry-code";
 import { useV2ItemSupport } from "../../state/v2ItemSupport";
 import { Collapsible, CollapsibleTrigger, CollapsiblePanel } from "../ui/collapsible";
 import {
@@ -3692,6 +3699,7 @@ function LiveActivityRow({
   failed = false,
   active = false,
   shimmer = false,
+  codeLabel = false,
 }: {
   label: ReactNode;
   iconName?: WorkEntryIconName;
@@ -3699,6 +3707,8 @@ function LiveActivityRow({
   failed?: boolean;
   active?: boolean;
   shimmer?: boolean;
+  /** The label is highlighted code, so a running shine must not repaint its colors. */
+  codeLabel?: boolean;
 }) {
   const animated = active && !failed;
   const showShimmer = animated && shimmer;
@@ -3714,6 +3724,7 @@ function LiveActivityRow({
         failed={failed}
         announceFailure={failed}
         active={animated && !shimmer}
+        codeLabel={codeLabel}
       />
       {showShimmer ? (
         <ActivityShimmerOverlay>
@@ -3732,6 +3743,7 @@ function LiveActivityContent({
   announceFailure = false,
   active = false,
   highlighted = false,
+  codeLabel = false,
 }: {
   label: ReactNode;
   iconName: WorkEntryIconName | undefined;
@@ -3740,6 +3752,7 @@ function LiveActivityContent({
   announceFailure?: boolean;
   active?: boolean;
   highlighted?: boolean;
+  codeLabel?: boolean;
 }) {
   const showTrailingFailureMark =
     failed && iconName !== undefined && !toolIconAcceptsTint(toolIcon);
@@ -3844,6 +3857,7 @@ function LiveWorkEntryTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "
   const failed = workEntryDisplayIndicatesToolFailure(row.entry);
   const thoughtLine = row.thought && !row.expanded ? liveThoughtLine(row.thought.detail ?? "") : "";
   const thoughtIsStatus = thoughtLine !== "" && row.entry === row.thought;
+  const labelCode = questionHeading ? null : workEntryLabelCode(row.entry, label);
 
   return (
     <button
@@ -3915,6 +3929,15 @@ function LiveWorkEntryTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "
               environmentId={ctx.activeThreadEnvironmentId}
               linked={false}
             />
+          ) : labelCode !== null ? (
+            <span className="font-mono text-(length:--font-size-code,var(--text-xs))">
+              <HighlightedCode
+                code={labelCode.code}
+                language={labelCode.language}
+                theme={ctx.resolvedTheme}
+                kind="label"
+              />
+            </span>
           ) : (
             label
           )
@@ -3923,6 +3946,7 @@ function LiveWorkEntryTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "
         toolIcon={row.entry.toolIcon ?? row.entry.toolSource?.icon}
         failed={failed}
         active={row.active}
+        codeLabel={labelCode !== null}
       />
     </button>
   );
@@ -5115,21 +5139,32 @@ function workEntryRawCommand(
   return rawCommand === workEntry.command.trim() ? null : rawCommand;
 }
 
+interface ToolCallBodyBlock {
+  readonly text: string;
+  /** Set when the block is code worth syntax highlighting. */
+  readonly language?: WorkEntryCode["language"];
+}
+
 function buildToolCallExpandedBody(
   workEntry: TimelineWorkEntry,
   workspaceRoot: string | undefined,
   visibleLabel: string,
   viewedImagePath: string | null,
-): string | null {
-  const blocks: string[] = [];
+  bodyCode: WorkEntryCode | null,
+): ReadonlyArray<ToolCallBodyBlock> | null {
+  const blocks: ToolCallBodyBlock[] = [];
   const seen = new Set<string>([visibleLabel.trim()]);
-  const addBlock = (value: string | null | undefined) => {
+  const addBlock = (value: string | null | undefined, language?: WorkEntryCode["language"]) => {
     const text = value?.trim();
     if (!text || seen.has(text)) return;
     seen.add(text);
-    blocks.push(text);
+    blocks.push(language ? { text, language } : { text });
   };
-  if (workEntry.itemType === "dynamic_tool" && workEntry.toolData !== undefined) {
+  if (bodyCode?.language === "python") {
+    // The cell itself, not its JSON envelope. Shown even when it equals the
+    // truncated label, so a one-line cell still has a full-width body.
+    blocks.push({ text: bodyCode.code.trim(), language: "python" });
+  } else if (workEntry.itemType === "dynamic_tool" && workEntry.toolData !== undefined) {
     const input =
       workEntry.structuredPayload?.type === "dynamic_tool"
         ? workEntry.structuredPayload.input
@@ -5145,7 +5180,7 @@ function buildToolCallExpandedBody(
   if (command === visibleLabel.trim()) {
     seen.add(command);
   } else {
-    addBlock(raw ?? command);
+    addBlock(raw ?? command, bodyCode?.language);
   }
   const detail = workEntry.detail?.trim();
   if (detail !== viewedImagePath?.trim()) {
@@ -5168,7 +5203,7 @@ function buildToolCallExpandedBody(
   if (changedFiles.length > 0) {
     addBlock([...new Set(changedFiles)].join("\n"));
   }
-  return blocks.length > 0 ? blocks.join("\n\n") : null;
+  return blocks.length > 0 ? blocks : null;
 }
 
 const toolCallExpandedBodyClassName =
@@ -5435,6 +5470,7 @@ function WorkEntryLogRow(props: WorkEntryRowProps) {
         ? "Thinking"
         : "Thought"
       : questionHeading || (displayLabel ?? workEntryDisplayLabel(workEntry, workspaceRoot));
+  const labelCode = questionHeading ? null : workEntryLabelCode(workEntry, previewText);
   const answerPreview =
     workEntry.questionAnswer && hasQuestionAnswer(workEntry.questionAnswer)
       ? getQuestionAnswerPreview(workEntry.questionAnswer)
@@ -5468,15 +5504,19 @@ function WorkEntryLogRow(props: WorkEntryRowProps) {
       workEntry.changedFiles?.length ||
       viewedImage,
     );
+  const bodyCode = questionHeading ? null : workEntryBodyCode(workEntry, previewText);
   const expandedBody =
     expanded && !isReasoning
       ? plainOutput !== undefined
         ? plainOutput
+          ? [{ text: plainOutput }]
+          : null
         : buildToolCallExpandedBody(
             workEntry,
             workspaceRoot,
             previewText,
             viewedImage ? viewedImagePath : null,
+            bodyCode,
           )
       : null;
   const plainOutputFetches =
@@ -5581,6 +5621,15 @@ function WorkEntryLogRow(props: WorkEntryRowProps) {
                   environmentId={ctx.activeThreadEnvironmentId}
                   linked
                 />
+              ) : labelCode !== null ? (
+                <span className="font-mono text-(length:--font-size-code,var(--text-xs))">
+                  <HighlightedCode
+                    code={labelCode.code}
+                    language={labelCode.language}
+                    theme={ctx.resolvedTheme}
+                    kind="label"
+                  />
+                </span>
               ) : (
                 previewText
               )}
@@ -5688,11 +5737,28 @@ function WorkEntryLogRow(props: WorkEntryRowProps) {
               onOpenTurnDiff={ctx.onOpenTurnDiff}
               onRollbackCheckpoint={ctx.onRollbackCheckpoint}
               onImageExpand={ctx.onImageExpand}
+              code={bodyCode ?? undefined}
             />
           ) : (
             <>
               {expandedBody ? (
-                <pre className={toolCallExpandedBodyClassName}>{expandedBody}</pre>
+                <pre className={toolCallExpandedBodyClassName}>
+                  {expandedBody.map((block, index) => (
+                    <Fragment key={block.text}>
+                      {index > 0 ? "\n\n" : null}
+                      {block.language ? (
+                        <HighlightedCode
+                          code={block.text}
+                          language={block.language}
+                          theme={ctx.resolvedTheme}
+                          kind="body"
+                        />
+                      ) : (
+                        block.text
+                      )}
+                    </Fragment>
+                  ))}
+                </pre>
               ) : null}
               {plainOutputFetches && workEntry.projectedItem ? (
                 <FetchedToolOutput
