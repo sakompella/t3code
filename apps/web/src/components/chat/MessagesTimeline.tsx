@@ -241,11 +241,6 @@ import { type ThreadFindMatch } from "./threadFind";
 import { useThreadFindNavigation } from "./useThreadFindNavigation";
 import { readThreadFindPosition } from "./threadFindPosition";
 import type { ThreadFindPositionReader } from "./threadFind";
-import {
-  workEntryBodyCode,
-  workEntryLabelCode,
-  type WorkEntryCode,
-} from "@t3tools/client-runtime/work-log/entry-code";
 import { runFoldSegmentKeyIsForRun } from "@t3tools/client-runtime/state/run-fold";
 import { TerminalContextInlineChip } from "./TerminalContextInlineChip";
 import { Popover, PopoverPopup, PopoverTrigger } from "../ui/popover";
@@ -296,6 +291,11 @@ import {
 } from "../../timestampFormat";
 import { FetchedToolOutput, V2ItemInspector } from "./V2ItemInspector";
 import { HighlightedCode } from "./HighlightedCode";
+import {
+  workEntryBodyCode,
+  workEntryLabelCode,
+  type WorkEntryCode,
+} from "@t3tools/client-runtime/work-log/entry-code";
 import { useV2ItemSupport } from "../../state/v2ItemSupport";
 import { Collapsible, CollapsibleTrigger, CollapsiblePanel } from "../ui/collapsible";
 import {
