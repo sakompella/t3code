@@ -2313,11 +2313,11 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
           const path = host.resolveAttachmentPath(attachment);
           if (path === null) continue;
           if (attachment.mimeType.startsWith("image/")) {
-            const bytes = yield* fileSystem.readFile(path);
+            const image = yield* host.readImageForProvider(path, attachment.mimeType);
             images.push({
               type: "image",
-              data: Buffer.from(bytes).toString("base64"),
-              mimeType: attachment.mimeType,
+              data: Buffer.from(image.data).toString("base64"),
+              mimeType: image.mimeType,
             });
           }
         }
