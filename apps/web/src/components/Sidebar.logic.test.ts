@@ -16,6 +16,7 @@ import {
   resolveProjectStatusIndicator,
   resolveSidebarSweepKeys,
   resolveSidebarThreadStatus,
+  resolveSidebarThreadSection,
   resolveSidebarV2TopStatus,
   resolveThreadStatusPill,
   resolveWorkingStartedAt,
