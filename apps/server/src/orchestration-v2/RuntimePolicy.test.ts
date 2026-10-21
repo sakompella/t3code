@@ -61,8 +61,11 @@ function makeThread(input: {
 }
 
 const grokInstanceId = ProviderInstanceId.make("grok");
+// The Prime Agent 0.10 fork offers only Full access.
+const fullAccessOnlyInstanceId = ProviderInstanceId.make("primeAgent");
 const supportedRuntimeModesByInstance = new Map<ProviderInstanceId, ReadonlyArray<RuntimeMode>>([
   [grokInstanceId, ["approval-required", "auto", "full-access"]],
+  [fullAccessOnlyInstanceId, ["full-access"]],
 ]);
 const providerInstanceFor = (instanceId: ProviderInstanceId) =>
   ({
@@ -121,6 +124,21 @@ it.layer(layerTest)("RuntimePolicyV2", (it) => {
       assert.equal(yield* modeFor(grokInstanceId, "auto"), "auto");
       assert.equal(yield* modeFor(grokInstanceId, "full-access"), "full-access");
       assert.equal(yield* modeFor(providerInstanceId, "auto-accept-edits"), "auto-accept-edits");
+    }),
+  );
+
+  it.effect("runs a thread on a provider without Supervised in the mode clients show", () =>
+    Effect.gen(function* () {
+      const policy = yield* RuntimePolicy.RuntimePolicyV2;
+      const now = yield* DateTime.now;
+      for (const runtimeMode of ["approval-required", "auto-accept-edits", "auto"] as const) {
+        const resolved = yield* policy.resolve({
+          thread: makeThread({ now, worktreePath: null, runtimeMode }),
+          modelSelection: { instanceId: fullAccessOnlyInstanceId, model: "default" },
+        });
+        // Web and mobile show a provider's first offered mode for a mode it lacks.
+        assert.equal(resolved.runtimeMode, "full-access");
+      }
     }),
   );
 });

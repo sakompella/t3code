@@ -18,6 +18,7 @@ import { ThreadContextDivider } from "./thread-context-divider";
 import { ThreadHandoffDivider, ThreadHandoffRow } from "./thread-handoff-row";
 import { GuestBubbleTint, GuestMessageName } from "./guestMessageStyle";
 import { ThreadGuestPendingMessage, useThreadGuestShare } from "./ThreadGuestShareBar";
+import { ThreadPendingHeadMoveRow } from "./thread-pending-head-move-row";
 import { SecretRequestCard } from "./SecretRequestCard";
 import { AppActivityIndicator } from "../../components/ui/AppActivityIndicator";
 import {
@@ -183,9 +184,11 @@ import {
   normalizeNativeMarkdownUrl,
   resolveMarkdownLinkPresentation,
 } from "../../lib/markdownLinks";
+import { runFoldSegmentKeyIsForRun } from "@t3tools/client-runtime/state/run-fold";
 import {
   createThreadFeedCache,
   threadFeedCompactionLabels,
+  deriveTerminalAssistantMessageIds,
   failedFeedRunIds,
   deriveThreadFeedPresentation,
   threadFeedRunIsUnsettled,
@@ -1252,7 +1255,7 @@ function renderFeedEntry(
     readonly onCopyWorkRow: (rowId: string, value: string) => void;
     readonly onToggleWorkGroup: (groupId: string, anchorKey?: string) => void;
     readonly onToggleWorkRow: (rowId: string, anchorKey?: string, groupId?: string) => void;
-    readonly onToggleTurnFold: (runId: RunId) => void;
+    readonly onToggleTurnFold: (foldKey: string) => void;
     readonly onOpenTurnDiff: (checkpoint: ThreadCheckpointSummary) => void;
     readonly onPressPreview: (source: FilePreviewSource) => void;
     readonly onPlaybackStart: () => void;
@@ -1303,7 +1306,7 @@ function renderFeedEntry(
         <Pressable
           accessibilityRole="button"
           accessibilityState={{ expanded: entry.expanded }}
-          onPress={() => props.onToggleTurnFold(entry.runId)}
+          onPress={() => props.onToggleTurnFold(entry.foldKey)}
           hitSlop={4}
           className="min-h-11 min-w-0 flex-1 flex-row items-center gap-2"
           style={{
@@ -1374,6 +1377,7 @@ function renderFeedEntry(
         hiddenCount={entry.hiddenCount}
         iconSubtleColor={iconSubtleColor}
         summary={entry.summary}
+        summaryCode={entry.summaryCode}
         summaryKind={entry.summaryKind}
         themeAppearance={props.themeAppearance}
         toolSurface={entry.toolSurface}
@@ -2070,7 +2074,7 @@ function ThreadFeedPlaceholder(props: {
 // hooks can't drag this derivation into an uncached scope.
 function useThreadFeedPresentation(
   props: ThreadFeedProps,
-  expandedTurnIds: ReadonlySet<RunId>,
+  expandedFoldKeys: ReadonlySet<string>,
   expandedWorkGroups: Record<string, boolean>,
 ) {
   const [feedCache] = useState(createThreadFeedCache);
@@ -2078,7 +2082,7 @@ function useThreadFeedPresentation(
     deriveThreadFeedPresentation(
       props.feed,
       props.latestRun,
-      expandedTurnIds,
+      expandedFoldKeys,
       new Set(
         Object.entries(expandedWorkGroups)
           .filter(([, expanded]) => expanded)
@@ -2177,14 +2181,14 @@ export const ThreadFeed = memo(function ThreadFeed({
     readonly copiedRowId: string | null;
     readonly expandedWorkGroups: Record<string, boolean>;
     readonly expandedWorkRows: Record<string, boolean>;
-    readonly expandedTurnIds: ReadonlySet<RunId>;
+    readonly expandedFoldKeys: ReadonlySet<string>;
   }>({
     copiedRowId: null,
     expandedWorkGroups: {},
     expandedWorkRows: {},
-    expandedTurnIds: new Set(),
+    expandedFoldKeys: new Set(),
   });
-  const { copiedRowId, expandedWorkGroups, expandedWorkRows, expandedTurnIds } = interactionState;
+  const { copiedRowId, expandedWorkGroups, expandedWorkRows, expandedFoldKeys } = interactionState;
   const markdownLinkRequest = useRef<AbortController | null>(null);
   const onInlinePlaybackStart = () => {
     markdownLinkRequest.current?.abort();
@@ -2729,7 +2733,7 @@ export const ThreadFeed = memo(function ThreadFeed({
   const { jumpToMessageId } = props;
   const jumpReady = !!jumpToMessageId && loadedListKey === `${feedThreadKey}:filled`;
   const presentedFeed = appendGuestPendingMessages(
-    useThreadFeedPresentation(props, expandedTurnIds, expandedWorkGroups),
+    useThreadFeedPresentation(props, expandedFoldKeys, expandedWorkGroups),
     guestShare,
   );
   const jumpRunId =
@@ -2737,10 +2741,15 @@ export const ThreadFeed = memo(function ThreadFeed({
     !presentedFeed.some((entry) => entry.type === "message" && entry.id === jumpToMessageId)
       ? messageFoldRunId(props.feed, jumpToMessageId)
       : null;
-  if (jumpRunId && !expandedTurnIds.has(jumpRunId)) {
+  const jumpCollapsedFoldKeys = presentedFeed.flatMap((entry) =>
+    entry.type === "run-fold" && entry.runId === jumpRunId && !expandedFoldKeys.has(entry.foldKey)
+      ? [entry.foldKey]
+      : [],
+  );
+  if (jumpCollapsedFoldKeys.length > 0) {
     setInteractionState((current) => ({
       ...current,
-      expandedTurnIds: new Set(current.expandedTurnIds).add(jumpRunId),
+      expandedFoldKeys: new Set([...current.expandedFoldKeys, ...jumpCollapsedFoldKeys]),
     }));
   }
   const setupAnchorIndex = presentedFeed.findIndex(
@@ -2842,15 +2851,7 @@ export const ThreadFeed = memo(function ThreadFeed({
     { anchorOffset: anchorTopInset + CHAT_LIST_ANCHOR_OFFSET },
   );
   const failedRunIds = failedFeedRunIds(props.feed, props.latestRun);
-  const terminalAssistantMessageIds = (() => {
-    const terminalIdsByTurn = new Map<RunId, string>();
-    for (const entry of props.feed) {
-      if (entry.type === "message" && entry.message.role === "assistant" && entry.message.runId) {
-        terminalIdsByTurn.set(entry.message.runId, entry.message.id);
-      }
-    }
-    return new Set(terminalIdsByTurn.values());
-  })();
+  const terminalAssistantMessageIds = deriveTerminalAssistantMessageIds(props.feed);
   // An interrupted run unfolds; a run that is no longer latest folds back.
   const [previousLatestRun, setPreviousLatestRun] = useState(props.latestRun);
   if (previousLatestRun !== props.latestRun) {
@@ -2859,17 +2860,26 @@ export const ThreadFeed = memo(function ThreadFeed({
     const previous = previousLatestRun;
     if (latest && previous) {
       if (latest.runId !== previous.runId) {
-        if (expandedTurnIds.has(previous.runId)) {
-          setInteractionState((current) => {
-            const next = new Set(current.expandedTurnIds);
-            next.delete(previous.runId);
-            return { ...current, expandedTurnIds: next };
-          });
+        if ([...expandedFoldKeys].some((key) => runFoldSegmentKeyIsForRun(key, previous.runId))) {
+          setInteractionState((current) => ({
+            ...current,
+            expandedFoldKeys: new Set(
+              [...current.expandedFoldKeys].filter(
+                (key) => !runFoldSegmentKeyIsForRun(key, previous.runId),
+              ),
+            ),
+          }));
         }
       } else if (previous.status === "running" && latest.status === "interrupted") {
+        const interruptedKeys = [
+          latest.runId,
+          ...presentedFeed.flatMap((entry) =>
+            entry.type === "run-fold" && entry.runId === latest.runId ? [entry.foldKey] : [],
+          ),
+        ];
         setInteractionState((current) => ({
           ...current,
-          expandedTurnIds: new Set(current.expandedTurnIds).add(latest.runId),
+          expandedFoldKeys: new Set([...current.expandedFoldKeys, ...interruptedKeys]),
         }));
       }
     }
@@ -2986,16 +2996,16 @@ export const ThreadFeed = memo(function ThreadFeed({
     });
   };
 
-  const onToggleTurnFold = (runId: RunId) => {
-    suspendEndScrollMaintenanceForDisclosure(`run-fold:${runId}`);
+  const onToggleTurnFold = (foldKey: string) => {
+    suspendEndScrollMaintenanceForDisclosure(`run-fold:${foldKey}`);
     setInteractionState((current) => {
-      const next = new Set(current.expandedTurnIds);
-      if (next.has(runId)) {
-        next.delete(runId);
+      const next = new Set(current.expandedFoldKeys);
+      if (next.has(foldKey)) {
+        next.delete(foldKey);
       } else {
-        next.add(runId);
+        next.add(foldKey);
       }
-      return { ...current, expandedTurnIds: next };
+      return { ...current, expandedFoldKeys: next };
     });
   };
 
@@ -3252,15 +3262,22 @@ export const ThreadFeed = memo(function ThreadFeed({
               </>
             }
             ListFooterComponent={
-              props.pendingHandoff ? (
-                <ThreadHandoffDivider
+              <>
+                {props.pendingHandoff ? (
+                  <ThreadHandoffDivider
+                    environmentId={props.environmentId}
+                    endpoints={props.pendingHandoff}
+                    iconColor={iconSubtleColor}
+                    surfaceColor={screenColor}
+                    label="Context handoff pending"
+                  />
+                ) : null}
+                <ThreadPendingHeadMoveRow
                   environmentId={props.environmentId}
-                  endpoints={props.pendingHandoff}
+                  threadId={props.threadId}
                   iconColor={iconSubtleColor}
-                  surfaceColor={screenColor}
-                  label="Context handoff pending"
                 />
-              ) : null
+              </>
             }
             contentContainerStyle={{
               paddingTop: FEED_PADDING_TOP,
