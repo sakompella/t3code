@@ -37,7 +37,8 @@ export function observeThreadForNotification(
     | "hasPendingApprovals"
     | "hasPendingUserInput"
     | "pendingSubagentRequest"
-  > & Pick<OrchestrationV2ThreadShell, "latestRunStopRequested">,
+  > &
+    Pick<OrchestrationV2ThreadShell, "latestRunStopRequested">,
   prior: ThreadNotificationMemory | undefined,
   now: string,
 ): ThreadNotificationObservation {
@@ -59,7 +60,9 @@ export function observeThreadForNotification(
       ? null
       : attention && attention !== prior.attention
         ? "input"
-        : ended?.isCompletion && !stopped && (prior.completion === null || ended.at > prior.completion)
+        : ended?.isCompletion &&
+            !stopped &&
+            (prior.completion === null || ended.at > prior.completion)
           ? "completion"
           : null;
   return { status, memory, kind };
