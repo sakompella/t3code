@@ -1,7 +1,4 @@
-/* Scan only src/. Without a .git directory (the staged build snapshot) Tailwind
-   cannot read .gitignore, and automatic detection walks node_modules through the
-   workspace symlinks: 860k files and minutes per build. */
-@import "tailwindcss" source(".");
+@import "tailwindcss";
 
 @custom-variant dark (&:is(.dark, .dark *));
 @custom-variant light (&:not(.dark, .dark *));

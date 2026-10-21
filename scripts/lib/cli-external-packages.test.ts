@@ -35,7 +35,6 @@ describe("shouldBundleCliDependency", () => {
       "ffi-rs",
       "@yuuang/ffi-rs-win32-x64-msvc",
       "@ff-labs/fff-node",
-      "@napi-rs/image",
       "@napi-rs/keyring",
       "@clerk/electron-passkeys",
       "node-addon-api",

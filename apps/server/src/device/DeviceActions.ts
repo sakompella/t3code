@@ -334,11 +334,15 @@ const serveSimPermissions = Effect.fn("DeviceActions.serveSimPermissions")(funct
       reason: "helper_missing",
     });
   yield* ready
-    .run(
-      ready.nodePath,
-      [cli, "permissions", input.decision, input.permission, input.appId, "-d", udid],
-      ready.nodeEnv === undefined ? undefined : { env: ready.nodeEnv },
-    )
+    .run(ready.nodePath, [
+      cli,
+      "permissions",
+      input.decision,
+      input.permission,
+      input.appId,
+      "-d",
+      udid,
+    ])
     .pipe(Effect.flatMap(ok("permission")));
 });
 

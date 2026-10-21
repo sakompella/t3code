@@ -137,18 +137,12 @@ export interface DeviceOperations {
 
 export interface DeviceHostReady {
   readonly nodePath: string;
-  /** Environment `nodePath` needs to run as Node (`ELECTRON_RUN_AS_NODE` for Electron); absent on remote hosts. */
-  readonly nodeEnv?: Readonly<Record<string, string>>;
   readonly hub: DeviceHubEndpoint;
   readonly devices: DeviceOperations;
   readonly run: (
     command: string,
     args: ReadonlyArray<string>,
-    options?: {
-      readonly timeoutMs?: number;
-      readonly stdin?: string;
-      readonly env?: Readonly<Record<string, string>>;
-    },
+    options?: { readonly timeoutMs?: number; readonly stdin?: string },
   ) => Effect.Effect<{ readonly stdout: string; readonly stderr: string; readonly code: number }>;
   readonly helpers: {
     readonly serveSimAxSettings: string | null;

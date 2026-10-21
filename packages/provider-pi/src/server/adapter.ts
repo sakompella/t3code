@@ -3446,11 +3446,11 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
           const path = host.resolveAttachmentPath(attachment);
           if (path === null) continue;
           if (attachment.mimeType.startsWith("image/")) {
-            const image = yield* host.readImageForProvider(path, attachment.mimeType);
+            const bytes = yield* fileSystem.readFile(path);
             images.push({
               type: "image",
-              data: Buffer.from(image.data).toString("base64"),
-              mimeType: image.mimeType,
+              data: Buffer.from(bytes).toString("base64"),
+              mimeType: attachment.mimeType,
             });
           } else {
             extraLines.push(`[Attachment saved at ${path}]`);
