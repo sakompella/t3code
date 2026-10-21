@@ -11,7 +11,8 @@ import {
 import { waitForHttpReady } from "@t3tools/shared/httpReadiness";
 import * as HostProcess from "@t3tools/shared/HostProcess";
 import {
-  resolveNodeExecutable,
+  resolveNodeRuntime,
+  type NodeRuntime,
   type NodeRuntimeUnavailableError,
 } from "@t3tools/shared/nodeRuntime";
 import * as NetService from "@t3tools/shared/Net";
@@ -87,7 +88,7 @@ const decodeAgentDeviceFailure = Schema.decodeUnknownOption(
 );
 
 interface HubProcess {
-  readonly nodePath: string;
+  readonly node: NodeRuntime;
   readonly child: ChildProcessSpawner.ChildProcessHandle;
   readonly scope: Scope.Closeable;
   readonly origin: string;
@@ -391,7 +392,7 @@ export const make = Effect.fn("LocalDeviceHost.make")(function* () {
 
   const spawnHub = Effect.fn("LocalDeviceHost.spawnHub")(function* (
     hubTool: DeviceToolPaths,
-    nodePath: string,
+    node: NodeRuntime,
   ): Effect.fn.Return<HubProcess, DeviceHost.DeviceHostError> {
     yield* reapStaleHub;
     yield* fs
@@ -414,7 +415,7 @@ export const make = Effect.fn("LocalDeviceHost.make")(function* () {
       const child = yield* spawner
         .spawn(
           ChildProcess.make(
-            nodePath,
+            node.command,
             [
               hubTool.entryPath,
               "--port",
@@ -431,12 +432,15 @@ export const make = Effect.fn("LocalDeviceHost.make")(function* () {
               shell: false,
               stdout: "pipe",
               stderr: "pipe",
-              env: yield* hubEnvironment(hostEnvironment).pipe(
-                Effect.provideService(FileSystem.FileSystem, fs),
-                Effect.provideService(Path.Path, path),
-                Effect.provideService(ProcessRunner.ProcessRunner, runner),
-                Effect.provideService(HostProcess.Platform, hostPlatform),
-              ),
+              env: {
+                ...(yield* hubEnvironment(hostEnvironment).pipe(
+                  Effect.provideService(FileSystem.FileSystem, fs),
+                  Effect.provideService(Path.Path, path),
+                  Effect.provideService(ProcessRunner.ProcessRunner, runner),
+                  Effect.provideService(HostProcess.Platform, hostPlatform),
+                )),
+                ...node.env,
+              },
             },
           ),
         )
@@ -452,7 +456,7 @@ export const make = Effect.fn("LocalDeviceHost.make")(function* () {
           ),
         );
       const startedAtMillis = yield* Clock.currentTimeMillis;
-      const hub: HubProcess = { child, scope, origin, startedAtMillis, nodePath };
+      const hub: HubProcess = { child, scope, origin, startedAtMillis, node };
       yield* Effect.forkIn(observeHubOutput(hub), scope);
       yield* waitForHttpReady({
         baseUrl: origin,
@@ -505,7 +509,7 @@ export const make = Effect.fn("LocalDeviceHost.make")(function* () {
           Effect.gen(function* () {
             const current = yield* Ref.get(runningRef);
             if (current?.hub.child.pid !== hub.child.pid) return;
-            const replacement = yield* spawnHub(hubTool, hub.nodePath);
+            const replacement = yield* spawnHub(hubTool, hub.node);
             yield* Ref.set(runningRef, { ...current, hub: replacement });
             yield* Effect.forkDetach(superviseHub(replacement, hubTool));
           }),
@@ -523,7 +527,7 @@ export const make = Effect.fn("LocalDeviceHost.make")(function* () {
 
   const startAgentDeviceDaemon = Effect.fn("LocalDeviceHost.startAgentDeviceDaemon")(function* (
     agentTool: Pick<DeviceToolPaths, "entryPath">,
-    nodePath: string,
+    node: NodeRuntime,
   ): Effect.fn.Return<
     DeviceHost.AgentDeviceEndpoint,
     | DeviceHost.DeviceHostError
@@ -535,6 +539,7 @@ export const make = Effect.fn("LocalDeviceHost.make")(function* () {
     const existing = yield* readDaemonFile().pipe(Effect.option);
     const daemonEnvironment: NodeJS.ProcessEnv = {
       ...hostEnvironment,
+      ...node.env,
       AGENT_DEVICE_STATE_DIR: stateDir,
       AGENT_DEVICE_DAEMON_SERVER_MODE: "http",
       // Disable the five-minute idle timeout; the server owns shutdown.
@@ -567,7 +572,7 @@ export const make = Effect.fn("LocalDeviceHost.make")(function* () {
     // No `daemon start` exists; `devices` is the cheapest command that starts and awaits it.
     const runResult = yield* runner
       .run({
-        command: nodePath,
+        command: node.command,
         args: [agentTool.entryPath, "devices", "--json"],
         env: daemonEnvironment,
         timeout: Duration.millis(DAEMON_READY_TIMEOUT_MS),
@@ -625,12 +630,12 @@ export const make = Effect.fn("LocalDeviceHost.make")(function* () {
   });
 
   const stopAgentDeviceDaemon = (
-    agentTool: { readonly entryPath: string; readonly nodePath: string } | null,
+    agentTool: { readonly entryPath: string; readonly node: NodeRuntime } | null,
   ) =>
     agentTool
       ? runner
           .run({
-            command: agentTool.nodePath,
+            command: agentTool.node.command,
             args: [
               agentTool.entryPath,
               "daemon",
@@ -638,14 +643,18 @@ export const make = Effect.fn("LocalDeviceHost.make")(function* () {
               "--state-dir",
               agentDeviceStateDir(path, config.stateDir),
             ],
-            env: { ...hostEnvironment, AGENT_DEVICE_NO_UPDATE_NOTIFIER: "1" },
+            env: {
+              ...hostEnvironment,
+              ...agentTool.node.env,
+              AGENT_DEVICE_NO_UPDATE_NOTIFIER: "1",
+            },
             timeout: Duration.seconds(10),
             timeoutBehavior: "timedOutResult",
           })
           .pipe(Effect.ignore)
       : Effect.void;
 
-  let agentToolRef: { readonly entryPath: string; readonly nodePath: string } | null = null;
+  let agentToolRef: { readonly entryPath: string; readonly node: NodeRuntime } | null = null;
 
   const ensureHubReady = Effect.fn("LocalDeviceHost.ensureHubReady")(function* (
     onPhase: (phase: "installing" | "starting", detail?: string) => Effect.Effect<void>,
@@ -657,7 +666,7 @@ export const make = Effect.fn("LocalDeviceHost.make")(function* () {
       const alive = yield* running.hub.child.isRunning.pipe(Effect.orElseSucceed(() => false));
       if (alive) return running;
     }
-    const nodePath = yield* resolveNodeExecutable("Local device support", hostEnvironment).pipe(
+    const node = yield* resolveNodeRuntime("Local device support", hostEnvironment).pipe(
       Effect.provideService(FileSystem.FileSystem, fs),
       Effect.provideService(Path.Path, path),
       Effect.provideService(HostProcess.Platform, hostPlatform),
@@ -684,9 +693,9 @@ export const make = Effect.fn("LocalDeviceHost.make")(function* () {
       ),
     );
     yield* onPhase("starting");
-    const hub = yield* spawnHub(hubTool, nodePath);
+    const hub = yield* spawnHub(hubTool, node);
     const next = yield* Effect.gen(function* () {
-      yield* pruneLocalDeviceTools(config.baseDir, nodePath, "hub").pipe(
+      yield* pruneLocalDeviceTools(config.baseDir, node, "hub").pipe(
         Effect.provideService(Path.Path, path),
         Effect.provideService(ProcessRunner.ProcessRunner, runner),
         Effect.ignore,
@@ -731,7 +740,7 @@ export const make = Effect.fn("LocalDeviceHost.make")(function* () {
         if (running.agentDevice) {
           const agentDevice = yield* startAgentDeviceDaemon(
             running.agentDevice,
-            running.hub.nodePath,
+            running.hub.node,
           );
           yield* Ref.set(runningRef, { ...running, agentDevice });
           return { ...toReady(running), agentDevice };
@@ -760,10 +769,10 @@ export const make = Effect.fn("LocalDeviceHost.make")(function* () {
               }),
           ),
         );
-        agentToolRef = { entryPath: agentTool.entryPath, nodePath: running.hub.nodePath };
+        agentToolRef = { entryPath: agentTool.entryPath, node: running.hub.node };
         yield* onPhase("starting");
-        const agentDevice = yield* startAgentDeviceDaemon(agentTool, running.hub.nodePath);
-        yield* pruneLocalDeviceTools(config.baseDir, running.hub.nodePath, "agent").pipe(
+        const agentDevice = yield* startAgentDeviceDaemon(agentTool, running.hub.node);
+        yield* pruneLocalDeviceTools(config.baseDir, running.hub.node, "agent").pipe(
           Effect.provideService(Path.Path, path),
           Effect.provideService(ProcessRunner.ProcessRunner, runner),
           Effect.ignore,
@@ -802,7 +811,7 @@ export const make = Effect.fn("LocalDeviceHost.make")(function* () {
             : command,
         args,
         cwd: workingDirectory,
-        env: hostEnvironment,
+        env: { ...hostEnvironment, ...options?.env },
         timeout: Duration.millis(options?.timeoutMs ?? 20_000),
         timeoutBehavior: "timedOutResult",
         ...(options?.stdin === undefined ? {} : { stdin: options.stdin }),
@@ -827,7 +836,8 @@ export const make = Effect.fn("LocalDeviceHost.make")(function* () {
         Effect.map((availability) => availability.available),
       ),
     }),
-    nodePath: running.hub.nodePath,
+    nodePath: running.hub.node.command,
+    nodeEnv: running.hub.node.env,
     run,
     helpers: running.helpers,
     ...(running.agentDevice
