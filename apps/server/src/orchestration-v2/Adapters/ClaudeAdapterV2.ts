@@ -123,6 +123,7 @@ import * as ChildProcess from "effect/process/ChildProcess";
 import * as ChildProcessSpawner from "effect/process/ChildProcessSpawner";
 
 import { resolveAttachmentPath } from "../../attachmentStore.ts";
+import { readImageForProvider } from "../../provider/providerImage.ts";
 import { resolveClaudeSdkExecutablePath } from "../../provider/Drivers/ClaudeExecutable.ts";
 import {
   planClaudeSkillDispatch,
@@ -1927,7 +1928,8 @@ const makeClaudeUserMessageWithAttachments = Effect.fnUntraced(function* (input:
       });
     }
 
-    const bytes = yield* input.fileSystem.readFile(attachmentPath).pipe(
+    const image = yield* readImageForProvider(attachmentPath, attachment.mimeType).pipe(
+      Effect.provideService(FileSystem.FileSystem, input.fileSystem),
       Effect.mapError(
         (cause) =>
           new ProviderAdapter.ProviderAdapterProtocolError({
@@ -1938,12 +1940,18 @@ const makeClaudeUserMessageWithAttachments = Effect.fnUntraced(function* (input:
           }),
       ),
     );
+    if (!isSupportedClaudeImageMimeType(image.mimeType)) {
+      return yield* new ProviderAdapter.ProviderAdapterProtocolError({
+        driver: CLAUDE_PROVIDER,
+        detail: `Unsupported Claude image attachment type '${image.mimeType}'`,
+      });
+    }
     content.push({
       type: "image",
       source: {
         type: "base64",
-        media_type: attachment.mimeType,
-        data: Buffer.from(bytes).toString("base64"),
+        media_type: image.mimeType,
+        data: Buffer.from(image.data).toString("base64"),
       },
     });
   }
