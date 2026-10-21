@@ -12,6 +12,7 @@ import * as ServerConfig from "../config.ts";
 import * as ServerSettings from "../serverSettings.ts";
 import * as DocumentText from "./DocumentText.ts";
 import * as ProviderCredentialStore from "./ProviderCredentialStore.ts";
+import { readImageForProvider } from "./providerImage.ts";
 
 export const layer = Layer.effect(
   ProviderHost.ProviderHost,
@@ -45,6 +46,13 @@ export const layer = Layer.effect(
           return yield* DocumentText.resolveExtractedTextPath(path);
         },
         Effect.provideService(FileSystem.FileSystem, fileSystem),
+      ),
+      readImageForProvider: Effect.fn("ProviderHost.readImageForProvider")(
+        function (path, mimeType) {
+          return readImageForProvider(path, mimeType).pipe(
+            Effect.provideService(FileSystem.FileSystem, fileSystem),
+          );
+        },
       ),
       credentials: Effect.fn("ProviderHost.credentials")(function (namespace, bindingId) {
         return ProviderCredentialStore.make(namespace, bindingId).pipe(
