@@ -60,6 +60,12 @@ export const layer = (
           return Effect.succeed(options.runBackgroundWork ?? true);
         }),
         resolveAttachmentPath: (attachment) => path.join(attachmentsDir, attachment.id),
+        // Tests never need the server's image scaling.
+        readImageForProvider: Effect.fn("ProviderHost.readImageForProvider")(
+          function (file, mimeType) {
+            return fileSystem.readFile(file).pipe(Effect.map((data) => ({ data, mimeType })));
+          },
+        ),
         credentials: Effect.fn("ProviderHost.credentials")(function (namespace, bindingId) {
           return Effect.sync(() => {
             const key = `${namespace}:${bindingId}`;
