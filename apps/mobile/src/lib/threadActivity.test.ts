@@ -628,7 +628,7 @@ describe("buildThreadFeed", () => {
     );
     expect(
       collapsed.flatMap((entry) => (entry.type === "message" ? [entry.message.text] : [])),
-    ).toEqual(["Run checks", "opening", "before-steer", "Change course", "final"]);
+    ).toEqual(["Run checks", "before-steer", "Change course", "final"]);
   });
 
   describe("a run that received steers", () => {
@@ -687,7 +687,6 @@ describe("buildThreadFeed", () => {
     it("folds each segment separately, where its work happened, timed on its own", () => {
       expect(sequence(deriveThreadFeedPresentation(feed, latestRun, new Set()))).toEqual([
         "Run checks",
-        "opening",
         // From the run's start to the first reply.
         "fold: Worked for 2.0s",
         "reply-1",
@@ -706,7 +705,6 @@ describe("buildThreadFeed", () => {
       const expanded = deriveThreadFeedPresentation(feed, latestRun, new Set([middle!]));
       expect(sequence(expanded)).toEqual([
         "Run checks",
-        "opening",
         "fold: Worked for 2.0s",
         "reply-1",
         "steer-1",
@@ -778,7 +776,6 @@ describe("buildThreadFeed", () => {
       expect(sequence(collapsed)).toEqual([
         "Run checks",
         "fold: Worked for 39s",
-        "commentary",
         "final",
       ]);
       expect(foldKeys(collapsed)).toEqual([runId]);
