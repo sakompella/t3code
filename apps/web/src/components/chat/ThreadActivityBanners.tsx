@@ -1,6 +1,7 @@
 import type {
   OrchestrationV2PendingBackgroundTask,
   OrchestrationV2ProviderGoal,
+  OrchestrationV2Subagent,
   ThreadId,
 } from "@t3tools/contracts";
 import type { EnvironmentThreadShell } from "@t3tools/client-runtime/state/shell";
@@ -8,6 +9,10 @@ import {
   presentPendingBackgroundWork,
   presentProviderGoal,
 } from "@t3tools/client-runtime/state/thread-execution";
+import {
+  buildLiveSubagentTree,
+  selectSubagentsForBackgroundTasks,
+} from "@t3tools/client-runtime/state/subagent-tree";
 import { childThreadInputsTitle } from "@t3tools/client-runtime/state/threads";
 import { GitBranchIcon, MessageCircleIcon, ShieldQuestionIcon, TargetIcon } from "lucide-react";
 import { Fragment } from "react";
@@ -15,6 +20,7 @@ import { cn } from "~/lib/utils";
 import { Button, InlineButton } from "../ui/button";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
 import type { ComposerBannerStackItem } from "./ComposerBannerStack";
+import { SubagentTreeList } from "./SubagentTree";
 
 /** Subagents waiting on the user, unless the parent is itself waiting on them. */
 export function childInputBannerItem(input: {
@@ -94,14 +100,79 @@ export function goalBannerItem(input: {
 export function backgroundWorkBannerItem(input: {
   readonly threadId: ThreadId;
   readonly tasks: ReadonlyArray<OrchestrationV2PendingBackgroundTask>;
+  readonly subagents: ReadonlyArray<OrchestrationV2Subagent>;
+  readonly turnRunning: boolean;
   readonly stopDisabled: boolean;
   readonly stopping: boolean;
   readonly onStop: () => Promise<void>;
   readonly onOpenThread: (threadId: ThreadId) => void;
 }): ComposerBannerStackItem | null {
   const { onOpenThread } = input;
-  const presentation = presentPendingBackgroundWork(input.tasks);
+  const presentation = presentPendingBackgroundWork(input.tasks, {
+    turnRunning: input.turnRunning,
+  });
   if (presentation === null) return null;
+  const stopAction = input.turnRunning ? undefined : (
+    <Button
+      size="xs"
+      variant="ghost"
+      disabled={input.stopDisabled}
+      onClick={() => void input.onStop()}
+    >
+      {input.stopping ? "Stopping..." : "Stop"}
+    </Button>
+  );
+  // While a turn runs, only subagents the background list names; a subagent
+  // the timeline already shows live must not reappear in the banner's tree.
+  const liveSubagentTree = buildLiveSubagentTree(
+    input.turnRunning
+      ? selectSubagentsForBackgroundTasks(input.subagents, input.tasks)
+      : input.subagents,
+  );
+  if (liveSubagentTree.roots.length > 0) {
+    // Live subagents read as a tree, like Prime Agent's agents view; other
+    // background work is listed after them.
+    const otherWork = presentation.items
+      .filter((item) => item.kind !== "subagent")
+      .map((item) => ({ taskId: item.taskId, label: item.label }));
+    return {
+      id: `background-work:${input.threadId}`,
+      variant: "default",
+      priority: "activity",
+      icon: (
+        <span
+          className="size-1.5 animate-status-pulse rounded-full bg-foreground"
+          aria-hidden="true"
+        />
+      ),
+      title: (
+        <span className="flex flex-wrap items-center gap-x-3">
+          <span>Subagents</span>
+          <span>
+            <span className="text-success">●</span> {liveSubagentTree.runningCount} running
+          </span>
+          {liveSubagentTree.waitingCount === 0 ? null : (
+            <span>
+              <span className="text-warning">◐</span> {liveSubagentTree.waitingCount} waiting
+            </span>
+          )}
+          {otherWork.length === 0 ? null : (
+            <span className="text-muted-foreground">
+              {otherWork.length} {otherWork.length === 1 ? "command" : "commands"}
+            </span>
+          )}
+        </span>
+      ),
+      children: (
+        <SubagentTreeList
+          tree={liveSubagentTree}
+          commands={otherWork}
+          onOpenThread={onOpenThread}
+        />
+      ),
+      actions: stopAction,
+    };
+  }
   return {
     id: `background-work:${input.threadId}`,
     variant: "default",
@@ -145,16 +216,7 @@ export function backgroundWorkBannerItem(input: {
               </Fragment>
             );
           }),
-    actions: (
-      <Button
-        size="xs"
-        variant="ghost"
-        disabled={input.stopDisabled}
-        onClick={() => void input.onStop()}
-      >
-        {input.stopping ? "Stopping..." : "Stop"}
-      </Button>
-    ),
+    actions: stopAction,
   };
 }
 
