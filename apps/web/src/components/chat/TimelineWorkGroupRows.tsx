@@ -376,7 +376,6 @@ function LiveActivityRow({
   failed = false,
   active = false,
   shimmer = false,
-  codeLabel = false,
 }: {
   label: ReactNode;
   iconName?: WorkEntryIconName;
@@ -384,8 +383,6 @@ function LiveActivityRow({
   failed?: boolean;
   active?: boolean;
   shimmer?: boolean;
-  /** The label is highlighted code, so a running shine must not repaint its colors. */
-  codeLabel?: boolean;
 }) {
   const animated = active && !failed;
   const showShimmer = animated && shimmer;
@@ -401,7 +398,6 @@ function LiveActivityRow({
         failed={failed}
         announceFailure={failed}
         active={animated && !shimmer}
-        codeLabel={codeLabel}
       />
       {showShimmer ? (
         <ActivityShimmerOverlay>
@@ -420,7 +416,6 @@ function LiveActivityContent({
   announceFailure = false,
   active = false,
   highlighted = false,
-  codeLabel = false,
 }: {
   label: ReactNode;
   iconName: WorkEntryIconName | undefined;
@@ -429,7 +424,6 @@ function LiveActivityContent({
   announceFailure?: boolean;
   active?: boolean;
   highlighted?: boolean;
-  codeLabel?: boolean;
 }) {
   const showTrailingFailureMark =
     failed && iconName !== undefined && !toolIconAcceptsTint(toolIcon);
@@ -584,7 +578,6 @@ export function LiveWorkEntryTimelineRow({
         toolIcon={row.entry.toolIcon ?? row.entry.toolSource?.icon}
         failed={failed}
         active={row.active}
-        codeLabel={labelCode !== null}
       />
     </button>
   );
