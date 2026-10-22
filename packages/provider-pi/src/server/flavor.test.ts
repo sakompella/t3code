@@ -125,8 +125,13 @@ describe("identifyForkPiCli", () => {
     }
   });
 
-  it("refuses every contract but 1", () => {
-    for (const contract of [-1, 0, 0.5, 1.000001, 2, 3, 10, 2 ** 31]) {
+  it("launches contract 2, which renamed the Python tool", () => {
+    const identity = identify(forkCapabilitiesWith({ contract: 2 }));
+    assert.equal(identity._tag, "Supported");
+  });
+
+  it("refuses every contract but 1 and 2", () => {
+    for (const contract of [-1, 0, 0.5, 1.000001, 1.999999, 3, 10, 2 ** 31]) {
       const identity = identify(forkCapabilitiesWith({ contract }));
       assert.equal(identity._tag, "Unsupported", String(contract));
       if (identity._tag === "Unsupported") assert.include(identity.reason, `contract ${contract}`);
