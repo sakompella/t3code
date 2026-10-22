@@ -6,6 +6,8 @@ import {
 } from "@t3tools/contracts";
 import * as DateTime from "effect/DateTime";
 
+import { backgroundWorkHoldsThread } from "./models.ts";
+
 export type ThreadRelationshipKind = "parent" | "fork" | "subagent" | "transfer";
 
 export interface ThreadRelationshipNode {
@@ -40,6 +42,13 @@ export function resolveMergeBackTargetThreadId(
   return projection.thread.forkedFrom?.type === "run"
     ? projection.thread.forkedFrom.threadId
     : projection.thread.lineage.parentThreadId;
+}
+
+/** A thread's status as Lineage shows it: waiting where the sidebar shows Waiting. */
+function shellActivityStatus(thread: OrchestrationV2ThreadShell): string {
+  return backgroundWorkHoldsThread(thread)
+    ? "waiting"
+    : (thread.activityRunStatus ?? thread.status);
 }
 
 function edgeKey(edge: ThreadRelationshipEdge): string {
@@ -90,7 +99,7 @@ export function deriveThreadRelationshipGraph(input: {
       sourceThreadId: parentThreadId,
       targetThreadId: thread.id,
       kind: thread.lineage.relationshipToParent === "subagent" ? "subagent" : "fork",
-      status: thread.activityRunStatus ?? thread.status,
+      status: shellActivityStatus(thread),
     });
   }
 
@@ -99,8 +108,10 @@ export function deriveThreadRelationshipGraph(input: {
     for (const subagent of input.projection.subagents) {
       if (subagent.childThreadId === null) continue;
       const child = threadsById.get(subagent.childThreadId);
+      // A nested subagent's record stays on the owner while its thread names
+      // its parent subagent's thread.
       addEdge({
-        sourceThreadId: ownerThreadId,
+        sourceThreadId: child?.lineage.parentThreadId ?? ownerThreadId,
         targetThreadId: subagent.childThreadId,
         kind: "subagent",
         status:
@@ -204,7 +215,7 @@ export function threadRelationshipRowStatus(
     return row.edge.status;
   }
   const thread = graph.nodes.get(row.threadId)?.thread;
-  return thread?.activityRunStatus ?? thread?.status ?? null;
+  return thread == null ? null : shellActivityStatus(thread);
 }
 
 function threadCreatedAtMillis(node: ThreadRelationshipNode | undefined): number | null {

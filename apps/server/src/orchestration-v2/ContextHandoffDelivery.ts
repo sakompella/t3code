@@ -1,6 +1,8 @@
 import type {
   OrchestrationV2ContextHandoff,
   OrchestrationV2ProviderThread,
+  OrchestrationV2Run,
+  OrchestrationV2ThreadProjection,
 } from "@t3tools/contracts";
 import type * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
 import { ContextHandoffBudgetError } from "@t3tools/provider-core/server/failure";
@@ -11,6 +13,40 @@ import {
   renderHistory,
   selectHistory,
 } from "@t3tools/provider-core/server/handoffBudget";
+
+/**
+ * Handoffs `run` carries to its provider thread: its own, and earlier ones
+ * whose carrying run did not leave them in the native conversation.
+ */
+export function handoffsForRun(
+  projection: Pick<OrchestrationV2ThreadProjection, "contextHandoffs" | "runs" | "messages">,
+  run: Pick<OrchestrationV2Run, "id" | "providerThreadId">,
+): ReadonlyArray<OrchestrationV2ContextHandoff> {
+  return projection.contextHandoffs.flatMap((handoff) => {
+    if (handoff.status !== "ready") return [];
+    if (handoff.targetRunId === run.id) return [handoff];
+    if (handoff.toProviderThreadId !== run.providerThreadId) return [];
+    const source = projection.runs.find((candidate) => candidate.id === handoff.targetRunId);
+    // A rollback discarded the turn that carried it and left it undelivered.
+    // This run carries it now, so rolling this run back sends it again.
+    if (source?.status === "rolled_back" && handoff.delivery === undefined) {
+      return [{ ...handoff, targetRunId: run.id }];
+    }
+    return source !== undefined &&
+      (source.status === "failed" ||
+        source.status === "interrupted" ||
+        (source.status === "completed" &&
+          handoff.delivery === undefined &&
+          projection.messages.some(
+            (message) =>
+              message.id === source.userMessageId &&
+              message.attachments.length === 0 &&
+              message.text.trim().toLowerCase() === "/compact",
+          )))
+      ? [handoff]
+      : [];
+  });
+}
 
 /**
  * Persist before/after injection: an ambiguous pending delivery requires a fresh native thread.
