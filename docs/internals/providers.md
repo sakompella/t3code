@@ -42,7 +42,7 @@ Prime Agent is a hard fork of Pi and runs through the same adapter with a
 work, and no event marks the end, so the adapter polls `get_state` until
 `sessionActions.active` clears; Prime Agent keeps that set through the whole retry chain. Turn
 boundaries for rollback come from new user entries in `get_fork_messages`. Every tool call is one
-`ipython` cell, and a failed cell reports `isError` on its result while the event's own flag stays
+Python cell (`ipython`, or `python_repl` from fork contract 2), and a failed cell reports `isError` on its result while the event's own flag stays
 false. A parent usually ends its run right after `rlm.spawn` and is woken again by the child's
 reply, so its turn settles while the child's subagent item stays running on the spawning run; that
 active item keeps the run's event stream open and drives the background-work banner. The kernel
