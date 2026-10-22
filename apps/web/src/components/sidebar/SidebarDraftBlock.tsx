@@ -9,7 +9,10 @@ import {
 } from "react";
 import type { EnvironmentProject } from "@t3tools/client-runtime/state/shell";
 import { cn } from "~/lib/utils";
-import { keepComposerFocusOnThreadRowPress, resolveSidebarRowAccessibility } from "../Sidebar.logic";
+import {
+  keepComposerFocusOnThreadRowPress,
+  resolveSidebarRowAccessibility,
+} from "../Sidebar.logic";
 import { ProjectFavicon, type ProjectFaviconProject } from "../ProjectFavicon";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
 import {
