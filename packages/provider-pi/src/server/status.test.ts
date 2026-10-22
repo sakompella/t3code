@@ -434,8 +434,8 @@ describe("PiProvider", () => {
     },
     {
       name: "an unknown contract",
-      ...forkCli({ stdout: forkCapabilitiesWith({ contract: 2 }) }),
-      reason: "contract 2",
+      ...forkCli({ stdout: forkCapabilitiesWith({ contract: 3 }) }),
+      reason: "contract 3",
     },
     {
       name: "a contract given as a string",
