@@ -47,10 +47,7 @@ import { cn } from "~/lib/utils";
 import { formatUpcomingTimestamp } from "../../timestampFormat";
 import { FetchedToolOutput, V2ItemInspector } from "./V2ItemInspector";
 import { HighlightedCode } from "./HighlightedCode";
-import {
-  workEntryBodyCode,
-  workEntryLabelCode,
-} from "@t3tools/client-runtime/work-log/entry-code";
+import { workEntryBodyCode, workEntryLabelCode } from "@t3tools/client-runtime/work-log/entry-code";
 import { SubagentNotificationLink } from "./V2LifecycleRow";
 import {
   TimelineRowCtx,
