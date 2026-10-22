@@ -2,6 +2,7 @@ import * as ProviderHost from "@t3tools/provider-core/server/ProviderHost";
 import { ProviderCredentialError } from "@t3tools/provider-core/server/errors";
 import * as Crypto from "effect/Crypto";
 import * as Effect from "effect/Effect";
+import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 
 import { resolveAttachmentPath } from "../attachmentStore.ts";
@@ -10,6 +11,7 @@ import * as BackgroundPolicy from "../background/BackgroundPolicy.ts";
 import * as ServerConfig from "../config.ts";
 import * as ServerSettings from "../serverSettings.ts";
 import * as ProviderCredentialStore from "./ProviderCredentialStore.ts";
+import { readImageForProvider } from "./providerImage.ts";
 
 export const layer = Layer.effect(
   ProviderHost.ProviderHost,
@@ -19,6 +21,7 @@ export const layer = Layer.effect(
     const backgroundPolicy = yield* BackgroundPolicy.BackgroundPolicy;
     const secrets = yield* ServerSecretStore.ServerSecretStore;
     const crypto = yield* Crypto.Crypto;
+    const fileSystem = yield* FileSystem.FileSystem;
     return ProviderHost.ProviderHost.of({
       paths: {
         cwd: config.cwd,
@@ -36,6 +39,10 @@ export const layer = Layer.effect(
       shouldRunBackgroundWork: backgroundPolicy.shouldRunScopeWork,
       resolveAttachmentPath: (attachment) =>
         resolveAttachmentPath({ attachmentsDir: config.attachmentsDir, attachment }),
+      readImageForProvider: (path, mimeType) =>
+        readImageForProvider(path, mimeType).pipe(
+          Effect.provideService(FileSystem.FileSystem, fileSystem),
+        ),
       credentials: (namespace, bindingId) =>
         ProviderCredentialStore.make(namespace, bindingId).pipe(
           Effect.map((store) => ({
