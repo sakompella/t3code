@@ -93,7 +93,7 @@ import {
   T3_NAVIGATE_TREE_RESULT_MARKER,
   T3_ROLLBACK_NOTICE,
 } from "./mcpExtensionSource.ts";
-import { PI_FLAVOR, PRIME_AGENT_FLAVOR, type PiFlavor } from "./flavor.ts";
+import { isPythonCellTool, PI_FLAVOR, PRIME_AGENT_FLAVOR, type PiFlavor } from "./flavor.ts";
 import { detectPiFlavor, type PiCliUnsupportedError } from "./status.ts";
 import { resolveKernelMcpAccess } from "./primeAgentT3Mcp.ts";
 
@@ -374,7 +374,7 @@ function piToolOutput(result: unknown, toolName: string): unknown {
 }
 
 /**
- * Prime Agent runs every tool as an `ipython` cell, so only the T3 bridge's
+ * Prime Agent runs every tool as a Python cell, so only the T3 bridge's
  * own confirmation can gate it. Edits are only known from the cell's result,
  * after it ran, so there is no file-change approval to skip.
  */
@@ -1377,7 +1377,7 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
           status,
           completedAt: completed ? emittedAt : null,
         } as const;
-        if (flavor.tools === "ipython" && toolName === "ipython") {
+        if (flavor.tools === "ipython" && isPythonCellTool(toolName)) {
           yield* ipython.emitCell(turn, {
             toolCallId,
             args,

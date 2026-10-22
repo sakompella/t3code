@@ -7712,6 +7712,57 @@ describe("PiAdapterV2 with the Prime Agent flavor", () => {
     }).pipe(Effect.scoped, Effect.provide(layerTest)),
   );
 
+  it.effect("shows a python_repl cell, from contract 2, as the same one Python tool item", () =>
+    Effect.gen(function* () {
+      const fake = yield* makeFakePi;
+      const { runtime, takeEvent, providerThread } = yield* openPrimeThread(fake);
+      yield* startTurn(runtime, providerThread);
+      yield* fake.takeRequest("prompt");
+      yield* fake.emit({ type: "agent_start" });
+
+      yield* fake.emit({
+        type: "tool_execution_start",
+        toolCallId: "cell_repl",
+        toolName: "python_repl",
+        args: { code: "total = 1 + 2\nprint(total)" },
+      });
+      const started = yield* takeEvent(
+        (event) =>
+          event.type === "turn_item.updated" &&
+          event.turnItem.type === "dynamic_tool" &&
+          event.turnItem.status === "running",
+      );
+      yield* fake.emit({
+        type: "tool_execution_update",
+        toolCallId: "cell_repl",
+        toolName: "python_repl",
+        partialResult: { content: [{ type: "text", text: "3\n" }], details: { status: "ok" } },
+      });
+      yield* fake.emit({
+        type: "tool_execution_end",
+        toolCallId: "cell_repl",
+        toolName: "python_repl",
+        result: { content: [{ type: "text", text: "3\n" }], details: { status: "ok" } },
+        isError: false,
+      });
+      const finished = yield* takeEvent(
+        (event) =>
+          event.type === "turn_item.updated" &&
+          event.turnItem.type === "dynamic_tool" &&
+          event.turnItem.status === "completed",
+      );
+      assert.isTrue(
+        started.type === "turn_item.updated" &&
+          finished.type === "turn_item.updated" &&
+          finished.turnItem.type === "dynamic_tool" &&
+          finished.turnItem.id === started.turnItem.id &&
+          finished.turnItem.toolName === "python" &&
+          finished.turnItem.title === "total = 1 + 2" &&
+          finished.turnItem.output === "3\n",
+      );
+    }).pipe(Effect.scoped, Effect.provide(layerTest)),
+  );
+
   const rlmChild = (status: string, extra: Record<string, unknown> = {}) => ({
     type: "rlm_child_update",
     child: {
@@ -12026,8 +12077,8 @@ describe("PiAdapterV2 on the Prime Agent 0.10 fork", () => {
     },
     {
       name: "a fork with an unknown contract",
-      cli: { ...FORK_CLI, capabilities: forkCapabilitiesWith({ contract: 2 }) },
-      reason: "contract 2",
+      cli: { ...FORK_CLI, capabilities: forkCapabilitiesWith({ contract: 3 }) },
+      reason: "contract 3",
     },
     { name: "a nightly label", cli: { ...FORK_CLI, version: "nightly" } },
   ])("does not launch a binary it cannot identify, from $name", ({ cli, reason }) =>
