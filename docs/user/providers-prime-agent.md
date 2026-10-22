@@ -121,7 +121,7 @@ work as described above. The differences:
 - If Prime Agent is unavailable, confirm that the configured binary runs on the server machine and
   reports version 0.9.6 or newer, then refresh the provider in Settings. T3 Code does not launch a
   binary whose `--version` it cannot read. Below 0.10, `--help` must offer `--mode rpc`. From 0.10
-  on, `prime-agent --capabilities` must print the T3 fork's contract 1 with every command T3 Code
+  on, `prime-agent --capabilities` must print the T3 fork's contract 1 or 2 with every command T3 Code
   uses; the Settings message names what is missing.
 - If no models appear, open Prime Agent directly and confirm its authentication and model
   configuration.
