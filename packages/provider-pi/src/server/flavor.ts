@@ -4,7 +4,7 @@
  * Prime Agent is a hard fork of Pi (forked around Pi 0.75). Its RPC keeps
  * Pi's commands and events, but it forked before Pi added `agent_settled`
  * and `get_entries`, and it replaced Pi's bash/edit/write tools with a single
- * persistent `ipython` tool. Everything else (sessions, forks, extensions,
+ * persistent Python tool. Everything else (sessions, forks, extensions,
  * extension UI, model selection, compaction) is shared, so both run through
  * the same adapter, probe, and text generation with one flavor each.
  */
@@ -42,7 +42,7 @@ export interface PiFlavor {
    * the active branch's user entries with `get_fork_messages`.
    */
   readonly sessionTree: "entries" | "fork_messages";
-  /** Pi's built-in bash/edit/write tools, or Prime Agent's single `ipython` tool. */
+  /** Pi's built-in bash/edit/write tools, or Prime Agent's single Python tool. */
   readonly tools: "pi" | "ipython";
   /**
    * Whether a wake's continuation run gets a notice naming what woke the
@@ -319,9 +319,19 @@ const ForkCapabilities = Schema.fromJsonString(
 const decodeForkCapabilities = Schema.decodeUnknownOption(ForkCapabilities);
 
 const T3_FORK_MARKER = "t3fork";
-/** The fork contract whose commands and frames this adapter was reviewed against. */
-const SUPPORTED_FORK_CONTRACT = 1;
-/** The RPC commands the adapter sends to the fork (contract 1). It may advertise more. */
+/**
+ * The fork contracts whose commands and frames this adapter was reviewed
+ * against. Contract 2 renamed the Python tool (see `isPythonCellTool`).
+ */
+const SUPPORTED_FORK_CONTRACTS: ReadonlyArray<number> = [1, 2];
+
+/**
+ * The Python cell tool's names: `ipython` before contract 2 and in 0.9.8,
+ * `python_repl` after upstream's rename. Both show as the same cell.
+ */
+export const isPythonCellTool = (toolName: string): boolean =>
+  toolName === "ipython" || toolName === "python_repl";
+/** The RPC commands the adapter sends to the fork (every supported contract). It may advertise more. */
 const FORK_COMMANDS_T3_CALLS = [
   "prompt",
   "abort",
@@ -367,9 +377,9 @@ export function identifyForkPiCli(
   if (fork !== T3_FORK_MARKER) {
     return unsupported(`its \`--capabilities\` names fork "${fork}", not "${T3_FORK_MARKER}"`);
   }
-  if (contract !== SUPPORTED_FORK_CONTRACT) {
+  if (!SUPPORTED_FORK_CONTRACTS.includes(contract)) {
     return unsupported(
-      `its fork contract ${contract} is not supported; T3 Code supports contract ${SUPPORTED_FORK_CONTRACT}`,
+      `its fork contract ${contract} is not supported; T3 Code supports contracts ${SUPPORTED_FORK_CONTRACTS.join(" and ")}`,
     );
   }
   const missing = FORK_COMMANDS_T3_CALLS.filter((command) => !rpc.includes(command));
