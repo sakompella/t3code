@@ -17,7 +17,7 @@ arguments work as they do for Pi.
 ## Let Prime Agent Use T3 Code Tools
 
 Prime Agent can start threads, delegate tasks, and schedule work through T3 Code's MCP server. It
-keeps its single `ipython` tool and calls T3 Code from the Python kernel, guided by a short
+keeps its single Python tool and calls T3 Code from the Python kernel, guided by a short
 `t3-code` skill. Prime Agent reads MCP servers only from its user settings file, so you must add
 this to `mcpServers` in `~/.prime/agent/settings.json` (or in
 `$PRIME_AGENT_CODING_AGENT_DIR/settings.json`) and start a new session:
