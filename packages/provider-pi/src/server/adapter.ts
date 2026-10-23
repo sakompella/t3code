@@ -5,7 +5,6 @@ import { readToolOutputImage } from "@t3tools/shared/toolOutput";
 import * as Predicate from "effect/Predicate";
 import {
   defaultInstanceIdForDriver,
-  ProviderDriverKind,
   type ChatAttachment,
   type ModelSelection,
   type OrchestrationV2ExecutionNode,
