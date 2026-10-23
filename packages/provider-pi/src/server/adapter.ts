@@ -4,7 +4,6 @@ import { getModelSelectionStringOptionValue } from "@t3tools/shared/model";
 import { readToolOutputImage } from "@t3tools/shared/toolOutput";
 import * as Predicate from "effect/Predicate";
 import {
-  ProviderDriverKind,
   type ChatAttachment,
   type ModelSelection,
   type OrchestrationV2ExecutionNode,
