@@ -4994,7 +4994,6 @@ describe("PiAdapterV2 with the Prime Agent flavor", () => {
       const reprobe = yield* fake.takeRequest("get_state").pipe(Effect.forkScoped);
       for (let step = 0; step < 20 && reprobe.pollUnsafe() === undefined; step += 1) {
         yield* TestClock.adjust(Duration.millis(100));
-        yield* Effect.yieldNow;
       }
       return yield* Fiber.join(reprobe);
     });
@@ -7102,7 +7101,6 @@ describe("PiAdapterV2 with the Prime Agent flavor", () => {
       const outcome = yield* takeRepliesAndOutcome(takeEvent).pipe(Effect.forkScoped);
       for (let step = 0; step < 50 && outcome.pollUnsafe() === undefined; step += 1) {
         yield* TestClock.adjust(Duration.millis(100));
-        yield* Effect.yieldNow;
       }
       return yield* Fiber.join(outcome);
     });
@@ -7338,7 +7336,6 @@ describe("PiAdapterV2 with the Prime Agent flavor", () => {
       // The row appears after a delay on the test clock.
       for (let step = 0; step < 40 && runningRow.pollUnsafe() === undefined; step += 1) {
         yield* TestClock.adjust(Duration.millis(100));
-        yield* Effect.yieldNow;
       }
       const running = yield* Fiber.join(runningRow);
       assert.isTrue(
