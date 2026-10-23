@@ -40,6 +40,7 @@ import * as Scope from "effect/Scope";
 import * as Stream from "effect/Stream";
 import * as SqlClient from "effect/sql/SqlClient";
 import { writeFileStringAtomically } from "@t3tools/shared/atomicWrite";
+import { resolveProjectSettings } from "@t3tools/shared/projectSettings";
 import { resolveSymlinkTarget } from "@t3tools/shared/symlink";
 import * as ServerConfig from "./config.ts";
 import { type DeepPartial, deepMerge } from "@t3tools/shared/Struct";
@@ -129,6 +130,17 @@ const normalizeServerSettings = (
           operation: "normalize",
           cause,
         }),
+    ),
+  );
+
+/** The project's response streaming mode, read fresh so a change applies to the next run. */
+export const readResponseStreamingMode = (
+  getSettings: Effect.Effect<ServerSettings, ServerSettingsError>,
+  projectId: ProjectId,
+) =>
+  getSettings.pipe(
+    Effect.map(
+      (settings) => resolveProjectSettings(settings, projectId).settings.responseStreamingMode,
     ),
   );
 
