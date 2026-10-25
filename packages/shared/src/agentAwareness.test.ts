@@ -80,6 +80,7 @@ describe("projectThreadAwarenessV2", () => {
       projectThreadAwarenessV2({
         environmentId: "env-1" as EnvironmentId,
         project,
+        now: updatedAt,
         thread: { ...v2Thread({ status }), latestRunSilent: true },
       })?.phase ?? null,
     ).toBe(phase);
