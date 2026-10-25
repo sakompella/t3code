@@ -1,6 +1,7 @@
 import type { Root, RootContent } from "mdast";
 import { resolveWorkEntryToolPresentation } from "@t3tools/client-runtime/work-log/presentation";
 import { isJavaScriptReplTool } from "@t3tools/shared/toolActivity";
+import { type WorkEntryCode } from "@t3tools/client-runtime/work-log/entry-code";
 import { toolGroupAction } from "./MessagesTimeline.logic";
 import { formatWorkspaceRelativePath } from "../../filePathDisplay";
 import { type TimelineWorkEntry, type TimelineRow } from "./timelineRowContext";
@@ -87,21 +88,32 @@ export function workEntryRawCommand(
   return rawCommand === workEntry.command.trim() ? null : rawCommand;
 }
 
+interface ToolCallBodyBlock {
+  readonly text: string;
+  /** Set when the block is code worth syntax highlighting. */
+  readonly language?: WorkEntryCode["language"];
+}
+
 export function buildToolCallExpandedBody(
   workEntry: TimelineWorkEntry,
   workspaceRoot: string | undefined,
   visibleLabel: string,
   viewedImagePath: string | null,
-): string | null {
-  const blocks: string[] = [];
+  bodyCode: WorkEntryCode | null,
+): ReadonlyArray<ToolCallBodyBlock> | null {
+  const blocks: ToolCallBodyBlock[] = [];
   const seen = new Set<string>([visibleLabel.trim()]);
-  const addBlock = (value: string | null | undefined) => {
+  const addBlock = (value: string | null | undefined, language?: WorkEntryCode["language"]) => {
     const text = value?.trim();
     if (!text || seen.has(text)) return;
     seen.add(text);
-    blocks.push(text);
+    blocks.push(language ? { text, language } : { text });
   };
-  if (workEntry.itemType === "dynamic_tool" && workEntry.toolData !== undefined) {
+  if (bodyCode?.language === "python") {
+    // The cell itself, not its JSON envelope. Shown even when it equals the
+    // truncated label, so a one-line cell still has a full-width body.
+    blocks.push({ text: bodyCode.code.trim(), language: "python" });
+  } else if (workEntry.itemType === "dynamic_tool" && workEntry.toolData !== undefined) {
     const input =
       workEntry.structuredPayload?.type === "dynamic_tool"
         ? workEntry.structuredPayload.input
@@ -117,7 +129,7 @@ export function buildToolCallExpandedBody(
   if (command === visibleLabel.trim()) {
     seen.add(command);
   } else {
-    addBlock(raw ?? command);
+    addBlock(raw ?? command, bodyCode?.language);
   }
   const detail = workEntry.detail?.trim();
   if (detail !== viewedImagePath?.trim()) {
@@ -140,7 +152,7 @@ export function buildToolCallExpandedBody(
   if (changedFiles.length > 0) {
     addBlock([...new Set(changedFiles)].join("\n"));
   }
-  return blocks.length > 0 ? blocks.join("\n\n") : null;
+  return blocks.length > 0 ? blocks : null;
 }
 
 export function workEntryIconName(workEntry: TimelineWorkEntry): WorkEntryIconName {

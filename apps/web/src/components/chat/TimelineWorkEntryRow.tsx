@@ -22,7 +22,7 @@ import {
   turnItemNeedsDetailFetch,
 } from "@t3tools/client-runtime/work-log/item-detail";
 import { claudeSkillInvocation } from "@t3tools/shared/toolActivity";
-import { memo, use, useState, type KeyboardEvent } from "react";
+import { Fragment, memo, use, useState, type KeyboardEvent } from "react";
 import {
   workEntryDisplayIndicatesToolFailure,
   workEntrySignalsSevereFailure,
@@ -45,6 +45,8 @@ import {
 import { cn } from "~/lib/utils";
 import { formatUpcomingTimestamp } from "../../timestampFormat";
 import { FetchedToolOutput, V2ItemInspector } from "./V2ItemInspector";
+import { HighlightedCode } from "./HighlightedCode";
+import { workEntryBodyCode, workEntryLabelCode } from "@t3tools/client-runtime/work-log/entry-code";
 import { SubagentNotificationLink } from "./V2LifecycleRow";
 import {
   TimelineRowCtx,
@@ -281,6 +283,7 @@ function WorkEntryLogRow(props: WorkEntryRowProps) {
         ? "Thinking"
         : "Thought"
       : questionHeading || (displayLabel ?? workEntryDisplayLabel(workEntry, workspaceRoot));
+  const labelCode = questionHeading ? null : workEntryLabelCode(workEntry, previewText);
   const answerPreview =
     workEntry.questionAnswer && hasQuestionAnswer(workEntry.questionAnswer)
       ? getQuestionAnswerPreview(workEntry.questionAnswer)
@@ -314,15 +317,19 @@ function WorkEntryLogRow(props: WorkEntryRowProps) {
       workEntry.changedFiles?.length ||
       viewedImage,
     );
+  const bodyCode = questionHeading ? null : workEntryBodyCode(workEntry, previewText);
   const expandedBody =
     expanded && !isReasoning
       ? plainOutput !== undefined
         ? plainOutput
+          ? [{ text: plainOutput }]
+          : null
         : buildToolCallExpandedBody(
             workEntry,
             workspaceRoot,
             previewText,
             viewedImage ? viewedImagePath : null,
+            bodyCode,
           )
       : null;
   const plainOutputFetches =
@@ -427,6 +434,15 @@ function WorkEntryLogRow(props: WorkEntryRowProps) {
                   environmentId={ctx.activeThreadEnvironmentId}
                   linked
                 />
+              ) : labelCode !== null ? (
+                <span className="font-mono text-(length:--font-size-code,var(--text-xs))">
+                  <HighlightedCode
+                    code={labelCode.code}
+                    language={labelCode.language}
+                    theme={ctx.resolvedTheme}
+                    kind="label"
+                  />
+                </span>
               ) : (
                 previewText
               )}
@@ -534,11 +550,28 @@ function WorkEntryLogRow(props: WorkEntryRowProps) {
               onOpenTurnDiff={ctx.onOpenTurnDiff}
               onRollbackCheckpoint={ctx.onRollbackCheckpoint}
               onImageExpand={ctx.onImageExpand}
+              code={bodyCode ?? undefined}
             />
           ) : (
             <>
               {expandedBody ? (
-                <pre className={toolCallExpandedBodyClassName}>{expandedBody}</pre>
+                <pre className={toolCallExpandedBodyClassName}>
+                  {expandedBody.map((block, index) => (
+                    <Fragment key={block.text}>
+                      {index > 0 ? "\n\n" : null}
+                      {block.language ? (
+                        <HighlightedCode
+                          code={block.text}
+                          language={block.language}
+                          theme={ctx.resolvedTheme}
+                          kind="body"
+                        />
+                      ) : (
+                        block.text
+                      )}
+                    </Fragment>
+                  ))}
+                </pre>
               ) : null}
               {plainOutputFetches && workEntry.projectedItem ? (
                 <FetchedToolOutput
