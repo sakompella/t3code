@@ -8,6 +8,7 @@ import {
   collectLimitPools,
   cursorUsageWindowDetails,
   displayLimitWindows,
+  formatReadingAge,
   formatResetsIn,
   paceRemainingPercent,
   remainingPercent,
@@ -168,7 +169,9 @@ function PoolWindowCard({
             <Text className="text-3xl font-t3-bold tabular-nums text-foreground">
               {pool.remainingPercent}%
             </Text>
-            <Text className="text-sm text-foreground-muted">left</Text>
+            <Text className="text-sm text-foreground-muted">
+              {pool.stale ? "left · stale" : "left"}
+            </Text>
           </View>
         </View>
         {pool.pace ? (
@@ -225,10 +228,13 @@ function PoolWindowCard({
         })}
       </View>
       <View>
-        {pool.columns.map(({ account, window }, index) => {
-          if (!window) return null;
+        {pool.columns.map((member, index) => {
+          if (!member.window) return null;
+          const { account, window } = member;
           const credits = account.limits.resetCredits?.availableCount ?? 0;
-          const resetsIn = formatResetsIn(window, now);
+          const resetsIn = member.stale
+            ? `stale ${formatReadingAge(account, now)}`
+            : formatResetsIn(window, now);
           return (
             <Pressable
               key={account.key}
@@ -424,7 +430,8 @@ export function UsageLimitAccountScreen({ route }: AccountScreenProps) {
   const pool = collectLimitPools(accounts, now)
     .find((candidate) => candidate.driver === account?.driver)
     ?.windows.find((candidate) => candidate.id === windowId && candidate.kind === windowKind);
-  const window = pool?.members.find((member) => member.account.key === accountKey)?.window;
+  const member = pool?.members.find((candidate) => candidate.account.key === accountKey);
+  const window = member?.window;
   const evenPace = window ? paceRemainingPercent(window, now) : null;
   const reset = pool?.resets.find((candidate) => candidate.member.account.key === accountKey);
   const [revealed, setRevealed] = useState(false);
@@ -471,6 +478,11 @@ export function UsageLimitAccountScreen({ route }: AccountScreenProps) {
               <Text className="text-3xl font-t3-bold tabular-nums text-foreground">
                 {remainingPercent(window)}% left
               </Text>
+              {member?.stale ? (
+                <Text className="text-sm text-foreground-muted">
+                  Stale: last read {formatReadingAge(account, now)} ago
+                </Text>
+              ) : null}
               {window.resetsAt ? (
                 <Text selectable className="text-sm text-foreground-muted">
                   Resets{" "}
