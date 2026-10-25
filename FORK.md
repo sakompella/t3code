@@ -122,6 +122,8 @@ Changes against upstream `main`, grouped by feature. Each item says what changed
   - Why: the hub quota connection supplies limits, not durable request history. Local logs cover agent work without an always-on hub collector. Other hub clients are not included, and copied history on separate machines may still count twice.
 - **Limits pools only readings that describe a live window.** A window whose reset time has passed since the reading was taken reads full, with no reset clock or pace. A reading older than three refresh intervals of the server that took it (its `providerHealthRefreshInterval`, or the default) is shown marked "stale", and adds nothing to the pooled totals, pace or restores.
   - Why: a saved environment that cannot connect keeps its cached server config, and the page only refreshes connected ones, so an offline machine's last reading stayed in the pool as if live. Upstream bug, fixed here in `packages/shared/src/usageLimits.ts` so web and mobile share it.
+- **Limits splits hub accounts from direct logins.** Within a provider's window card, accounts that only a CLIProxyAPI hub reports form their own group (`groupLimitWindows` in `packages/shared/src/usageLimits.ts`), listed first, then the provider's direct logins. Each group has its own "% left", pace and restores. With one group the card looks as before. The composer's `/usage-limits` list puts hub accounts first.
+  - Why: one average over both supplies hid which was running low. An account signed in directly and listed by a hub is already one account, and stays a direct login.
 
 ### Prime Agent UI (keep)
 
