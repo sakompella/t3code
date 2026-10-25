@@ -1,4 +1,5 @@
 import {
+  DEFAULT_PROVIDER_HEALTH_REFRESH_INTERVAL,
   type EnvironmentId,
   type UsageLimitsReport,
   type ProviderInstanceId,
@@ -8,14 +9,21 @@ import {
   type ServerProvider,
   type ServerProviderUsageLimits,
   type ServerProviderUsageWindow,
+  type ServerSettings,
   type UsageLimitSourceSnapshots,
 } from "@t3tools/contracts";
 
 import * as DateTime from "effect/DateTime";
+import * as Duration from "effect/Duration";
+
+import { resolveServerBackgroundActivitySettings } from "./backgroundActivitySettings.ts";
 
 const MINUTE = 60_000;
 const HOUR = 60 * MINUTE;
 const DAY = 24 * HOUR;
+
+/** One refresh may be skipped or in flight; three missed in a row mean the source stopped refreshing. */
+const STALE_AFTER_REFRESH_INTERVALS = 3;
 
 export const CHATGPT_USAGE_URL = "https://chatgpt.com/#settings/Usage";
 export const CHATGPT_USAGE_LIMIT_CODE = "subscription_sharing_usage_limit_exceeded";
@@ -74,6 +82,7 @@ export type LimitPresentations = ReadonlyMap<
     readonly serverConfig: {
       readonly providers: readonly ServerProvider[];
       readonly usageLimitSources?: UsageLimitSourceSnapshots | undefined;
+      readonly settings?: ServerSettings | undefined;
     } | null;
   }
 >;
@@ -168,7 +177,28 @@ export interface LimitAccount {
     readonly environmentId: EnvironmentId;
     readonly input: ProviderConsumeResetCreditInput;
   } | null;
+  /** How often the server that took `limits` refreshes them. */
+  readonly refreshIntervalMs: number;
   readonly limits: ServerProviderUsageLimits;
+}
+
+function refreshIntervalMs(settings: ServerSettings | undefined): number {
+  const interval = settings
+    ? resolveServerBackgroundActivitySettings(settings).providerHealthRefreshInterval
+    : DEFAULT_PROVIDER_HEALTH_REFRESH_INTERVAL;
+  const ms = Duration.toMillis(interval);
+  return ms > 0 ? ms : Duration.toMillis(DEFAULT_PROVIDER_HEALTH_REFRESH_INTERVAL);
+}
+
+function isStaleReading(account: LimitAccount, now: number): boolean {
+  return (
+    now - Date.parse(account.limits.checkedAt) >
+    STALE_AFTER_REFRESH_INTERVALS * account.refreshIntervalMs
+  );
+}
+
+export function formatReadingAge(account: LimitAccount, now: number): string {
+  return formatDuration(now - Date.parse(account.limits.checkedAt));
 }
 
 export function collectLimitAccounts(presentations: LimitPresentations): readonly LimitAccount[] {
@@ -219,6 +249,7 @@ export function collectLimitAccounts(presentations: LimitPresentations): readonl
       accentColor: previous.accentColor ?? next.accentColor,
       environments,
       sourceLabel: environments.length > 0 ? null : (previous.sourceLabel ?? next.sourceLabel),
+      refreshIntervalMs: winner.refreshIntervalMs,
       redeem:
         hubRedeems.get(key)?.redeem ??
         (creditSource ? creditSource.redeem : (winner.redeem ?? previous.redeem ?? next.redeem)),
@@ -240,6 +271,7 @@ export function collectLimitAccounts(presentations: LimitPresentations): readonl
   );
   for (const [environmentId, presentation] of presentations) {
     const label = presentation.entry.target.label;
+    const refreshInterval = refreshIntervalMs(presentation.serverConfig?.settings);
     for (const provider of providersWithLimits(presentation.serverConfig?.providers ?? [])) {
       if (!provider.usageLimits || limitsNotice(provider.usageLimits) !== null) continue;
       merge(resolveKey(nativeReport(provider)) ?? `${environmentId}:${provider.instanceId}`, {
@@ -252,12 +284,14 @@ export function collectLimitAccounts(presentations: LimitPresentations): readonl
         environments: [{ environmentId, label }],
         sourceLabel: null,
         redeem: { environmentId, input: { instanceId: provider.instanceId } },
+        refreshIntervalMs: refreshInterval,
         limits: provider.usageLimits,
       });
     }
   }
   const labelEnvironment = presentations.size > 1;
   for (const [environmentId, presentation] of presentations) {
+    const refreshInterval = refreshIntervalMs(presentation.serverConfig?.settings);
     for (const source of presentation.serverConfig?.usageLimitSources ?? []) {
       const sourceLabel = labelEnvironment
         ? `${presentation.entry.target.label} · ${source.label}`
@@ -284,6 +318,7 @@ export function collectLimitAccounts(presentations: LimitPresentations): readonl
                 },
               }
             : null,
+          refreshIntervalMs: refreshInterval,
           limits: account.usageLimits,
         });
       }
@@ -319,6 +354,8 @@ export interface LimitPoolMember {
   readonly account: LimitAccount;
   readonly window: ServerProviderUsageWindow;
   readonly refillPercent: number;
+  /** Its source stopped refreshing: shown, but not counted and without a clock. */
+  readonly stale: boolean;
 }
 
 export interface LimitPoolWindow {
@@ -329,6 +366,8 @@ export interface LimitPoolWindow {
   readonly columns: ReadonlyArray<
     LimitPoolMember | { readonly account: LimitAccount; readonly window: null }
   >;
+  /** No member is live, so the totals show what was last read. */
+  readonly stale: boolean;
   readonly remainingPercent: number;
   readonly usedPercent: number;
   readonly pace: LimitPace | null;
@@ -372,10 +411,31 @@ const WINDOW_KIND_ORDER: Record<ServerProviderUsageWindow["kind"], number> = {
   other: 3,
 };
 
+/**
+ * A reading taken before a window's reset time says nothing about the window
+ * that began at it, so that window reads full until a refresh says otherwise.
+ */
+function withRolledOverWindows(account: LimitAccount, now: number): LimitAccount {
+  if (isStaleReading(account, now)) return account;
+  return {
+    ...account,
+    limits: {
+      ...account.limits,
+      windows: account.limits.windows.map((window) => {
+        const resetsAt = resetMillis(window);
+        const readAt = Date.parse(account.limits.checkedAt);
+        if (resetsAt === null || resetsAt > now || resetsAt <= readAt) return window;
+        return { ...window, usedPercent: 0, resetsAt: undefined };
+      }),
+    },
+  };
+}
+
 export function collectLimitPools(
-  accounts: readonly LimitAccount[],
+  reported: readonly LimitAccount[],
   now: number,
 ): readonly LimitPool[] {
+  const accounts = reported.map((account) => withRolledOverWindows(account, now));
   const byDriver = new Map<ServerProvider["driver"], LimitAccount[]>();
   for (const account of accounts) {
     const list = byDriver.get(account.driver);
@@ -418,7 +478,20 @@ function poolKey(driver: ServerProvider["driver"], window: ServerProviderUsageWi
   return driver === "codex" ? window.kind : `${window.kind}:${window.id}`;
 }
 
-function poolMember(account: LimitAccount, reported: ServerProviderUsageWindow, now: number) {
+function poolMember(
+  account: LimitAccount,
+  reported: ServerProviderUsageWindow,
+  now: number,
+): LimitPoolMember {
+  // Its clock describes a window nobody has read since, so none is kept.
+  if (isStaleReading(account, now)) {
+    return {
+      account,
+      window: { ...reported, resetsAt: undefined },
+      refillPercent: 0,
+      stale: true,
+    };
+  }
   const spentWeekly =
     reported.kind === "session"
       ? account.limits.windows.find(
@@ -429,7 +502,9 @@ function poolMember(account: LimitAccount, reported: ServerProviderUsageWindow, 
               : account.driver === "codex" && window.kind === "weekly"),
         )
       : undefined;
-  if (!spentWeekly) return { account, window: reported, refillPercent: reported.usedPercent };
+  if (!spentWeekly) {
+    return { account, window: reported, refillPercent: reported.usedPercent, stale: false };
+  }
 
   const weeklyReset = resetMillis(spentWeekly);
   const sessionReset = resetMillis(reported);
@@ -459,6 +534,7 @@ function poolMember(account: LimitAccount, reported: ServerProviderUsageWindow, 
     // Suppression is not session spending, so it has no session pace clock.
     window: { ...reported, usedPercent: 100, resetsAt, windowDurationMins: undefined },
     refillPercent,
+    stale: false,
   };
 }
 
@@ -481,7 +557,9 @@ function poolWindows(accounts: readonly LimitAccount[], now: number): readonly L
     const memberByAccount = new Map(members.map((member) => [member.account.key, member]));
     const first = members[0]!.window;
     const id = members[0]!.account.driver === "codex" ? key : first.id;
-    const usedPercent = members.reduce((sum, m) => sum + m.window.usedPercent, 0) / members.length;
+    const live = members.filter((member) => !member.stale);
+    const counted = live.length > 0 ? live : members;
+    const usedPercent = counted.reduce((sum, m) => sum + m.window.usedPercent, 0) / counted.length;
     // Pace compares spend against the clock, so it is judged only over the
     // members that have a clock; a window with no reset would otherwise
     // count as spend with no time elapsed and skew the verdict.
@@ -501,7 +579,7 @@ function poolWindows(accounts: readonly LimitAccount[], now: number): readonly L
               {
                 member,
                 at,
-                restoresPercent: Math.round(member.refillPercent / members.length),
+                restoresPercent: Math.round(member.refillPercent / counted.length),
               },
             ];
       })
@@ -514,6 +592,7 @@ function poolWindows(accounts: readonly LimitAccount[], now: number): readonly L
       columns: accounts.map(
         (account) => memberByAccount.get(account.key) ?? { account, window: null },
       ),
+      stale: live.length === 0,
       usedPercent: Math.round(usedPercent),
       remainingPercent: Math.round(100 - usedPercent),
       pace: meanElapsed === null ? null : paceOfShares(timedUsed, meanElapsed),
