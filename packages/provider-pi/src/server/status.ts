@@ -322,11 +322,8 @@ export interface PiVersionRead {
 }
 
 /**
- * The flavor the configured binary speaks, from its `--version` and then its
- * `--help` (below 0.10) or `--capabilities` (0.10 on, the T3 fork). A CLI T3
- * cannot identify is never launched. A caller that already read `--version`
- * passes it as a `PiVersionRead`. The binary file is checked on every call, so
- * an upgraded binary is identified again.
+ * Identifies the binary's flavor via `--version`, then `--help` (below 0.10) or `--capabilities`
+ * (0.10+). A CLI T3 cannot identify is never launched. The binary file is rechecked on every call.
  */
 export const detectPiFlavor = (
   flavor: PiFlavor,

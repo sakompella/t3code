@@ -1030,12 +1030,9 @@ function failedTimelineRunIds(
 }
 
 /**
- * Settled turns fold activity before their terminal assistant message behind
- * a "Worked for ..." row. Ordinary trailing work joins the fold, while failures
- * and work still in progress stay visible. A prompt without a run (a
- * provider-native subagent, or a turn imported from V1) folds its response
- * the same way. Steers and notifications split a run into segments that fold
- * separately, each where its work happened.
+ * Settled turns fold activity before their terminal assistant message behind a "Worked for ..."
+ * row. Ordinary trailing work joins the fold; failures and work in progress stay visible. Prompts
+ * without a run fold the same way.
  */
 function deriveTurnFolds(input: {
   timelineEntries: ReadonlyArray<TimelineEntry>;

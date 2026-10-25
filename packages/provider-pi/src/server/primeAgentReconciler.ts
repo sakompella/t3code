@@ -81,28 +81,10 @@ function startsRun(message: unknown): boolean {
 }
 
 /**
- * Which stored aborted copy replaced which reply a turn streamed. Stock ends
- * a reply Stop cut off with a copy of what it streamed, stamped at abort time
- * and announced by no message_start of its own (agent-loop.js
- * `finishAbortedMessage`), as the next message end after the reply's last
- * update. A reply the turn streamed with no end, that the history does not
- * hold, and that no compaction or retry may have dropped, was replaced by
- * such a copy, which:
- * - holds all the text the turn showed of the reply;
- * - is stored after the last stored message the turn saw before the reply,
- *   or, when the turn saw none, in a run this turn started (one whose first
- *   message no earlier turn accounted for);
- * - is stored before anything the turn saw after the reply;
- * - did not arrive live before the reply started.
- * Delivered events keep their order and the history only appends, so when
- * the earliest stored copy that fits arrived live after the reply, no copy
- * stored before it can be the reply's: it is the reply's. Otherwise a reply
- * matches only the one copy that fits it, and a copy two replies would take
- * goes to neither. Both rest on the reply having a copy at all, which a lost
- * retry or compaction breaks, so a completed or failed reply, or a summary,
- * stored between the reply's anchor and its copy leaves the reply unmatched. Anything else is left apart: a reply that shows its cut
- * text is a miss, one that shows another reply's text would be wrong.
- * Returns each copy's key with the timestamp of the reply it replaced.
+ * Matches each stored aborted copy (`finishAbortedMessage`, no message_start) to the reply it
+ * replaced. A copy fits when it holds all the text the turn showed, is stored after the last
+ * message seen before the reply and before anything seen after it, and did not arrive live earlier.
+ * A reply matches only a unique fit. Returns each copy's key with the replaced reply's timestamp.
  */
 export function matchStoppedCopies(input: {
   readonly history: ReadonlyArray<unknown>;
@@ -183,12 +165,10 @@ export function matchStoppedCopies(input: {
 }
 
 /**
- * What `get_state` says about the stored conversation, so two reads show
- * whether it changed. The 0.10 fork reports its tree leaf, which every stored
- * entry moves. Its `messageCount` counts every branch's messages and not the
- * stored notices `get_messages` returns, so after a rollback or a notice it
- * never matches the history. 0.9.8 reports no leaf, and its count is the
- * length of the history `get_messages` returns.
+ * What `get_state` says about the stored conversation, so two reads show whether it changed. The
+ * 0.10 fork reports its tree leaf; its `messageCount` spans every branch and omits stored notices,
+ * so it never matches the history. 0.9.8 has no leaf, and its count equals the `get_messages`
+ * length.
  */
 type PiHistoryMark = string | number;
 
@@ -217,11 +197,9 @@ const readHistory = (request: PiRpcConnection["request"], timeoutMs: number) =>
   );
 
 /**
- * Reads the stored conversation of an agent that `idleState` showed idle,
- * and confirms it with a second state read. Stock RPC has no atomic
- * snapshot, so this narrows the race rather than closing it: the history
- * counts only if the agent is still idle and both states count exactly the
- * messages it holds.
+ * Reads the stored conversation of an agent `idleState` showed idle and confirms with a second
+ * state read. Stock RPC has no atomic snapshot, so this narrows the race: the history counts only
+ * if the agent is still idle and both states count exactly its messages.
  */
 const readSettledTranscript = Effect.fnUntraced(function* (
   request: PiRpcConnection["request"],
@@ -261,25 +239,10 @@ function toolCallIdsOf(messages: ReadonlyArray<unknown>): Array<string> {
 }
 
 /**
- * Makes T3's projection match what Prime Agent stored, for a stream that can
- * drop any event (see `PiFlavor.lossyStream`).
- *
- * The stored conversation (`get_messages`) is the authority. Its messages are
- * matched to T3's items by native identity: an assistant message by its
- * timestamp, which the live stream keys its items by too, and a tool by its
- * call id. The one exception is a reply Stop cut off, which stock stores only
- * as an aborted copy under a new timestamp. The copy shows nothing until a
- * history read places it by its position (see `matchStoppedCopies`), or the
- * turn ends without one (`placeHeldCopies`). The reconciler runs inside the
- * event pump, so it never interleaves with live events, and every run is
- * idempotent: a message is projected into the turn that stored it, then
- * accounted for, and later reads or late live events for it change nothing.
- *
- * It runs when a turn settles, when Stop ends one, as soon as a running
- * turn's stream skips past a reply's or tool's end, and on a backed-off quiet
- * check while an idle session has background work, which is where wakes are
- * lost whole. What the history cannot show stays unknown: a child's outcome
- * comes only from the notice Prime Agent stores for its parent.
+ * Makes T3's projection match what Prime Agent stored, for a stream that can drop any event (see
+ * `PiFlavor.lossyStream`). `get_messages` is the authority; messages match items by native identity
+ * (assistant timestamp, tool call id). Stop-cut replies match via `matchStoppedCopies` or
+ * `placeHeldCopies`. Idempotent: each message is projected once, then accounted for.
  */
 export function makePrimeAgentReconciler<E>(input: {
   readonly enabled: boolean;
@@ -361,11 +324,9 @@ export function makePrimeAgentReconciler<E>(input: {
   let seededSession: string | null = null;
 
   /**
-   * Everything `sessionFile` stored so far is history T3 did not stream:
-   * either earlier turns or work from before this process attached. When
-   * the read fails, what was stored before it is told apart by its
-   * timestamp. A session already seeded keeps its ledger, so the messages
-   * it has not accounted for yet still reach T3.
+   * Everything `sessionFile` stored so far is history T3 did not stream. If the read fails, earlier
+   * content is told apart by timestamp. A session already seeded keeps its ledger so unaccounted
+   * messages still reach T3.
    */
   const baseline = Effect.fnUntraced(function* (sessionFile: string) {
     if (!enabled || (ledger !== null && seededSession === sessionFile)) return;
@@ -538,11 +499,9 @@ export function makePrimeAgentReconciler<E>(input: {
   });
 
   /**
-   * Places, once, the stopped copies no history read placed by the time the
-   * turn ends: the history could not be read, or did not hold them. A copy
-   * that holds all T3 shows of the turn's latest unended reply finishes it;
-   * any other copy is a reply of its own. The reply stays unaccounted, so a
-   * later read still projects it if the history holds it under its own key.
+   * Places, once, the stopped copies no history read placed by turn end. A copy that holds all T3
+   * shows of the latest unended reply finishes it; any other is a reply of its own. The reply stays
+   * unaccounted so a later read still projects it under its own key.
    */
   const placeHeldCopies = Effect.fnUntraced(function* (turn: ActivePiTurn) {
     const open = unendedReplyKeys(turn).filter((key) => !turn.removedReplies.has(key));
@@ -625,12 +584,9 @@ export function makePrimeAgentReconciler<E>(input: {
   });
 
   /**
-   * Repairs what a gap in a running turn's stream lost, before the event
-   * that proves it is applied: replies cut off before their message_end,
-   * and tools whose end never came. Their stored versions replace them, so
-   * a cut reply never shows as final and keeps its place before what
-   * followed it. A failed read leaves them open for the settle read.
-   * Nothing is committed; the settle read still runs.
+   * Repairs what a gap in a running turn's stream lost, before the event proving it applies:
+   * replies cut off before message_end and tools whose end never came. Stored versions replace them
+   * and keep their place. A failed read leaves them open for the settle read; nothing is committed.
    */
   const repairLostEnds = (turn: ActivePiTurn, event: PiRpcRecord) => {
     if (!enabled || ledger === null || turn.transcript !== "streaming") return Effect.void;
@@ -680,11 +636,9 @@ export function makePrimeAgentReconciler<E>(input: {
   });
 
   /**
-   * Accounts for what the turn showed live. After a read, that is every
-   * message it saw, even one stored only after the read. Without a read, a
-   * message it showed only in part stays unaccounted, so a later read still
-   * projects what was stored. Late events of its tools are dropped either
-   * way: a read brings their stored outcome.
+   * Accounts for what the turn showed live: after a read, every message it saw; without one, partly
+   * shown messages stay unaccounted so a later read still projects them. Late tool events are
+   * dropped either way since a read brings their stored outcome.
    */
   const closeTurn = (turn: ActivePiTurn) => {
     if (!enabled || ledger === null) return;

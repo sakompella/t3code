@@ -962,12 +962,9 @@ export const dismissThreadUserInput = Effect.fn("EnvironmentCommands.dismissThre
 );
 
 /**
- * The checkpoint holding the files after run `runOrdinal`. A run that failed
- * or was cancelled before capture left no checkpoint, so the last earlier
- * run's stands for it, else the thread start. Checkpoints of rolled-back runs
- * are stale and skipped. A missing or failed checkpoint is returned as is, so
- * the rollback fails rather than discard the run that owns it. Rolling back
- * to an earlier checkpoint also discards the runs skipped on the way.
+ * The checkpoint holding files after run `runOrdinal`. A run without a checkpoint falls back to the
+ * last earlier one, else thread start; rolled-back checkpoints are skipped. A missing or failed
+ * checkpoint is returned as is so rollback fails rather than discard its run.
  */
 function checkpointAfterRun(
   checkpoints: ReadonlyArray<OrchestrationV2Checkpoint>,

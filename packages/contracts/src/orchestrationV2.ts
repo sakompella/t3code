@@ -1468,12 +1468,10 @@ export type OrchestrationV2UserMessageInputIntent =
   typeof OrchestrationV2UserMessageInputIntent.Type;
 
 /**
- * How a system notice reads. An absent tone means `warning`, which is what
- * every notice was before tones existed.
+ * How a system notice reads; an absent tone means `warning`.
  * - `warning`: something the user should notice.
  * - `info`: a routine event, shown as a quiet row.
- * - `progress`: a quiet status line for work in flight; once it completes it
- *   carries no information and clients stop showing it.
+ * - `progress`: status for work in flight; clients stop showing it once complete.
  */
 export const OrchestrationV2SystemNoticeTone = Schema.Literals(["warning", "info", "progress"]);
 export type OrchestrationV2SystemNoticeTone = typeof OrchestrationV2SystemNoticeTone.Type;

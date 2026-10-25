@@ -165,11 +165,9 @@ const usageCost = (usage: typeof Usage.Type): number => {
 };
 
 /**
- * Prime Agent folds a subagent's usage into its parent response in memory.
- * Appended lines stay raw, but a fork or file rewrite persists the folded value
- * under the same entry, followed by the copied `child_usage_attributed` entries
- * that give the parent's own usage back. The first attribution for a response
- * restores its own totals; on a raw line it changes nothing.
+ * Prime Agent folds a subagent's usage into its parent response in memory, and a fork or file
+ * rewrite persists the folded value. The copied `child_usage_attributed` entries that follow give
+ * the parent's own usage back; on a raw line the first attribution changes nothing.
  */
 function restoreOwnUsage(parsed: unknown, state: typeof PiScanState.Type): boolean {
   const attribution = decodeAttribution(parsed);

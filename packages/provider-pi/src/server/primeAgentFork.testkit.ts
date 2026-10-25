@@ -1,10 +1,6 @@
 /**
- * Records from the Prime Agent 0.10 fork's `--mode rpc` stdout
- * (`sakompella/prime-agent` fork/main 0f208bf35, slice-2 live smoke on
- * agentbox, 2026-10-11). A scripted parent spawned one haiku child (`adder`),
- * which answered `42` with `agent_message.send`; that message woke the
- * parent. Correlated responses are left out, since the fake answers requests
- * itself, and long strings are clipped.
+ * Prime Agent 0.10 fork `--mode rpc` stdout records. Correlated responses are omitted, since the
+ * fake answers requests itself; long strings are clipped.
  */
 
 /** Stdout records in arrival order, from the parent's first `agent_start` on. */

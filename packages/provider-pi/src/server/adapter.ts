@@ -142,11 +142,9 @@ const STREAM_FLUSH_MS = 50;
 const PI_REQUEST_TIMEOUT_MS = 15_000;
 const PI_SESSION_TIMEOUT_MS = 60_000;
 /**
- * Prime Agent frees a session lease when the worker that held it exits. T3
- * lets the previous RPC process finish closing the session, so the lease is
- * normally free by the time a resume asks. This covers the few seconds the
- * daemon may still need to stop the worker. A lease held longer, for example
- * after the previous process was killed, falls back to a new session.
+ * Prime Agent frees a session lease when its worker exits. T3 waits for the previous RPC process to
+ * close, so this retry only covers the seconds the daemon needs to stop the worker. A lease held
+ * longer falls back to a new session.
  */
 const SESSION_LEASE_RETRY = Schedule.spaced(Duration.seconds(1)).pipe(Schedule.upTo({ times: 15 }));
 const SETTLE_PROBE_MAX_ATTEMPTS = 3;
@@ -543,11 +541,9 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
       const extensionPath = flavor.extensions
         ? yield* provideCacheFs(materializePiT3McpExtension(host.paths.providerStatusCacheDir))
         : undefined;
-      // An agent with its own MCP client never gets T3's tools natively. It
-      // reaches T3 through the t3-code skill once the user declared the server
-      // in its settings. Until then the user gets a setup notice.
-      // Seam: the 0.10 fork will get T3's tools from a native `t3` Python
-      // module (Prime fork slice 3). Until it lands, the fork uses this route.
+      // Agents with their own MCP client reach T3 through the t3-code skill once the user declares
+      // the server in settings; until then they get a setup notice. The 0.10 fork uses this route
+      // until it has a native `t3` module.
       const kernelMcpAccess =
         mcpSession === undefined || flavor.kernelMcp === null
           ? undefined
@@ -704,12 +700,10 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
       /** Whether T3's extension command for in-place rollback is loaded; null until discovered. */
       let navigateTreeAvailable: boolean | null = null;
       /**
-       * Set by an in-place rollback the RPC did itself. T3's extension tells the
-       * agent that its kernel kept its state; without one, the next prompt does.
-       * The 0.10 fork reports no leaf id, so its provider thread's head ref
-       * keeps this durable: it names the user entry the conversation was rolled
-       * back before, until the fork accepts a prompt carrying the notice or
-       * lists that entry off its active branch (see `registerThread`).
+       * Set by an in-place rollback the RPC did itself. T3's extension tells the agent its kernel
+       * kept state; without one, the next prompt does. The 0.10 fork reports no leaf id, so its
+       * thread's head ref keeps this durable until the fork accepts the notice or drops the entry
+       * (see `registerThread`).
        */
       let rollbackNoticePending = false;
       /** In-place rollbacks waiting for the extension command's reported outcome. */
@@ -3315,11 +3309,9 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
             : undefined;
         if (rolledBackBefore !== undefined) {
           rollbackNoticePending = true;
-          // T3 never repeats the move: a wake may have added conversation on
-          // the new branch since. Only a readable listing without the entry
-          // shows that the fork kept the move. A listing that still has it,
-          // or one T3 could not read, leaves the move unconfirmed, which only
-          // the user can repair.
+          // Never repeat the move: a wake may have added conversation on the new branch. Only a
+          // readable listing without the entry shows the fork kept the move; a listing that has it,
+          // or one T3 could not read, leaves it unconfirmed for the user to repair.
           const moveKept = Option.exists(
             treeBaseline,
             ({ userEntryIds }) => !userEntryIds.includes(rolledBackBefore),
@@ -4426,17 +4418,10 @@ function walkPiBranch(
 }
 
 /**
- * Resolve the pi session-tree entry `fork` should re-root at, for a rollback
- * or a fork from a turn. A strong ref names a user entry, so the boundary is
- * the first later turn with one. Turns with a null ref left nothing on the
- * branch. Weak refs are synthetic: most come from turns that never had a user
- * entry (wakes, continuations, `/compact`), which bound nothing and are
- * skipped. When the session tree is readable (`readEntries`, Pi's
- * `get_entries`), a weak turn's unrecorded user entry is looked up by time
- * (`piUncapturedForkEntry`) and bounds the cut instead. A weak turn whose entry
- * is not found stays on the kept side, so the result can include an extra user
- * entry but never drops one before the target. `skippedWeakTurns` counts those
- * turns so callers can say so. `entryId` is `null` when nothing bounds the cut.
+ * Resolves the pi session-tree entry `fork` re-roots at. A strong ref names a user entry, so the
+ * boundary is the first later turn with one. Weak refs (wakes, continuations, `/compact`) are
+ * skipped unless `readEntries` finds their user entry by time (`piUncapturedForkEntry`). Unfound
+ * entries stay kept, so the cut may include an extra user entry but never drops one.
  */
 function piForkBoundary<E>(
   input: {

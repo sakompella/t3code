@@ -201,12 +201,8 @@ const PI_FAMILY_DRIVERS: ReadonlySet<ProviderDriverKind> = new Set([
 ]);
 
 /**
- * Pi and Prime Agent learn their commands and skills from a live RPC session.
- * A completed discovery always settles the account state (authenticated or
- * not), so a snapshot with an unknown account came from the boot placeholder,
- * a slow probe, or a failed one. Those must not blank the lists the composer
- * offers, nor the cache file the next boot reads. A missing binary still
- * clears them.
+ * An unknown account means the snapshot came from the boot placeholder or a slow or failed probe,
+ * so it must not blank the cached command and skill lists. A missing binary still clears them.
  */
 const shouldRetainMissingPiCommands = (provider: ServerProvider): boolean =>
   PI_FAMILY_DRIVERS.has(provider.driver) &&

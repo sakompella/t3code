@@ -172,11 +172,9 @@ const unchanged = (state: CacheMissState): CacheMissStep => ({
 });
 
 /**
- * Counts one transcript message. Call it in chronological order, or in any
- * order a message may arrive: a message already counted, or older than what
- * was, changes nothing. Compaction and branch summaries reset the baseline,
- * because the next prompt is new content rather than re-billed content. A
- * model switch does not reset it; the new model re-bills the prompt.
+ * Counts one transcript message, in any arrival order: a message already counted or older than the
+ * last changes nothing. Compaction and branch summaries reset the baseline since the next prompt is
+ * new content. A model switch does not, because the new model re-bills the prompt.
  */
 export function observeCacheMiss(
   state: CacheMissState,
