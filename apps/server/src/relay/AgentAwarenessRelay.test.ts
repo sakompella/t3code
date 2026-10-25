@@ -538,6 +538,58 @@ describe("AgentAwarenessRelay", () => {
     }),
   );
 
+  it.effect("publishes a completion settled during the hold after an earlier snooze ended", () =>
+    Effect.gen(function* () {
+      const { relay, currentShell, publications } = yield* makeTestRelay();
+      yield* relay.publishThread(THREAD_ID);
+      const snoozeEnded = yield* DateTime.now;
+      yield* TestClock.adjust("1 second");
+      const completed = shell({
+        status: "completed",
+        snoozedUntil: snoozeEnded,
+        latestRunCompletedAt: yield* DateTime.now,
+      });
+      yield* Ref.set(currentShell, completed);
+      yield* relay.publishThread(THREAD_ID);
+      yield* Ref.set(currentShell, {
+        ...completed,
+        settledOverride: "settled",
+        settledAt: yield* DateTime.now,
+      });
+      yield* relay.publishThread(THREAD_ID);
+      yield* TestClock.adjust("5 seconds");
+      yield* relay.drain;
+      assert.deepEqual(
+        publications.map((publication) => publication.state?.phase ?? null),
+        ["running", "completed"],
+      );
+    }),
+  );
+
+  it.effect("does not announce a held completion that a short snooze hid before it settled", () =>
+    Effect.gen(function* () {
+      const { relay, currentShell, publications } = yield* makeTestRelay();
+      yield* relay.publishThread(THREAD_ID);
+      const completed = shell({ status: "completed", latestRunCompletedAt: yield* DateTime.now });
+      yield* Ref.set(currentShell, completed);
+      yield* relay.publishThread(THREAD_ID);
+      yield* Ref.set(currentShell, {
+        ...completed,
+        snoozedUntil: DateTime.add(yield* DateTime.now, { seconds: 1 }),
+        snoozedAt: yield* DateTime.now,
+        settledOverride: "settled",
+        settledAt: yield* DateTime.now,
+      });
+      yield* relay.publishThread(THREAD_ID);
+      yield* TestClock.adjust("5 seconds");
+      yield* relay.drain;
+      assert.notInclude(
+        publications.map((publication) => publication.state?.phase ?? null),
+        "completed",
+      );
+    }),
+  );
+
   it.effect("drops a held completion when a queued continuation hides the thread", () =>
     Effect.gen(function* () {
       const { relay, currentShell, publications } = yield* makeTestRelay();
