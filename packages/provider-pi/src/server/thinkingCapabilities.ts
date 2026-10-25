@@ -21,13 +21,18 @@ export const EMPTY_PI_MODEL_CAPABILITIES: ModelCapabilities = createModelCapabil
   optionDescriptors: [],
 });
 
+/**
+ * `sessionLevels` are the levels the session may hold. The model's default is
+ * the one they all clamp to, and there is none when they disagree.
+ */
 export function thinkingCapabilitiesForPiModel(
   model: unknown,
-  defaultThinkingLevel: unknown,
+  sessionLevels: ReadonlyArray<string>,
 ): ModelCapabilities {
   const levels = supportedPiThinkingLevelsFromModel(model);
   if (levels.length === 0) return EMPTY_PI_MODEL_CAPABILITIES;
-  const defaultLevel = clampPiThinkingLevel(defaultThinkingLevel, levels);
+  const defaults = new Set(sessionLevels.map((level) => clampPiThinkingLevel(level, levels)));
+  const [defaultLevel] = defaults.size === 1 ? defaults : [];
   return createModelCapabilities({
     optionDescriptors: [
       {
@@ -42,6 +47,19 @@ export function thinkingCapabilitiesForPiModel(
       },
     ],
   });
+}
+
+/**
+ * The levels a session that remembers the level asked for may hold when
+ * `get_state` reports `reported` on `activeModel`: every level that clamps to
+ * it there.
+ */
+export function piThinkingLevelsReportedAs(
+  reported: string,
+  activeModel: unknown,
+): ReadonlyArray<PiThinkingLevel> {
+  const levels = supportedPiThinkingLevelsFromModel(activeModel);
+  return PI_THINKING_LEVELS.filter((level) => clampPiThinkingLevel(level, levels) === reported);
 }
 
 function clampPiThinkingLevel(

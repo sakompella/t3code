@@ -6,6 +6,7 @@ import {
   collectLimitPools,
   cursorUsageWindowDetails,
   displayLimitWindows,
+  formatReadingAge,
   formatResetsIn,
   type LimitAccount,
   type LimitPool,
@@ -135,6 +136,7 @@ function Row({ label, children }: { readonly label: string; readonly children: R
 function SegmentPopover({
   account,
   window,
+  stale,
   reset,
   now,
   redeem,
@@ -142,6 +144,7 @@ function SegmentPopover({
 }: {
   readonly account: LimitAccount;
   readonly window: LimitPoolMember["window"];
+  readonly stale: boolean;
   readonly reset: LimitPoolWindow["resets"][number] | undefined;
   readonly now: number;
   readonly redeem: ReturnType<typeof useResetCredit> | null;
@@ -184,6 +187,7 @@ function SegmentPopover({
       </div>
       <div className="flex flex-col gap-1 border-t border-border/60 pt-2.5">
         <Row label="Left">{remaining}%</Row>
+        {stale ? <Row label="Updated">{formatReadingAge(account, now)} ago · stale</Row> : null}
         {window.resetsAt ? (
           <Row label="Resets">
             {formatUpcomingTimestamp(window.resetsAt, timestampFormat, now)}
@@ -281,6 +285,7 @@ function PoolSegment({
 }: {
   readonly account: LimitAccount;
   readonly window: LimitPoolMember["window"];
+  readonly stale: boolean;
   readonly reset: LimitPoolWindow["resets"][number] | undefined;
   readonly refillPercent: number;
   readonly color: string;
@@ -325,6 +330,7 @@ function RedeemableSegment({
 function SegmentTriggers({
   account,
   window,
+  stale,
   reset,
   redeem,
   refillPercent,
@@ -340,11 +346,12 @@ function SegmentTriggers({
   readonly showAccountName: boolean;
 }) {
   const popover = use(SegmentPopoverContext) ?? undefined;
-  const payload: SegmentPayload = { account, window, reset, redeem };
+  const payload: SegmentPayload = { account, window, stale, reset, redeem };
   const remaining = remainingPercent(window);
   const timeLeft = paceRemainingPercent(window, now);
   const [segmentRef, paceMark] = usePaceMark(timeLeft);
   const resetsIn = formatResetsIn(window, now);
+  const clock = stale ? `stale ${formatReadingAge(account, now)}` : resetsIn;
   const credits = account.limits.resetCredits?.availableCount ?? 0;
   return (
     <>
@@ -357,7 +364,7 @@ function SegmentTriggers({
             ref={segmentRef}
             type="button"
             style={{ gridColumn: index, gridRow: 1, ...paceMark?.gappedTrack }}
-            aria-label={`${account.displayName ?? (account.email ? accountInitials(account.email) : account.driver)}: ${remaining}% left${resetsIn ? `, ${resetsIn}` : ""}${timeLeft === null ? "" : `, ${timeLeft}% of the window left`}${credits ? `, ${credits} reset ${credits === 1 ? "credit" : "credits"} banked` : ""}`}
+            aria-label={`${account.displayName ?? (account.email ? accountInitials(account.email) : account.driver)}: ${remaining}% left${clock ? `, ${clock}` : ""}${timeLeft === null ? "" : `, ${timeLeft}% of the window left`}${credits ? `, ${credits} reset ${credits === 1 ? "credit" : "credits"} banked` : ""}`}
             className="relative h-5 min-w-0 cursor-pointer rounded-md bg-muted text-start outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background data-[popup-open]:ring-1 data-[popup-open]:ring-inset data-[popup-open]:ring-border @2xl/pool:h-8"
           />
         }
@@ -368,7 +375,10 @@ function SegmentTriggers({
             <div
               aria-hidden
               className="absolute inset-y-0 left-0 rounded-md opacity-35"
-              style={{ width: `${remaining}%`, backgroundColor: color }}
+              style={{
+                width: `${remaining}%`,
+                backgroundColor: stale ? "var(--muted-foreground)" : color,
+              }}
             />
             {remaining < 100 && reset && refillPercent > 0 ? (
               <div
@@ -403,12 +413,12 @@ function SegmentTriggers({
             />
           ) : null}
           <span className="shrink-0 font-semibold text-foreground tabular-nums">{remaining}%</span>
-          {resetsIn || credits ? (
+          {clock || credits ? (
             <span className="ms-auto flex min-w-0 items-center gap-1.5 overflow-hidden rounded-sm bg-background/85 px-1.5 py-0.5 text-2xs whitespace-nowrap text-foreground tabular-nums">
-              {resetsIn?.replace("resets in ", "↻ ") ?? ""}
+              {clock?.replace("resets in ", "↻ ") ?? ""}
               {credits ? (
                 <>
-                  {resetsIn ? (
+                  {clock ? (
                     <span aria-hidden className="text-muted-foreground">
                       ·
                     </span>
@@ -440,9 +450,9 @@ function LegendRow({
   readonly index: number;
 }) {
   const popover = use(SegmentPopoverContext) ?? undefined;
-  const { account, window } = payload;
+  const { account, window, stale } = payload;
   const remaining = remainingPercent(window);
-  const resetsIn = formatResetsIn(window, now);
+  const resetsIn = stale ? `stale ${formatReadingAge(account, now)}` : formatResetsIn(window, now);
   const credits = account.limits.resetCredits?.availableCount ?? 0;
   return (
     <PopoverTrigger
@@ -507,6 +517,7 @@ function PoolBar({
               key={member.account.key}
               account={member.account}
               window={member.window}
+              stale={member.stale}
               reset={restores.get(member.account.key)}
               refillPercent={member.refillPercent}
               color={color}
@@ -545,6 +556,7 @@ function PoolWindowCard({
           </span>
           <span className="inline-flex items-center gap-2 text-sm text-muted-foreground">
             <span>left</span>
+            {pool.stale ? <span>· stale</span> : null}
             {pool.pace ? <PaceIcon pace={pool.pace} /> : null}
           </span>
         </span>

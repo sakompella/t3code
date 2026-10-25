@@ -4,12 +4,13 @@ import {
   shouldShowInstanceBadge,
 } from "@t3tools/client-runtime/state/provider-instance-display";
 import type { MenuAction } from "@react-native-menu/menu";
-import type {
-  ModelCapabilities,
-  ModelSelection,
-  ProjectId,
-  RuntimeMode,
-  ServerConfig as T3ServerConfig,
+import {
+  providerForNewThread,
+  type ModelCapabilities,
+  type ModelSelection,
+  type RuntimeMode,
+  type ProjectId,
+  type ServerConfig as T3ServerConfig,
 } from "@t3tools/contracts";
 import { resolveProjectProviderInstanceEnabled } from "@t3tools/contracts";
 import {
@@ -62,6 +63,7 @@ function providerDisplayLabel(provider: {
   if (provider.driver === "codex") return "Codex";
   if (provider.driver === "claudeAgent") return "Claude";
   if (provider.driver === "pi") return "Pi";
+  if (provider.driver === "primeAgent") return "Prime Agent";
   return provider.instanceId;
 }
 
@@ -217,18 +219,46 @@ export function resolveDefaultableModelSelection(
   return provider?.driver !== "antigravity" && model?.isLegacy === true ? null : usable;
 }
 
+/**
+ * The model a new task starts on. An explicit draft pick wins, then a project default whose
+ * provider can start a thread (an Antigravity default needing setup is kept so it does not change
+ * silently), then the device's last manual pick. Otherwise the provider from `providerForNewThread`
+ * with its default model.
+ */
 export function resolveNewTaskModelSelection(input: {
   readonly draftSelection: ModelSelection | null;
   readonly projectDefaultSelection: ModelSelection | null;
+  /** The default model as configured, before `resolveDefaultableModelSelection`. */
+  readonly configuredDefaultSelection: ModelSelection | null;
   readonly stickySelection: ModelSelection | null;
+  readonly config: T3ServerConfig | null | undefined;
+  readonly projectId: ProjectId | null;
   readonly modelOptions: ReadonlyArray<ModelOption>;
 }): ModelSelection | null {
+  const startProvider = providerForNewThread(
+    (input.config?.providers ?? []).map((provider) => ({
+      ...provider,
+      enabled: isProviderEnabledForProject(input.config, provider, input.projectId),
+      isAvailable: provider.availability !== "unavailable",
+    })),
+    input.configuredDefaultSelection?.instanceId,
+  );
+  const projectDefaultSelection =
+    input.projectDefaultSelection?.instanceId === startProvider?.instanceId ||
+    isModelSelectionUnavailable(input.config, input.projectDefaultSelection, input.projectId)
+      ? input.projectDefaultSelection
+      : null;
+  const startOptions = input.modelOptions.filter(
+    (option) =>
+      !option.isUnavailable &&
+      (startProvider === undefined || option.providerKey === startProvider.instanceId),
+  );
   return (
     input.draftSelection ??
-    input.projectDefaultSelection ??
+    projectDefaultSelection ??
     input.stickySelection ??
-    input.modelOptions.find((option) => option.isDefault && !option.isUnavailable)?.selection ??
-    input.modelOptions.find((option) => !option.isUnavailable)?.selection ??
+    startOptions.find((option) => option.isDefault)?.selection ??
+    startOptions[0]?.selection ??
     null
   );
 }

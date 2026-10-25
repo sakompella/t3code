@@ -75,7 +75,7 @@ export interface TimelineRowSharedState {
     readonly checkpointId: string;
     readonly scopeId: string;
   }) => void;
-  onToggleTurnFold: (runId: RunId) => void;
+  onToggleTurnFold: (foldKey: string) => void;
   onToggleAttemptFold: (attemptId: RunAttemptId) => void;
   onFileOpen: (attachment: ChatFileAttachment) => void;
   onFileDownload: (attachment: ChatFileAttachment) => void;
