@@ -248,11 +248,9 @@ interface EditorView {
 }
 
 /**
- * A synchronous pointer press, so keys can follow it before the navigation
- * settles. A dispatched mousedown has no default action, so this applies the
- * browser's: an unprevented mousedown moves focus to the focusable element
- * under it. (A real `userEvent.click` resolves only after ChatView has
- * refocused the composer, so it cannot catch keys lost in between.)
+ * A synchronous pointer press, so keys can follow before navigation settles. A dispatched mousedown
+ * has no default action, so this applies the browser's: moving focus to the focusable element under
+ * it.
  */
 function clickElement(target: HTMLElement) {
   const mousedown = new MouseEvent("mousedown", { bubbles: true, cancelable: true, detail: 1 });

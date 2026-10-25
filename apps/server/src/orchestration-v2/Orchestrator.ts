@@ -458,11 +458,9 @@ function wakeWorkStartedAt(
 }
 
 /**
- * The fields that end a snooze on the user's request. The moment it
- * effectively ended (the earlier of its deadline and now) is kept after the
- * deadline is cleared, so work finished by then stays hidden. A deadline that
- * already passed keeps its own time, so work finished after it stays fresh,
- * and an unsnooze with no snooze to end leaves the recorded moment alone.
+ * Fields that end a snooze on the user's request. The effective end (earlier of deadline and now)
+ * is kept after the deadline clears, so work finished by then stays hidden. A passed deadline keeps
+ * its own time; an unsnooze with no snooze leaves the recorded moment alone.
  */
 function endSnoozeEarly(
   thread: Pick<OrchestrationV2AppThread, "snoozedUntil" | "snoozeEndedAt">,

@@ -321,18 +321,9 @@ function pullRequestWatchTasks(
 }
 
 /**
- * Background work to show while a turn is still running: everything pending
- * except what the timeline already shows as a live row, so no task appears in
- * both places.
- *
- * The timeline keeps the in-progress steps of the runs in the current
- * response in its live activity row, so `foregroundRunIds` names the items to
- * leave out, and any roster task sharing their id. What remains is work that
- * outlived its step: roster tasks that providers add after the starting tool
- * call returns (Claude background tasks, Prime Agent `bash()` jobs) and active
- * items left behind by earlier runs.
- *
- * Once the turn settles, `derivePendingBackgroundWork` takes over.
+ * Background work to show while a turn is still running: everything pending except what the
+ * timeline already shows as a live row. `foregroundRunIds` names the items to leave out, plus any
+ * roster task sharing their id. After the turn settles, `derivePendingBackgroundWork` takes over.
  */
 export function deriveOutlivingBackgroundWork(input: {
   readonly providerThreads: ReadonlyArray<PendingBackgroundWorkProviderThread>;

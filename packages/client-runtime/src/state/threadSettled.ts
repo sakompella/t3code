@@ -91,13 +91,10 @@ export interface ThreadSettleShell {
 }
 
 /**
- * Settled resolution. The agent's own wakes (finished background commands,
- * heartbeats, subagent messages) run on a settled thread without un-settling
- * it, so a thread still raises its hand when such a run needs the user: it or
- * one of its subagents is blocked on an approval or a question, a guest
- * message waits for the user, or a run failed after the settle.
- * Its completion does not: the user said they were done with it. Like snooze,
- * the server fields stay set; the thread only stops classifying as settled.
+ * Settled resolution. The agent's own wakes run on a settled thread without un-settling it, but the
+ * thread raises its hand when such a run needs the user (blocked approval or question, guest
+ * message, failure after the settle). Its completion does not. Server fields stay set; the thread
+ * only stops classifying as settled.
  */
 export function effectiveSettled(shell: ThreadSettleShell): boolean {
   if (shell.settledOverride !== "settled") return false;
@@ -114,13 +111,10 @@ export function effectiveSettled(shell: ThreadSettleShell): boolean {
 }
 
 /**
- * A thread may be snoozed unless the agent or one of its subagents is
- * blocked on the user right now: hiding a pending approval or user-input
- * request defeats the request, and a queued turn start (a message no turn has
- * adopted yet) is invisible pending work the same way it is for settle. A running session IS snoozable —
- * snooze only affects visibility, never the agent. Requests that arrive after
- * the snooze do not undo it; the open thread still shows them. Client-side
- * twin of the server invariants so the UI can reject before a round trip.
+ * A thread may be snoozed unless the agent or a subagent is blocked on the user now: hiding a
+ * pending approval, user-input request, or queued turn start defeats it. A running session is
+ * snoozable since snooze only affects visibility. Client-side twin of the server invariants so the
+ * UI can reject before a round trip.
  */
 export function canSnooze(
   shell: QueuedThreadShell & {
@@ -143,12 +137,9 @@ export function canSnooze(
 }
 
 /**
- * Snoozed resolution: hidden from the inbox while the wake time is in the
- * future, whatever the thread does meanwhile. Approvals, questions, failures,
- * finished runs and new messages (the user's too) all leave it snoozed; only
- * the timer or an explicit unsnooze ends it. Timer wakes are derived — no
- * server event fires when snoozedUntil passes; the stale fields simply stop
- * classifying as snoozed (and feed the woke indicator until the user visits).
+ * Snoozed resolution: hidden from the inbox while the wake time is in the future, whatever the
+ * thread does. Timer wakes are derived; no server event fires when snoozedUntil passes, so the
+ * stale fields just stop classifying as snoozed.
  */
 export function effectiveSnoozed(
   shell: ThreadSnoozeShell,
@@ -159,11 +150,9 @@ export function effectiveSnoozed(
 }
 
 /**
- * When a previously-snoozed thread's timer ran out, or null if it never
- * snoozed / is still snoozed. Used for the "Woke" indicator: the thread
- * reappears in its original sort position (the inbox sort is deliberately
- * static), so the wake signal has to carry the weight. Compare against the
- * client's lastVisitedAt — visiting clears the indicator like it clears unread.
+ * When a previously snoozed thread's timer ran out, or null if it never snoozed or is still
+ * snoozed. Drives the "Woke" indicator: the thread keeps its sort position, so the wake signal must
+ * carry it. Compare against the client's lastVisitedAt; visiting clears it.
  */
 export function threadWokeAt(
   shell: ThreadSnoozeShell,

@@ -221,13 +221,9 @@ function terminalRunStatus(status: OrchestrationV2RunStatus): boolean {
 }
 
 /**
- * Whether the post-settlement background roster holds the thread's run, so
- * the thread shows as waiting on it (the sidebar and Lineage). Only work the
- * agent waits on holds it: commands and monitors it left running unmarked,
- * such as a dev server, present the run's own status. The server suppresses
- * the roster while an interruptible activity run exists, so a remaining roster
- * is stronger than checkpoint-oriented waiting. A failed latest run outranks
- * the roster, so the failure stays visible.
+ * Whether the background roster holds the thread's run. Only work the agent waits on holds it;
+ * unmarked commands and monitors (a dev server) do not. A failed latest run outranks the roster so
+ * the failure stays visible.
  */
 export function backgroundWorkHoldsThread(
   thread: Pick<OrchestrationV2ThreadShell, "pendingBackgroundTasks" | "status">,
@@ -237,9 +233,8 @@ export function backgroundWorkHoldsThread(
   );
 }
 
-// Park runtime at idle while background work holds the thread, so #4415
-// waiting-presentation Waiting (session.idle) can consume CTM runtime.
-// latestRun keeps the latest run's status for history presentation.
+// Park runtime at idle while background work holds the thread. latestRun keeps the latest run's
+// status for history presentation.
 function shellRuntime(thread: OrchestrationV2ThreadShell): ThreadRuntimeSummary | null {
   const parkAtIdle = backgroundWorkHoldsThread(thread);
   if (thread.latestRunId === null && thread.activeProviderThreadId === null && !parkAtIdle) {

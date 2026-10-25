@@ -6668,11 +6668,9 @@ describe("PiAdapterV2 with the Prime Agent flavor", () => {
     }).pipe(Effect.scoped, Effect.provide(layerTest)),
   );
 
-  // One dropped range, from the first reply's start to the next prompt's end.
-  // The later reply is stopped at once, so its copy is exactly what it showed.
-  // The older copy also holds that text, and the RPC stream carries no event
-  // sequence, so this looks the same as the mirror case (the reply's own copy
-  // lost, a later run's copy arriving right after it). Both stay misses.
+  // One dropped range, from the first reply's start to the next prompt's end. The later reply is
+  // stopped at once, and the older copy holds the same text with no event sequence to tell them
+  // apart, so this looks like the mirror case. Both stay misses.
   it.effect("keeps a reply apart when its live copy and an older unseen copy both fit", () =>
     Effect.gen(function* () {
       const fake = yield* makeFakePi;

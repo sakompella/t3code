@@ -1512,11 +1512,9 @@ function isTurnItemAtOrBeforeRun(input: {
 }
 
 /**
- * Whether a source item belongs in a fork's inherited prefix. A rollback
- * discards every run after its target, so while the fork's source run is live,
- * any rolled-back run before it was rewound before the fork existed and must
- * not reappear. Once the source run itself is rolled back, the fork keeps the
- * history it was taken from.
+ * Whether a source item belongs in a fork's inherited prefix. While the fork's source run is live,
+ * runs rolled back before it were rewound before the fork existed and must not reappear. Once the
+ * source run itself is rolled back, the fork keeps the history it was taken from.
  */
 function isInheritableForkItem(
   input: Parameters<typeof isOrchestrationV2TurnItemVisible>[0] & {

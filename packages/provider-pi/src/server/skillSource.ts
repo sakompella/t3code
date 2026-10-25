@@ -1,10 +1,7 @@
 /**
- * Source for the T3-owned `t3-code` skill that Prime Agent loads with
- * `--skill`. Prime Agent reaches T3's MCP server through the kernel's own
- * `mcp` module, so the skill replaces the native tool registrations and the
- * orchestration prompt block that the Pi extension injects for other agents.
- *
- * Pi requires the skill's directory name to equal its `name`.
+ * Source for the T3-owned `t3-code` skill that Prime Agent loads with `--skill`. It replaces the
+ * native tool registrations and orchestration prompt block the Pi extension injects for other
+ * agents. Pi requires the skill's directory name to equal its `name`.
  */
 export const PI_T3_CODE_SKILL_NAME = "t3-code";
 export const PI_T3_CODE_SKILL_FILENAME = "SKILL.md";
