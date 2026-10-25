@@ -551,12 +551,13 @@ export const make = Effect.gen(function* () {
     const project = Option.isSome(thread)
       ? yield* projects.getById(thread.value.projectId)
       : Option.none<Project>();
+    const now = yield* DateTime.now;
     const projected = resolveAgentAwarenessRelayPublishSnapshot({
       environmentId,
       threadId,
       thread,
       project,
-      now: yield* DateTime.now,
+      now,
     });
     // An outcome a snooze hid is withdrawn like any other hidden state, so a
     // row published before the snooze cannot linger or turn into an alert.
@@ -629,16 +630,19 @@ export const make = Effect.gen(function* () {
       });
       // Settled during the hold, not resumed: alert the current completion, then clear the card
       // on a new window. Only settlement may hide it; queued or silent runs also project to null.
+      // A completion a snooze hid stays hidden, even once the snooze is over.
       const unsettled =
         snapshot.state === null &&
         heldCompletions.has(threadId) &&
         Option.isSome(thread) &&
-        thread.value.settledOverride === "settled"
+        thread.value.settledOverride === "settled" &&
+        !terminalEndedUnderSnooze(thread.value)
           ? resolveAgentAwarenessRelayPublishSnapshot({
               environmentId,
               threadId,
               thread: Option.some({ ...thread.value, settledOverride: null }),
               project,
+              now,
             })
           : null;
       if (unsettled?.state?.phase === "completed") {
