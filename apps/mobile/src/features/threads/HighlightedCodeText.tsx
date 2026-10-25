@@ -8,10 +8,10 @@ import { Platform, type TextStyle } from "react-native";
 
 import { AppText as Text } from "../../components/ui/AppText";
 import { cn } from "../../lib/cn";
-import type { ReviewDiffTheme, ReviewHighlightedToken } from "../review/shikiReviewHighlighter";
+import type { HighlightedToken, HighlightScheme } from "../../lib/highlights";
 import { useMarkdownCodeHighlight } from "./markdownCodeHighlightState";
 
-function tokenStyle(token: ReviewHighlightedToken): TextStyle {
+function tokenStyle(token: HighlightedToken): TextStyle {
   const fontStyle = token.fontStyle ?? 0;
   return {
     ...(token.color ? { color: token.color } : null),
@@ -21,9 +21,7 @@ function tokenStyle(token: ReviewHighlightedToken): TextStyle {
 }
 
 /** Lines of tokens as nested text. Keys are character offsets, which never reorder. */
-function renderTokenLines(
-  lines: ReadonlyArray<ReadonlyArray<ReviewHighlightedToken>>,
-): ReactNode[] {
+function renderTokenLines(lines: ReadonlyArray<ReadonlyArray<HighlightedToken>>): ReactNode[] {
   const nodes: ReactNode[] = [];
   let offset = 0;
   lines.forEach((line, lineIndex) => {
@@ -44,16 +42,14 @@ function renderTokenLines(
 }
 
 /**
- * Monospace code text with Shiki colors. It shows the same characters in the
- * same font before the tokens arrive, so a row never changes size. Only the
- * head of the code is tokenized (see `splitCodeHighlightWindow`) and the
- * result is cached by the shared highlight atom, so a row that scrolls out and
- * back does no new work. Mounted rows are the only ones that tokenize.
+ * Monospace code text with syntax colors, in the same characters and font as
+ * plain text, so a row never changes size. Only the head of the code is
+ * tokenized (see `splitCodeHighlightWindow`), and only by mounted rows.
  */
 export const HighlightedCodeText = memo(function HighlightedCodeText(props: {
   readonly code: string;
   readonly language: WorkEntryCodeLanguage;
-  readonly theme: ReviewDiffTheme;
+  readonly theme: HighlightScheme;
   readonly kind: CodeHighlightWindowKind;
   readonly className?: string;
   readonly opacity?: number;
