@@ -18,11 +18,9 @@ export function makePrimeAgentTools(input: {
   const { driver, workspaceRelativePath } = input;
   const { emit, emitItemNode, baseItemFields } = input.items;
   /**
-   * Prime Agent's edit helper reports each change on the cell result as
-   * `details.diffs: [{ path, oldStr, newStr }]`. Surface them as file
-   * changes under the cell so the diff view works like other providers'.
-   * The 0.10 fork clips an oversized diff, marks each clipped side in its
-   * text, and sets `truncated: true`; the card's title says so too.
+   * Prime Agent's edit helper reports changes as `details.diffs: [{ path, oldStr, newStr }]`;
+   * surface them as file changes under the cell. The 0.10 fork clips oversized diffs, marks each
+   * clipped side, and sets `truncated: true`, which the card's title also states.
    */
   const emitIpythonFileChanges = Effect.fnUntraced(function* (
     turn: PiItemSink,

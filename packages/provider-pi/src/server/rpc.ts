@@ -165,11 +165,9 @@ export interface PiRpcSpawnOptions {
 export interface PiRpcConnection {
   readonly send: (record: PiRpcRecord) => Effect.Effect<void, PiRpcError>;
   /**
-   * Correlated request: assigns an `id`, waits for the matching response
-   * record, and returns its `data` (undefined when the command carries none).
-   * Fails on `success: false`, transport death, timeout, or a reply over the
-   * record size limit. A `null` timeout waits for the response, for commands
-   * that must not be abandoned midway.
+   * Correlated request: resolves with the matching response's `data`. Fails on `success: false`,
+   * transport death, timeout, or an oversized reply. A `null` timeout waits indefinitely for
+   * commands that must not be abandoned.
    */
   readonly request: (
     record: PiRpcRecord,
@@ -284,12 +282,9 @@ function parsePiRecord(line: string): PiRpcRecord | undefined {
 }
 
 /**
- * Kill the pi process group: SIGTERM, a grace that ends as soon as the group
- * exits, then SIGKILL.
- *
- * `hasExited` is consulted before each signal. Once the original child is
- * gone its pid/pgid can be recycled by the OS, so escalating blindly could
- * deliver SIGKILL to an unrelated process.
+ * Kill the pi process group: SIGTERM, then SIGKILL after a grace that ends when the group exits.
+ * `hasExited` is checked before each signal because a recycled pid/pgid could otherwise take
+ * SIGKILL.
  */
 const terminatePiProcess = Effect.fn("PiRpc.terminatePiProcess")(function* (
   kill: (signal: NodeJS.Signals) => boolean,

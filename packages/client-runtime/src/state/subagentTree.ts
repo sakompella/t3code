@@ -1,10 +1,6 @@
 /**
- * Live subagent tree for the background-work panel, shared by web and mobile.
- *
- * Providers that nest subagents (Prime Agent's `rlm.spawn` children spawning
- * their own) parent each child on its parent subagent's node, so the tree
- * follows `parentNodeId`. Only live subagents appear; a live child whose
- * parent already finished becomes a root rather than disappearing.
+ * Live subagent tree for the background-work panel. A live child whose parent already finished
+ * becomes a root rather than disappearing.
  */
 import type {
   OrchestrationV2PendingBackgroundTask,

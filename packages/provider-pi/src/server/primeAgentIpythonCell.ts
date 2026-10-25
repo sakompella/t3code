@@ -1,19 +1,8 @@
 /**
- * Classifies Prime Agent `ipython` tool cells so the timeline can show shell
- * work as commands and everything else as Python.
- *
- * Prime Agent runs every action through one persistent IPython kernel. Its
- * own TUI (core/tools/ipython-cell-code.js and code-preview.js, MIT) labels a
- * cell `bash` when it starts with a `%%bash` cell magic, or when its main
- * statement is a call to the kernel's `bash("...")` helper with a plain string
- * literal. This ports those two rules; Prime Agent's line scoring for
- * one-line previews is presentation-only and intentionally not copied.
- *
- * We are looser than the TUI in two ways, because agents mostly write
- * `r = await bash(f"...")` followed by `print(r.output)`: the command may be an
- * f-string (shown as its template, `{expr}` placeholders intact), and prints of
- * the result may follow. Anything that runs a second call or computes the
- * command stays Python.
+ * Classifies Prime Agent `ipython` cells so the timeline shows shell work as commands and the rest
+ * as Python. A cell is `bash` when it starts with `%%bash` or its main statement is `bash(...)`
+ * with a string literal, as in Prime Agent's TUI. Looser: an f-string command and prints of the
+ * result are accepted. Anything that runs a second call or computes the command stays Python.
  */
 
 export type IpythonCell =

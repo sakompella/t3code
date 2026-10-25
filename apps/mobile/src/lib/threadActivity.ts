@@ -1197,11 +1197,9 @@ export function deriveTerminalAssistantMessageIds(
 }
 
 /**
- * A prompt without a run (a provider-native subagent, or a turn imported from
- * V1) folds its response like a run. `runlessWorkActive` keeps the latest
- * runless response open; V2 work must not reopen imported turns. Steers and
- * notifications split a run into segments that fold separately, each where
- * its work happened.
+ * A prompt without a run (provider-native subagent, imported V1 turn) folds like a run.
+ * `runlessWorkActive` keeps the latest runless response open; V2 work must not reopen imported
+ * turns.
  */
 function deriveThreadFeedRunFolds(
   feed: ReadonlyArray<ThreadFeedEntry>,

@@ -366,11 +366,8 @@ export function useThreadLifecycle(input: ThreadLifecycleInput) {
   const handleSwitchCheckoutToThreadStable = useStableCallback(() => {
     void handleSwitchCheckoutToThread();
   });
-  // The interrupt path also accepts a completed run while its provider still
-  // has background work.
-  // While a turn runs, the banner lists only work that outlived the step that
-  // started it. Its Stop would send the same interrupt as the composer's Stop,
-  // so the banner shows no Stop then.
+  // While a turn runs, the banner lists only work that outlived its step, and hides Stop because it
+  // would send the same interrupt as the composer's Stop.
   const activeBackgroundTasks = activeThread ? pendingBackgroundTasks : [];
   const [stoppingBackgroundWorkKey, setStoppingBackgroundWorkKey] = useState<string | null>(null);
   const isStoppingBackgroundWork =

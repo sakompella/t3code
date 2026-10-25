@@ -161,11 +161,9 @@ export function piWakeNotification(
 }
 
 /**
- * Prime Agent can inject a message into a run that is already going, e.g. a
- * background command that finished. The agent answers it in the same run, so
- * without a row the reply looks like it came from nowhere, and the run folds
- * the earlier reply away. The row is display only: Prime Agent already
- * consumed the message, so nothing is queued or woken.
+ * Prime Agent can inject a message into a run already going, such as a finished background command,
+ * and answers it in the same run. The row keeps that reply from looking unprompted and from being
+ * folded away. It is display only: nothing is queued or woken.
  */
 export function makePrimeAgentWakeNotices(input: {
   readonly enabled: boolean;
@@ -204,14 +202,9 @@ export function makePrimeAgentWakeNotices(input: {
 }
 
 /**
- * The jobs a Prime Agent kernel runs in the background, as the adapter infers
- * them from the cells it saw.
- *
- * Prime Agent gives RPC clients no list of live jobs, and reports a job's end
- * only with a notice that it withdraws when a later cell reads the finished
- * result first. So a job a cell has read may have ended without any signal.
- * Such a job stays tracked, to keep the session alive in case it still runs
- * and its notice is yet to come, but it leaves the roster the composer shows.
+ * The jobs a Prime Agent kernel runs in the background, inferred from the cells the adapter saw.
+ * Prime Agent lists no live jobs and withdraws a job's end notice if a cell reads the result first.
+ * Such a read job stays tracked to keep the session alive, but leaves the composer's roster.
  */
 export function makePrimeAgentBackgroundJobs(
   publish: (
@@ -260,11 +253,9 @@ export function makePrimeAgentBackgroundJobs(
   };
 
   /**
-   * Tracks jobs a finished cell started in the background. Awaiting or killing
-   * a handle ends its job; reading its result takes it off the roster. A cell
-   * that assigns a handle's name again detaches the old job from it first:
-   * what the cell does with the name before that assignment is about the old
-   * job, and everything after is about the new value.
+   * Tracks jobs a finished cell started in the background. Awaiting or killing a handle ends its
+   * job; reading its result removes it from the roster. Reassigning a handle's name detaches the
+   * old job first, since earlier uses of the name concern the old job.
    */
   const trackBackgroundJobs = Effect.fnUntraced(function* (code: string) {
     yield* publishIfRosterChanged(() => {
