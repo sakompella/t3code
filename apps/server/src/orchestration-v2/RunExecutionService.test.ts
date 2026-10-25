@@ -850,7 +850,7 @@ describe("a late subagent shell across a session's subscribers", () => {
     const start = (run: ScenarioRun) =>
       runExecution.startRootRun({
         commandId: CommandId.make(`command:${run.runId}`),
-        appThread: { id: threadId } as OrchestrationV2AppThread,
+        appThread: rootAppThread(threadId),
         providerSessionId: ProviderSessionId.make("session:shell-owner"),
         session: {
           events: Stream.empty,
