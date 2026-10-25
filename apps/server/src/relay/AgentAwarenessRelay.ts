@@ -330,11 +330,9 @@ function resolveAgentAwarenessRelayPublishSnapshot(input: {
 }
 
 /**
- * Whether the finished run ended no later than the end of a snooze: its
- * deadline, which stays on the thread after the timer ends, or the moment an
- * unsnooze ended it early (`snoozeEndedAt`). Everything that finished by then
- * was hidden or already seen, so it is never announced afterward, whether or
- * not the thread was published before and even once publishing turns on later.
+ * Whether the finished run ended no later than the end of a snooze: its deadline, or the moment an
+ * unsnooze ended it early (`snoozeEndedAt`). Everything finished by then was hidden or already
+ * seen, so it is never announced later, even once publishing turns on.
  */
 function terminalEndedUnderSnooze(thread: OrchestrationV2ThreadShell): boolean {
   if (thread.latestRunCompletedAt == null) return false;

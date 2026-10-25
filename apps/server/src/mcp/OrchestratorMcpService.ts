@@ -680,12 +680,10 @@ function interactionModeRank(mode: ProviderInteractionMode): number {
 }
 
 /**
- * The mode a new thread runs in: the requested mode, else the parent's, never
- * broader than the parent's. Pass `target` when the thread runs on a known
- * provider. A provider runs a mode it does not offer in another one, so an
- * explicit request for one is refused, and an inherited one steps down to the
- * broadest mode the provider offers. A provider whose every mode is broader
- * than the parent's is refused.
+ * The mode a new thread runs in: the requested mode, else the parent's, never broader than the
+ * parent's. With a known `target`, an explicit mode the provider does not offer is refused and an
+ * inherited one steps down to the broadest offered. A provider offering only broader modes is
+ * refused.
  */
 export function resolveRuntimeMode(
   parentMode: RuntimeMode,

@@ -347,11 +347,9 @@ export function makePrimeAgentChildThreads(input: {
   });
 
   /**
-   * Routes one event of an observed child session onto its thread. The
-   * child's RPC drops events like the main one, so assistant text comes
-   * from message snapshots, and each message is keyed by its own timestamp:
-   * a lost `message_start` cannot shift ids, and replaying history over
-   * live events is idempotent.
+   * Routes one event of an observed child session onto its thread. The child's RPC drops events, so
+   * assistant text comes from message snapshots keyed by their own timestamp; a lost
+   * `message_start` cannot shift ids and replaying history is idempotent.
    */
   const observeChildEvent = Effect.fnUntraced(function* (
     transcript: PiChildTranscript,
@@ -646,10 +644,8 @@ export function makePrimeAgentChildThreads(input: {
   });
 
   /**
-   * A nested child seen before its parent child starts under the root. Once
-   * T3 has the parent child's thread, the nested child's thread and card move
-   * under it on the nested child's next update, whatever its status. The
-   * thread changes only its parent, so the user's edits to it stay, and the
+   * A nested child seen before its parent child starts under the root, then moves under the parent
+   * child's thread on its next update. Only the thread's parent changes, so user edits stay and the
    * card keeps its outcome.
    */
   const moveUnderParentChild = Effect.fnUntraced(function* (
@@ -699,11 +695,9 @@ export function makePrimeAgentChildThreads(input: {
     const parentChild = parentChildId === undefined ? undefined : rlmChildren.get(parentChildId);
     const parentTranscript =
       parentChildId === undefined ? undefined : rlmTranscripts.get(parentChildId);
-    // A child outlives the run that spawned it; its record stays on that run.
-    // A nested child's record goes to its parent child's run while the parent
-    // is still on its task and that run's turn did not fail or get interrupted
-    // (either ends the run's listener at once). Otherwise it goes to the live
-    // turn, as a resumed Claude task does, so the record has a run to land on.
+    // A child outlives the run that spawned it. A nested child's record goes to its parent child's
+    // run unless that run's turn failed or was interrupted (either ends the run's listener); then
+    // it goes to the live turn.
     const parentRunEnded = (candidate: ActivePiTurn) =>
       candidate !== currentTurn && (candidate.interrupted || candidate.failure !== null);
     const launchingTurn =

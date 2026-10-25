@@ -1907,11 +1907,9 @@ export const layerWithOptions = (
         );
 
       /**
-       * Stores one event of a session-scoped child thread. A failed write is
-       * retried briefly, then logged and dropped: a child transcript must not
-       * end its parent's session. The release permit covers the live check,
-       * the write and its retries, so a released session's pump never writes
-       * after release removed it, over what its replacement stored.
+       * Stores one event of a session-scoped child thread. A failed write is retried briefly, then
+       * dropped: a child transcript must not end its parent's session. The release permit covers
+       * the live check and write, so a released session's pump never overwrites its replacement.
        */
       const storeSessionChildThreadEvent =
         /* Runs once per child-thread event; avoid a span per event. */
@@ -1966,12 +1964,9 @@ export const layerWithOptions = (
 
       const startEventPump = (entry: LiveSessionEntry) => {
         let stoppedByProvider = false;
-        // A runtime with session-scoped child threads (Prime Agent) has them
-        // stored here instead of by its runs. Runs come and go and read at
-        // their own pace, so no rule a run applies alone can give such a
-        // thread exactly one writer. This pump is the adapter stream's only
-        // reader, so it can. Each thread keeps the streaming filter a run
-        // would apply to its replies.
+        // Session-scoped child threads (Prime Agent) are stored here, not by runs, because runs
+        // read at their own pace and cannot give a thread exactly one writer. This pump is the
+        // adapter stream's only reader, so it can. Each thread keeps the run's streaming filter.
         const sessionChildThreads = new Map<
           ThreadId,
           ReturnType<typeof makeAssistantStreamingFilter>

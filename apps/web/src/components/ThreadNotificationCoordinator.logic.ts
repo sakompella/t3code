@@ -74,12 +74,10 @@ export function observeThreadForNotification(
 }
 
 /**
- * When the work a snapshot accounts for completed a task, or null. Shell
- * updates are coalesced, so a check can start or end in the same update a
- * user's run ended in. A routine check therefore stands for the latest run
- * someone asked for (latestTaskRunCompletedAt and latestTaskRunStatus). A run
- * that ended without completing, or whose status an older server did not
- * send, never counts as a completion.
+ * When the work a snapshot accounts for completed a task, or null. Shell updates are coalesced, so
+ * a routine check stands for the latest run someone asked for (latestTaskRunCompletedAt and
+ * latestTaskRunStatus). A run that ended without completing, or has no status from an older server,
+ * never counts.
  */
 function completedTaskAt(
   thread: Pick<

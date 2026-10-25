@@ -220,12 +220,10 @@ export function resolveDefaultableModelSelection(
 }
 
 /**
- * The model a new task starts on. An explicit draft pick wins, then a project
- * default whose provider can start a thread (an Antigravity default that needs
- * setup is kept, as it must not change silently), then the device's last
- * manual pick. Otherwise the task starts on the provider every surface predicts
- * (`providerForNewThread`, requested through the configured default, even
- * when its model is not defaultable) with that provider's default model.
+ * The model a new task starts on. An explicit draft pick wins, then a project default whose
+ * provider can start a thread (an Antigravity default needing setup is kept so it does not change
+ * silently), then the device's last manual pick. Otherwise the provider from `providerForNewThread`
+ * with its default model.
  */
 export function resolveNewTaskModelSelection(input: {
   readonly draftSelection: ModelSelection | null;

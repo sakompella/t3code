@@ -1,12 +1,7 @@
 /**
- * PiFlavor — what differs between agents that speak Pi's RPC protocol.
- *
- * Prime Agent is a hard fork of Pi (forked around Pi 0.75). Its RPC keeps
- * Pi's commands and events, but it forked before Pi added `agent_settled`
- * and `get_entries`, and it replaced Pi's bash/edit/write tools with a single
- * persistent Python tool. Everything else (sessions, forks, extensions,
- * extension UI, model selection, compaction) is shared, so both run through
- * the same adapter, probe, and text generation with one flavor each.
+ * What differs between agents that speak Pi's RPC protocol. Prime Agent forked before Pi added
+ * `agent_settled` and `get_entries` and replaces bash/edit/write with one persistent Python tool;
+ * everything else is shared, so one adapter serves both flavors.
  */
 import { ProviderDriverKind } from "@t3tools/contracts";
 import * as Duration from "effect/Duration";
@@ -45,11 +40,9 @@ export interface PiFlavor {
   /** Pi's built-in bash/edit/write tools, or Prime Agent's single Python tool. */
   readonly tools: "pi" | "ipython";
   /**
-   * Whether a wake's continuation run gets a notice naming what woke the
-   * agent. Prime Agent wakes itself by design (heartbeats, schedules, finished
-   * background commands, agent messages), and the messages it was woken with
-   * say which, so the offer waits for its reply. Pi's extension wakes carry no
-   * such cause and are offered at once with the generic notice.
+   * Whether a wake's continuation run gets a notice naming what woke the agent. Prime Agent's
+   * woken-with messages say which, so the offer waits for its reply. Pi's extension wakes carry no
+   * cause and are offered at once with the generic notice.
    */
   readonly wakeNotices: boolean;
   /**
@@ -78,13 +71,9 @@ export interface PiFlavor {
    */
   readonly successor?: PiFlavor;
   /**
-   * Whether the RPC can drop stream events. Prime Agent's RPC rides its
-   * daemon socket and resyncs instead of queueing when that socket backs up,
-   * so any event can go missing, up to a whole reply or wake. Every update
-   * and the final message still carry the whole message so far, and the
-   * adapter treats that snapshot as the truth; what never arrived is rebuilt
-   * from the stored conversation (see `primeAgentReconciler.ts`). Pi's
-   * stream is lossless.
+   * Whether the RPC can drop stream events. Prime Agent's resyncs instead of queueing when its
+   * daemon socket backs up. Every update still carries the whole message so far and is the truth;
+   * missing events are rebuilt from the stored conversation (`primeAgentReconciler.ts`).
    */
   readonly lossyStream: boolean;
   /**
@@ -108,28 +97,20 @@ export interface PiFlavor {
    */
   readonly kernelMcp: PiFlavor["agentDir"] | null;
   /**
-   * Whether the RPC lists the session's heartbeats (`list_heartbeats`), the
-   * recurring prompts it runs while the client keeps it alive. The adapter
-   * publishes them on the provider thread. Its RPC does not forward
-   * `heartbeats_changed`, so they are read when the session opens and when a
-   * turn settles.
+   * Whether the RPC lists the session's heartbeats (`list_heartbeats`). It does not forward
+   * `heartbeats_changed`, so they are read when the session opens and when a turn settles.
    */
   readonly heartbeats: boolean;
   /**
-   * How long T3 waits for the process to exit after SIGTERM before SIGKILL.
-   * Prime Agent's SIGTERM handler tells its daemon to stop the session's
-   * worker (`complete_owned_session`), which frees the session lease. A kill
-   * that lands first leaves the lease held until the daemon's 30 s
-   * disconnect timer fires, and a resume in that window is refused.
+   * How long T3 waits after SIGTERM before SIGKILL. Prime Agent's SIGTERM handler releases the
+   * session lease via its daemon; a kill that lands first holds the lease until the daemon's 30 s
+   * disconnect timer, and a resume in that window is refused.
    */
   readonly terminationGrace: Duration.Duration;
   /**
-   * Whether a thread's existing session is opened by launching the process on
-   * it (`--resume <file>`) instead of asking the running process to
-   * `switch_session`. Prime Agent's daemon hands its message, observe and
-   * heartbeat controllers only to the session a process starts on, so a
-   * session swapped in later cannot message its subagents. Pi has no such
-   * controllers, and its `--resume` opens a picker, so it keeps the swap.
+   * Whether an existing session is opened by launching with `--resume <file>` instead of
+   * `switch_session`. Prime Agent's daemon hands its message, observe and heartbeat controllers
+   * only to the session a process starts on. Pi's `--resume` opens a picker, so it keeps the swap.
    */
   readonly resumesAtLaunch: boolean;
   /**
@@ -140,11 +121,9 @@ export interface PiFlavor {
    */
   readonly restartsOnLostDaemonSession: boolean;
   /**
-   * Whether the session keeps the thinking level asked for and `get_state`
-   * reports it clamped to the current model, so a switch to a model with more
-   * levels gets the requested one back (the 0.10 fork: Extra High reads as
-   * High on a model without it). Pi and 0.9.8 store the clamped level, and
-   * that is what the next model gets.
+   * Whether the session keeps the requested thinking level while `get_state` reports it clamped to
+   * the current model, so switching to a model with more levels restores the request. Pi and 0.9.8
+   * store the clamped level.
    */
   readonly remembersThinkingRequest: boolean;
 }
@@ -228,11 +207,9 @@ const primeAgent098 = {
 } satisfies PiFlavor;
 
 /**
- * The `sakompella/prime-agent` fork of the Rust Prime Agent 0.10. Its RPC
- * runs in the daemon (RLM children, agent messages, heartbeats, wakes),
- * speaks the 0.9.8 commands and frames, and adds `navigate_tree`. It has no
- * extensions, so T3 cannot gate tools before they run. It reaches T3's tools
- * through `kernelMcp` until its native `t3` module replaces that route.
+ * The `sakompella/prime-agent` fork of Prime Agent 0.10. Its RPC runs in the daemon and speaks the
+ * 0.9.8 commands plus `navigate_tree`. It has no extensions, so T3 cannot gate tools before they
+ * run, and it reaches T3's tools through `kernelMcp`.
  */
 export const PRIME_AGENT_FORK_FLAVOR: PiFlavor = {
   ...primeAgent098,

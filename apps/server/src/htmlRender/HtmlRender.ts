@@ -145,10 +145,8 @@ export class HtmlRender extends Context.Service<
   {
     readonly prepare: (html: string) => Effect.Effect<string, HtmlRenderPrepareError>;
     /**
-     * Stores a prepared page as a thread attachment for clients to show inline,
-     * measuring its height at each client width when the preview browser is
-     * already installed. `record` runs uninterruptibly before the page counts
-     * as published. Its failure removes the page, unless it fails with
+     * Stores a prepared page as a thread attachment. `record` runs uninterruptibly before the page
+     * counts as published; its failure removes the page unless it is
      * `HtmlRenderOwnershipUnknownError`.
      */
     readonly publish: <E = never>(
@@ -483,9 +481,7 @@ const make = Effect.gen(function* () {
         ),
       ).pipe(
         Effect.onError(() => removePage),
-        Effect.tap((reference) =>
-          mcpSessions.recordHtmlRender(input.threadId, input, reference),
-        ),
+        Effect.tap((reference) => mcpSessions.recordHtmlRender(input.threadId, input, reference)),
         Effect.tap((reference) =>
           record === undefined
             ? Effect.void

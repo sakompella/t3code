@@ -639,13 +639,10 @@ export const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThr
 
   const isUnread = hasUnseenCompletion({ ...thread, lastVisitedAt });
   const status = resolveSidebarThreadStatus(thread);
-  // A woken thread reappears at its original position (the sort is
-  // deliberately static), so the pill has to carry the weight. Snoozing is
-  // an explicit act, so the pill clears only when the user re-engages:
-  // visiting after the timer ran out, clicking the pill, sending a message,
-  // settling, archiving, or a change request state that settles the thread.
-  // An unparseable visit timestamp counts as never-visited, so corrupt local
-  // data cannot eat the wake signal.
+  // A woken thread keeps its sort position, so the pill must carry the signal. It clears only on
+  // re-engagement: visiting after the timer, clicking, sending, settling, archiving, or a change
+  // request state that settles it. An unparseable visit timestamp counts as never visited so
+  // corrupt local data cannot eat the wake signal.
   const lastVisitedDate = lastVisitedAt === undefined ? null : parseTimestampDate(lastVisitedAt);
   const wokeAtDate = props.wokeAt === null ? null : parseTimestampDate(props.wokeAt);
   const isWoke =

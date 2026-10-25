@@ -117,13 +117,10 @@ export function makePrimeAgentStream(input: {
   };
 
   /**
-   * Bring every item of a stored assistant message to the text Prime Agent
-   * recorded, completing it, whether or not the stream ever started it. The
-   * message is matched by the timestamp identity `adoptMessageIdentity`
-   * derives, never by its text, so an item that already shows the recorded
-   * text is left alone. A stopped copy takes the identity of the reply it
-   * `replaced`, and a block that reply never showed keeps the place the copy
-   * arrived in.
+   * Brings every item of a stored assistant message to the text Prime Agent recorded, whether or
+   * not the stream started it. Messages match by the timestamp identity from
+   * `adoptMessageIdentity`, never by text. A stopped copy takes the identity of the reply it
+   * `replaced`.
    */
   const upsertRecordedMessage = Effect.fnUntraced(function* (
     turn: PiItemSink,
