@@ -318,6 +318,96 @@ describe("scheduled task model defaults", () => {
       }),
     ).toEqual(environmentSelection);
   });
+  it.each([
+    { warning: "codex", ready: "primeAgent" },
+    { warning: "primeAgent", ready: "codex" },
+  ])(
+    "starts on the ready provider, not a warning one listed first ($warning first)",
+    ({ warning, ready }) => {
+      const provider = (driver: string, status: "ready" | "warning") => ({
+        ...config.providers[0]!,
+        instanceId: ProviderInstanceId.make(driver),
+        driver,
+        status,
+      });
+      expect(
+        resolve(
+          {
+            ...config,
+            settings: { ...config.settings, defaultModelSelection: null },
+            providers: [provider(warning, "warning"), provider(ready, "ready")] as never,
+          },
+          null,
+        )?.instanceId,
+      ).toEqual(ready);
+    },
+  );
+  describe("when the project default cannot be used", () => {
+    const provider = (id: string, extra: Record<string, unknown> = {}) => ({
+      instanceId: ProviderInstanceId.make(id),
+      driver: id,
+      displayName: id,
+      enabled: true,
+      installed: true,
+      status: "ready",
+      auth: { status: "authenticated" },
+      models: [
+        { slug: "default", name: "default", isDefault: true, isCustom: false, capabilities: null },
+        { slug: "old", name: "old", isLegacy: true, isCustom: false, capabilities: null },
+      ],
+      ...extra,
+    });
+    const select = (id: string, model = "default") => ({
+      instanceId: ProviderInstanceId.make(id),
+      model,
+    });
+    // Mobile keeps a default only when its provider is the one a new thread starts on.
+    it.each([
+      {
+        name: "legacy project model on Codex, global default on Claude",
+        providers: [provider("claudeAgent"), provider("codex")],
+        global: select("claudeAgent"),
+        project: select("codex", "old"),
+        expected: select("codex"),
+      },
+      {
+        name: "unavailable project provider, global default on a warning provider",
+        providers: [
+          provider("primeAgent"),
+          provider("codex", { availability: "unavailable" }),
+          provider("claudeAgent", { status: "warning" }),
+        ],
+        global: select("claudeAgent"),
+        project: select("codex"),
+        expected: select("primeAgent"),
+      },
+      {
+        name: "signed-out project provider, global default on Claude",
+        providers: [
+          provider("claudeAgent"),
+          provider("codex", { auth: { status: "unauthenticated" } }),
+        ],
+        global: select("claudeAgent"),
+        project: select("codex"),
+        expected: null,
+      },
+      {
+        name: "legacy project model on Codex, global default on a fork listed first",
+        providers: [provider("primeAgent"), provider("codex")],
+        global: select("primeAgent"),
+        project: select("codex", "old"),
+        expected: select("codex"),
+      },
+    ])("matches mobile: $name", ({ providers, global, project, expected }) => {
+      expect(
+        scheduledTaskDefaultModel(
+          { ...DEFAULT_SERVER_SETTINGS, defaultModelSelection: global },
+          { id: projectId, defaultModelSelection: project },
+          deriveProviderInstanceEntries(providers as unknown as ServerConfig["providers"]),
+        ),
+      ).toEqual(expected);
+    });
+  });
 });
 
 it("rejects dedupe templates without a request placeholder", () => {

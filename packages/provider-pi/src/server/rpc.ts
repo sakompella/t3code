@@ -1,7 +1,22 @@
 /**
- * Framing follows Pi's spec: LF-delimited only, with a trailing `\r` stripped.
- * Lines are split manually (never with `readline`, which also splits on
- * U+2028/U+2029 and would corrupt frames).
+ * PiRpc — stdio JSONL transport for the Pi coding agent's RPC mode.
+ *
+ * Spawns `pi --mode rpc` and speaks Pi's line-delimited JSON protocol:
+ * requests go to stdin as `{"type": "...", "id": "..."}` records, responses
+ * come back as `{"type": "response", "id": ..., "success": ...}` and are
+ * correlated by `id`; every other stdout record is a session event and is
+ * surfaced on the `events` queue in arrival order.
+ *
+ * Framing follows Pi's spec: LF-delimited only, with a trailing `\r`
+ * stripped. Lines are split manually (never with `readline`, which also
+ * splits on U+2028/U+2029 and would corrupt frames). Records that fail to
+ * parse as JSON are dropped with a debug log rather than failing the
+ * transport, so a chatty extension cannot take the session down. Records
+ * longer than `maxRecordChars` fail the request they answer with
+ * `PiRpcRecordTooLargeError`; the reader resyncs at the next newline.
+ *
+ * Used by `PiAdapterV2` for sessions and by `PiTextGeneration` /
+ * `PiProvider` for ephemeral one-shot processes.
  */
 import * as Clock from "effect/Clock";
 import * as Deferred from "effect/Deferred";
@@ -10,6 +25,7 @@ import * as Effect from "effect/Effect";
 import * as Option from "effect/Option";
 import * as Predicate from "effect/Predicate";
 import * as Queue from "effect/Queue";
+import * as Schedule from "effect/Schedule";
 import * as Scope from "effect/Scope";
 import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
@@ -34,6 +50,8 @@ export class PiRpcError extends Schema.TaggedError<PiRpcError>()("PiRpcError", {
   }
 }
 
+const isPiRpcError = Schema.is(PiRpcError);
+
 export class PiRpcTimeoutError extends Schema.TaggedError<PiRpcTimeoutError>()(
   "PiRpcTimeoutError",
   {
@@ -43,6 +61,69 @@ export class PiRpcTimeoutError extends Schema.TaggedError<PiRpcTimeoutError>()(
 ) {
   override get message(): string {
     return `Pi RPC ${this.operation} failed: timed out after ${this.timeoutMs}ms.`;
+  }
+}
+
+const SESSION_LEASE_HELD_TEXT = "Session is already active";
+
+/**
+ * Prime Agent refuses `switch_session` while another worker still holds the
+ * session lease, and reports only the message text. The holder releases the
+ * lease once it finishes shutting down, so the refusal is transient.
+ */
+export function isPiSessionLeaseContention(error: unknown): boolean {
+  return (
+    isPiRpcError(error) &&
+    error.operation === "switch_session" &&
+    typeof error.cause === "string" &&
+    error.cause.startsWith(SESSION_LEASE_HELD_TEXT)
+  );
+}
+
+const UNKNOWN_ACTIVE_SESSION_PREFIX = "Unknown active session: ";
+
+/**
+ * The active session id a Prime Agent daemon answers a request with when it
+ * does not host that session, read from the failed response's error text.
+ */
+export function unknownActiveSessionId(errorText: unknown): string | undefined {
+  if (typeof errorText !== "string" || !errorText.startsWith(UNKNOWN_ACTIVE_SESSION_PREFIX)) {
+    return undefined;
+  }
+  const id = errorText.slice(UNKNOWN_ACTIVE_SESSION_PREFIX.length).trim();
+  return id.length === 0 ? undefined : id;
+}
+
+export class PiRpcRecordTooLargeError extends Schema.TaggedError<PiRpcRecordTooLargeError>()(
+  "PiRpcRecordTooLargeError",
+  {
+    operation: Schema.String,
+    chars: Schema.Int,
+    maxChars: Schema.Int,
+  },
+) {
+  override get message(): string {
+    return `Pi RPC ${this.operation} failed: a stdout record of ${this.chars} chars exceeds the ${this.maxChars} char limit.`;
+  }
+}
+
+/**
+ * Prime Agent opens a session at launch (`--resume <file>`) only when no other
+ * worker holds its lease, and otherwise exits with this message on stderr. The
+ * holder releases the lease once it finishes shutting down, so the refusal is
+ * transient.
+ */
+export function isPiSessionLeaseRefusal(stderr: string): boolean {
+  return stderr.includes(SESSION_LEASE_HELD_TEXT);
+}
+
+/** A `--resume` launch the daemon refused because another worker still holds the session. */
+export class PiSessionLeaseHeldError extends Schema.TaggedError<PiSessionLeaseHeldError>()(
+  "PiSessionLeaseHeldError",
+  { sessionFile: Schema.String },
+) {
+  override get message(): string {
+    return `Pi session ${this.sessionFile} is still held by another worker.`;
   }
 }
 
@@ -62,6 +143,22 @@ export function piRecordNumber(input: unknown, key: string): number | undefined 
   return Predicate.isNumber(value) && Number.isFinite(value) ? value : undefined;
 }
 
+/**
+ * Whether a `get_state` payload shows no remaining agent work. Pi reports a
+ * pending message count; Prime Agent keeps `sessionActions.active` set until a
+ * run's retry chain and post-run work finish, and counts queued input.
+ */
+export function piStateIsIdle(state: unknown): boolean {
+  const sessionActions = piRecordField(state, "sessionActions");
+  return (
+    piRecordField(state, "isStreaming") !== true &&
+    piRecordField(state, "isCompacting") !== true &&
+    (piRecordNumber(state, "pendingMessageCount") ?? 0) === 0 &&
+    (piRecordNumber(sessionActions, "queuedCount") ?? 0) === 0 &&
+    piRecordField(sessionActions, "active") === undefined
+  );
+}
+
 export function parsePiModelSlug(slug: string): { provider: string; modelId: string } | null {
   const separator = slug.indexOf("/");
   if (separator <= 0 || separator === slug.length - 1) return null;
@@ -73,58 +170,109 @@ export interface PiRpcSpawnOptions {
   readonly args: ReadonlyArray<string>;
   readonly cwd: string | undefined;
   readonly env: NodeJS.ProcessEnv;
+  /**
+   * How long SIGTERM may take before SIGKILL, ending as soon as the process
+   * group exits. Defaults to one second. An agent that closes its session in
+   * its SIGTERM handler needs longer, or the kill cuts that shutdown off.
+   */
+  readonly terminationGrace?: Duration.Input;
+  /** Longest stdout record accepted, in characters. */
+  readonly maxRecordChars?: number;
 }
 
 export interface PiRpcConnection {
   readonly send: (record: PiRpcRecord) => Effect.Effect<void, PiRpcError>;
+  /**
+   * Correlated request: assigns an `id`, waits for the matching response
+   * record, and returns its `data` (undefined when the command carries none).
+   * Fails on `success: false`, transport death, timeout, or a reply over the
+   * record size limit. A `null` timeout waits for the response, for commands
+   * that must not be abandoned midway.
+   */
   readonly request: (
     record: PiRpcRecord,
-    timeoutMs?: number,
-  ) => Effect.Effect<unknown, PiRpcError | PiRpcTimeoutError>;
+    timeoutMs?: number | null,
+  ) => Effect.Effect<unknown, PiRpcError | PiRpcTimeoutError | PiRpcRecordTooLargeError>;
   readonly events: Queue.Queue<PiRpcRecord, PiRpcError>;
   readonly exited: Effect.Effect<number, PiRpcError>;
+  /**
+   * The end of what pi wrote to stderr, read once the process has closed it
+   * (empty if it has not within half a second). Only for classifying a failed
+   * launch: stderr can carry credentials or prompt text, so never log it.
+   */
+  readonly stderrAfterExit: Effect.Effect<string>;
   readonly terminate: Effect.Effect<void>;
 }
 
 const DEFAULT_REQUEST_TIMEOUT_MS = 30_000;
-const TERMINATION_GRACE = Duration.seconds(1);
+const DEFAULT_TERMINATION_GRACE = Duration.seconds(1);
+const TERMINATION_POLL = Schedule.spaced("20 millis");
 
 interface PendingPiRequest {
-  readonly deferred: Deferred.Deferred<unknown, PiRpcError>;
+  readonly operation: string;
+  readonly deferred: Deferred.Deferred<unknown, PiRpcError | PiRpcRecordTooLargeError>;
 }
 
-// MCP completion events carry images in both model content and the script
-// CallToolResult. Allow the shared image budget twice, plus bounded JSON/text
-// overhead, before dropping an extension's oversized record.
-const MAX_PI_RECORD_CHARS =
+/**
+ * Default record limit, in characters. MCP completion events carry images in
+ * both model content and the script CallToolResult, so upstream allows the
+ * shared image budget twice plus bounded JSON/text overhead (about 232 million
+ * characters). That is far above the largest Prime Agent `get_messages` reply
+ * seen here (about 13 million). A record over it fails pending requests with
+ * `PiRpcRecordTooLargeError` instead of vanishing.
+ */
+const DEFAULT_MAX_PI_RECORD_CHARS =
   2 * MAX_TOOL_OUTPUT_IMAGES * MAX_TOOL_OUTPUT_IMAGE_BASE64_LENGTH + 8 * 1024 * 1024;
+const STDERR_TAIL_CHARS = 2_000;
+const STDERR_CLOSE_WAIT = Duration.millis(500);
 
-function makeJsonlFramer() {
-  let buffer = "";
-  let dropping = false;
-  return (chunk: string): ReadonlyArray<string> => {
-    const lines: string[] = [];
+export type PiFrame =
+  | { readonly _tag: "Line"; readonly text: string }
+  | { readonly _tag: "Oversized"; readonly chars: number };
+
+/**
+ * Splits decoded stdout text into LF-delimited frames. Pieces of a line are
+ * collected and joined once at its newline. Past `maxChars` a line stops being
+ * collected and surfaces as `Oversized`, carrying only its length.
+ */
+export function makeJsonlFramer(maxChars: number) {
+  let pieces: string[] = [];
+  let chars = 0;
+
+  const push = (piece: string) => {
+    chars += piece.length;
+    if (chars <= maxChars) {
+      pieces.push(piece);
+    } else {
+      pieces = [];
+    }
+  };
+
+  const finishLine = (): PiFrame | undefined => {
+    const text = pieces.join("");
+    const frame: PiFrame | undefined =
+      chars > maxChars
+        ? { _tag: "Oversized", chars }
+        : chars === 0
+          ? undefined
+          : { _tag: "Line", text: text.endsWith("\r") ? text.slice(0, -1) : text };
+    pieces = [];
+    chars = 0;
+    return frame;
+  };
+
+  return (chunk: string): ReadonlyArray<PiFrame> => {
+    const frames: PiFrame[] = [];
     let start = 0;
     while (start < chunk.length) {
       const newline = chunk.indexOf("\n", start);
-      const end = newline < 0 ? chunk.length : newline;
-      if (!dropping) {
-        if (buffer.length + end - start > MAX_PI_RECORD_CHARS) {
-          buffer = "";
-          dropping = true;
-        } else {
-          buffer += chunk.slice(start, end);
-        }
-      }
+      push(chunk.slice(start, newline < 0 ? chunk.length : newline));
       if (newline < 0) break;
-      if (!dropping && buffer.length > 0) {
-        lines.push(buffer.endsWith("\r") ? buffer.slice(0, -1) : buffer);
-      }
-      buffer = "";
-      dropping = false;
+      const frame = finishLine();
+      if (frame !== undefined) frames.push(frame);
       start = newline + 1;
     }
-    return lines;
+    return frames;
   };
 }
 
@@ -163,6 +311,9 @@ function parsePiRecord(line: string): PiRpcRecord | undefined {
 }
 
 /**
+ * Kill the pi process group: SIGTERM, a grace that ends as soon as the group
+ * exits, then SIGKILL.
+ *
  * `hasExited` is consulted before each signal. Once the original child is
  * gone its pid/pgid can be recycled by the OS, so escalating blindly could
  * deliver SIGKILL to an unrelated process.
@@ -170,10 +321,14 @@ function parsePiRecord(line: string): PiRpcRecord | undefined {
 const terminatePiProcess = Effect.fn("PiRpc.terminatePiProcess")(function* (
   kill: (signal: NodeJS.Signals) => boolean,
   hasExited: () => boolean,
+  grace: Duration.Input,
 ) {
   if (hasExited()) return;
   if (!kill("SIGTERM")) return;
-  yield* Effect.sleep(TERMINATION_GRACE);
+  yield* Effect.sync(hasExited).pipe(
+    Effect.repeat({ until: (exited) => exited, schedule: TERMINATION_POLL }),
+    Effect.timeoutOption(grace),
+  );
   if (hasExited()) return;
   kill("SIGKILL");
 });
@@ -239,13 +394,20 @@ export const makePiRpcConnection = Effect.fnUntraced(function* (options: PiRpcSp
   }).pipe(Effect.scoped, Effect.ignore);
 
   const terminateProcess =
-    platform === "win32" ? terminateWindowsTree : terminatePiProcess(killProcessGroup, hasExited);
+    platform === "win32"
+      ? terminateWindowsTree
+      : terminatePiProcess(
+          killProcessGroup,
+          hasExited,
+          options.terminationGrace ?? DEFAULT_TERMINATION_GRACE,
+        );
 
   // Registered before any further setup: an interrupt or failure between the
   // spawn and the rest of this constructor would otherwise leak a detached
   // pi process with no finalizer to reap it.
   yield* Scope.addFinalizer(scope, terminateProcess.pipe(Effect.ignore, Effect.uninterruptible));
 
+  const maxRecordChars = options.maxRecordChars ?? DEFAULT_MAX_PI_RECORD_CHARS;
   const pendingRequests = new Map<string, PendingPiRequest>();
   const events = yield* Queue.unbounded<PiRpcRecord, PiRpcError>();
   const outgoing = yield* Queue.unbounded<Uint8Array, PiRpcError>();
@@ -304,30 +466,54 @@ export const makePiRpcConnection = Effect.fnUntraced(function* (options: PiRpcSp
     Effect.forkIn(scope),
   );
 
+  // An oversized record is never parsed, so we cannot tell which request it
+  // answers, or whether it is a response at all. Fail every pending request: a
+  // wrong guess would leave the right one hanging until its timeout. The
+  // callers' requests are rare and short, so a spurious failure is cheap.
+  const rejectOversized = Effect.fn("PiRpc.rejectOversized")(function* (
+    frame: Extract<PiFrame, { _tag: "Oversized" }>,
+  ) {
+    yield* Effect.logWarning("Dropping oversized pi stdout record.", {
+      chars: frame.chars,
+      maxChars: maxRecordChars,
+      failedRequests: pendingRequests.size,
+    });
+    for (const [id, pending] of pendingRequests) {
+      pendingRequests.delete(id);
+      yield* Deferred.fail(
+        pending.deferred,
+        new PiRpcRecordTooLargeError({
+          operation: pending.operation,
+          chars: frame.chars,
+          maxChars: maxRecordChars,
+        }),
+      );
+    }
+  });
+
+  const routeFrame =
+    /* Protocol records include streaming deltas; avoid a span per frame. */
+    Effect.fnUntraced(function* (frame: PiFrame) {
+      if (frame._tag === "Oversized") return yield* rejectOversized(frame);
+      const record = parsePiRecord(frame.text);
+      if (record === undefined) {
+        yield* Effect.logDebug("Dropping non-JSON pi stdout line.", {
+          lineLength: frame.text.length,
+        });
+        return;
+      }
+      yield* routeRecord(record);
+    });
+
   yield* Effect.gen(function* () {
-    const frame = makeJsonlFramer();
+    const frameLines = makeJsonlFramer(maxRecordChars);
     yield* child.stdout.pipe(
       Stream.decodeText(),
       Stream.runForEach((chunk) =>
-        Effect.gen(function* () {
-          const lines = frame(chunk);
-          for (const line of lines) {
-            const record = parsePiRecord(line);
-            if (record === undefined) {
-              yield* Effect.logDebug("Dropping non-JSON pi stdout line.", {
-                lineLength: line.length,
-              });
-              continue;
-            }
-            yield* routeRecord(record);
-          }
-        }),
+        Effect.forEach(frameLines(chunk), routeFrame, { discard: true }),
       ),
     );
-    for (const line of frame("\n")) {
-      const trailing = parsePiRecord(line);
-      if (trailing !== undefined) yield* routeRecord(trailing);
-    }
+    yield* Effect.forEach(frameLines("\n"), routeFrame, { discard: true });
   }).pipe(
     Effect.matchCauseEffect({
       onFailure: (cause) => failTransport(new PiRpcError({ operation: "read", cause })),
@@ -363,16 +549,20 @@ export const makePiRpcConnection = Effect.fnUntraced(function* (options: PiRpcSp
     Effect.forkIn(scope),
   );
 
+  let stderrTail = "";
+  const stderrClosed = yield* Deferred.make<void>();
   yield* child.stderr.pipe(
     Stream.decodeText(),
-    Stream.runForEach((chunk) =>
-      chunk.trim().length === 0
+    Stream.runForEach((chunk) => {
+      stderrTail = (stderrTail + chunk).slice(-STDERR_TAIL_CHARS);
+      return chunk.trim().length === 0
         ? Effect.void
         : // Length only: pi's stderr is unbounded remote output and can carry
           // credentials or prompt text, so it never enters a log annotation.
-          Effect.logDebug("pi stderr", { stderrLength: chunk.length }),
-    ),
+          Effect.logDebug("pi stderr", { stderrLength: chunk.length });
+    }),
     Effect.ignore,
+    Effect.ensuring(Deferred.succeed(stderrClosed, undefined)),
     Effect.forkIn(scope),
   );
 
@@ -402,25 +592,26 @@ export const makePiRpcConnection = Effect.fnUntraced(function* (options: PiRpcSp
 
   const request = Effect.fn("PiRpc.request")(function* (
     record: PiRpcRecord,
-    timeoutMs = DEFAULT_REQUEST_TIMEOUT_MS,
-  ): Effect.fn.Return<unknown, PiRpcError | PiRpcTimeoutError> {
+    timeoutMs: number | null = DEFAULT_REQUEST_TIMEOUT_MS,
+  ): Effect.fn.Return<unknown, PiRpcError | PiRpcTimeoutError | PiRpcRecordTooLargeError> {
     const id = `t3-${nextRequestId++}`;
-    const deferred = yield* Deferred.make<unknown, PiRpcError>();
-    pendingRequests.set(id, { deferred });
+    const operation = String(record["type"] ?? "request");
+    const deferred = yield* Deferred.make<unknown, PiRpcError | PiRpcRecordTooLargeError>();
+    pendingRequests.set(id, { operation, deferred });
     yield* send({ ...record, id }).pipe(
       Effect.tapError(() => Effect.sync(() => pendingRequests.delete(id))),
     );
-    return yield* Effect.raceFirst(Deferred.await(deferred), Deferred.await(transportDown)).pipe(
-      Effect.timeoutOrElse({
-        duration: Duration.millis(timeoutMs),
-        orElse: () =>
-          Effect.fail(
-            new PiRpcTimeoutError({
-              operation: String(record["type"] ?? "request"),
-              timeoutMs,
+    const response = Effect.raceFirst(Deferred.await(deferred), Deferred.await(transportDown));
+    return yield* (
+      timeoutMs === null
+        ? response
+        : response.pipe(
+            Effect.timeoutOrElse({
+              duration: Duration.millis(timeoutMs),
+              orElse: () => Effect.fail(new PiRpcTimeoutError({ operation, timeoutMs })),
             }),
-          ),
-      }),
+          )
+    ).pipe(
       Effect.onInterrupt(() => Effect.sync(() => pendingRequests.delete(id))),
       Effect.onError(() => Effect.sync(() => pendingRequests.delete(id))),
     );
@@ -431,6 +622,12 @@ export const makePiRpcConnection = Effect.fnUntraced(function* (options: PiRpcSp
     request,
     events,
     exited: Deferred.await(exitDeferred),
+    stderrAfterExit: Deferred.await(stderrClosed).pipe(
+      Effect.timeoutOption(STDERR_CLOSE_WAIT),
+      // Same reason as the stdout-close wait above: adapter tests run under TestClock.
+      Effect.provideService(Clock.Clock, Clock.Clock.defaultValue()),
+      Effect.map(() => stderrTail),
+    ),
     terminate: failTransport(
       new PiRpcError({ operation: "terminate", detail: "pi process was stopped" }),
     ).pipe(Effect.andThen(terminateProcess), Effect.ignore, Effect.uninterruptible),

@@ -1334,7 +1334,7 @@ export const providerInstanceConfigEnabledFlag = (config: unknown): boolean | un
  * Matches the `enabled` decoding default of each driver's settings schema.
  */
 const DEFAULT_DISABLED_PROVIDER_DRIVERS: ReadonlySet<ProviderDriverKind> = new Set(
-  ["cursor", "grok", "muse", "pi", "opencode", "antigravity"].map((driver) =>
+  ["cursor", "grok", "muse", "pi", "primeAgent", "opencode", "antigravity"].map((driver) =>
     ProviderDriverKind.make(driver),
   ),
 );
@@ -1424,6 +1424,28 @@ export const resolveIdleCompaction = (
     Option.getOrElse(() => "default" as const),
   );
   return override === "default" ? globalIdleCompaction(settings) : override;
+};
+
+/**
+ * `providers` as new threads in `projectId` see them: the project's own switch
+ * for an instance replaces the machine-wide `enabled` the snapshot reports.
+ */
+export const applyProjectProviderEnablement = <
+  Provider extends { readonly instanceId: ProviderInstanceId; readonly enabled: boolean },
+>(
+  providers: ReadonlyArray<Provider>,
+  settings: Pick<ServerSettings, "projectSettingsOverrides">,
+  projectId: ProjectId | null,
+): ReadonlyArray<Provider> => {
+  const overrides =
+    projectId === null
+      ? undefined
+      : settings.projectSettingsOverrides[projectId]?.providerInstances;
+  if (overrides === undefined) return providers;
+  return providers.map((provider) => {
+    const enabled = overrides[provider.instanceId]?.enabled;
+    return enabled === undefined ? provider : { ...provider, enabled };
+  });
 };
 
 export const ServerSettingsOperation = Schema.Literals([
