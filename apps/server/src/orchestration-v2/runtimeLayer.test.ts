@@ -4056,8 +4056,10 @@ it.layer(layerTest)("OrchestrationV2LayerLive lifecycle", (it) => {
             threadId,
             reason: "user",
           })
-          .pipe(Effect.andThen(orchestrator.getThreadProjection(threadId)))
-          .pipe(Effect.map(({ thread }) => thread));
+          .pipe(
+            Effect.andThen(orchestrator.getThreadProjection(threadId)),
+            Effect.map(({ thread }) => thread),
+          );
       const iso = (value: DateTime.Utc | null | undefined) =>
         value == null ? null : DateTime.formatIso(value);
 

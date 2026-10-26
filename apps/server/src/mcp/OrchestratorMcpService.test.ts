@@ -2701,9 +2701,7 @@ describe("OrchestratorMcpService provider resolution", () => {
             }),
             Layer.mock(ProjectService.ProjectService)({
               getById: (id) =>
-                Effect.succeed(
-                  Option.some({ id, defaultModelSelection: forkModelSelection } as never),
-                ),
+                Effect.succeedSome({ id, defaultModelSelection: forkModelSelection } as never),
             }),
             Layer.mock(SecretRequests.SecretRequests)({}),
             Layer.mock(ScheduledTaskService.ScheduledTaskService)({
@@ -2834,9 +2832,10 @@ describe("OrchestratorMcpService provider resolution", () => {
                   }),
                   Layer.mock(ProjectService.ProjectService)({
                     getById: (id) =>
-                      Effect.succeed(
-                        Option.some({ id, defaultModelSelection: forkModelSelection } as never),
-                      ),
+                      Effect.succeedSome({
+                        id,
+                        defaultModelSelection: forkModelSelection,
+                      } as never),
                   }),
                   Layer.mock(SecretRequests.SecretRequests)({}),
                   Layer.mock(ScheduledTaskService.ScheduledTaskService)({
