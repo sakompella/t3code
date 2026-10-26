@@ -64,6 +64,7 @@ import {
   presentPendingBackgroundWork,
   presentProviderGoal,
 } from "@t3tools/client-runtime/state/thread-execution";
+import { resolveBackgroundWorkPillSegment } from "@t3tools/client-runtime/state/thread-background-work";
 import { resolveSubagentPillSegment } from "@t3tools/client-runtime/state/thread-subagents";
 import {
   formatModelSelectionEffort,
@@ -185,7 +186,8 @@ import {
 } from "./ThreadComposer";
 import { ComposerPopoverHost } from "./ComposerPopoverHost";
 import { ThreadFeed, type ThreadFeedHistoryControls } from "./ThreadFeed";
-import { useThreadTurnSubagents } from "./ThreadAgentsSheet";
+import { useThreadRunningTurnBackgroundWork, useThreadTurnSubagents } from "./ThreadAgentsSheet";
+import { ComposerHeartbeat } from "./ComposerHeartbeat";
 import { ComposerQueuedEditBanner } from "./ComposerQueuedEdit";
 import { useThreadQueuedCount } from "./ThreadQueueControl";
 import { ThreadGuestShareBar } from "./ThreadGuestShareBar";
@@ -589,6 +591,13 @@ export const ThreadDetailScreen = function ThreadDetailScreen(props: ThreadDetai
   const queuedCount = useThreadQueuedCount(props.selectedThreadDetailRef);
   const turnSubagents = useThreadTurnSubagents(props.selectedThreadDetailRef);
   const agentsSegment = resolveSubagentPillSegment(turnSubagents);
+  // The server's roster lists background work only after the turn settles; this
+  // is the projection's view of what the running turn left behind.
+  const runningTurnBackgroundWork = useThreadRunningTurnBackgroundWork({
+    environmentId: props.environmentId,
+    threadId: props.selectedThread.id,
+  });
+  const backgroundSegment = resolveBackgroundWorkPillSegment(runningTurnBackgroundWork);
   const defaultComposerEditorRef = useRef<ComposerEditorHandle>(null);
   const composerEditorRef = props.draftMode?.editorRef ?? defaultComposerEditorRef;
   const isProviderSubagent = isProviderNativeSubagentThread(props.selectedThread.source);
@@ -703,7 +712,6 @@ export const ThreadDetailScreen = function ThreadDetailScreen(props: ThreadDetai
     wokeAt,
     settled,
     lastVisitedAt: props.selectedThread.lastVisitedAt,
-    latestRunCompletedAt: props.selectedThread.latestRun?.completedAt ?? null,
   });
   const runStatusAction = async (action: "stop" | "wake" | "unsettle" | "dismiss") => {
     if (statusPending || !props.canOperateThread) return;
@@ -1585,6 +1593,7 @@ export const ThreadDetailScreen = function ThreadDetailScreen(props: ThreadDetai
                   showScrollToEnd={showScrollToEndButton}
                   onScrollToEnd={handleScrollToEnd}
                   agents={agentsSegment}
+                  background={floatingStatus?.kind === "working" ? backgroundSegment : null}
                   onOpenAgents={() => {
                     Keyboard.dismiss();
                     navigation.navigate("ThreadAgents", {
@@ -1648,6 +1657,12 @@ export const ThreadDetailScreen = function ThreadDetailScreen(props: ThreadDetai
                         onDismiss={() => clearThreadComposerError(selectedThreadKey)}
                       />
                     </Animated.View>
+                  ) : null}
+                  {activeUserInputRequestId === null ? (
+                    <ComposerHeartbeat
+                      environmentId={props.environmentId}
+                      threadId={props.selectedThread.id}
+                    />
                   ) : null}
                   {usageLimitsReport && activeUserInputRequestId === null ? (
                     <Animated.View

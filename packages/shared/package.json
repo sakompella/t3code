@@ -235,6 +235,10 @@
       "types": "./src/paletteSearch.ts",
       "import": "./src/paletteSearch.ts"
     },
+    "./threadSnooze": {
+      "types": "./src/threadSnooze.ts",
+      "import": "./src/threadSnooze.ts"
+    },
     "./threadPullRequests": {
       "types": "./src/threadPullRequests.ts",
       "import": "./src/threadPullRequests.ts"
