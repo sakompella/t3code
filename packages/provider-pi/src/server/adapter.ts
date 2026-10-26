@@ -856,14 +856,14 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
 
       const lostDaemonSessionDetail = `${name}'s daemon lost this session. T3 is restarting it; send your message again`;
       /**
-       * These RPC requests address the connection's bound session. Prime's
-       * error names its daemon id, which differs from get_state.sessionId.
-       * Child tool failures arrive as tool events, not failed RPC responses.
+       * "Unknown active session" names the session the command addressed. The RPC addresses the
+       * bound one for a command that names none, so only such a command can report it lost; one
+       * that names a child (observe, unobserve) learns about the child, and the parent is fine.
        */
-      const isLostDaemonSession = (errorText: unknown) => {
-        const id = unknownActiveSessionId(errorText);
-        return flavor.restartsOnLostDaemonSession && id !== undefined;
-      };
+      const isLostDaemonSession = (errorText: unknown, failed?: PiRpcRecord) =>
+        flavor.restartsOnLostDaemonSession &&
+        unknownActiveSessionId(errorText) !== undefined &&
+        failed?.["activeSessionId"] === undefined;
       /**
        * The daemon lost the session but the process stays alive, so every
        * request through it fails. End it the way Stop does: the session stops
@@ -883,7 +883,7 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
         connection.request(record, timeoutMs).pipe(
           Effect.catchTags({
             PiRpcError: (error) =>
-              isLostDaemonSession(error.cause)
+              isLostDaemonSession(error.cause, record)
                 ? retireLostDaemonSession.pipe(
                     Effect.andThen(
                       Effect.fail(

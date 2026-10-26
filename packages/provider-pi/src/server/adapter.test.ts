@@ -193,6 +193,8 @@ interface FakePi {
    * daemon does once it no longer hosts the process's session.
    */
   readonly loseDaemonSession: (activeSessionId: string) => void;
+  /** From now on, refuse every `observe` the way the daemon does for a session it does not host. */
+  readonly refuseObserves: () => void;
   readonly vetoNextSwitch: () => void;
   /** Refuse the next `count` `switch_session` requests with `message`, as Prime Agent does while another worker holds the lease. */
   readonly rejectNextSwitches: (count: number, message: string) => void;
@@ -265,6 +267,7 @@ const makeFakePi: Effect.Effect<FakePi> = Effect.gen(function* () {
   let failState = false;
   let vetoSwitch = false;
   let lostSessionId: string | undefined;
+  let refusesObserves = false;
   let rejectedSwitches = { remaining: 0, message: "" };
   let vetoNewSession = false;
   let deferredLifecycle: string | undefined;
@@ -310,6 +313,13 @@ const makeFakePi: Effect.Effect<FakePi> = Effect.gen(function* () {
       command: String(record["type"]),
       success: true,
     };
+    if (refusesObserves && record["type"] === "observe") {
+      return {
+        ...base,
+        success: false,
+        error: `Unknown active session: ${record["activeSessionId"]}`,
+      };
+    }
     if (lostSessionId !== undefined && record["type"] !== "get_state") {
       return { ...base, success: false, error: `Unknown active session: ${lostSessionId}` };
     }
@@ -531,6 +541,9 @@ const makeFakePi: Effect.Effect<FakePi> = Effect.gen(function* () {
       vetoNewSession = true;
     },
     allRequests: () => allRequests,
+    refuseObserves: () => {
+      refusesObserves = true;
+    },
     loseDaemonSession: (activeSessionId) => {
       lostSessionId = activeSessionId;
     },
@@ -10710,6 +10723,36 @@ describe("PiAdapterV2 with the Prime Agent flavor", () => {
         });
         const { args } = fresh.lastSpawn();
         assert.equal(args[args.indexOf("--resume") + 1], sessionFile);
+      }).pipe(Effect.scoped, Effect.provide(layerTest)),
+    );
+
+    it.effect("keeps the process when the daemon does not host a child the thread observes", () =>
+      Effect.gen(function* () {
+        const observeRefusals = yield* Deferred.make<void>();
+        const reportsRefusal = Logger.make(({ message }) => {
+          const [text] = message as ReadonlyArray<unknown>;
+          if (String(text).endsWith("could not observe a child session")) {
+            Deferred.doneUnsafe(observeRefusals, Effect.void);
+          }
+        });
+        const fake = yield* makeFakePi;
+        fake.queueState({ sessionId: LOST_SESSION_ID });
+        fake.refuseObserves();
+        const session = yield* openPrimeThread(fake).pipe(
+          Effect.provide(Logger.layer([reportsRefusal])),
+        );
+        yield* startTurn(session.runtime, session.providerThread);
+        yield* fake.takeRequest("prompt");
+        yield* fake.emit({ type: "agent_start" });
+        yield* fake.emit(rlmChild("running", { activeSessionId: "active-1" }));
+        const refused = yield* fake.takeRequest("observe");
+        assert.equal(refused["activeSessionId"], "active-1");
+        yield* Deferred.await(observeRefusals);
+
+        yield* fake.emit({ type: "agent_end", messages: [] });
+        yield* fake.emit({ type: "agent_settled" });
+        const terminal = yield* session.takeEvent((event) => event.type === "turn.terminal");
+        assert.isTrue(terminal.type === "turn.terminal" && terminal.status === "completed");
       }).pipe(Effect.scoped, Effect.provide(layerTest)),
     );
 
