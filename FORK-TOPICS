@@ -8,3 +8,5 @@ failed-turn-sweep upstream   # a failed turn does not start a worktree cleanup s
 provider-switch-guidance upstream   # agent instructions: switch provider only for a missing capability
 syntax-highlighting-web meta   # syntax highlighting of shell and Python tool rows on web, and the shared entryCode.ts
 fork    syntax-highlighting-web   # everything else, until it is carved into topics (see FORK.md, Topic branches)
+restart-note-prime-children fork   # the server restart note leaves out Prime Agent subagents, which Prime resumes itself
+usage-cpa-split fork   # Limits groups accounts by CLIProxyAPI hub and direct logins
