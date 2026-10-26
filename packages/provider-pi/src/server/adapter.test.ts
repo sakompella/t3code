@@ -10712,6 +10712,178 @@ describe("PiAdapterV2 with the Prime Agent flavor", () => {
     );
   });
 
+  describe("when a Prime Agent session resumed at launch runs work before its thread registers", () => {
+    const openResumed = (
+      fake: FakePi,
+      flavor: PiFlavor = PRIME_AGENT_FLAVOR,
+      sessionFile: string | null = FAKE_SESSION_FILE,
+    ) =>
+      Effect.gen(function* () {
+        const offers =
+          yield* Queue.unbounded<ProviderContinuationRequests.ProviderContinuationRequest>();
+        const session = yield* openRuntime(
+          fake,
+          "default",
+          THREAD_ID,
+          SESSION_ID,
+          undefined,
+          flavor,
+          { offer: (request) => Queue.offer(offers, request).pipe(Effect.asVoid) },
+          {},
+          sessionFile ?? undefined,
+        );
+        return { ...session, offers };
+      });
+
+    /** The session's next status change to `running` or `error`, which says how its first native work was taken. */
+    const takeNativeWorkOutcome = (takeEvent: TakeEvent) =>
+      takeEvent(
+        (event) =>
+          event.type === "provider_session.updated" &&
+          (event.providerSession.status === "running" || event.providerSession.status === "error"),
+      ).pipe(
+        Effect.map((event) =>
+          event.type === "provider_session.updated" ? event.providerSession : undefined,
+        ),
+      );
+
+    it.effect("holds the work, then runs it as a wake and takes the user's next turn", () =>
+      Effect.gen(function* () {
+        const fake = yield* makeFakePi;
+        const { runtime, takeEvent, offers } = yield* openResumed(fake);
+
+        yield* emitChildMessageWake(fake);
+        const started = yield* takeNativeWorkOutcome(takeEvent);
+        assert.equal(started?.status, "running", started?.lastError ?? undefined);
+
+        const providerThread = yield* runtime.ensureThread({
+          threadId: THREAD_ID,
+          modelSelection: modelSelection("default"),
+          runtimePolicy,
+        });
+        const offer = yield* Queue.take(offers);
+        assert.equal(offer.providerThreadId, providerThread.id);
+        assert.equal(offer.notification?.summary, "Message from worker");
+        const dispatched = yield* offer.dispatchIfCurrent!(Effect.succeed("dispatched"));
+        assert.isTrue(Option.isSome(dispatched));
+        yield* startTurn(
+          runtime,
+          providerThread,
+          "default",
+          [],
+          "Background activity updated",
+          undefined,
+          1,
+          THREAD_ID,
+          "provider",
+        );
+        assert.deepEqual(yield* takeRepliesAndOutcome(takeEvent), {
+          texts: ["The child said child-ok"],
+          status: "completed",
+        });
+
+        yield* startTurn(runtime, providerThread, "default", [], "What next?", undefined, 2);
+        const prompt = yield* fake.takeRequest("prompt");
+        assert.equal(prompt["message"], "What next?");
+        yield* fake.emit({ type: "response", command: "prompt", success: true });
+        yield* fake.emit({ type: "agent_start" });
+        yield* fake.emit({ type: "agent_end", messages: [] });
+        yield* fake.emit({ type: "agent_settled" });
+        const terminal = yield* takeEvent((event) => event.type === "turn.terminal");
+        assert.isTrue(terminal.type === "turn.terminal" && terminal.status === "completed");
+      }).pipe(Effect.scoped, Effect.provide(layerTest)),
+    );
+
+    it.effect("lets the user's turn join the held work as it would any pending wake", () =>
+      Effect.gen(function* () {
+        const fake = yield* makeFakePi;
+        const { runtime, takeEvent, offers } = yield* openResumed(fake);
+        yield* emitChildMessageWake(fake);
+        const started = yield* takeNativeWorkOutcome(takeEvent);
+        assert.equal(started?.status, "running", started?.lastError ?? undefined);
+
+        const providerThread = yield* runtime.ensureThread({
+          threadId: THREAD_ID,
+          modelSelection: modelSelection("default"),
+          runtimePolicy,
+        });
+        const offer = yield* Queue.take(offers);
+        yield* startTurn(runtime, providerThread, "default", [], "What happened?");
+        const prompt = yield* fake.takeRequest("prompt");
+        assert.equal(prompt["streamingBehavior"], "steer");
+        yield* takeEvent(
+          (event) =>
+            event.type === "turn_item.updated" &&
+            event.turnItem.type === "assistant_message" &&
+            event.turnItem.status === "completed",
+        );
+        const stale = yield* offer.dispatchIfCurrent!(Effect.succeed("dispatched"));
+        assert.isTrue(Option.isNone(stale), "the adopted wake's continuation must not dispatch");
+      }).pipe(Effect.scoped, Effect.provide(layerTest)),
+    );
+
+    it.effect.each([
+      {
+        situation: "a Prime Agent session started without a session file",
+        flavor: PRIME_AGENT_FLAVOR,
+        file: null,
+      },
+      {
+        situation: "a flavor that does not resume at launch",
+        flavor: PI_FLAVOR,
+        file: FAKE_SESSION_FILE,
+      },
+    ])("still stops work in $situation", ({ flavor, file }) =>
+      Effect.gen(function* () {
+        const fake = yield* makeFakePi;
+        const { takeEvent } = yield* openResumed(fake, flavor, file);
+
+        yield* fake.emit({ type: "agent_start" });
+
+        const outcome = yield* takeNativeWorkOutcome(takeEvent);
+        assert.equal(outcome?.status, "error");
+        assert.include(outcome?.lastError, "invisible tool execution");
+      }).pipe(Effect.scoped, Effect.provide(layerTest)),
+    );
+
+    it.effect("stops work that no registration claims within the grace period", () =>
+      Effect.gen(function* () {
+        const fake = yield* makeFakePi;
+        const { takeEvent } = yield* openResumed(fake);
+        yield* fake.emit({ type: "agent_start" });
+        const started = yield* takeNativeWorkOutcome(takeEvent);
+        assert.equal(started?.status, "running");
+
+        yield* TestClock.adjust(Duration.seconds(31));
+
+        const outcome = yield* takeNativeWorkOutcome(takeEvent);
+        assert.equal(outcome?.status, "error");
+        assert.include(outcome?.lastError, "invisible tool execution");
+      }).pipe(Effect.scoped, Effect.provide(layerTest)),
+    );
+
+    it.effect("stops work that outgrows what T3 holds", () =>
+      Effect.gen(function* () {
+        const fake = yield* makeFakePi;
+        const { takeEvent } = yield* openResumed(fake);
+        yield* fake.emit({ type: "agent_start" });
+        const started = yield* takeNativeWorkOutcome(takeEvent);
+        assert.equal(started?.status, "running");
+
+        for (let count = 0; count < 2_100; count += 1) {
+          yield* fake.emit({
+            type: "message_update",
+            assistantMessageEvent: { type: "text_delta" },
+          });
+        }
+
+        const outcome = yield* takeNativeWorkOutcome(takeEvent);
+        assert.equal(outcome?.status, "error");
+        assert.include(outcome?.lastError, "invisible tool execution");
+      }).pipe(Effect.scoped, Effect.provide(layerTest)),
+    );
+  });
+
   const T3_COMMANDS = { commands: [{ name: "t3-navigate-tree", source: "extension" }] };
 
   /** Answers the next in-place rollback command the way T3's extension reports it. */
