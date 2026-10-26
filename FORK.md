@@ -10,7 +10,7 @@
 
 ## Topic branches
 
-The fork is kept as topic branches on upstream `main`. `FORK-TOPICS` lists them in merge order as `<topic> <parent>`, where the parent is `upstream` or an earlier topic, and topic X lives on branch `topic/X`. Today there are eight, in merge order:
+The fork is kept as topic branches on upstream `main`. `FORK-TOPICS` lists them in merge order as `<topic> <parent>`, where the parent is `upstream` or an earlier topic, and topic X lives on branch `topic/X`. Today there are ten, in merge order:
 
 - `meta` on upstream: this file, `FORK-TOPICS` and `scripts/fork-topics.py`.
 - `tailwind-src-scan` on upstream: Tailwind scans only `apps/web/src`.
@@ -20,6 +20,8 @@ The fork is kept as topic branches on upstream `main`. `FORK-TOPICS` lists them 
 - `provider-switch-guidance` on upstream: agent instructions delegate to another provider only for a missing capability.
 - `syntax-highlighting-web` on `meta`: syntax highlighting of shell and Python tool rows on web, plus `entryCode.ts`, which mobile and the Prime tool display also use.
 - `fork` on `syntax-highlighting-web`: everything else, mostly the Prime Agent provider.
+- `restart-note-prime-children` on `fork`: the server restart note leaves out Prime Agent subagents, because the Prime Agent daemon resumes them itself.
+- `usage-cpa-split` on `fork`: Limits groups each provider's accounts into CLIProxyAPI hub accounts and direct logins.
 
 The feature list below covers every topic and stays in this file. More topics get carved out of `fork` once each builds on its own from whole hunks. When two features share a hunk, an ordinary refactor commit on `fork` first moves their lines apart. A topic whose code `fork` imports goes on `meta`, and `fork` is restacked on it. What blocks the next carves (checked 2026-10-21):
 
