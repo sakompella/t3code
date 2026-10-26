@@ -12,6 +12,7 @@ type Work = OrchestrationV2RestartCancelledBackgroundWork;
 type Attempt = Pick<OrchestrationV2RunAttempt, "id" | "runId">;
 
 const MAX_LABEL_LENGTH = 160;
+const PRIME_AGENT_DRIVER = "primeAgent";
 
 function compactLabel(value: unknown, maxLength = MAX_LABEL_LENGTH): string | undefined {
   if (typeof value !== "string") return undefined;
@@ -27,13 +28,17 @@ function labelWithId(name: unknown, fallback: string, suffix: string): string {
   return `${compactLabel(name, budget) ?? compactLabel(fallback, budget)}${suffix}`;
 }
 
-/** resumeId overrides the item id for native resume, such as Codex's child provider-thread id. */
+/**
+ * resumeId overrides the item id for native resume, such as Codex's child provider-thread id.
+ * Prime Agent subagents are omitted: its daemon resumes them and messages the parent itself.
+ */
 export function cancelledTurnItemWork(
   item: OrchestrationV2TurnItem,
   resumeId?: string,
 ): Work | undefined {
   switch (item.type) {
     case "subagent": {
+      if (item.driver === PRIME_AGENT_DRIVER) return undefined;
       const nativeId =
         item.origin === "provider_native" ? (resumeId ?? item.nativeItemRef?.nativeId) : undefined;
       return {
