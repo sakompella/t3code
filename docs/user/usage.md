@@ -105,6 +105,12 @@ Claude resets are not available when the server runs on macOS, where Claude keep
 Keychain. On narrow screens, numbered rows below
 the bar show each account's quota, countdown, and credits. Tap a row to open its details.
 
+When a hub's accounts sit next to accounts signed in directly, each window card splits in two: the
+hub's accounts first (labeled **CLIProxyAPI**, or the hub's name when you have several), then
+**Direct logins**. Each group has its own total and bar, so you can see which supply is running
+low. An account signed in directly counts as a direct login even when a hub lists it too. The
+`/usage-limits` result lists hub accounts first as well.
+
 The same account signed in on more than one environment, or reported by a hub as well, counts once.
 Filter with the environment dropdown to see what a single machine has.
 
