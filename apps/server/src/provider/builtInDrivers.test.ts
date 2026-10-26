@@ -6,8 +6,7 @@ import { BUILT_IN_DRIVERS } from "./builtInDrivers.ts";
 describe("built-in drivers", () => {
   it("resolve the same default enabled state on the client as the server's config decoding", () => {
     for (const { driverKind, configSchema } of BUILT_IN_DRIVERS) {
-      const serverEnabled = (Schema.decodeUnknownSync(configSchema)({}) as { enabled: boolean })
-        .enabled;
+      const serverEnabled = (Schema.decodeSync(configSchema)({}) as { enabled: boolean }).enabled;
       assert.strictEqual(
         resolveProviderInstanceEnabled({ driver: driverKind, config: {} }),
         serverEnabled,

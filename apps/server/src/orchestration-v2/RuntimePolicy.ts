@@ -64,7 +64,9 @@ export const layer: Layer.Layer<RuntimePolicyV2> = Layer.succeed(RuntimePolicyV2
       cwd: input.thread.worktreePath,
     });
   }),
-  runtimeMode: (thread) => Effect.succeed(thread.runtimeMode),
+  runtimeMode: Effect.fn("RuntimePolicyV2.runtimeMode")(function (thread) {
+    return Effect.succeed(thread.runtimeMode);
+  }),
 });
 
 export const layerFromProjectStore: Layer.Layer<
@@ -85,10 +87,10 @@ export const layerFromProjectStore: Layer.Layer<
         : (yield* instance.snapshot.getSnapshot).supportedRuntimeModes;
     });
     return RuntimePolicyV2.of({
-      runtimeMode: (thread) =>
-        supportedRuntimeModes(thread.modelSelection).pipe(
-          Effect.map((supported) => providerRuntimeMode(thread.runtimeMode, supported)),
-        ),
+      runtimeMode: Effect.fn("RuntimePolicyV2.runtimeMode")(function* (thread) {
+        const offered = yield* supportedRuntimeModes(thread.modelSelection);
+        return providerRuntimeMode(thread.runtimeMode, offered);
+      }),
       resolve: Effect.fn("RuntimePolicyV2.resolve")(function* (input) {
         const offered = yield* supportedRuntimeModes(input.modelSelection);
         const cwd =
