@@ -6,7 +6,7 @@ import type { ComposerBannerStackItem } from "./ComposerBannerStack";
 
 /**
  * A thread's heartbeat as a quiet composer notice: schedule and next run as
- * text, nothing that moves. It sits behind any activity or warning.
+ * text, nothing that moves. ChatView lists it after the other notices.
  */
 export function heartbeatBannerItem(
   threadId: ThreadId,
@@ -15,7 +15,6 @@ export function heartbeatBannerItem(
   return {
     id: `heartbeat:${threadId}`,
     variant: "info",
-    priority: "notice",
     icon: <HeartPulseIcon />,
     title: presentation.title,
     ...(presentation.detail === null ? {} : { description: presentation.detail }),
