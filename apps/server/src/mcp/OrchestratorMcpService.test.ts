@@ -2614,6 +2614,298 @@ describe("OrchestratorMcpService provider resolution", () => {
         assert.equal(yield* resolveRuntimeMode("auto", undefined, muse), "approval-required");
       }),
     );
+
+    it.effect("refuses an inherited mode when every mode the provider offers is broader", () =>
+      Effect.gen(function* () {
+        // The Prime Agent 0.10 fork cannot ask before a tool runs.
+        const fullAccessOnly = {
+          modelSelection: { instanceId: ProviderInstanceId.make("primeAgent"), model: "default" },
+          supportedRuntimeModes: ["full-access"] as const,
+        };
+        const error = yield* resolveRuntimeMode(
+          "approval-required",
+          "inherit",
+          fullAccessOnly,
+        ).pipe(Effect.flip);
+        assert.equal(error.code, "runtime_mode_escalation_denied");
+        assert.include(error.message, "full-access");
+      }),
+    );
+  });
+
+  describe("authority over Prime Agent 0.10 fork work, which runs every mode as Full access", () => {
+    const primeAgent = ProviderInstanceId.make("primeAgent");
+    const forkModelSelection = { instanceId: primeAgent, model: "default" };
+    const forkThreadId = ThreadId.make("thread:fork-stored-supervised");
+    // Stored Supervised, as a default or a model switch can leave it; the fork runs it in full access.
+    const forkThread: OrchestrationV2ThreadShell = {
+      ...liveThreadShell(forkThreadId, { runtimeMode: "approval-required", activeRunId: null }),
+      providerInstanceId: primeAgent,
+      modelSelection: forkModelSelection,
+    };
+    const forkProvider: ServerProvider = {
+      instanceId: primeAgent,
+      driver: ProviderDriverKind.make("primeAgent"),
+      enabled: true,
+      installed: true,
+      version: "0.10.0",
+      status: "ready",
+      auth: { status: "authenticated" },
+      checkedAt: "2026-10-11T00:00:00.000Z",
+      models: [],
+      slashCommands: [],
+      skills: [],
+      supportedRuntimeModes: ["full-access"],
+    };
+    const forkTask: ScheduledTask = {
+      id: ScheduledTaskId.make("scheduled-task:fork"),
+      title: "Nightly",
+      prompt: "Tidy up",
+      enabled: true,
+      schedule: { type: "webhook", signature: null },
+      projectId: forkThread.projectId,
+      threadId: null,
+      workspaceStrategy: { type: "root" },
+      modelSelection: forkModelSelection,
+      runtimeMode: "approval-required",
+      interactionMode: "default",
+      createdBy: "user",
+      creationSource: "web",
+      createdAt: "2026-10-11T00:00:00.000Z",
+      updatedAt: "2026-10-11T00:00:00.000Z",
+      nextRunAt: null,
+      lastRunAt: null,
+      lastRunStatus: "never",
+      lastRunError: null,
+      runCount: 0,
+      webhook: {
+        path: "/hooks/scheduled-task/fork",
+        url: "https://t3.example/hooks/fork",
+        hasSecret: false,
+      },
+    };
+    const client = (access: "approval-required" | "full-access"): McpInvocationScope => ({
+      environmentId: EnvironmentId.make("environment:fork"),
+      requestNamespace: `client:fork-${access}`,
+      thread: undefined,
+      client: { sessionId: `fork-${access}`, label: "Claude Code", access },
+      capabilities: new Set(["orchestration"]),
+      issuedAt: 1,
+    });
+    const service = (writes: Ref.Ref<ReadonlyArray<string>>) =>
+      layerOrchestratorService.pipe(
+        Layer.provide(
+          Layer.mergeAll(
+            NodeServices.layer,
+            ServerSettings.layerTest(),
+            Layer.mock(ThreadManagementService.ThreadManagementService)({
+              getThreadShell: () => Effect.succeed(forkThread),
+              getProjectThreadRecords: () => Effect.succeed(idleThreadProjection(forkThread)),
+              sendToThread: () =>
+                Ref.update(writes, (all) => [...all, "send"]).pipe(
+                  Effect.as({
+                    run: { id: RunId.make("run:fork"), status: "running" },
+                    delivery: "started",
+                  } as never),
+                ),
+              interruptThread: () =>
+                Ref.update(writes, (all) => [...all, "interrupt"]).pipe(
+                  Effect.as({ type: "no_active_run" } as never),
+                ),
+            }),
+            Layer.mock(ProviderRegistry.ProviderRegistry)({
+              getProviders: Effect.succeed([forkProvider]),
+            }),
+            Layer.mock(ProviderAdapterRegistry.ProviderAdapterRegistryV2)({
+              list: () => Effect.succeed([]),
+            }),
+            Layer.mock(ProjectService.ProjectService)({
+              getById: (id) =>
+                Effect.succeedSome({ id, defaultModelSelection: forkModelSelection } as never),
+            }),
+            Layer.mock(SecretRequests.SecretRequests)({}),
+            Layer.mock(ScheduledTaskService.ScheduledTaskService)({
+              list: () => Effect.succeed({ tasks: [forkTask] }),
+              upsert: () =>
+                Ref.update(writes, (all) => [...all, "upsert"]).pipe(Effect.as({ task: forkTask })),
+            }),
+          ),
+        ),
+      );
+
+    it.effect("refuses a supervised client's message to a fork thread stored Supervised", () =>
+      Effect.gen(function* () {
+        const writes = yield* Ref.make<ReadonlyArray<string>>([]);
+        const mcp = yield* OrchestratorMcpService.OrchestratorMcpService.pipe(
+          Effect.provide(service(writes)),
+        );
+        const sent = yield* mcp
+          .sendToThread(client("approval-required"), {
+            threadId: forkThreadId,
+            message: "Delete the build cache",
+          })
+          .pipe(Effect.flip);
+        assert.equal(sent.code, "runtime_mode_escalation_denied");
+        const interrupted = yield* mcp
+          .interruptThread(client("approval-required"), { threadId: forkThreadId })
+          .pipe(Effect.flip);
+        assert.equal(interrupted.code, "runtime_mode_escalation_denied");
+        assert.deepEqual(yield* Ref.get(writes), []);
+
+        yield* mcp.sendToThread(client("full-access"), {
+          threadId: forkThreadId,
+          message: "Delete the build cache",
+        });
+        assert.deepEqual(yield* Ref.get(writes), ["send"]);
+      }),
+    );
+
+    it.effect("refuses to schedule a supervised client's task on a fork default", () =>
+      Effect.gen(function* () {
+        const writes = yield* Ref.make<ReadonlyArray<string>>([]);
+        const error = yield* OrchestratorMcpService.OrchestratorMcpService.pipe(
+          Effect.flatMap((mcp) =>
+            mcp.scheduleTask(client("approval-required"), {
+              projectId: forkThread.projectId,
+              prompt: "Tidy up",
+              schedule: { type: "webhook" },
+              bindToCurrentThread: false,
+            }),
+          ),
+          Effect.provide(service(writes)),
+          Effect.flip,
+        );
+        assert.include(error, { code: "runtime_mode_escalation_denied" });
+        assert.deepEqual(yield* Ref.get(writes), []);
+      }),
+    );
+
+    it.effect("treats a fork task stored Supervised as the full-access work it runs", () =>
+      Effect.gen(function* () {
+        const writes = yield* Ref.make<ReadonlyArray<string>>([]);
+        const mcp = yield* OrchestratorMcpService.OrchestratorMcpService.pipe(
+          Effect.provide(service(writes)),
+        );
+        const listed = yield* mcp.listScheduledTasks(client("approval-required"), {
+          projectId: forkThread.projectId,
+        });
+        assert.equal(listed.tasks[0]?.webhookUrl, undefined);
+        const error = yield* mcp
+          .updateScheduledTask(client("approval-required"), {
+            scheduledTaskId: forkTask.id,
+            prompt: "Something else",
+          })
+          .pipe(Effect.flip);
+        assert.equal(error.code, "runtime_mode_escalation_denied");
+        assert.deepEqual(yield* Ref.get(writes), []);
+      }),
+    );
+
+    it.effect("lets a fork caller disable and delete the task it bound to its own thread", () =>
+      Effect.gen(function* () {
+        const ownThread: OrchestrationV2ThreadShell = {
+          ...forkThread,
+          activeRunId: RunId.make("run:fork-own"),
+        };
+        const ownProjection = {
+          ...idleThreadProjection(ownThread),
+          runs: [
+            {
+              id: RunId.make("run:fork-own"),
+              status: "running",
+              providerInstanceId: primeAgent,
+              rootNodeId: "node:fork-own",
+            },
+          ],
+        } as never;
+        const saved = yield* Ref.make<ScheduledTask | undefined>(undefined);
+        const writes = yield* Ref.make<ReadonlyArray<string>>([]);
+        const caller: McpInvocationScope = {
+          environmentId: EnvironmentId.make("environment:fork"),
+          requestNamespace: "thread:fork-own",
+          thread: {
+            threadId: ownThread.id,
+            providerInstanceId: primeAgent,
+            providerSessionId: "session:fork-own",
+          } as never,
+          client: undefined,
+          capabilities: new Set(["orchestration"]),
+          issuedAt: 1,
+        };
+        const mcp = yield* OrchestratorMcpService.OrchestratorMcpService.pipe(
+          Effect.provide(
+            layerOrchestratorService.pipe(
+              Layer.provide(
+                Layer.mergeAll(
+                  NodeServices.layer,
+                  ServerSettings.layerTest(),
+                  Layer.mock(ThreadManagementService.ThreadManagementService)({
+                    getThreadShell: () => Effect.succeed(ownThread),
+                    getProjectThreadRecords: () => Effect.succeed(ownProjection),
+                    getThreadRecords: () => Effect.succeed(ownProjection),
+                  }),
+                  Layer.mock(ProviderRegistry.ProviderRegistry)({
+                    getProviders: Effect.succeed([forkProvider]),
+                  }),
+                  Layer.mock(ProviderAdapterRegistry.ProviderAdapterRegistryV2)({
+                    list: () => Effect.succeed([]),
+                  }),
+                  Layer.mock(ProjectService.ProjectService)({
+                    getById: (id) =>
+                      Effect.succeedSome({
+                        id,
+                        defaultModelSelection: forkModelSelection,
+                      } as never),
+                  }),
+                  Layer.mock(SecretRequests.SecretRequests)({}),
+                  Layer.mock(ScheduledTaskService.ScheduledTaskService)({
+                    list: () =>
+                      Ref.get(saved).pipe(
+                        Effect.map((task) => ({ tasks: task === undefined ? [] : [task] })),
+                      ),
+                    upsert: (input) =>
+                      Effect.gen(function* () {
+                        const task: ScheduledTask = {
+                          ...forkTask,
+                          ...input,
+                          id: input.id ?? ScheduledTaskId.make("scheduled-task:fork-own"),
+                        } as ScheduledTask;
+                        yield* Ref.set(saved, task);
+                        yield* Ref.update(writes, (all) => [...all, "upsert"]);
+                        return { task };
+                      }),
+                    delete: () =>
+                      Ref.update(writes, (all) => [...all, "delete"]).pipe(Effect.as({} as never)),
+                  }),
+                ),
+              ),
+            ),
+          ),
+        );
+
+        const created = yield* mcp.scheduleTask(caller, {
+          projectId: ownThread.projectId,
+          prompt: "Wake me",
+          schedule: { type: "webhook" },
+          bindToCurrentThread: true,
+        });
+        yield* mcp.updateScheduledTask(caller, {
+          scheduledTaskId: created.scheduledTaskId,
+          enabled: false,
+        });
+        assert.isFalse((yield* Ref.get(saved))?.enabled);
+        // Unbinding would make it independent fork work, which the caller may not start.
+        const unbound = yield* mcp
+          .updateScheduledTask(caller, {
+            scheduledTaskId: created.scheduledTaskId,
+            bindToCurrentThread: false,
+          })
+          .pipe(Effect.flip);
+        assert.equal(unbound.code, "runtime_mode_escalation_denied");
+        yield* mcp.deleteScheduledTask(caller, { scheduledTaskId: created.scheduledTaskId });
+        assert.deepEqual(yield* Ref.get(writes), ["upsert", "upsert", "delete"]);
+      }),
+    );
   });
 });
 

@@ -70,6 +70,11 @@ export interface TranscriptUsageFormat<State> {
   readonly state?: {
     readonly initial: () => State;
     readonly schema: Schema.Codec<State, unknown>;
+    /**
+     * Whether lines read after a resume point changed what earlier lines
+     * produced, so the file must be parsed whole. Asked only after a resumed parse.
+     */
+    needsFullParse?(state: State): boolean;
   };
   /** Enable cross-file deduplication when session records can appear in multiple files. */
   readonly sharedSessionsAcrossFiles?: true;

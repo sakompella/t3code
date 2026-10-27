@@ -10,6 +10,7 @@ import {
   ThreadId,
   TurnItemId,
   type OrchestrationV2DomainEvent,
+  type OrchestrationV2Subagent,
   type OrchestrationV2ThreadProjection,
   type OrchestrationV2ThreadStreamItem,
   OrchestrationV2TurnItem,
@@ -25,6 +26,7 @@ import {
   projectTurnItemForWire,
   projectTurnItemForDetail,
   projectDomainEventForWire,
+  projectThreadProjectionForWire,
 } from "./WireProjection.ts";
 import { threadShellFromProjection } from "./ProjectionStore.ts";
 import { MAX_TOOL_OUTPUT_IMAGES, toolOutputImages } from "@t3tools/shared/toolOutput";
@@ -190,6 +192,62 @@ describe("orchestration V2 wire projection", () => {
       "a".repeat(32_767) + "\n… output truncated for transport",
     );
     expect(item.progress).toBe(progress);
+  });
+
+  it("bounds a subagent's reply in its live event and snapshots as on its card", () => {
+    const result = "é".repeat(20_000) + "😀".repeat(10_000);
+    const subagentId = NodeId.make("child-agent");
+    const subagent = {
+      id: subagentId,
+      threadId: base.threadId,
+      runId: null,
+      parentNodeId: NodeId.make("root"),
+      origin: "provider_native",
+      createdBy: "agent",
+      driver: ProviderDriverKind.make("primeAgent"),
+      providerInstanceId: ProviderInstanceId.make("primeAgent"),
+      providerThreadId: null,
+      childThreadId: null,
+      nativeTaskRef: null,
+      prompt: "Inspect code",
+      title: null,
+      model: null,
+      status: "completed",
+      result,
+      startedAt: base.startedAt,
+      completedAt: base.completedAt,
+      updatedAt: base.updatedAt,
+    } satisfies OrchestrationV2Subagent;
+    const card = projectTurnItemForWire({
+      ...base,
+      type: "subagent",
+      subagentId,
+      origin: "provider_native",
+      driver: subagent.driver,
+      providerInstanceId: subagent.providerInstanceId,
+      childThreadId: null,
+      prompt: subagent.prompt,
+      result,
+    });
+    const cardResult = card.type === "subagent" ? card.result : undefined;
+    expect(cardResult).not.toBe(result);
+
+    const event = projectDomainEventForWire({
+      id: EventId.make("subagent-wire-event"),
+      type: "subagent.updated",
+      threadId: base.threadId,
+      occurredAt: base.updatedAt,
+      payload: subagent,
+    });
+    expect(event.type === "subagent.updated" ? event.payload.result : undefined).toBe(cardResult);
+    const snapshot = projectThreadProjectionForWire({
+      subagents: [subagent],
+      contextHandoffs: [],
+      turnItems: [],
+      visibleTurnItems: [],
+    } as unknown as OrchestrationV2ThreadProjection);
+    expect(snapshot.subagents[0]?.result).toBe(cardResult);
+    expect(subagent.result).toBe(result);
   });
 
   it("leaves a screenshot's bytes out of the fetched tool output", () => {

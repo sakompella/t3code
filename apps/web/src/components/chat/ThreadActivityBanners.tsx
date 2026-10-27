@@ -1,6 +1,7 @@
 import type {
   OrchestrationV2PendingBackgroundTask,
   OrchestrationV2ProviderGoal,
+  OrchestrationV2Subagent,
   ThreadId,
 } from "@t3tools/contracts";
 import type { EnvironmentThreadShell, ThreadStructure } from "@t3tools/client-runtime/state/shell";
@@ -8,6 +9,10 @@ import {
   presentPendingBackgroundWork,
   presentProviderGoal,
 } from "@t3tools/client-runtime/state/thread-execution";
+import {
+  buildLiveSubagentTree,
+  selectSubagentsForBackgroundTasks,
+} from "@t3tools/client-runtime/state/subagent-tree";
 import { childThreadInputsTitle } from "@t3tools/client-runtime/state/threads";
 import { formatDuration } from "@t3tools/shared/orchestrationTiming";
 import * as DateTime from "effect/DateTime";
@@ -26,6 +31,7 @@ import { Button, InlineButton } from "../ui/button";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
 import type { ComposerBannerStackItem } from "./ComposerBannerStack";
 import type { ThreadNowItem } from "./ThreadNow";
+import { SubagentTreeList } from "./SubagentTree";
 
 /** Subagents waiting on the user, unless the parent is itself waiting on them. */
 export function childInputNowItem(input: {
@@ -110,14 +116,69 @@ export function backgroundWorkNowItem(input: {
   readonly threadId: ThreadId;
   readonly tasks: ReadonlyArray<OrchestrationV2PendingBackgroundTask>;
   readonly turnItems: ThreadStructure["turnItems"];
+  readonly subagents: ReadonlyArray<OrchestrationV2Subagent>;
+  readonly turnRunning: boolean;
   readonly stopDisabled: boolean;
   readonly stopping: boolean;
   readonly onStop: () => Promise<void>;
   readonly onOpenThread: (threadId: ThreadId) => void;
 }): ThreadNowItem | null {
   const { onOpenThread } = input;
-  const presentation = presentPendingBackgroundWork(input.tasks);
+  const presentation = presentPendingBackgroundWork(input.tasks, {
+    turnRunning: input.turnRunning,
+  });
   if (presentation === null) return null;
+  const stopAction = input.turnRunning ? undefined : (
+    <InlineButton disabled={input.stopDisabled} onClick={() => void input.onStop()}>
+      {input.stopping ? "Stopping..." : "Stop"}
+    </InlineButton>
+  );
+  // While a turn runs, only subagents the background list names; a subagent
+  // the timeline already shows live must not reappear in the tree.
+  const liveSubagentTree = buildLiveSubagentTree(
+    input.turnRunning
+      ? selectSubagentsForBackgroundTasks(input.subagents, input.tasks)
+      : input.subagents,
+  );
+  if (liveSubagentTree.roots.length > 0) {
+    // Live subagents read as a tree, like Prime Agent's agents view; other
+    // background work is listed after them.
+    const otherWork = presentation.items
+      .filter((item) => item.kind !== "subagent")
+      .map((item) => ({ taskId: item.taskId, label: item.label }));
+    return {
+      id: `background-work:${input.threadId}`,
+      icon: <CircleDashedIcon />,
+      title: "Subagents",
+      description: (
+        <>
+          <span className="text-success">●</span> {liveSubagentTree.runningCount} running
+          {liveSubagentTree.waitingCount === 0 ? null : (
+            <>
+              {" "}
+              <span aria-hidden>·</span> <span className="text-warning">◐</span>{" "}
+              {liveSubagentTree.waitingCount} waiting
+            </>
+          )}
+          {otherWork.length === 0 ? null : (
+            <>
+              {" "}
+              <span aria-hidden>·</span> {otherWork.length}{" "}
+              {otherWork.length === 1 ? "command" : "commands"}
+            </>
+          )}
+        </>
+      ),
+      children: (
+        <SubagentTreeList
+          tree={liveSubagentTree}
+          commands={otherWork}
+          onOpenThread={onOpenThread}
+        />
+      ),
+      ...(stopAction === undefined ? {} : { actions: stopAction }),
+    };
+  }
   const rows = presentation.items.map((task) => {
     // Same key derivePendingBackgroundWork gives turn-item tasks; subagent items carry progress.
     const item = input.turnItems.findLast(
@@ -175,9 +236,7 @@ export function backgroundWorkNowItem(input: {
             Open
           </InlineButton>
         )}
-        <InlineButton disabled={input.stopDisabled} onClick={() => void input.onStop()}>
-          {input.stopping ? "Stopping..." : "Stop"}
-        </InlineButton>
+        {stopAction}
       </>
     ),
   };

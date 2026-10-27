@@ -183,6 +183,7 @@ const layerService = (input: {
         HOME: input.home,
         GROK_HOME: NodePath.join(input.home, "grok"),
         PI_CODING_AGENT_DIR: NodePath.join(input.home, "pi"),
+        PRIME_AGENT_CODING_AGENT_DIR: NodePath.join(input.home, "prime"),
         OPENCODE_DATA_DIR: NodePath.join(input.home, "opencode"),
         ANTIGRAVITY_DATA_DIR: NodePath.join(input.home, "antigravity"),
         XDG_CONFIG_HOME: NodePath.join(input.home, "config"),
@@ -465,6 +466,172 @@ describe("Codex usage history", () => {
 });
 
 describe("UsageService", () => {
+  it.live("counts Pi and Prime Agent custom homes, child sessions and disabled accounts once", () =>
+    Effect.gen(function* () {
+      const { home, settings } = yield* setup;
+      const primeHome = NodePath.join(home, "prime");
+      const otherHome = NodePath.join(home, "other-prime");
+      const makeLine = (id: string, output: number) =>
+        encodeUnknownJsonString({
+          type: "message",
+          id,
+          timestamp: "2026-08-01T10:00:00.000Z",
+          message: {
+            role: "assistant",
+            provider: "anthropic",
+            model: "claude-opus-5-5",
+            timestamp: Date.parse("2026-08-01T10:00:00Z"),
+            responseId: id,
+            usage: { input: 2, output, cacheRead: 3, cacheWrite: 5, cost: { total: 0.5 } },
+          },
+        }) + "\n";
+      yield* Effect.promise(async () => {
+        for (const [root, id, output] of [
+          [NodePath.join(primeHome, "sessions"), "parent", 7],
+          [NodePath.join(primeHome, "session-artifacts", "parent", "child"), "child", 11],
+          [NodePath.join(otherHome, "sessions"), "other", 13],
+          [NodePath.join(home, "pi", "sessions", "project"), "pi", 17],
+        ] as const) {
+          await NodeFSP.mkdir(root, { recursive: true });
+          await NodeFSP.writeFile(NodePath.join(root, id + ".jsonl"), makeLine(id, output));
+        }
+        await NodeFSP.writeFile(
+          NodePath.join(primeHome, "sessions", "fork.jsonl"),
+          makeLine("parent", 7),
+        );
+      });
+      const result = yield* Effect.gen(function* () {
+        const service = yield* UsageService.make;
+        const cold = yield* service.readSummary(WINDOW);
+        const warm = yield* service.readSummary(WINDOW);
+        assert.deepStrictEqual(warm.buckets, cold.buckets);
+        return warm;
+      }).pipe(
+        Effect.provide(
+          layerService({
+            prefix: "usage-pi-prime",
+            home,
+            settings: {
+              ...settings,
+              providerInstances: {
+                [ProviderInstanceId.make("prime-extra")]: {
+                  driver: ProviderDriverKind.make("primeAgent"),
+                  enabled: false,
+                  environment: [
+                    { name: "PRIME_AGENT_CODING_AGENT_DIR", value: otherHome, sensitive: false },
+                  ],
+                },
+              },
+            },
+          }),
+        ),
+      );
+      assert.strictEqual(totalOutputTokens(result), 48);
+      assert.strictEqual(
+        result.buckets.reduce((sum, b) => sum + b.records, 0),
+        4,
+      );
+      assert.strictEqual(
+        result.buckets.reduce((sum, b) => sum + b.costUsd, 0),
+        2,
+      );
+      assert.strictEqual(
+        result.buckets
+          .filter((b) => b.provider === "primeAgent")
+          .reduce((sum, b) => sum + b.totals.outputTokens, 0),
+        31,
+      );
+    }).pipe(Effect.scoped),
+  );
+
+  it.live(
+    "replaces a Prime Agent parent's folded usage when its attribution lands on a rescan",
+    () =>
+      Effect.gen(function* () {
+        const { home, settings } = yield* setup;
+        const sessions = NodePath.join(home, "prime", "sessions");
+        const transcript = NodePath.join(sessions, "parent.jsonl");
+        const response = (id: string, usage: object) =>
+          encodeUnknownJsonString({
+            type: "message",
+            id,
+            timestamp: "2026-08-01T10:00:00.000Z",
+            message: {
+              role: "assistant",
+              provider: "anthropic",
+              model: "claude-opus-5-5",
+              timestamp: Date.parse("2026-08-01T10:00:00Z"),
+              responseId: id,
+              usage,
+            },
+          }) + "\n";
+        const aggregateUsage = {
+          input: 12,
+          output: 10,
+          cacheRead: 11,
+          cacheWrite: 13,
+          cost: { total: 1.25 },
+        };
+        const childUsage = {
+          input: 10,
+          output: 3,
+          cacheRead: 0,
+          cacheWrite: 0,
+          cost: { total: 0.75 },
+        };
+        yield* Effect.promise(async () => {
+          await NodeFSP.mkdir(sessions, { recursive: true });
+          await NodeFSP.writeFile(transcript, response("parent", aggregateUsage));
+        });
+        yield* Effect.gen(function* () {
+          const service = yield* UsageService.make;
+          const folded = yield* service.readSummary(WINDOW);
+          assert.strictEqual(totalOutputTokens(folded), 10);
+
+          yield* Effect.promise(() =>
+            NodeFSP.appendFile(
+              transcript,
+              encodeUnknownJsonString({
+                type: "child_usage_attributed",
+                id: "attribution",
+                targetId: "parent",
+                childUsage,
+                aggregateUsage,
+              }) +
+                "\n" +
+                response("later", {
+                  input: 1,
+                  output: 5,
+                  cacheRead: 0,
+                  cacheWrite: 0,
+                  cost: { total: 0.25 },
+                }),
+            ),
+          );
+          const rescanned = yield* service.readSummary(WINDOW);
+          assert.strictEqual(totalOutputTokens(rescanned), 7 + 5);
+          assert.strictEqual(
+            rescanned.buckets.reduce((sum, bucket) => sum + bucket.records, 0),
+            2,
+          );
+          assert.closeTo(
+            rescanned.buckets.reduce((sum, bucket) => sum + bucket.costUsd, 0),
+            0.5 + 0.25,
+            1e-12,
+          );
+
+          const fresh = yield* UsageService.make.pipe(
+            Effect.provide(
+              layerService({ prefix: "usage-prime-attribution-fresh", home, settings }),
+            ),
+          );
+          assert.deepStrictEqual((yield* fresh.readSummary(WINDOW)).buckets, rescanned.buckets);
+        }).pipe(
+          Effect.provide(layerService({ prefix: "usage-prime-attribution", home, settings })),
+        );
+      }).pipe(Effect.scoped),
+  );
+
   it.live(
     "repairs initial Codex prices after unchanged-file retries, persists evidence and corrections, and honors later native tiers",
     () =>

@@ -73,9 +73,9 @@ Pinning does not prevent automatic settlement. Settling a thread removes its pin
 On web and desktop, drag a thread between sections to change its state. Drag a thread up into
 the pinned section to pin it at the spot you drop it; drag a pinned thread down into the active
 list to unpin it. Dragging a thread onto the **Settled** header settles it, and dragging a settled
-thread into the active list un-settles it. A snoozed thread can be dragged out of the snoozed
-shelf, which wakes it, but threads cannot be dragged into the shelf because snoozing needs a wake
-time. Dragging a pinned thread out of the pinned section does not ask for unpin confirmation.
+thread into the active list un-settles it. A snoozed thread dragged into the active list wakes it. Dropping it in the pinned section pins it
+but leaves it snoozed. Threads cannot be dragged into the snoozed shelf because snoozing needs a
+wake time. Dragging a pinned thread out of the pinned section does not ask for unpin confirmation.
 Pinned and active boundary labels appear only while dragging, without moving the rows. The
 other rows slide aside to show where the thread will land. When you cross into another section,
 the dragged thread shows the action the drop performs, with its icon: **Pin**, **Unpin**,
@@ -244,6 +244,7 @@ continuations after a restart. Stopping the thread, sending a new message,
 archiving, or settling it prevents a pending continuation from starting.
 
 Choose **Snooze until reset** to hide the thread until its allowance returns.
+A thread that is already snoozed keeps its own wake time; use **Snooze** to change it.
 Snooze and auto-resume are independent: snooze alone wakes the thread without
 sending a message; enabling both wakes and continues it. **Wake now** cancels
 the snooze. Enable **Snooze until limits reset** in thread behavior settings to
@@ -282,7 +283,13 @@ selected, the options apply to every connected environment, and the mobile app u
 Choose **Snooze → Custom…** from a thread's menu to pick a date and time in your
 local time zone, or a duration in minutes, hours, or days. Durations start when
 you confirm; one day means 24 hours. On web and desktop, you can also snooze
-several selected threads together. Choose **Wake thread** to bring a thread back early.
-A snoozed thread keeps working and stays hidden until its wake time, even while
-its agent wakes itself for background work. It comes back early only when it needs
-an approval or answer from you, when a run fails, or when you send it a message.
+several selected threads together.
+
+A snoozed thread stays out of your inbox until its time ends or you choose
+**Wake thread** (or **Wake now** in the open thread). Nothing else brings it
+back: not a finished run, a failure, an approval or question, an agent update,
+pinning it, or a message you send. The agent keeps working, including a limit
+auto-resume that comes due, and the thread keeps its history. Opening it shows
+its status and any request waiting for you. A snoozed thread sends no
+notifications, and it does not announce afterward what finished while it was
+snoozed.
