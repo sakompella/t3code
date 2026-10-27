@@ -337,12 +337,11 @@ export const detectPiFlavor = (
   const run = (flag: "--version" | "--help" | "--capabilities") =>
     runPiCliCommand(flavor, piSettings, environment, flag).pipe(
       Effect.mapError((error) => unsupported(`\`${flag}\` failed to run: ${error.message}`)),
-      Effect.timeoutOption(VERSION_PROBE_TIMEOUT_MS),
-      Effect.flatMap((output) =>
-        Option.isNone(output)
-          ? Effect.fail(unsupported(`\`${flag}\` timed out after ${VERSION_PROBE_TIMEOUT_MS}ms`))
-          : Effect.succeed(output.value),
-      ),
+      Effect.timeoutOrElse({
+        duration: VERSION_PROBE_TIMEOUT_MS,
+        orElse: () =>
+          Effect.fail(unsupported(`\`${flag}\` timed out after ${VERSION_PROBE_TIMEOUT_MS}ms`)),
+      }),
     );
   const output = (flag: "--version" | "--help") =>
     run(flag).pipe(

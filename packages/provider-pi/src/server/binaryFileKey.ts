@@ -11,15 +11,17 @@ import * as NodeFS from "node:fs";
  * its size, mtime, ctime and inode; ctime and inode catch in-place replaces that restore size and
  * mtime. Limit: a wrapper that picks its target at run time hides changes of that target.
  */
-export const binaryFileKey = (command: string, environment: NodeJS.ProcessEnv) =>
-  Effect.gen(function* () {
-    const platform = yield* HostProcess.Platform;
-    const resolveExecutable = yield* SpawnExecutableResolution;
-    const executable = resolveExecutable(command, platform, environment);
-    if (executable === undefined) return Option.none<string>();
-    return yield* Effect.try(() => {
-      const realPath = NodeFS.realpathSync(executable);
-      const { size, mtimeMs, ctimeMs, ino, dev } = NodeFS.statSync(realPath);
-      return [executable, realPath, size, mtimeMs, ctimeMs, ino, dev].join("\0");
-    }).pipe(Effect.option);
-  });
+export const binaryFileKey = Effect.fn("binaryFileKey")(function* (
+  command: string,
+  environment: NodeJS.ProcessEnv,
+) {
+  const platform = yield* HostProcess.Platform;
+  const resolveExecutable = yield* SpawnExecutableResolution;
+  const executable = resolveExecutable(command, platform, environment);
+  if (executable === undefined) return Option.none<string>();
+  return yield* Effect.try(() => {
+    const realPath = NodeFS.realpathSync(executable);
+    const { size, mtimeMs, ctimeMs, ino, dev } = NodeFS.statSync(realPath);
+    return [executable, realPath, size, mtimeMs, ctimeMs, ino, dev].join("\0");
+  }).pipe(Effect.option);
+});

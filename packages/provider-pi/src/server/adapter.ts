@@ -932,7 +932,7 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
        */
       const readHeartbeats = () => {
         const sessionId = heartbeatSessionId;
-        if (!flavor.heartbeats || sessionId === null) return Effect.succeed(undefined);
+        if (!flavor.heartbeats || sessionId === null) return Effect.void;
         return request({ type: "list_heartbeats" }, 2_000).pipe(
           Effect.map((listing) => primeAgentHeartbeats(listing, sessionId)),
           Effect.orElseSucceed(() => undefined),
