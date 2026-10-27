@@ -522,6 +522,7 @@ describe("PiProvider", () => {
     "get_session_stats",
     "get_fork_messages",
     "get_commands",
+    "get_rlm_children",
     "fork",
     "navigate_tree",
     "list_heartbeats",

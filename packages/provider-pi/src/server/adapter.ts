@@ -447,6 +447,8 @@ function retryOutcomeParkResumeAt(event: PiRpcRecord): DateTime.Utc | null {
     : primeAgentQuotaParkResumeAt(recordString(event, "finalError"));
 }
 
+const isPiRpcError = Schema.is(PiRpcError);
+
 /**
  * Events that stay live while a wake is buffered, so a child's events never
  * wait on the parent's turn.
@@ -766,7 +768,7 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
       /**
        * What the cache-miss notices know about the hosted thread's prompt
        * cache. It outlives `threadState`, which a reload on the same session
-       * replaces; a new session seeds it again (see `seedCacheMiss`).
+       * replaces; a new session seeds it again (see `seedFromHistory`).
        */
       let cacheMissState = emptyCacheMissState;
       let registrationAttempted = false;
@@ -1887,8 +1889,10 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
         });
       });
 
-      const seedCacheMiss = (messages: ReadonlyArray<unknown>) => {
+      /** What the history stored before T3 attached tells the session's notices and children. */
+      const seedFromHistory = (messages: ReadonlyArray<unknown>) => {
         if (flavor.cacheMissNotices) cacheMissState = seedCacheMissState(messages);
+        return childThreads.settleFromHistory(messages);
       };
 
       const emitExtensionError = Effect.fnUntraced(function* (event: PiRpcRecord) {
@@ -2429,7 +2433,7 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
       /** What a message Prime Agent injected says about background work: a job or a child ended. */
       const applyInjectedMessage = Effect.fnUntraced(function* (message: unknown) {
         yield* completeBackgroundJob(message);
-        yield* childThreads.settleFromNotice(message);
+        yield* childThreads.settleFromNotice(message, threadState?.activeTurn ?? null);
       });
 
       /**
@@ -2471,7 +2475,7 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
           pendingWake !== null && !pendingWake.offered && continuationRequests !== undefined,
         probeQuietTurn: (turn) => scheduleSettleProbe(turn, true, 1, 0, true).pipe(Effect.asVoid),
         enqueue: (record) => Queue.offer(connection.events, record).pipe(Effect.asVoid),
-        seedCache: seedCacheMiss,
+        seedFromHistory,
         items: {
           observeCache: (turn, message) => noteCacheUsage(turn, message, "stored"),
           upsertAssistantMessage: upsertRecordedMessage,
@@ -3164,6 +3168,11 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
         Effect.catchCause((cause) =>
           sessionEventPermit.withPermits(1)(
             Effect.gen(function* () {
+              // A wake, or work held for a thread to register, is the agent running without a turn.
+              const agentWasWorking =
+                threadState?.activeTurn != null ||
+                pendingWake !== null ||
+                preRegistrationEvents !== null;
               pendingWake = null;
               preRegistrationEvents = null;
               const state = threadState;
@@ -3173,6 +3182,13 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
                   protocolError("Pi transport closed during rollback"),
                 );
               pendingWake = null;
+              // T3 stops a process it retires itself, so any other transport end is the process's own.
+              const exitedWhileIdle =
+                !agentWasWorking &&
+                Option.exists(
+                  Cause.findErrorOption(cause),
+                  (error) => isPiRpcError(error) && error.operation !== "terminate",
+                );
               const interrupted = state?.activeTurn?.interrupted === true;
               // The kernel and its children died with the process.
               yield* childThreads.interrupt();
@@ -3197,7 +3213,16 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
               if (unsolicitedActivityDetected) {
                 yield* updateProviderSession("error", unsolicitedActivityError);
                 yield* Queue.end(events);
-              } else if (stopRequested) {
+              } else if (stopRequested || exitedWhileIdle) {
+                // Nothing was running, so nothing was lost: a process that exits
+                // while idle (the daemon restarted) detaches quietly, and the next
+                // turn reopens the session.
+                if (!stopRequested) {
+                  yield* Effect.logInfo(`${name} process exited while idle; detaching`, {
+                    providerSessionId: input.providerSessionId,
+                    cause: Cause.pretty(cause),
+                  });
+                }
                 yield* updateProviderSession("stopped", null);
                 yield* Queue.end(events);
               } else {
@@ -3791,6 +3816,7 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
                 sessionNoticesShown = true;
                 for (const notice of sessionNotices) yield* emitSessionNotice(activeTurn, notice);
               }
+              yield* childThreads.adoptHeldUpdates(activeTurn);
               if (wake !== null) {
                 if (continuation) activeTurn.wakeTrigger = piWakeTrigger(wake.events)?.message;
                 for (const event of wake.events) {
