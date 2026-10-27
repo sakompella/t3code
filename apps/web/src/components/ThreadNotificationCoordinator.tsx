@@ -29,11 +29,13 @@ import {
   threadNotificationTag,
   unlockNotificationAudio,
 } from "../threadNotifications";
-import { resolveSidebarThreadStatus, type SidebarThreadStatus } from "./Sidebar.logic";
+import type { SidebarThreadStatus } from "./Sidebar.logic";
 import {
   createThreadNotificationGate,
+  observeThreadForNotification,
   type ThreadNotificationKind,
   type ThreadNotificationObservation,
+  type ThreadNotificationOptions,
 } from "./ThreadNotificationCoordinator.logic";
 import { toastManager } from "./ui/toast";
 
@@ -174,12 +176,15 @@ export function startThreadNotifications(
   ) => {
     const previous = entry.previous;
     const next = new Map<ThreadId, NotificationState>();
+    const now = new Date().toISOString();
     // A parent here also hears of what its tasks on linked environments ask.
     const subagentRequests = registry.get(
       environmentThreadShells.pendingSubagentRequestsAtom(environmentId),
     );
     const delegatedUnderParent = registry.get(environmentThreadShells.delegatedUnderParentAtom);
-    const changed: Array<[NotificationState | undefined, NotificationState]> = [];
+    const changed: Array<
+      [NotificationState | undefined, NotificationState, ThreadNotificationOptions]
+    > = [];
     for (const rawThread of threads) {
       if (
         isShownUnderParent(
@@ -197,37 +202,21 @@ export function startThreadNotifications(
         continue;
       }
       const thread = presentThreadShell(environmentId, rawThread, subagentRequest);
-      let status = resolveSidebarThreadStatus(thread);
-      if (status === "ready" && thread.latestRun?.status === "failed") status = "failed";
-      const attention =
-        status === "input" ||
-        status === "request" ||
-        status === "approval" ||
-        status === "failed" ||
-        status === "limited"
-          ? `${thread.latestRun?.runId ?? ""}:${status}`
-          : null;
-      const completedAt = Date.parse(thread.latestRun?.completedAt ?? "");
-      const settled = status === "ready" && thread.latestRun?.status === "completed";
-      const state = {
-        raw: rawThread,
-        subagentRequest,
-        thread,
-        status,
-        attention,
-        settled,
-        completedAt: settled && Number.isFinite(completedAt) ? completedAt : null,
-      };
+      const { status, observation, options } = observeThreadForNotification(
+        {
+          ...thread,
+          latestRunStopRequested: rawThread.latestRunStopRequested,
+        },
+        now,
+      );
+      const state = { ...observation, raw: rawThread, subagentRequest, thread, status };
       next.set(thread.id, state);
-      changed.push([prior, state]);
+      changed.push([prior, state, options]);
     }
     entry.previous = next;
     entry.gate.retain(new Set(next.keys()));
-    for (const [prior, state] of changed) {
-      entry.gate.observe(state.thread.id, prior, state, {
-        archived: state.thread.archivedAt !== null,
-        quiet: state.raw.latestRunStopRequested === true,
-      });
+    for (const [prior, state, options] of changed) {
+      entry.gate.observe(state.thread.id, prior, state, options);
     }
   };
 

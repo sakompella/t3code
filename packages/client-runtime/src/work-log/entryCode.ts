@@ -50,11 +50,8 @@ export function pythonCellLabel(entry: CodeEntry): string | null {
 }
 
 /**
- * The code a row label shows, a shell command or a Python cell preview, so a
- * client can render it in its code font and highlight it. Returns null when
- * the label is prose, such as a group heading or a live "Running git" label.
- * Whitespace differences are ignored, so a client may pass a label it has
- * collapsed to one line, and a label cut short with "..." still counts.
+ * The code a row label shows (shell command or Python cell preview), or null when the label is
+ * prose. Whitespace differences are ignored, and a label cut short with "..." still counts.
  */
 export function workEntryLabelCode(entry: CodeEntry, label: string): WorkEntryCode | null {
   if (entry.command && labelShowsCode(label, commandDisplayText(entry.command))) {

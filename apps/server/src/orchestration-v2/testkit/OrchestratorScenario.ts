@@ -329,7 +329,7 @@ export function runOrchestratorV2Scenario(
       > =>
         Effect.gen(function* () {
           const projection = yield* orchestrator.getThreadProjection(threadId);
-          if (!hasActiveRun(projection)) {
+          if (!hasActiveRun(projection) && !projection.thread.pendingHeadMove) {
             return;
           }
           if (scenarioWaitExhausted(attemptsRemaining, deadlineAt)) {
