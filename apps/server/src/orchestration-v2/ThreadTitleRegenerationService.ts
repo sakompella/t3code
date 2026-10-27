@@ -181,7 +181,7 @@ const make = Effect.gen(function* () {
           : Effect.logWarning("Thread title generation failed", {
               threadId: input.threadId,
               requestId: input.requestId,
-              cause,
+              cause: Cause.pretty(cause),
             }).pipe(Effect.as({ type: "complete" as const })),
       ),
     );

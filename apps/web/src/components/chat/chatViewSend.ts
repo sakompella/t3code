@@ -2,6 +2,7 @@ import {
   CommandId,
   type EnvironmentId,
   type ModelSelection,
+  type OrchestrationV2RollbackSummary,
   type ProviderInteractionMode,
   type ScopedThreadRef,
   type ThreadId,
@@ -161,6 +162,7 @@ export async function rewindToMessage(input: {
   readonly turnCount: number;
   readonly restoreFiles: boolean;
   readonly checkpoint: ReturnType<typeof findRevertCheckpoint>;
+  readonly summary: OrchestrationV2RollbackSummary | undefined;
   readonly draftTarget: ScopedThreadRef | DraftId;
   readonly composerHasPendingAttachments: boolean;
   readonly createAssetUrl: Parameters<
@@ -175,6 +177,7 @@ export async function rewindToMessage(input: {
       restoreFiles: boolean;
       checkpointId?: string;
       scopeId?: string;
+      summary?: OrchestrationV2RollbackSummary;
     };
   }) => Promise<AtomCommandResult<unknown, unknown>>;
 }): Promise<
@@ -214,6 +217,7 @@ export async function rewindToMessage(input: {
           ...(input.checkpoint === undefined
             ? {}
             : { checkpointId: input.checkpoint.id, scopeId: input.checkpoint.scopeId }),
+          ...(input.summary === undefined ? {} : { summary: input.summary }),
         },
       });
       if (result._tag === "Failure") throw squashAtomCommandFailure(result);

@@ -7,6 +7,7 @@ import {
   AuthOrchestrationOperateScope,
   type EnvironmentId,
   type MessageId,
+  type OrchestrationV2RollbackSummary,
   type ScopedThreadRef,
   type ThreadId,
   type RunId,
@@ -94,6 +95,7 @@ export function useTimelineRewind(input: TimelineRewindInput) {
     turnCount: number,
     messageId: MessageId,
     restoreFiles?: boolean,
+    summary?: OrchestrationV2RollbackSummary,
   ) => {
     const localApi = readLocalApi();
     if (
@@ -142,6 +144,7 @@ export function useTimelineRewind(input: TimelineRewindInput) {
       restoreFiles,
       // Keep the live checkpoint identity when command context refetches a bounded window.
       checkpoint: findRevertCheckpoint(serverProjection?.checkpoints ?? [], turnCount),
+      summary,
       draftTarget: composerDraftTarget,
       composerHasPendingAttachments: composerRef.current?.hasPendingAttachments() === true,
       createAssetUrl: createAttachmentAssetUrl,
@@ -166,8 +169,13 @@ export function useTimelineRewind(input: TimelineRewindInput) {
     }
   };
   const onRevertToTurnCountStable = useStableCallback(onRevertToTurnCount);
-  const onConfirmRevert = (turnCount: number, messageId: MessageId, restoreFiles: boolean) => {
-    void onRevertToTurnCount(turnCount, messageId, restoreFiles);
+  const onConfirmRevert = (
+    turnCount: number,
+    messageId: MessageId,
+    restoreFiles: boolean,
+    summary: OrchestrationV2RollbackSummary | undefined,
+  ) => {
+    void onRevertToTurnCount(turnCount, messageId, restoreFiles, summary);
   };
   const onConfirmRevertStable = useStableCallback(onConfirmRevert);
 

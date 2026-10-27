@@ -3,7 +3,8 @@ import {
   OrchestrationV2AppThread,
   ProjectId,
   ProviderInstanceId,
-  type RuntimeMode,
+  RuntimeMode,
+  providerRuntimeMode,
 } from "@t3tools/contracts";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
@@ -44,6 +45,11 @@ export interface RuntimePolicyV2Shape {
     readonly thread: OrchestrationV2AppThread;
     readonly modelSelection: ModelSelection;
   }) => Effect.Effect<ProviderAdapter.ProviderAdapterV2RuntimePolicy, RuntimePolicyV2Error>;
+  /** The runtime mode a thread with these settings runs in, as `resolve` gives it. */
+  readonly runtimeMode: (thread: {
+    readonly runtimeMode: RuntimeMode;
+    readonly modelSelection: ModelSelection;
+  }) => Effect.Effect<RuntimeMode>;
 }
 
 export class RuntimePolicyV2 extends Context.Service<RuntimePolicyV2, RuntimePolicyV2Shape>()(
@@ -58,18 +64,10 @@ export const layer: Layer.Layer<RuntimePolicyV2> = Layer.succeed(RuntimePolicyV2
       cwd: input.thread.worktreePath,
     });
   }),
+  runtimeMode: Effect.fn("RuntimePolicyV2.runtimeMode")(function (thread) {
+    return Effect.succeed(thread.runtimeMode);
+  }),
 });
-
-function providerRuntimeMode(
-  runtimeMode: RuntimeMode,
-  supportedRuntimeModes: ReadonlyArray<RuntimeMode> | undefined,
-): RuntimeMode {
-  return supportedRuntimeModes === undefined ||
-    supportedRuntimeModes.length === 0 ||
-    supportedRuntimeModes.includes(runtimeMode)
-    ? runtimeMode
-    : "approval-required";
-}
 
 export const layerFromProjectStore: Layer.Layer<
   RuntimePolicyV2,
@@ -80,13 +78,21 @@ export const layerFromProjectStore: Layer.Layer<
   Effect.gen(function* () {
     const projects = yield* ProjectStore.ProjectStoreV2;
     const providerInstances = yield* ProviderInstanceRegistry.ProviderInstanceRegistry;
+    const supportedRuntimeModes = Effect.fn("RuntimePolicyV2.supportedRuntimeModes")(function* (
+      modelSelection: ModelSelection,
+    ) {
+      const instance = yield* providerInstances.getInstance(modelSelection.instanceId);
+      return instance === undefined
+        ? undefined
+        : (yield* instance.snapshot.getSnapshot).supportedRuntimeModes;
+    });
     return RuntimePolicyV2.of({
+      runtimeMode: Effect.fn("RuntimePolicyV2.runtimeMode")(function* (thread) {
+        const offered = yield* supportedRuntimeModes(thread.modelSelection);
+        return providerRuntimeMode(thread.runtimeMode, offered);
+      }),
       resolve: Effect.fn("RuntimePolicyV2.resolve")(function* (input) {
-        const instance = yield* providerInstances.getInstance(input.modelSelection.instanceId);
-        const supportedRuntimeModes =
-          instance === undefined
-            ? undefined
-            : (yield* instance.snapshot.getSnapshot).supportedRuntimeModes;
+        const offered = yield* supportedRuntimeModes(input.modelSelection);
         const cwd =
           input.thread.worktreePath ??
           (yield* projects.get(input.thread.projectId).pipe(
@@ -113,7 +119,7 @@ export const layerFromProjectStore: Layer.Layer<
             ),
           ));
         return ProviderAdapter.ProviderAdapterV2RuntimePolicy.make({
-          runtimeMode: providerRuntimeMode(input.thread.runtimeMode, supportedRuntimeModes),
+          runtimeMode: providerRuntimeMode(input.thread.runtimeMode, offered),
           interactionMode: input.thread.interactionMode,
           cwd,
         });
@@ -130,6 +136,7 @@ export function layerWithOverride(
     Effect.gen(function* () {
       const base = yield* RuntimePolicyV2;
       return {
+        runtimeMode: base.runtimeMode,
         resolve: (input) =>
           base.resolve(input).pipe(
             Effect.map((policy) =>

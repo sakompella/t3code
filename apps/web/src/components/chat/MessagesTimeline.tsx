@@ -77,12 +77,13 @@ import {
   isTimelineMinimapRowVisible,
   resolveTimelineMinimapVisibleRange,
   resolveTimelineMinimapHitStripWidth,
-  timelineTurnFoldRunIdsByEntryId,
+  timelineTurnFoldKeysByEntryId,
   type MessagesTimelineRow,
   type TimelineLatestRun,
 } from "./MessagesTimeline.logic";
 import { type ThreadFindMatch } from "./threadFind";
 import { useThreadFindNavigation } from "./useThreadFindNavigation";
+import { runFoldSegmentKeyIsForRun } from "@t3tools/client-runtime/state/run-fold";
 import { TooltipScrollDismissArea } from "../ui/tooltip";
 import { WorktreeSetupCard } from "./WorktreeSetupCard";
 import { useOpenPrLink } from "~/lib/openPullRequestLink";
@@ -401,8 +402,8 @@ const ConversationTimeline = memo(function ConversationTimeline({
     ...timelineListStateFor(listIdentityKey),
     findOpenAtOpening: findOpen,
   }));
-  const [expandedRunIds, setExpandedRunIds] = useState<ReadonlySet<RunId>>(
-    () => listState.rememberedPosition?.disclosures?.runs ?? new Set(),
+  const [expandedFoldKeys, setExpandedFoldKeys] = useState<ReadonlySet<string>>(
+    () => listState.rememberedPosition?.disclosures?.folds ?? new Set(),
   );
   const [expandedWorkGroupIds, setExpandedWorkGroupIds] = useState<ReadonlySet<string>>(
     () => listState.rememberedPosition?.disclosures?.workGroups ?? new Set(),
@@ -422,7 +423,7 @@ const ConversationTimeline = memo(function ConversationTimeline({
     () => new Map(),
   );
   const [fullscreenAppRowId, setFullscreenAppRowId] = useState<string | null>(null);
-  let paintedExpandedRunIds = expandedRunIds;
+  let paintedExpandedFoldKeys = expandedFoldKeys;
   let paintedExpandedWorkGroupIds = expandedWorkGroupIds;
   let paintedExpandedAttemptIds = expandedAttemptIds;
   const identityChanged = listState.identity !== listIdentityKey;
@@ -442,10 +443,10 @@ const ConversationTimeline = memo(function ConversationTimeline({
     // A viewer pinned in another thread must not keep live follow off here,
     // nor when that thread comes back.
     setFullscreenAppRowId(null);
-    paintedExpandedRunIds = rememberedPosition?.disclosures?.runs ?? new Set();
+    paintedExpandedFoldKeys = rememberedPosition?.disclosures?.folds ?? new Set();
     paintedExpandedWorkGroupIds = rememberedPosition?.disclosures?.workGroups ?? new Set();
     paintedExpandedAttemptIds = rememberedPosition?.disclosures?.attempts ?? new Set();
-    setExpandedRunIds(paintedExpandedRunIds);
+    setExpandedFoldKeys(paintedExpandedFoldKeys);
     setExpandedWorkGroupIds(paintedExpandedWorkGroupIds);
     setExpandedAttemptIds(paintedExpandedAttemptIds);
   }
@@ -499,14 +500,14 @@ const ConversationTimeline = memo(function ConversationTimeline({
     return disclosureAnchorKey === null || row.id === disclosureAnchorKey;
   };
 
-  const onToggleTurnFold = (runId: RunId) => {
-    suspendEndScrollMaintenanceForDisclosure(`turn-fold:${runId}`);
-    setExpandedRunIds((existing) => {
+  const onToggleTurnFold = (foldKey: string) => {
+    suspendEndScrollMaintenanceForDisclosure(`turn-fold:${foldKey}`);
+    setExpandedFoldKeys((existing) => {
       const next = new Set(existing);
-      if (next.has(runId)) {
-        next.delete(runId);
+      if (next.has(foldKey)) {
+        next.delete(foldKey);
       } else {
-        next.add(runId);
+        next.add(foldKey);
       }
       return next;
     });
@@ -536,46 +537,9 @@ const ConversationTimeline = memo(function ConversationTimeline({
     });
   };
 
-  // An interrupted run opens its fold; a newer run closes the previous run's.
-  const [observedLatestRun, setObservedLatestRun] = useState({
-    identity: listIdentityKey,
-    runId: latestRun?.runId,
-    status: latestRun?.status,
-  });
-  if (
-    observedLatestRun.identity !== listIdentityKey ||
-    observedLatestRun.runId !== latestRun?.runId ||
-    observedLatestRun.status !== latestRun?.status
-  ) {
-    setObservedLatestRun({
-      identity: listIdentityKey,
-      runId: latestRun?.runId,
-      status: latestRun?.status,
-    });
-    const previousRunId = observedLatestRun.runId;
-    if (
-      observedLatestRun.identity === listIdentityKey &&
-      latestRun &&
-      previousRunId !== undefined
-    ) {
-      if (latestRun.runId === previousRunId) {
-        if (observedLatestRun.status === "running" && latestRun.status === "interrupted") {
-          setExpandedRunIds((existing) => new Set(existing).add(latestRun.runId));
-        }
-      } else {
-        setExpandedRunIds((existing) => {
-          if (!existing.has(previousRunId)) return existing;
-          const next = new Set(existing);
-          next.delete(previousRunId);
-          return next;
-        });
-      }
-    }
-  }
-
   // Imported turns and post-steer work fold under synthetic keys, not the entries' run ids.
-  const findFoldRunIds = findActive
-    ? timelineTurnFoldRunIdsByEntryId({
+  const findFoldKeys = findActive
+    ? timelineTurnFoldKeysByEntryId({
         timelineEntries,
         latestRun,
         runningRunId,
@@ -583,14 +547,14 @@ const ConversationTimeline = memo(function ConversationTimeline({
         runlessWorkActive,
       })
     : null;
-  const activeFindRunId =
-    findActive && activeFindMatch ? findFoldRunIds?.get(activeFindMatch.entryId) : undefined;
-  const [expandedFindRunId, setExpandedFindRunId] = useState<RunId | undefined>();
-  if (expandedFindRunId !== activeFindRunId) {
-    setExpandedFindRunId(activeFindRunId);
-    if (activeFindRunId) {
-      setExpandedRunIds((previous) =>
-        previous.has(activeFindRunId) ? previous : new Set(previous).add(activeFindRunId),
+  const activeFindFoldKey =
+    findActive && activeFindMatch ? findFoldKeys?.get(activeFindMatch.entryId) : undefined;
+  const [expandedFindFoldKey, setExpandedFindFoldKey] = useState<string | undefined>();
+  if (expandedFindFoldKey !== activeFindFoldKey) {
+    setExpandedFindFoldKey(activeFindFoldKey);
+    if (activeFindFoldKey) {
+      setExpandedFoldKeys((previous) =>
+        previous.has(activeFindFoldKey) ? previous : new Set(previous).add(activeFindFoldKey),
       );
     }
   }
@@ -614,9 +578,9 @@ const ConversationTimeline = memo(function ConversationTimeline({
         )
       : undefined;
   if (citationRequest && citedEntry) {
-    const citedRunId = (
-      findFoldRunIds ??
-      timelineTurnFoldRunIdsByEntryId({
+    const citedFoldKey = (
+      findFoldKeys ??
+      timelineTurnFoldKeysByEntryId({
         timelineEntries,
         latestRun,
         runningRunId,
@@ -625,9 +589,9 @@ const ConversationTimeline = memo(function ConversationTimeline({
       })
     ).get(citedEntry.id);
     setCitationExpandedFor(citationRequest.key);
-    if (citedRunId) {
-      setExpandedRunIds((previous) =>
-        previous.has(citedRunId) ? previous : new Set(previous).add(citedRunId),
+    if (citedFoldKey) {
+      setExpandedFoldKeys((previous) =>
+        previous.has(citedFoldKey) ? previous : new Set(previous).add(citedFoldKey),
       );
     }
     const citedAttempt = citedEntry.attempt;
@@ -637,10 +601,10 @@ const ConversationTimeline = memo(function ConversationTimeline({
       );
     }
   }
-  const visibleExpandedRunIds =
-    !activeFindRunId || paintedExpandedRunIds.has(activeFindRunId)
-      ? paintedExpandedRunIds
-      : new Set(paintedExpandedRunIds).add(activeFindRunId);
+  const visibleExpandedFoldKeys =
+    !activeFindFoldKey || paintedExpandedFoldKeys.has(activeFindFoldKey)
+      ? paintedExpandedFoldKeys
+      : new Set(paintedExpandedFoldKeys).add(activeFindFoldKey);
 
   const activeFindAttemptId = activeFindMatch
     ? timelineEntries.find((entry) => entry.id === activeFindMatch.entryId)?.attempt?.id
@@ -669,7 +633,7 @@ const ConversationTimeline = memo(function ConversationTimeline({
     pendingApprovalRequestIds,
     latestRun,
     runningRunId,
-    expandedRunIds: visibleExpandedRunIds,
+    expandedFoldKeys: visibleExpandedFoldKeys,
     expandedAttemptIds: visibleExpandedAttemptIds,
     expandedWorkGroupIds,
     isWorking,
@@ -695,6 +659,48 @@ const ConversationTimeline = memo(function ConversationTimeline({
     (approval) =>
       isVisiblePendingApproval(approval) && !matchedApprovalRequestIds.has(approval.requestId),
   );
+
+  const runFoldKeys = (runId: RunId) =>
+    rows.flatMap((row) => (row.kind === "turn-fold" && row.runId === runId ? [row.foldKey] : []));
+
+  // An in-session interrupt leaves its turn expanded so the user keeps their
+  // place; the next turn (or a reload, since this is local state) folds it.
+  const [observedLatestRun, setObservedLatestRun] = useState({
+    identity: listIdentityKey,
+    runId: latestRun?.runId,
+    status: latestRun?.status,
+  });
+  if (
+    observedLatestRun.identity !== listIdentityKey ||
+    observedLatestRun.runId !== latestRun?.runId ||
+    observedLatestRun.status !== latestRun?.status
+  ) {
+    setObservedLatestRun({
+      identity: listIdentityKey,
+      runId: latestRun?.runId,
+      status: latestRun?.status,
+    });
+    const previousRunId = observedLatestRun.runId;
+    if (
+      observedLatestRun.identity === listIdentityKey &&
+      latestRun &&
+      previousRunId !== undefined
+    ) {
+      if (latestRun.runId === previousRunId) {
+        if (observedLatestRun.status === "running" && latestRun.status === "interrupted") {
+          const interruptedKeys = [latestRun.runId, ...runFoldKeys(latestRun.runId)];
+          setExpandedFoldKeys((existing) => new Set([...existing, ...interruptedKeys]));
+        }
+      } else {
+        setExpandedFoldKeys((existing) => {
+          const next = new Set(
+            [...existing].filter((key) => !runFoldSegmentKeyIsForRun(key, previousRunId)),
+          );
+          return next.size === existing.size ? existing : next;
+        });
+      }
+    }
+  }
   // Run status/timestamps change per stream event; keep them out of shared row context.
   const runs = useStableHandoffRuns(runsProp);
   const minimapItems = deriveTimelineMinimapItems(rows);
@@ -913,7 +919,7 @@ const ConversationTimeline = memo(function ConversationTimeline({
           scrollOffset: element.scrollTop,
           atEnd: isAtEnd,
           disclosures: {
-            runs: paintedExpandedRunIds,
+            folds: paintedExpandedFoldKeys,
             workGroups: paintedExpandedWorkGroupIds,
             attempts: paintedExpandedAttemptIds,
             workGroupState: workGroupViewState,
@@ -1173,7 +1179,7 @@ const ConversationTimeline = memo(function ConversationTimeline({
     threadKey: listIdentityKey,
     navigate: navigateTimeline,
     timelineViewportElement,
-    findFoldRunIds,
+    findFoldKeys,
     timelineEntries,
     latestRun,
     runningRunId,
@@ -1480,6 +1486,7 @@ const TimelineRowContent = memo(function TimelineRowContent({ row }: { row: Time
               groupedEntries={row.groupedEntries}
               isExpandedToolGroup={row.isExpandedToolGroup}
               displayLabel={row.displayLabel}
+              liveEntryId={row.liveEntryId}
             />
           ) : null}
           {row.kind === "work-live" ? <LiveWorkEntryTimelineRow row={row} /> : null}
@@ -1637,7 +1644,7 @@ function WorkHistorySkeleton() {
 function TurnFoldTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "turn-fold" }> }) {
   const ctx = use(TimelineRowCtx);
   const { loading, error, toggle } = useDeferredWorkLoading(row, () =>
-    ctx.onToggleTurnFold(row.runId),
+    ctx.onToggleTurnFold(row.foldKey),
   );
 
   return (
