@@ -145,6 +145,12 @@ const PI_SESSION_TIMEOUT_MS = 60_000;
  * longer falls back to a new session.
  */
 const SESSION_LEASE_RETRY = Schedule.spaced(Duration.seconds(1)).pipe(Schedule.upTo({ times: 15 }));
+/**
+ * What a session resumed at launch may run before its thread registers: the
+ * events T3 holds, and how long it waits for the registration.
+ */
+const PRE_REGISTRATION_EVENT_LIMIT = 2_000;
+const PRE_REGISTRATION_GRACE = Duration.seconds(30);
 const SETTLE_PROBE_MAX_ATTEMPTS = 3;
 const SETTLE_PROBE_RETRY_DELAY = Duration.millis(100);
 /** Idle-probe flavors re-read state while a retry, compaction, or queued action is still running. */
@@ -450,6 +456,20 @@ const PI_SESSION_SCOPED_EVENTS: ReadonlySet<string> = new Set([
   "observed_session_event",
   "observed_session_closed",
 ]);
+
+/** Whether an event belongs to the parent's own native work, which a wake holds back. */
+function isParentWorkEvent(event: PiRpcRecord): boolean {
+  const type = String(event["type"]);
+  const interactiveUiRequest =
+    type === "extension_ui_request" &&
+    ["select", "confirm", "input", "editor"].includes(String(event["method"]));
+  return (
+    !interactiveUiRequest &&
+    !type.startsWith("t3.") &&
+    type !== "response" &&
+    !PI_SESSION_SCOPED_EVENTS.has(type)
+  );
+}
 
 function itemScope(sink: PiItemSink): PiItemScope {
   if ("scope" in sink) return sink.scope;
@@ -758,6 +778,12 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
       let daemonLostSession = false;
       let unsolicitedActivityDetected = false;
       let pendingWake: PiWake | null = null;
+      /**
+       * Native work a session resumed at launch started before its thread
+       * registered, oldest first. The session file is known at launch, so the
+       * work is the thread's own; `registerThread` replays it as a wake.
+       */
+      let preRegistrationEvents: Array<PiRpcRecord> | null = null;
       /** Idle release cancels Prime Agent's quota wake; keep it loaded until a reply works. */
       let quotaParkedUntil: DateTime.Utc | null = null;
       let rollbackBarrier: Deferred.Deferred<
@@ -769,6 +795,7 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
         Effect.gen(function* () {
           closed = true;
           pendingWake = null;
+          preRegistrationEvents = null;
           if (rollbackBarrier !== null)
             yield* Deferred.fail(
               rollbackBarrier,
@@ -856,14 +883,14 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
 
       const lostDaemonSessionDetail = `${name}'s daemon lost this session. T3 is restarting it; send your message again`;
       /**
-       * These RPC requests address the connection's bound session. Prime's
-       * error names its daemon id, which differs from get_state.sessionId.
-       * Child tool failures arrive as tool events, not failed RPC responses.
+       * "Unknown active session" names the session the command addressed. The RPC addresses the
+       * bound one for a command that names none, so only such a command can report it lost; one
+       * that names a child (observe, unobserve) learns about the child, and the parent is fine.
        */
-      const isLostDaemonSession = (errorText: unknown) => {
-        const id = unknownActiveSessionId(errorText);
-        return flavor.restartsOnLostDaemonSession && id !== undefined;
-      };
+      const isLostDaemonSession = (errorText: unknown, failed?: PiRpcRecord) =>
+        flavor.restartsOnLostDaemonSession &&
+        unknownActiveSessionId(errorText) !== undefined &&
+        failed?.["activeSessionId"] === undefined;
       /**
        * The daemon lost the session but the process stays alive, so every
        * request through it fails. End it the way Stop does: the session stops
@@ -883,7 +910,7 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
         connection.request(record, timeoutMs).pipe(
           Effect.catchTags({
             PiRpcError: (error) =>
-              isLostDaemonSession(error.cause)
+              isLostDaemonSession(error.cause, record)
                 ? retireLostDaemonSession.pipe(
                     Effect.andThen(
                       Effect.fail(
@@ -2261,6 +2288,36 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
         yield* connection.terminate;
       });
 
+      /** Ends the session over agent work no thread owns, which would run unseen. */
+      const stopForUnsolicitedActivity = Effect.gen(function* () {
+        unsolicitedActivityDetected = true;
+        preRegistrationEvents = null;
+        yield* updateProviderSession("error", unsolicitedActivityError);
+        yield* connection.terminate;
+      });
+
+      /**
+       * Holds the work a resumed session started before its thread registered.
+       * Work no registration claims within the grace period is unowned.
+       */
+      const holdUntilThreadRegisters = Effect.fnUntraced(function* (firstEvent: PiRpcRecord) {
+        const held = [firstEvent];
+        preRegistrationEvents = held;
+        yield* updateProviderSession("running", null);
+        yield* Effect.sleep(PRE_REGISTRATION_GRACE).pipe(
+          Effect.andThen(
+            sessionEventPermit.withPermits(1)(
+              Effect.suspend(() =>
+                preRegistrationEvents === held && !closed
+                  ? stopForUnsolicitedActivity
+                  : Effect.void,
+              ),
+            ),
+          ),
+          Effect.forkIn(scope),
+        );
+      });
+
       /**
        * Records why a settle probe found the agent busy, or that it got no
        * answer. It gets a span of its own because only logs inside a span
@@ -2459,6 +2516,13 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
       });
 
       const handleSessionEvent = Effect.fnUntraced(function* (event: PiRpcRecord) {
+        if (preRegistrationEvents !== null && isParentWorkEvent(event)) {
+          if (preRegistrationEvents.length >= PRE_REGISTRATION_EVENT_LIMIT) {
+            return yield* stopForUnsolicitedActivity;
+          }
+          preRegistrationEvents.push(event);
+          return;
+        }
         // Cache usage has its own identity, finer than the reconciler's: a
         // reply can share a timestamp with an earlier one and still be new.
         const liveTurn = threadState?.activeTurn ?? null;
@@ -2473,17 +2537,7 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
         const message = event["message"];
         if (event["type"] === "message_end" && isWorkingReply(message)) quotaParkedUntil = null;
         // Model hooks can show dialogs before turn ownership; keep requests session-scoped and buffer output.
-        const interactiveUiRequest =
-          event["type"] === "extension_ui_request" &&
-          ["select", "confirm", "input", "editor"].includes(String(event["method"]));
-        if (
-          threadState?.activeTurn === null &&
-          pendingWake !== null &&
-          !interactiveUiRequest &&
-          !String(event["type"]).startsWith("t3.") &&
-          event["type"] !== "response" &&
-          !PI_SESSION_SCOPED_EVENTS.has(String(event["type"]))
-        ) {
+        if (threadState?.activeTurn === null && pendingWake !== null && isParentWorkEvent(event)) {
           const wake = pendingWake;
           wake.events.push(event);
           if (event["type"] === "agent_start") yield* updateProviderSession("running", null);
@@ -2543,10 +2597,19 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
               if (!flavor.wakeNotices) yield* offerWake(wake, state.providerThread.appThreadId);
               return;
             }
+            if (
+              turn === null &&
+              state === null &&
+              flavor.resumesAtLaunch &&
+              liveSession !== null &&
+              !closed &&
+              !stopRequested
+            ) {
+              yield* holdUntilThreadRegisters(event);
+              return;
+            }
             if (turn === null) {
-              unsolicitedActivityDetected = true;
-              yield* updateProviderSession("error", unsolicitedActivityError);
-              yield* connection.terminate;
+              yield* stopForUnsolicitedActivity;
               return;
             }
             turn.sawAgentActivity = true;
@@ -3102,6 +3165,7 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
           sessionEventPermit.withPermits(1)(
             Effect.gen(function* () {
               pendingWake = null;
+              preRegistrationEvents = null;
               const state = threadState;
               if (rollbackBarrier !== null)
                 yield* Deferred.fail(
@@ -3162,6 +3226,15 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
       // wake. The reconciler checks quiet sessions against Prime Agent's state.
       yield* reconciler.watch.pipe(Effect.forkIn(scope));
 
+      /** Replays the work a resumed session started before its thread registered, now as a wake. */
+      const adoptPreRegistrationWork = Effect.gen(function* () {
+        const held = preRegistrationEvents;
+        if (held === null) return;
+        preRegistrationEvents = null;
+        if (closed || stopRequested) return;
+        for (const event of held) yield* handleSessionEvent(event);
+      });
+
       const registerThread = Effect.fnUntraced(function* (
         threadInput: ProviderAdapter.ProviderAdapterV2EnsureThreadInput,
         publish = true,
@@ -3198,6 +3271,11 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
           flavor.resumesAtLaunch && resumeId != null && resumeId === liveSession;
         registrationAttempted = true;
         if ((resumeId != null && !alreadyOnSession) || needsNewSession) {
+          if (preRegistrationEvents !== null) {
+            // The work belongs to the session this switch replaces, not to this thread.
+            yield* stopForUnsolicitedActivity;
+            return yield* protocolError(`${name} ran work on a session this thread does not use`);
+          }
           lastNativeThreadId = resumeId ?? lastNativeThreadId;
           // Failed lifecycle operations can still change native sessions; invalidate bindings and defaults.
           threadState = null;
@@ -3336,6 +3414,7 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
             driver,
             providerThread: state.providerThread,
           });
+        yield* sessionEventPermit.withPermits(1)(adoptPreRegistrationWork);
         return state.providerThread;
       });
 
