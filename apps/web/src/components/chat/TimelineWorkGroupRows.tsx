@@ -57,6 +57,8 @@ import {
   workEntryIconName,
 } from "./TimelineWorkEntryRow.logic";
 import { formatWorkingTimerNow } from "./TimelineWorkGroupRows.logic";
+import { HighlightedCode } from "./HighlightedCode";
+import { workEntryLabelCode } from "@t3tools/client-runtime/work-log/entry-code";
 
 export const WorkGroupSection = memo(function WorkGroupSection({
   anchorKey,
@@ -487,6 +489,7 @@ export function LiveWorkEntryTimelineRow({
   const failed = workEntryDisplayIndicatesToolFailure(row.entry);
   const thoughtLine = row.thought && !row.expanded ? liveThoughtLine(row.thought.detail ?? "") : "";
   const thoughtIsStatus = thoughtLine !== "" && row.entry === row.thought;
+  const labelCode = questionHeading ? null : workEntryLabelCode(row.entry, label);
 
   return (
     <button
@@ -558,6 +561,15 @@ export function LiveWorkEntryTimelineRow({
               environmentId={ctx.activeThreadEnvironmentId}
               linked={false}
             />
+          ) : labelCode !== null ? (
+            <span className="font-mono text-(length:--font-size-code,var(--text-xs))">
+              <HighlightedCode
+                code={labelCode.code}
+                language={labelCode.language}
+                theme={ctx.resolvedTheme}
+                kind="label"
+              />
+            </span>
           ) : (
             label
           )
