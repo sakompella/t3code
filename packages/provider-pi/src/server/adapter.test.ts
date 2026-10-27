@@ -10882,6 +10882,72 @@ describe("PiAdapterV2 with the Prime Agent flavor", () => {
       }).pipe(Effect.scoped, Effect.provide(layerTest)),
     );
 
+    it.effect("keeps the held wake's notice and reply when the session already stored them", () =>
+      Effect.gen(function* () {
+        const fake = yield* makeFakePi;
+        const { runtime, takeEvent, offers } = yield* openResumed(fake);
+        const childMessage = {
+          role: "custom",
+          customType: "agent_message",
+          content: "[agent-message from child:worker]\n\nchild-ok",
+          details: {
+            message: "child-ok",
+            from: { sessionName: "worker", runtimeKind: "subagent" },
+            fromRelationship: "child",
+          },
+          timestamp: 1_700_000_000_100,
+        };
+        const reply = {
+          role: "assistant",
+          content: [{ type: "text", text: "The child said child-ok" }],
+          stopReason: "stop",
+          timestamp: 1_700_000_000_200,
+        };
+        yield* fake.emit({ type: "agent_start" });
+        yield* fake.emit({ type: "message_start", message: childMessage });
+        yield* fake.emit({ type: "message_end", message: childMessage });
+        yield* fake.emit({ type: "message_start", message: { ...reply, content: [] } });
+        yield* fake.emit({
+          type: "message_update",
+          assistantMessageEvent: {
+            type: "text_delta",
+            contentIndex: 0,
+            delta: "The child said child-ok",
+          },
+        });
+        yield* fake.emit({ type: "message_end", message: reply });
+        yield* fake.emit({ type: "agent_end", messages: [childMessage, reply] });
+        const started = yield* takeNativeWorkOutcome(takeEvent);
+        assert.equal(started?.status, "running", started?.lastError ?? undefined);
+        fake.setTranscript([childMessage, reply]);
+
+        const providerThread = yield* runtime.ensureThread({
+          threadId: THREAD_ID,
+          modelSelection: modelSelection("default"),
+          runtimePolicy,
+        });
+        const offer = yield* Queue.take(offers);
+        assert.equal(offer.notification?.summary, "Message from worker");
+        const dispatched = yield* offer.dispatchIfCurrent!(Effect.succeed("dispatched"));
+        assert.isTrue(Option.isSome(dispatched));
+        yield* startTurn(
+          runtime,
+          providerThread,
+          "default",
+          [],
+          "Background activity updated",
+          undefined,
+          1,
+          THREAD_ID,
+          "provider",
+        );
+        assert.deepEqual(yield* takeRepliesAndOutcome(takeEvent), {
+          texts: ["The child said child-ok"],
+          status: "completed",
+        });
+      }).pipe(Effect.scoped, Effect.provide(layerTest)),
+    );
+
     it.effect("lets the user's turn join the held work as it would any pending wake", () =>
       Effect.gen(function* () {
         const fake = yield* makeFakePi;

@@ -324,24 +324,35 @@ export function makePrimeAgentReconciler<E>(input: {
   let seededSession: string | null = null;
 
   /**
-   * Everything `sessionFile` stored so far is history T3 did not stream. If the read fails, earlier
-   * content is told apart by timestamp. A session already seeded keeps its ledger so unaccounted
-   * messages still reach T3.
+   * Everything `sessionFile` stored so far is history T3 did not stream, except the messages of
+   * `heldEvents`: live work T3 holds until the thread registers, which replays after this. If the
+   * read fails, earlier content is told apart by timestamp. A session already seeded keeps its
+   * ledger so unaccounted messages still reach T3.
    */
-  const baseline = Effect.fnUntraced(function* (sessionFile: string) {
+  const baseline = Effect.fnUntraced(function* (
+    sessionFile: string,
+    heldEvents: ReadonlyArray<PiRpcRecord> = [],
+  ) {
     if (!enabled || (ledger !== null && seededSession === sessionFile)) return;
     ledger = null;
     seededSession = sessionFile;
     const readAt = yield* Clock.currentTimeMillis;
-    const messages = yield* readHistory(request, HISTORY_READ_TIMEOUT_MS);
+    const stored = yield* readHistory(request, HISTORY_READ_TIMEOUT_MS);
     ledger = {
       keys: new Set(),
       toolCalls: new Set(),
       historyMark: 0,
-      storedBefore: messages === undefined ? readAt : 0,
+      storedBefore: stored === undefined ? readAt : 0,
     };
-    if (messages !== undefined) commit(messages);
-    input.seedCache(messages ?? []);
+    const heldKeys = new Set(
+      heldEvents.flatMap((event) => transcriptMessageKey(eventMessage(event)) ?? []),
+    );
+    const history = (stored ?? []).filter((message) => {
+      const key = transcriptMessageKey(message);
+      return key === undefined || !heldKeys.has(key);
+    });
+    if (stored !== undefined) commit(history, stored.length);
+    input.seedCache(history);
   });
 
   /** A live event about a message or tool an earlier turn already accounted for. */

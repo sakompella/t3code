@@ -3406,8 +3406,8 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
             state.providerThread = { ...providerThread, nativeConversationHeadRef: null };
           }
         }
-        // What is stored now predates this view of the session.
-        yield* reconciler.baseline(nativeId);
+        // What is stored now predates this view of the session, except the work held for it.
+        yield* reconciler.baseline(nativeId, preRegistrationEvents ?? []);
         if (publish)
           yield* emit({
             type: "provider_thread.updated",
