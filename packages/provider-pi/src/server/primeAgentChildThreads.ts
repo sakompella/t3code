@@ -63,10 +63,13 @@ type RlmChildDecision =
       readonly turn: ActivePiTurn;
     }
   | {
+      /** No turn can take the card yet; the next turn that starts does. */
+      readonly outcome: "held";
+    }
+  | {
       readonly outcome: "dropped";
       readonly reason:
         | "missing-child-id"
-        | "no-turn"
         | "terminal-for-unseen-child"
         | "terminal-already-settled";
     };
@@ -109,6 +112,23 @@ function noticedChildEnd(
     default:
       return undefined;
   }
+}
+
+/**
+ * The children a `rlm_children_resumed` notice says run again. The 0.10 fork
+ * sends it when a restart cut its children and the parent came back.
+ */
+function noticedResumedChildIds(message: unknown): ReadonlyArray<string> {
+  if (
+    recordString(message, "role") !== "custom" ||
+    recordString(message, "customType") !== "rlm_children_resumed"
+  )
+    return [];
+  const children = recordField(recordField(message, "details"), "children");
+  return (Array.isArray(children) ? children : []).flatMap((child) => {
+    const childId = recordString(child, "childId");
+    return childId === undefined || recordString(child, "outcome") === "failed" ? [] : [childId];
+  });
 }
 
 function rlmChildStatus(
@@ -193,6 +213,13 @@ export function makePrimeAgentChildThreads(input: {
     settleOpenTools,
   } = input.items;
   const rlmChildren = new Map<string, PiRlmChildState>();
+  /**
+   * Children the daemon resumed after a restart. T3 cancelled their cards and
+   * may never see them run, so even a first update that is terminal is news.
+   */
+  const resumedChildIds = new Set<string>();
+  /** The latest update of each child no turn could take yet, in arrival order. */
+  const heldUpdates = new Map<string, unknown>();
   const rlmTranscripts = new Map<string, PiChildTranscript>();
   const observedTranscripts = new Map<string, PiChildTranscript>();
   const openChildTranscript = Effect.fnUntraced(function* (input: {
@@ -529,7 +556,8 @@ export function makePrimeAgentChildThreads(input: {
     decision: RlmChildDecision,
   ) => {
     const session = sessionThread();
-    const turn = decision.outcome === "dropped" ? null : decision.turn;
+    const turn =
+      decision.outcome === "dropped" || decision.outcome === "held" ? null : decision.turn;
     return Effect.logInfo("orchestration-v2.prime-agent-rlm-child-update").pipe(
       Effect.annotateLogs({
         driver,
@@ -705,15 +733,26 @@ export function makePrimeAgentChildThreads(input: {
         ? parentChild.turn
         : (currentTurn ?? parentChild?.turn ?? null);
     const turn = previous?.turn ?? launchingTurn;
-    if (turn === null) {
+    const status = statusOverride ?? rlmChildStatus(recordString(snapshot, "status"));
+    const terminal = status !== "pending" && status !== "running";
+    if (
+      previous === undefined &&
+      terminal &&
+      !resumedChildIds.has(childId) &&
+      !heldUpdates.has(childId)
+    ) {
       yield* traceRlmChildUpdate(snapshot, currentTurn, source, {
         outcome: "dropped",
-        reason: "no-turn",
+        reason: "terminal-for-unseen-child",
       });
       return;
     }
-    const status = statusOverride ?? rlmChildStatus(recordString(snapshot, "status"));
-    const terminal = status !== "pending" && status !== "running";
+    if (turn === null) {
+      heldUpdates.set(childId, snapshot);
+      yield* traceRlmChildUpdate(snapshot, currentTurn, source, { outcome: "held" });
+      return;
+    }
+    heldUpdates.delete(childId);
     if (previous !== undefined && parentTranscript !== undefined) {
       yield* moveUnderParentChild(childId, previous, parentTranscript, emittedAt);
     }
@@ -722,13 +761,6 @@ export function makePrimeAgentChildThreads(input: {
     // not rewrite that card from an unrelated turn.
     if (previous?.terminal && terminal) {
       yield* emitRetainedChildUpdate(childId, previous, snapshot, status, currentTurn, source);
-      return;
-    }
-    if (previous === undefined && terminal) {
-      yield* traceRlmChildUpdate(snapshot, currentTurn, source, {
-        outcome: "dropped",
-        reason: "terminal-for-unseen-child",
-      });
       return;
     }
     yield* traceRlmChildUpdate(snapshot, currentTurn, source, {
@@ -896,11 +928,54 @@ export function makePrimeAgentChildThreads(input: {
   });
 
   /**
+   * Shows resumed children from the roster: the daemon reports a child only when its status
+   * changes, and one running across a T3 restart never does. A notice from history may be old,
+   * so there only children still running count as resumed.
+   */
+  const showResumedChildren = Effect.fnUntraced(function* (
+    childIds: ReadonlyArray<string>,
+    currentTurn: ActivePiTurn | null,
+    from: "live" | "history",
+  ) {
+    if (from === "live") for (const childId of childIds) resumedChildIds.add(childId);
+    const roster = yield* request({ type: "get_rlm_children" }).pipe(Effect.option);
+    if (Option.isNone(roster)) {
+      yield* Effect.logWarning(`${name} could not read the resumed children's roster`, {
+        childIds,
+      });
+      return;
+    }
+    const children = recordField(roster.value, "children");
+    for (const snapshot of Array.isArray(children) ? children : []) {
+      const childId = recordString(snapshot, "id");
+      if (childId === undefined || !childIds.includes(childId)) continue;
+      if (from === "history") {
+        const status = rlmChildStatus(recordString(snapshot, "status"));
+        if (status !== "pending" && status !== "running") continue;
+        resumedChildIds.add(childId);
+      }
+      yield* emitRlmChild(snapshot, currentTurn);
+    }
+  });
+
+  /** Gives the turn that just started the cards no turn could take before. */
+  const adoptHeldUpdates = (turn: ActivePiTurn) =>
+    Effect.forEach(Array.from(heldUpdates.values()), (snapshot) => emitRlmChild(snapshot, turn), {
+      discard: true,
+    });
+
+  /**
    * Settles a child from the notice Prime Agent stored for its parent, for
    * when the roster update that said so was dropped. A child already settled
    * keeps its card.
    */
-  const settleFromNotice = Effect.fnUntraced(function* (message: unknown) {
+  const settleFromNotice = Effect.fnUntraced(function* (
+    message: unknown,
+    currentTurn: ActivePiTurn | null,
+  ) {
+    // A wake's replay applies its notice a second time.
+    const resumed = noticedResumedChildIds(message).filter((id) => !resumedChildIds.has(id));
+    if (resumed.length > 0) yield* showResumedChildren(resumed, currentTurn, "live");
     const noticed = noticedChildEnd(message);
     const child = noticed === undefined ? undefined : rlmChildren.get(noticed.childId);
     if (noticed === undefined || child === undefined || child.terminal) return;
@@ -913,6 +988,17 @@ export function makePrimeAgentChildThreads(input: {
       null,
       "transcript_notice",
     );
+  });
+
+  /**
+   * Applies the resume notices in the history read at attach, which counts
+   * them as seen: the daemon can write one before T3 reads events, or before
+   * this process launched.
+   */
+  const settleFromHistory = Effect.fnUntraced(function* (messages: ReadonlyArray<unknown>) {
+    const childIds = new Set(messages.flatMap(noticedResumedChildIds));
+    for (const childId of resumedChildIds) childIds.delete(childId);
+    if (childIds.size > 0) yield* showResumedChildren([...childIds], null, "history");
   });
 
   const interrupt = (turn?: ActivePiTurn) =>
@@ -931,10 +1017,16 @@ export function makePrimeAgentChildThreads(input: {
   return {
     handleEvent,
     settleFromNotice,
+    settleFromHistory,
+    adoptHeldUpdates,
     interrupt,
     hasLiveChildren: () =>
       Array.from(rlmChildren.values()).some(
         (child) => !child.terminal || child.followUpStartedAt !== null,
-      ),
+      ) ||
+      Array.from(heldUpdates.values()).some((snapshot) => {
+        const status = rlmChildStatus(recordString(snapshot, "status"));
+        return status === "pending" || status === "running";
+      }),
   };
 }
