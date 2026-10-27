@@ -221,6 +221,8 @@ interface FakePi {
   readonly queueHeartbeats: (data: unknown) => void;
   /** Make the next `list_heartbeats` ack fail. */
   readonly failNextHeartbeats: () => void;
+  /** The roster every later `get_rlm_children` ack reports. */
+  readonly setRlmChildren: (children: ReadonlyArray<unknown>) => void;
   readonly closeStdout: Effect.Effect<void>;
   readonly lastSpawn: () => {
     readonly args: ReadonlyArray<string>;
@@ -261,6 +263,7 @@ const makeFakePi: Effect.Effect<FakePi> = Effect.gen(function* () {
   const observedQueue: Array<ReadonlyArray<unknown>> = [];
   const commandsQueue: Array<{ readonly success: boolean; readonly data?: unknown }> = [];
   const heartbeatsQueue: Array<{ readonly success: boolean; readonly data?: unknown }> = [];
+  let rlmChildren: ReadonlyArray<unknown> = [];
   const allRequests: Array<PiRpcRecord> = [];
   let deferState = false;
   let deferredStateRequest: PiRpcRecord | undefined;
@@ -384,6 +387,8 @@ const makeFakePi: Effect.Effect<FakePi> = Effect.gen(function* () {
         return { ...base, ...(commandsQueue.shift() ?? { data: { commands: [] } }) };
       case "list_heartbeats":
         return { ...base, ...(heartbeatsQueue.shift() ?? { data: { heartbeats: [] } }) };
+      case "get_rlm_children":
+        return { ...base, data: { children: rlmChildren, eventSequence: 0 } };
       case "fork":
         return { ...base, data: { text: "Hello pi", cancelled: false } };
       case "navigate_tree":
@@ -566,6 +571,9 @@ const makeFakePi: Effect.Effect<FakePi> = Effect.gen(function* () {
     failNextCommands: () => commandsQueue.push({ success: false }),
     queueHeartbeats: (data) => heartbeatsQueue.push({ success: true, data }),
     failNextHeartbeats: () => heartbeatsQueue.push({ success: false }),
+    setRlmChildren: (children) => {
+      rlmChildren = children;
+    },
     closeStdout: Queue.end(stdout),
     lastSpawn: () => lastSpawn,
     setVersion: (next) => {
@@ -8846,12 +8854,14 @@ describe("PiAdapterV2 with the Prime Agent flavor", () => {
           const line = yield* Queue.take(traced);
           return [line.childId, line.outcome, line.reason, line.runId];
         });
-        // No turn is running, so a child nobody has seen has nowhere to go.
+        // No turn is running, so a child nobody has seen waits for the next one.
         yield* fake.emit(rlmChild("running", { id: "sub-late" }));
-        assert.deepEqual(yield* nextLine, ["sub-late", "dropped", "no-turn", null]);
+        assert.deepEqual(yield* nextLine, ["sub-late", "held", null, null]);
         yield* fake.emit(rlmChild("done"));
         assert.deepEqual(yield* nextLine, ["sub-1", "emitted", null, settledTurnRunId]);
-        // A later turn is running: now a repeat or a stranger is dropped for what it is.
+        // sub-late still runs, so the session keeps its background work.
+        assert.isTrue(yield* session.runtime.hasPendingBackgroundWork!);
+        // A later turn takes the held card; a repeat or a stranger is dropped for what it is.
         yield* startTurn(
           session.runtime,
           session.providerThread,
@@ -8861,6 +8871,12 @@ describe("PiAdapterV2 with the Prime Agent flavor", () => {
           undefined,
           2,
         );
+        assert.deepEqual(yield* nextLine, [
+          "sub-late",
+          "emitted",
+          null,
+          RunId.make(`run:${THREAD_ID}:2`),
+        ]);
         yield* fake.takeRequest("prompt");
         yield* fake.emit({ type: "agent_start" });
         yield* fake.emit(rlmChild("done"));
@@ -8873,6 +8889,149 @@ describe("PiAdapterV2 with the Prime Agent flavor", () => {
           null,
         ]);
       }).pipe(Effect.provide(captureChildUpdateLogs));
+    }).pipe(Effect.scoped, Effect.provide(layerTest)),
+  );
+
+  it.effect("gives a child that reports while no turn runs its card on the next turn", () =>
+    Effect.gen(function* () {
+      const fake = yield* makeFakePi;
+      const session = yield* openPrimeThread(fake);
+      // A restarted daemon resumes the child before T3 starts a turn.
+      yield* fake.emit(rlmChild("running", { id: "sub-r" }));
+      yield* fake.emit(rlmChild("done", { id: "sub-r", answerPreview: "resumed and done" }));
+      yield* startTurn(session.runtime, session.providerThread);
+      const card = yield* session.takeEvent(
+        (event) => event.type === "subagent.updated" && event.subagent.title === "worker",
+      );
+      assert.isTrue(
+        card.type === "subagent.updated" &&
+          card.subagent.status === "completed" &&
+          card.subagent.result === "resumed and done" &&
+          card.subagent.runId === RunId.make(`run:${THREAD_ID}:1`),
+      );
+    }).pipe(Effect.scoped, Effect.provide(layerTest)),
+  );
+
+  it.effect("shows children the daemon resumed after a restart, then their outcome", () =>
+    Effect.gen(function* () {
+      const fake = yield* makeFakePi;
+      const session = yield* openPrimeThread(fake);
+      yield* startTurn(session.runtime, session.providerThread);
+      yield* fake.takeRequest("prompt");
+      yield* fake.emit({ type: "agent_start" });
+      // Still running across a T3 restart, so the daemon sends no update for it.
+      fake.setRlmChildren([
+        rlmChild("running", { id: "sub-r", activeSessionId: "child-session" }).child,
+        rlmChild("done", { id: "sub-old" }).child,
+      ]);
+      yield* fake.emit({
+        type: "message_start",
+        message: {
+          role: "custom",
+          customType: "rlm_children_resumed",
+          content: "[children-resumed]",
+          display: true,
+          details: {
+            children: [
+              { childId: "sub-r", outcome: "still_running" },
+              { childId: "sub-lost", outcome: "failed", error: "Corrupt session lease" },
+            ],
+          },
+          timestamp: 2000,
+        },
+      });
+      yield* fake.takeRequest("get_rlm_children");
+      const running = yield* session.takeEvent((event) => event.type === "subagent.updated");
+      assert.isTrue(
+        running.type === "subagent.updated" &&
+          running.subagent.status === "running" &&
+          running.subagent.prompt === "Reply to your parent with child-ok",
+      );
+      yield* fake.emit(rlmChild("done", { id: "sub-r", answerPreview: "finished after resume" }));
+      const done = yield* session.takeEvent((event) => event.type === "subagent.updated");
+      assert.isTrue(
+        done.type === "subagent.updated" &&
+          done.subagent.status === "completed" &&
+          done.subagent.result === "finished after resume",
+      );
+    }).pipe(Effect.scoped, Effect.provide(layerTest)),
+  );
+
+  it.effect("shows a stored resume notice's children that still run, and only those", () =>
+    Effect.gen(function* () {
+      const fake = yield* makeFakePi;
+      // The daemon resumed the children before this process attached.
+      fake.setTranscript([
+        {
+          role: "custom",
+          customType: "rlm_children_resumed",
+          content: "[children-resumed]",
+          display: true,
+          details: {
+            children: [
+              { childId: "sub-r", outcome: "resumed" },
+              { childId: "sub-old", outcome: "resumed" },
+            ],
+          },
+          timestamp: 2000,
+        },
+      ]);
+      fake.setRlmChildren([
+        rlmChild("running", { id: "sub-r" }).child,
+        rlmChild("done", { id: "sub-old" }).child,
+      ]);
+      const session = yield* openPrimeThread(fake);
+      yield* fake.takeRequest("get_rlm_children");
+      yield* startTurn(session.runtime, session.providerThread);
+      const running = yield* session.takeEvent((event) => event.type === "subagent.updated");
+      assert.isTrue(running.type === "subagent.updated" && running.subagent.status === "running");
+      if (running.type !== "subagent.updated") return;
+      // The notice may be old, so the end of a child that had already finished is not news.
+      yield* fake.emit(rlmChild("done", { id: "sub-old" }));
+      yield* fake.emit(rlmChild("error", { id: "sub-r", error: "boom" }));
+      const next = yield* session.takeEvent((event) => event.type === "subagent.updated");
+      assert.isTrue(
+        next.type === "subagent.updated" &&
+          next.subagent.id === running.subagent.id &&
+          next.subagent.status === "failed" &&
+          next.subagent.result === "boom",
+      );
+    }).pipe(Effect.scoped, Effect.provide(layerTest)),
+  );
+
+  it.effect("detaches quietly when the process exits while no turn runs", () =>
+    Effect.gen(function* () {
+      const fake = yield* makeFakePi;
+      const session = yield* openPrimeThread(fake);
+      yield* fake.closeStdout;
+      const ended = yield* session.takeEvent((event) => event.type === "provider_session.updated");
+      assert.isTrue(
+        ended.type === "provider_session.updated" &&
+          ended.providerSession.status === "stopped" &&
+          ended.providerSession.lastError === null,
+      );
+    }).pipe(Effect.scoped, Effect.provide(layerTest)),
+  );
+
+  it.effect("fails the running turn when the process exits under it", () =>
+    Effect.gen(function* () {
+      const fake = yield* makeFakePi;
+      const session = yield* openPrimeThread(fake);
+      yield* startTurn(session.runtime, session.providerThread);
+      yield* fake.takeRequest("prompt");
+      yield* fake.emit({ type: "agent_start" });
+      yield* fake.closeStdout;
+      const terminal = yield* session.takeEvent((event) => event.type === "turn.terminal");
+      assert.isTrue(terminal.type === "turn.terminal" && terminal.status === "failed");
+      const ended = yield* session.takeEvent(
+        (event) =>
+          event.type === "provider_session.updated" && event.providerSession.status !== "running",
+      );
+      assert.isTrue(
+        ended.type === "provider_session.updated" &&
+          ended.providerSession.status === "error" &&
+          ended.providerSession.lastError?.includes("exited unexpectedly") === true,
+      );
     }).pipe(Effect.scoped, Effect.provide(layerTest)),
   );
 
