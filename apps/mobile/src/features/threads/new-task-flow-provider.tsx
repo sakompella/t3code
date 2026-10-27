@@ -425,7 +425,10 @@ export function NewTaskFlowProvider(
   const selectedModel = resolveNewTaskModelSelection({
     draftSelection: draftModelSelection,
     projectDefaultSelection: projectDefaultModelSelection,
+    configuredDefaultSelection: projectSettings.settings.defaultModelSelection,
     stickySelection: stickyModelSelection,
+    config: selectedEnvironmentServerConfig,
+    projectId: selectedProject?.id ?? null,
     modelOptions,
   });
   const selectedModelKey = selectedModel
