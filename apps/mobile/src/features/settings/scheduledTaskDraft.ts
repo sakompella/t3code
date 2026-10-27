@@ -40,7 +40,10 @@ export function scheduledTaskDefaultModel(
   return resolveNewTaskModelSelection({
     draftSelection: null,
     projectDefaultSelection,
+    configuredDefaultSelection: configured,
     stickySelection: null,
+    config,
+    projectId: project?.id ?? null,
     modelOptions: buildModelOptions(
       config,
       projectDefaultSelection,
