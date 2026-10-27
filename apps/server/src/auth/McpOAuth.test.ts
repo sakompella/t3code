@@ -7,10 +7,12 @@ import {
   mcpClientScopes,
 } from "@t3tools/contracts";
 import { expect, it } from "@effect/vitest";
+import * as ConfigProvider from "effect/ConfigProvider";
 import * as Context from "effect/Context";
 import * as Crypto from "effect/Crypto";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
+import * as Logger from "effect/Logger";
 import * as Etag from "effect/http/Etag";
 import * as HttpPlatform from "effect/http/HttpPlatform";
 import * as HttpRouter from "effect/http/HttpRouter";
@@ -40,7 +42,10 @@ const layerEnvironmentAuth = EnvironmentAuth.layer.pipe(
   Layer.provideMerge(ServerEnvironment.layerIdentity),
   Layer.provide(layerConfig),
 );
-const makeLayerRoutes = (capture: (auth: EnvironmentAuth.EnvironmentAuth["Service"]) => void) =>
+const makeLayerRoutes = (
+  capture: (auth: EnvironmentAuth.EnvironmentAuth["Service"]) => void,
+  extraResources: ReadonlyArray<string>,
+) =>
   Layer.mergeAll(
     Layer.effectDiscard(
       EnvironmentAuth.EnvironmentAuth.pipe(Effect.tap((auth) => Effect.sync(() => capture(auth)))),
@@ -49,7 +54,7 @@ const makeLayerRoutes = (capture: (auth: EnvironmentAuth.EnvironmentAuth["Servic
       Layer.provide(AuthHttp.layer),
       Layer.provide(
         McpOAuthHttp.layer.pipe(
-          Layer.provide(McpOAuth.layer),
+          Layer.provide(McpOAuth.layer(extraResources)),
           Layer.provide(ServerSettings.layerTest()),
         ),
       ),
@@ -88,14 +93,20 @@ type Handler = (request: Request) => Effect.Effect<Response>;
 
 const withRoutes = <A, E>(
   use: (handler: Handler, auth: EnvironmentAuth.EnvironmentAuth["Service"]) => Effect.Effect<A, E>,
+  { extraResources = [], logs }: { extraResources?: ReadonlyArray<string>; logs?: string[] } = {},
 ) =>
   Effect.gen(function* () {
     const crypto = yield* Crypto.Crypto;
-    const context = Context.make(Crypto.Crypto, crypto);
+    const context = Context.make(Crypto.Crypto, crypto).pipe(
+      Context.add(
+        Logger.CurrentLoggers,
+        new Set(logs ? [Logger.make(({ message }) => void logs.push(String(message)))] : []),
+      ),
+    );
     let routerAuth: EnvironmentAuth.EnvironmentAuth["Service"] | undefined;
     const layerRoutes = makeLayerRoutes((auth) => {
       routerAuth = auth;
-    });
+    }, extraResources);
     return yield* Effect.acquireUseRelease(
       Effect.sync(() => HttpRouter.toWebHandler(layerRoutes, { disableLogger: true })),
       (web) =>
@@ -577,6 +588,186 @@ it.live("one-click approves only access the browser session holds the scopes for
     }),
   ),
 );
+
+const TUNNEL_RESOURCE = "https://tunnel-service.example.test/tunnels/tunnel_1/mcp";
+
+const authorizeLocation = (handler: Handler, params: Record<string, string>) =>
+  handler(at(`/oauth/mcp/authorize?${new URLSearchParams(params)}`)).pipe(
+    Effect.map((response) => {
+      expect(response.status).toBe(302);
+      return new URL(response.headers.get("location")!, ORIGIN);
+    }),
+  );
+
+const authorizeAndApprove = (
+  handler: Handler,
+  auth: EnvironmentAuth.EnvironmentAuth["Service"],
+  clientId: string,
+  resource: string | undefined,
+) =>
+  Effect.gen(function* () {
+    const { resource: _canonical, ...rest } = authorizeParams(clientId);
+    const params = resource === undefined ? rest : { ...rest, resource };
+    const pairing = yield* auth.issuePairingCredential();
+    const approved = yield* decide(handler, params, {
+      _tag: "pairing-code",
+      access: "auto",
+      code: pairing.credential,
+    });
+    return new URL(approved.redirectTo!).searchParams.get("code")!;
+  });
+
+const redeem = (handler: Handler, clientId: string, code: string, resource: string | undefined) =>
+  handler(
+    at(
+      "/oauth/mcp/token",
+      form({
+        grant_type: "authorization_code",
+        code,
+        redirect_uri: authorizeParams(clientId).redirect_uri,
+        client_id: clientId,
+        code_verifier: verifier,
+        ...(resource === undefined ? {} : { resource }),
+      }),
+    ),
+  );
+
+it.live("issues a token for a configured extra resource, normalized, at authorize and token", () =>
+  withRoutes(
+    (handler, auth) =>
+      Effect.gen(function* () {
+        const clientId = yield* registeredClientId(handler);
+        const code = yield* authorizeAndApprove(handler, auth, clientId, `${TUNNEL_RESOURCE}/`);
+        const response = yield* redeem(handler, clientId, code, TUNNEL_RESOURCE);
+        expect(response.status).toBe(200);
+        const token = yield* json<{ access_token: string }>(response);
+        const client = yield* auth.authenticateMcpClient(
+          HttpServerRequest.fromWeb(
+            at("/mcp", { headers: { authorization: `Bearer ${token.access_token}` } }),
+          ),
+        );
+        expect(client).toMatchObject({ label: "Claude Code" });
+
+        const canonical = yield* authorizeAndApprove(handler, auth, clientId, `${ORIGIN}/mcp`);
+        expect((yield* redeem(handler, clientId, canonical, undefined)).status).toBe(200);
+      }),
+    { extraResources: [TUNNEL_RESOURCE] },
+  ),
+);
+
+it.live("refuses a resource that is neither ours nor configured, and logs what it refused", () => {
+  const logs: string[] = [];
+  return withRoutes(
+    (handler) =>
+      Effect.gen(function* () {
+        const clientId = yield* registeredClientId(handler);
+        for (const resource of [
+          "https://tunnel-service.example.test/tunnels/tunnel_2/mcp",
+          `${TUNNEL_RESOURCE}#fragment`,
+          `${TUNNEL_RESOURCE}#`,
+          "not a url",
+        ]) {
+          const location = yield* authorizeLocation(handler, {
+            ...authorizeParams(clientId),
+            resource,
+          });
+          expect(location.origin).toBe("http://localhost:51234");
+          expect(location.searchParams.get("error")).toBe("invalid_target");
+          expect(location.searchParams.get("error_description")).toBe(
+            `This server only issues tokens for ${ORIGIN}/mcp.`,
+          );
+          expect(location.searchParams.get("iss")).toBe(ORIGIN);
+        }
+        expect(logs).toEqual([
+          `Rejected MCP OAuth resource "https://tunnel-service.example.test/tunnels/tunnel_2/mcp"; accepted: ${ORIGIN}/mcp, ${TUNNEL_RESOURCE}`,
+          `Rejected MCP OAuth resource "${TUNNEL_RESOURCE}#fragment"; accepted: ${ORIGIN}/mcp, ${TUNNEL_RESOURCE}`,
+          `Rejected MCP OAuth resource "${TUNNEL_RESOURCE}#"; accepted: ${ORIGIN}/mcp, ${TUNNEL_RESOURCE}`,
+          `Rejected MCP OAuth resource "not a url"; accepted: ${ORIGIN}/mcp, ${TUNNEL_RESOURCE}`,
+        ]);
+      }),
+    { extraResources: [TUNNEL_RESOURCE], logs },
+  );
+});
+
+it.live("accepts only its own resource when no extra resources are configured", () =>
+  withRoutes((handler, auth) =>
+    Effect.gen(function* () {
+      const clientId = yield* registeredClientId(handler);
+      const location = yield* authorizeLocation(handler, {
+        ...authorizeParams(clientId),
+        resource: TUNNEL_RESOURCE,
+      });
+      expect(location.searchParams.get("error")).toBe("invalid_target");
+
+      const code = yield* authorizeAndApprove(handler, auth, clientId, undefined);
+      expect((yield* redeem(handler, clientId, code, `${ORIGIN}/mcp/`)).status).toBe(200);
+    }),
+  ),
+);
+
+it.live("redeems a code only for the resource it was issued for", () => {
+  const logs: string[] = [];
+  return withRoutes(
+    (handler, auth) =>
+      Effect.gen(function* () {
+        const clientId = yield* registeredClientId(handler);
+        const refused = (code: string, resource: string | undefined) =>
+          redeem(handler, clientId, code, resource).pipe(
+            Effect.flatMap((response) =>
+              json<{ error: string }>(response).pipe(
+                Effect.map((body) => ({ status: response.status, error: body.error })),
+              ),
+            ),
+          );
+        const invalidGrant = { status: 400, error: "invalid_grant" };
+
+        const tunnelCode = yield* authorizeAndApprove(handler, auth, clientId, TUNNEL_RESOURCE);
+        expect(yield* refused(tunnelCode, `${ORIGIN}/mcp`)).toEqual(invalidGrant);
+        expect(logs.filter((line) => line.startsWith("Refused"))).toEqual([
+          `Refused MCP OAuth code for resource "${ORIGIN}/mcp"; issued for ${TUNNEL_RESOURCE}, accepted: ${ORIGIN}/mcp, ${TUNNEL_RESOURCE}`,
+        ]);
+
+        const canonicalCode = yield* authorizeAndApprove(handler, auth, clientId, `${ORIGIN}/mcp`);
+        expect(yield* refused(canonicalCode, TUNNEL_RESOURCE)).toEqual(invalidGrant);
+
+        const unboundCode = yield* authorizeAndApprove(handler, auth, clientId, undefined);
+        expect(yield* refused(unboundCode, TUNNEL_RESOURCE)).toEqual(invalidGrant);
+      }),
+    { extraResources: [TUNNEL_RESOURCE], logs },
+  );
+});
+
+it.live("reads extra resources from a comma-separated variable, where empty means none", () => {
+  const read = (value: string | undefined) =>
+    McpOAuth.extraResourcesConfig.pipe(
+      Effect.provide(
+        ConfigProvider.layer(
+          ConfigProvider.fromEnv({
+            env: value === undefined ? {} : { T3CODE_MCP_OAUTH_EXTRA_RESOURCES: value },
+          }),
+        ),
+      ),
+    );
+  return Effect.gen(function* () {
+    for (const none of [undefined, "", "  ", " , "]) {
+      expect(yield* read(none)).toEqual([]);
+    }
+    expect(yield* read(` ${TUNNEL_RESOURCE}/ , https://other.example.test/mcp?x=1 `)).toEqual([
+      TUNNEL_RESOURCE,
+      "https://other.example.test/mcp",
+    ]);
+    for (const malformed of [
+      `${TUNNEL_RESOURCE},not a url`,
+      `${TUNNEL_RESOURCE}#fragment`,
+      `${TUNNEL_RESOURCE}#`,
+      "ftp://other.example.test/mcp",
+    ]) {
+      const error = yield* read(malformed).pipe(Effect.flip);
+      expect(String(error)).toContain("T3CODE_MCP_OAUTH_EXTRA_RESOURCES");
+      expect(String(error)).toContain("Expected an http(s) URL without a fragment");
+    }
+  });
+});
 
 it("matches loopback redirects on everything but the port, and https redirects exactly", () => {
   const matches = McpOAuth.redirectMatches;
