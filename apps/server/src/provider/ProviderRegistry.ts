@@ -202,6 +202,21 @@ const shouldRetainMissingOpenCodeMetadata = (provider: ServerProvider): boolean 
   provider.driver === ProviderDriverKind.make("opencode") &&
   shouldRetainMissingProviderModels(provider);
 
+const PI_FAMILY_DRIVERS: ReadonlySet<ProviderDriverKind> = new Set([
+  ProviderDriverKind.make("pi"),
+  ProviderDriverKind.make("primeAgent"),
+]);
+
+/**
+ * An unknown account means the snapshot came from the boot placeholder or a slow or failed probe,
+ * so it must not blank the cached command and skill lists. A missing binary still clears them.
+ */
+const shouldRetainMissingPiCommands = (provider: ServerProvider): boolean =>
+  PI_FAMILY_DRIVERS.has(provider.driver) &&
+  provider.enabled &&
+  provider.installed &&
+  provider.auth.status === "unknown";
+
 const mergeProviderModels = (
   provider: ServerProvider,
   previousModels: ReadonlyArray<ServerProvider["models"][number]>,
@@ -276,6 +291,15 @@ export const mergeProviderSnapshot = (
         ? { workspaceSnapshots: previousProvider.workspaceSnapshots }
         : {}),
     ...(shouldRetainMissingOpenCodeMetadata(nextProvider)
+      ? {
+          slashCommands:
+            nextProvider.slashCommands.length === 0
+              ? previousProvider.slashCommands
+              : nextProvider.slashCommands,
+          skills: nextProvider.skills.length === 0 ? previousProvider.skills : nextProvider.skills,
+        }
+      : {}),
+    ...(shouldRetainMissingPiCommands(nextProvider)
       ? {
           slashCommands:
             nextProvider.slashCommands.length === 0

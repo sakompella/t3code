@@ -1,4 +1,5 @@
 // @effect-diagnostics globalDate:off -- UI snooze presets use local calendar boundaries and Intl labels.
+import { isSnoozeActive } from "@t3tools/shared/threadSnooze";
 import * as DateTime from "effect/DateTime";
 
 import type { EnvironmentThreadShell, PendingSubagentRequest } from "./models.ts";
@@ -67,10 +68,22 @@ export function hasQueuedTurnStart(
   );
 }
 
-export interface ThreadSnoozeShell extends QueuedThreadShell {
-  readonly source?: Pick<EnvironmentThreadShell["source"], "pendingRuntimeRequest">;
+/**
+ * The snooze lifecycle fields. Snooze is an overlay on the active state: a
+ * snoozed thread stays "active" in the data model and is only suppressed
+ * from the inbox (and from alerts) until its wake time passes or the user
+ * unsnoozes it. Nothing the thread does or receives ends it early.
+ */
+export interface ThreadSnoozeShell {
   readonly snoozedUntil?: string | null;
-  readonly snoozedAt?: string | null;
+}
+
+/** The settle fields plus everything needed to detect a raised hand. */
+export interface ThreadSettleShell {
+  readonly settledOverride: "settled" | "active" | null;
+  readonly settledAt: string | null;
+  readonly latestTurn?: SettlementRunLike | null;
+  readonly latestRun?: SettlementRunLike | null;
   readonly hasPendingApprovals: boolean;
   readonly hasPendingUserInput: boolean;
   readonly pendingSubagentRequest?: PendingSubagentRequest | null;
@@ -78,72 +91,69 @@ export interface ThreadSnoozeShell extends QueuedThreadShell {
 }
 
 /**
- * Only a request for the user or a fresh failure ends a snooze early. Completed runs never do:
- * a snoozed long-running thread keeps waking itself for background work and stays hidden
- * until its timer.
+ * Settled resolution. The agent's own wakes run on a settled thread without un-settling it, but the
+ * thread raises its hand when such a run needs the user (blocked approval or question, guest
+ * message, failure after the settle). Its completion does not. Server fields stay set; the thread
+ * only stops classifying as settled.
  */
-export function threadRaisedHandWhileSnoozed(shell: ThreadSnoozeShell): boolean {
-  if (shell.hasPendingApprovals || shell.hasPendingUserInput) return true;
-  if (shell.source?.pendingRuntimeRequest != null) return true;
-  if (shell.pendingSubagentRequest != null) return true;
-  if ((shell.pendingGuestMessageCount ?? 0) > 0) return true;
-  const failedAt = failureEdgeAt(shell);
-  return (
-    failedAt !== undefined &&
-    (shell.snoozedAt == null ||
-      (failedAt != null && Date.parse(failedAt) > Date.parse(shell.snoozedAt)))
-  );
-}
-
-// V2 runtime.updatedAt includes metadata writes; prefer the failed run's completion.
-// Legacy sessions only expose the runtime timestamp.
-function failureEdgeAt(shell: ThreadSnoozeShell): string | null | undefined {
-  const runtime = shell.runtime ?? shell.session ?? null;
-  if (runtime?.status !== "error" && runtime?.status !== "failed") return undefined;
+export function effectiveSettled(shell: ThreadSettleShell): boolean {
+  if (shell.settledOverride !== "settled") return false;
+  if (shell.hasPendingApprovals || shell.hasPendingUserInput) return false;
+  if (shell.pendingSubagentRequest != null) return false;
+  if ((shell.pendingGuestMessageCount ?? 0) > 0) return false;
   const latestRun = shell.latestRun ?? shell.latestTurn ?? null;
-  if (latestRun?.status === "failed" && latestRun.completedAt != null) {
-    return latestRun.completedAt;
-  }
-  return runtime.updatedAt ?? null;
+  const failedAfterSettle =
+    (latestRun?.status === "failed" || latestRun?.state === "failed") &&
+    latestRun.completedAt != null &&
+    shell.settledAt !== null &&
+    Date.parse(latestRun.completedAt) > Date.parse(shell.settledAt);
+  return !failedAfterSettle;
 }
 
+/**
+ * A thread may be snoozed unless the agent or a subagent is blocked on the user now: hiding a
+ * pending approval, user-input request, or queued turn start defeats it. A running session is
+ * snoozable since snooze only affects visibility. Client-side twin of the server invariants so the
+ * UI can reject before a round trip.
+ */
 export function canSnooze(
-  shell: Pick<
-    ThreadSnoozeShell,
-    | "hasPendingApprovals"
-    | "hasPendingUserInput"
-    | "pendingSubagentRequest"
-    | "pendingGuestMessageCount"
-    | "latestUserMessageAt"
-    | "latestTurn"
-    | "latestRun"
-    | "session"
-    | "runtime"
-    | "source"
-  >,
+  shell: QueuedThreadShell & {
+    readonly source?: Pick<EnvironmentThreadShell["source"], "pendingRuntimeRequest">;
+    readonly hasPendingApprovals: boolean;
+    readonly hasPendingUserInput: boolean;
+    readonly pendingSubagentRequest?: PendingSubagentRequest | null;
+    readonly pendingGuestMessageCount?: number;
+  },
   options: { readonly now: string },
 ): boolean {
   if (shell.hasPendingApprovals || shell.hasPendingUserInput) return false;
   // The server rejects snoozing even for nonblocking questions.
   if (shell.source?.pendingRuntimeRequest != null) return false;
   if (shell.pendingSubagentRequest != null) return false;
-  // A waiting guest message would wake it at once.
+  // A waiting guest message is a request for the user; snoozing would hide it.
   if ((shell.pendingGuestMessageCount ?? 0) > 0) return false;
   if (hasQueuedTurnStart(shell, options)) return false;
   return true;
 }
 
+/**
+ * Snoozed resolution: hidden from the inbox while the wake time is in the future, whatever the
+ * thread does. Timer wakes are derived; no server event fires when snoozedUntil passes, so the
+ * stale fields just stop classifying as snoozed.
+ */
 export function effectiveSnoozed(
   shell: ThreadSnoozeShell,
   options: { readonly now: string },
 ): boolean {
   if (shell.snoozedUntil == null) return false;
-  const wakeAtMs = Date.parse(shell.snoozedUntil);
-  if (Number.isNaN(wakeAtMs)) return false;
-  if (wakeAtMs <= Date.parse(options.now)) return false;
-  return !threadRaisedHandWhileSnoozed(shell);
+  return isSnoozeActive(Date.parse(shell.snoozedUntil), Date.parse(options.now));
 }
 
+/**
+ * When a previously snoozed thread's timer ran out, or null if it never snoozed or is still
+ * snoozed. Drives the "Woke" indicator: the thread keeps its sort position, so the wake signal must
+ * carry it. Compare against the client's lastVisitedAt; visiting clears it.
+ */
 export function threadWokeAt(
   shell: ThreadSnoozeShell,
   options: { readonly now: string },
@@ -151,22 +161,6 @@ export function threadWokeAt(
   if (shell.snoozedUntil == null) return null;
   const wakeAtMs = Date.parse(shell.snoozedUntil);
   if (Number.isNaN(wakeAtMs)) return null;
-  // An early hand-raise wake stays authoritative even after the scheduled
-  // wake time passes: reporting snoozedUntil then would resurface a Woke
-  // indicator the user already cleared by visiting (snoozedUntil is newer
-  // than that visit's lastVisitedAt).
-  if (threadRaisedHandWhileSnoozed(shell)) {
-    // An old failure must not replace the activity time of an approval or input wake.
-    const failedAt = failureEdgeAt(shell);
-    if (
-      failedAt != null &&
-      (shell.snoozedAt == null || Date.parse(failedAt) > Date.parse(shell.snoozedAt))
-    ) {
-      return failedAt;
-    }
-    const runtime = shell.runtime ?? shell.session ?? null;
-    return runtime?.updatedAt ?? shell.snoozedAt ?? null;
-  }
   return wakeAtMs <= Date.parse(options.now) ? shell.snoozedUntil : null;
 }
 
@@ -297,21 +291,15 @@ export function localSnoozeTime(date: Date): string {
   return `${String(date.getHours()).padStart(2, "0")}:${String(date.getMinutes()).padStart(2, "0")}`;
 }
 
-/**
- * Whether a woken thread woke after the user last saw it. A run that completed
- * after the last visit counts as seeing it, since the user watched it finish.
- */
+/** Whether a woken thread woke after the user last visited it. */
 export function isThreadWokeUnseen(input: {
   readonly wokeAt: string | null;
   readonly settled: boolean;
   readonly lastVisitedAt: string | null | undefined;
-  readonly latestRunCompletedAt: string | null;
 }): boolean {
   if (input.wokeAt === null || input.settled) return false;
   const wokeAtMs = Date.parse(input.wokeAt);
   if (Number.isNaN(wokeAtMs)) return false;
-  const seenAt = [input.lastVisitedAt, input.latestRunCompletedAt]
-    .map((value) => (value ? Date.parse(value) : NaN))
-    .filter((ms) => !Number.isNaN(ms));
-  return seenAt.every((ms) => ms < wokeAtMs);
+  const visitedAtMs = input.lastVisitedAt ? Date.parse(input.lastVisitedAt) : NaN;
+  return Number.isNaN(visitedAtMs) || visitedAtMs < wokeAtMs;
 }
