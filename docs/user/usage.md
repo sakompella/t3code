@@ -8,12 +8,19 @@ On mobile, choose **Usage** in the workspace navigation.
 
 ## Understand your usage
 
-**Usage** combines Codex, Claude Code, Grok Build, OpenCode, Antigravity, Pi, Muse Code, and Cursor history
-from your connected environments. It shows token use, cache savings, model breakdowns, and estimated API-equivalent
+**Usage** combines Codex, Claude Code, Grok Build, OpenCode, Antigravity, Pi, Prime Agent, Muse Code,
+and Cursor history from your connected environments. It shows token use, cache savings, model breakdowns, and estimated API-equivalent
 cost, split by token type and by speed. These estimates are not your subscription bill.
 **Premium** is what Fast and Ultrafast requests cost above standard rates. Cost that cannot be
 split, such as a provider-reported cost for a model without public rates, shows as **Other**.
 Select a model under **Breakdown** to see its trend, cache hit rate, and cost per million tokens.
+
+Prime Agent usage reads the same session log as Pi, from `~/.prime/agent/sessions` and its
+subagent sessions in `~/.prime/agent/session-artifacts`, or the same directories under
+`PRIME_AGENT_CODING_AGENT_DIR` in the account's environment settings. A response saved with its
+subagents' usage folded in counts once, at its own usage. Copied responses count once per server.
+Recorded costs are API-equivalent estimates from the agent's model configuration, not subscription
+charges. Hub requests from other clients are not included.
 
 Totals depend on the history available on each server. Grok turns without a saved completed-turn
 record are missing from the totals.

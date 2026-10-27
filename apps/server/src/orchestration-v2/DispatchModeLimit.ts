@@ -12,8 +12,13 @@ export interface DispatchModeRefusal extends DispatchModes {
   readonly mode: "runtime" | "interaction";
 }
 
-/** Recheck target modes under the command lock; the user can raise them after preflight. */
+/**
+ * Recheck target modes under the command lock; the user can raise them after preflight. Unset for
+ * the user's own commands. Modes are those a thread runs in once the command applies (a provider
+ * switch can broaden them, see `RuntimePolicyV2`); the caller may keep, not broaden, its own.
+ */
 export interface DispatchModeLimitValue extends DispatchModes {
+  readonly callerThreadId?: ThreadId;
   readonly refused?: Ref.Ref<DispatchModeRefusal | undefined>;
 }
 

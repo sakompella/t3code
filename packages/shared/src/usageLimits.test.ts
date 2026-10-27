@@ -1,10 +1,12 @@
 import {
+  DEFAULT_SERVER_SETTINGS,
   EnvironmentId,
   ProviderDriverKind,
   ProviderInstanceId,
   type ServerProvider,
   UsageLimitSourceId,
 } from "@t3tools/contracts";
+import * as DateTime from "effect/DateTime";
 import { describe, expect, it } from "vite-plus/test";
 
 import {
@@ -23,6 +25,7 @@ import {
 } from "./usageLimits.ts";
 
 const now = Date.parse("2026-09-03T12:00:00.000Z");
+const FIVE_MINUTES = 5 * 60_000;
 
 const window = {
   id: "five_hour",
@@ -569,6 +572,7 @@ describe("pools", () => {
   });
 
   it("pools windows by id across accounts and orders resets by when they land", () => {
+    const checkedAt = "2026-09-03T11:58:00.000Z";
     const input = new Map([
       [
         EnvironmentId.make("env-a"),
@@ -668,6 +672,7 @@ describe("pools", () => {
           environments: [],
           sourceLabel: null,
           redeem: null,
+          refreshIntervalMs: FIVE_MINUTES,
           limits: {
             checkedAt,
             windows: [
@@ -713,7 +718,8 @@ describe("pooled account columns", () => {
     environments: [],
     sourceLabel: "Hub",
     redeem: null,
-    limits: { checkedAt: "2026-09-03T11:00:00.000Z", windows },
+    refreshIntervalMs: FIVE_MINUTES,
+    limits: { checkedAt: "2026-09-03T11:58:00.000Z", windows },
   });
   const keys = (pool: ReturnType<typeof collectLimitPools>[number]) =>
     pool.windows.map((row) =>
@@ -876,6 +882,183 @@ describe("pooled account columns", () => {
       now,
     );
     expect(keys(pool!)).toEqual([["b", "a"]]);
+  });
+
+  describe("a window whose reset time has passed", () => {
+    const rolledOver = {
+      ...window,
+      usedPercent: 94,
+      resetsAt: "2026-09-03T11:59:00.000Z",
+    } as const;
+    const readBefore = (key: string, windows: LimitAccount["limits"]["windows"]) => {
+      const reading = account(key, windows);
+      return { ...reading, limits: { ...reading.limits, checkedAt: "2026-09-03T11:57:00.000Z" } };
+    };
+
+    it("is full again, with no reset clock, pace or refill, and adds none of its old usage to the pool", () => {
+      const [pool] = collectLimitPools(
+        [readBefore("a", [rolledOver]), account("b", [{ ...window, usedPercent: 40 }])],
+        now,
+      );
+      const [session] = pool!.windows;
+      const a = session!.members.find((member) => member.account.key === "a")!;
+      expect(a.window).toMatchObject({ usedPercent: 0, resetsAt: undefined });
+      expect(paceOf(a.window, now)).toBe(null);
+      expect(session!.remainingPercent).toBe(80);
+      expect(session!.resets.map((reset) => reset.member.account.key)).toEqual(["b"]);
+      expect(session!.pace).toBe("under");
+    });
+
+    it("has no pace for the pool when it is the only member", () => {
+      const [pool] = collectLimitPools([readBefore("a", [rolledOver])], now);
+      expect(pool!.windows[0]).toMatchObject({ remainingPercent: 100, pace: null, resets: [] });
+    });
+
+    it("does not leave the session blocked by a weekly window that has since reset", () => {
+      const [pool] = collectLimitPools(
+        [
+          readBefore("a", [
+            { ...window, usedPercent: 30 },
+            { ...weekly, usedPercent: 100, resetsAt: "2026-09-03T11:59:00.000Z" },
+          ]),
+        ],
+        now,
+      );
+      expect(pool!.windows.map((row) => row.remainingPercent)).toEqual([70, 100]);
+    });
+
+    it("counts as reset exactly when its reset time arrives", () => {
+      const at = (resetsAt: string) =>
+        collectLimitPools([readBefore("a", [{ ...window, usedPercent: 94, resetsAt }])], now)[0]!
+          .windows[0]!.remainingPercent;
+      expect(at("2026-09-03T12:00:00.000Z")).toBe(100);
+      expect(at("2026-09-03T12:00:00.001Z")).toBe(6);
+    });
+
+    it("is trusted as reported when the reading was taken after that reset time", () => {
+      const [pool] = collectLimitPools(
+        [account("a", [{ ...rolledOver, resetsAt: "2026-09-03T11:30:00.000Z" }])],
+        now,
+      );
+      expect(pool!.windows[0]).toMatchObject({ remainingPercent: 6 });
+    });
+  });
+
+  describe("a stale reading", () => {
+    const stale = (key: string, windows: LimitAccount["limits"]["windows"], ageMs: number) => {
+      const reading = account(key, windows);
+      return {
+        ...reading,
+        limits: {
+          ...reading.limits,
+          checkedAt: DateTime.formatIso(DateTime.makeUnsafe(now - ageMs)),
+        },
+      };
+    };
+
+    it("stays on its bar, marked, but adds nothing to the totals, pace or restores", () => {
+      const old = stale(
+        "old",
+        [{ ...window, usedPercent: 94, resetsAt: "2026-09-02T09:22:00.000Z" }],
+        19 * 3_600_000,
+      );
+      const [pool] = collectLimitPools([old, account("b", [{ ...window, usedPercent: 40 }])], now);
+      const [session] = pool!.windows;
+      expect(keys(pool!)).toEqual([["b", "old"]]);
+      expect(session!.columns.map((member) => member.window && member.stale)).toEqual([
+        false,
+        true,
+      ]);
+      const oldMember = session!.members.find((member) => member.account.key === "old")!;
+      expect(oldMember.window).toMatchObject({ usedPercent: 94, resetsAt: undefined });
+      expect(session).toMatchObject({ remainingPercent: 60, stale: false, pace: "under" });
+      expect(session!.resets.map((reset) => reset.member.account.key)).toEqual(["b"]);
+      expect(session!.resets[0]!.restoresPercent).toBe(40);
+    });
+
+    it("marks a pool with no live member as stale and still shows what was last read", () => {
+      const [pool] = collectLimitPools(
+        [stale("old", [{ ...window, usedPercent: 94 }], 19 * 3_600_000)],
+        now,
+      );
+      expect(pool!.windows[0]).toMatchObject({
+        stale: true,
+        remainingPercent: 6,
+        pace: null,
+        resets: [],
+      });
+    });
+
+    it("is judged against the refresh interval of the server it came from", () => {
+      const read = (ageMs: number, refreshIntervalMs: number) =>
+        collectLimitPools([{ ...stale("a", [window], ageMs), refreshIntervalMs }], now)[0]!
+          .windows[0]!.stale;
+      expect(read(3 * FIVE_MINUTES, FIVE_MINUTES)).toBe(false);
+      expect(read(3 * FIVE_MINUTES + 1, FIVE_MINUTES)).toBe(true);
+      expect(read(40 * 60_000, 15 * 60_000)).toBe(false);
+      expect(read(0, FIVE_MINUTES)).toBe(false);
+      expect(read(-60_000, FIVE_MINUTES)).toBe(false);
+    });
+
+    it("leaves a live reading's window exactly as reported", () => {
+      const [pool] = collectLimitPools([account("a", [window])], now);
+      expect(pool!.windows[0]!.members[0]).toMatchObject({
+        window,
+        stale: false,
+        refillPercent: 40,
+      });
+    });
+  });
+});
+
+describe("refresh interval of a reading", () => {
+  const read = (settings?: typeof DEFAULT_SERVER_SETTINGS) =>
+    collectLimitAccounts(
+      new Map([
+        [
+          EnvironmentId.make("env-a"),
+          {
+            entry: { target: { label: "Laptop" } },
+            serverConfig: {
+              ...(settings ? { settings } : {}),
+              providers: [
+                provider({
+                  usageLimits: { checkedAt: "2026-09-03T11:00:00.000Z", windows: [window] },
+                }),
+              ],
+              usageLimitSources: [
+                {
+                  id: UsageLimitSourceId.make("hub"),
+                  kind: "cliproxy" as const,
+                  label: "hub",
+                  checkedAt: "2026-09-03T11:00:00.000Z",
+                  accounts: [
+                    {
+                      id: "hub-account.json",
+                      driver: ProviderDriverKind.make("claudeAgent"),
+                      usageLimits: { checkedAt: "2026-09-03T11:00:00.000Z", windows: [window] },
+                    },
+                  ],
+                },
+              ],
+            },
+          },
+        ],
+      ]),
+    ).map((account) => account.refreshIntervalMs);
+
+  it("is the server's provider refresh interval, for its own and its hub's accounts", () => {
+    expect(read(DEFAULT_SERVER_SETTINGS)).toEqual([FIVE_MINUTES, FIVE_MINUTES]);
+    expect(
+      read({
+        ...DEFAULT_SERVER_SETTINGS,
+        backgroundActivity: { schemaVersion: 1, profile: "battery-saver", overrides: {} },
+      }),
+    ).toEqual([15 * 60_000, 15 * 60_000]);
+  });
+
+  it("is the default when the server's settings are unknown", () => {
+    expect(read()).toEqual([FIVE_MINUTES, FIVE_MINUTES]);
   });
 });
 
