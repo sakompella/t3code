@@ -13,7 +13,7 @@ import { fxClient } from "@t3tools/provider-fx/client";
 import { grokClient } from "@t3tools/provider-grok/client";
 import { museClient } from "@t3tools/provider-muse/client";
 import { openCodeClient } from "@t3tools/provider-opencode/client";
-import { piClient } from "@t3tools/provider-pi/client";
+import { piClient, primeAgentClient } from "@t3tools/provider-pi/client";
 
 export const providerClients = makeProviderClientRegistry([
   {
@@ -43,6 +43,7 @@ export const providerClients = makeProviderClientRegistry([
   },
   museClient,
   piClient,
+  primeAgentClient,
   acpRegistryClient,
 ]);
 

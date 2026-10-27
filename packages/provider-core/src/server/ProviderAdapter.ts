@@ -1,4 +1,7 @@
-import type { OrchestrationV2HistoricalMessage } from "@t3tools/contracts";
+import type {
+  OrchestrationV2HistoricalMessage,
+  OrchestrationV2RollbackSummary,
+} from "@t3tools/contracts";
 import {
   ChatAttachment,
   CheckpointId,
@@ -82,6 +85,13 @@ export const ProviderAdapterV2Event = Schema.Union([
     appThread: OrchestrationV2AppThread,
     createOnly: Schema.optional(Schema.Boolean),
   }),
+  /** A created thread's lineage parent changed. Its other fields are the user's. */
+  Schema.Struct({
+    type: Schema.Literal("app_thread.reparented"),
+    driver: ProviderDriverKind,
+    threadId: ThreadId,
+    parentThreadId: ThreadId,
+  }),
   Schema.Struct({
     type: Schema.Literal("provider_session.updated"),
     driver: ProviderDriverKind,
@@ -118,6 +128,8 @@ export const ProviderAdapterV2Event = Schema.Union([
     type: Schema.Literal("turn_item.updated"),
     driver: ProviderDriverKind,
     turnItem: OrchestrationV2TurnItem,
+    /** The thread the item was in until this update, which also tells that thread it left. */
+    movedFromThreadId: Schema.optional(ThreadId),
   }),
   /** Unpersisted deltas go only to clients showing the row; final output arrives in turn_item.updated. */
   Schema.Struct({
@@ -459,6 +471,11 @@ export interface ProviderAdapterV2ThreadSnapshot {
   readonly providerPayload?: unknown;
 }
 
+export interface ProviderAdapterV2RollbackThreadResult extends ProviderAdapterV2ThreadSnapshot {
+  /** The summary of the discarded turns the provider left, when one was asked for. */
+  readonly rollbackSummary?: string;
+}
+
 export interface ProviderAdapterV2ReadThreadSnapshotInput {
   readonly providerThread: OrchestrationV2ProviderThread;
 }
@@ -480,6 +497,8 @@ export interface ProviderAdapterV2RollbackThreadInput {
   readonly providerThread: OrchestrationV2ProviderThread;
   readonly target: ProviderAdapterV2RollbackTarget;
   readonly providerThreadTurns: ReadonlyArray<OrchestrationV2ProviderTurn>;
+  /** Only sent when the capabilities declare `providerCanSummarizeRollback`. */
+  readonly summary?: OrchestrationV2RollbackSummary;
 }
 
 export interface ProviderAdapterV2ForkThreadInput {
@@ -547,6 +566,13 @@ export interface ProviderAdapterV2SessionRuntime {
   readonly events: Stream.Stream<ProviderAdapterV2Event, ProviderAdapterV2Error>;
   /** Manager runtimes broadcast independent subscriptions; adapters may expose only a single-consumer stream. */
   readonly subscribeEvents?: Effect.Effect<ProviderAdapterV2EventSubscription>;
+  /**
+   * `"session"`: the session manager stores this runtime's subagent child
+   * threads (the thread and its runless events) once, and never hands them to
+   * runs. For a provider whose children can start and work while no run of
+   * the parent thread is live or listening (Prime Agent).
+   */
+  readonly childThreadScope?: "session";
   readonly hasPendingBackgroundWork?: Effect.Effect<boolean>;
   /** Root-subscription probe; replacement checks opt in to subagents owned by the live process. */
   readonly hasPendingBackgroundWorkForThread?: (
@@ -623,7 +649,7 @@ export interface ProviderAdapterV2SessionRuntime {
   readonly mcpApps?: ProviderAdapterV2McpApps;
   readonly rollbackThread: (
     input: ProviderAdapterV2RollbackThreadInput,
-  ) => Effect.Effect<ProviderAdapterV2ThreadSnapshot, ProviderAdapterV2Error>;
+  ) => Effect.Effect<ProviderAdapterV2RollbackThreadResult, ProviderAdapterV2Error>;
   readonly forkThread: (
     input: ProviderAdapterV2ForkThreadInput,
   ) => Effect.Effect<OrchestrationV2ProviderThread, ProviderAdapterV2Error>;

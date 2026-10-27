@@ -191,29 +191,45 @@ export const writesThreads = <P, A, E, R>(
             yield* assertSameLink(caller, target);
           }
         }
-        // Modes can rise after this check; the orchestrator rechecks under lock and records refusal before handlers wrap errors.
-        const refused = yield* Ref.make<DispatchModeRefusal | undefined>(undefined);
-        return yield* handle(params).pipe(
-          Effect.provideService(DispatchModeLimit, { ...caller.limits, refused }),
-          Effect.catch((error) =>
-            Effect.flatMap(Ref.get(refused), (refusal) =>
-              Effect.fail<E | OrchestratorMcpFailure>(
-                refusal === undefined ? error : escalationDenied(refusal),
-              ),
-            ),
-          ),
-        );
+        return yield* handle(params).pipe(withinDispatchModeLimit(caller));
       }),
     () => writingCaller,
   );
 
+/**
+ * Runs a handler's dispatches under the caller's limits. Modes can rise after the gate's check,
+ * and a provider can run a thread in a broader mode than it stores, so the orchestrator rechecks
+ * under lock and records its refusal here, since handlers wrap dispatch errors their own way.
+ */
+const withinDispatchModeLimit =
+  (caller: Caller) =>
+  <A, E, R>(effect: Effect.Effect<A, E, R>) =>
+    Effect.gen(function* () {
+      const refused = yield* Ref.make<DispatchModeRefusal | undefined>(undefined);
+      return yield* effect.pipe(
+        Effect.provideService(DispatchModeLimit, {
+          ...caller.limits,
+          ...(caller.caller === undefined ? {} : { callerThreadId: caller.caller.id }),
+          refused,
+        }),
+        Effect.catch((error) =>
+          Effect.flatMap(Ref.get(refused), (refusal) =>
+            Effect.fail<E | OrchestratorMcpFailure>(
+              refusal === undefined ? error : escalationDenied(refusal),
+            ),
+          ),
+        ),
+      );
+    });
+
+/** How an agent hears that a thread it targets runs above its modes. */
 const escalationDenied = (refusal: DispatchModeRefusal) =>
   new OrchestratorMcpFailure({
     code:
       refusal.mode === "runtime"
         ? "runtime_mode_escalation_denied"
         : "interaction_mode_escalation_denied",
-    message: `Thread ${refusal.threadId} now runs in ${refusal.runtimeMode}/${refusal.interactionMode} mode, above this caller's. Its user changed it while this call ran.`,
+    message: `Thread ${refusal.threadId} runs in ${refusal.runtimeMode}/${refusal.interactionMode} mode, above this caller's, so it was left unchanged.`,
   });
 
 export interface StartedModes {
@@ -252,7 +268,10 @@ export const startsThreads = <P, A, E, R>(
       Effect.gen(function* () {
         const caller = yield* writingCaller;
         if (linked !== "stamped") yield* assertNotLinked(caller, linked.refused);
-        return yield* handle(params, yield* started(caller, params));
+        // Its provider may run the new thread in a broader mode than requested.
+        return yield* handle(params, yield* started(caller, params)).pipe(
+          withinDispatchModeLimit(caller),
+        );
       }),
     (params: P) => Effect.flatMap(writingCaller, (caller) => started(caller, params)),
   );
