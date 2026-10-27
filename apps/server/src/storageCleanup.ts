@@ -823,6 +823,8 @@ const make = Effect.gen(function* () {
           !deleted &&
           settings.worktreeAfterDays !== null &&
           activityAt < now - settings.worktreeAfterDays * DAY_MS;
+        // Wakes (heartbeats, subagent and job results) run on a settled thread
+        // without un-settling it, so the settled clock restarts at its last run.
         const settledFor =
           deleted || thread.settledAt === null
             ? null

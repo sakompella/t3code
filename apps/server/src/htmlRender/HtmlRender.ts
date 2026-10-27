@@ -102,6 +102,21 @@ export class HtmlRenderStoreError extends Schema.TaggedError<HtmlRenderStoreErro
   }
 }
 
+/**
+ * A `record` that cannot tell whether it stored the page. Publishing keeps the
+ * page, since a stored item may point at it.
+ */
+export class HtmlRenderOwnershipUnknownError extends Schema.TaggedError<HtmlRenderOwnershipUnknownError>()(
+  "HtmlRenderOwnershipUnknownError",
+  { cause: Schema.Defect() },
+) {
+  override get message(): string {
+    return "T3 could not confirm whether the page was shown. Read this thread before publishing it again.";
+  }
+}
+
+const isOwnershipUnknown = Schema.is(HtmlRenderOwnershipUnknownError);
+
 export type HtmlRenderPrepareError =
   | HtmlRenderImagesNotFoundError
   | HtmlRenderImageTooLargeError
@@ -117,16 +132,26 @@ export interface HtmlPreview {
   readonly missingImages?: ReadonlyArray<string>;
 }
 
+export interface HtmlRenderPublishInput<E> {
+  readonly threadId: ThreadId;
+  readonly html: string;
+  readonly title: string;
+  readonly height: number;
+  readonly record?: (reference: HtmlRenderReference) => Effect.Effect<void, E>;
+}
+
 export class HtmlRender extends Context.Service<
   HtmlRender,
   {
     readonly prepare: (html: string) => Effect.Effect<string, HtmlRenderPrepareError>;
-    readonly publish: (input: {
-      readonly threadId: ThreadId;
-      readonly html: string;
-      readonly title: string;
-      readonly height: number;
-    }) => Effect.Effect<HtmlRenderReference, HtmlRenderPrepareError | HtmlRenderStoreError>;
+    /**
+     * Stores a prepared page as a thread attachment. `record` runs uninterruptibly before the page
+     * counts as published; its failure removes the page unless it is
+     * `HtmlRenderOwnershipUnknownError`.
+     */
+    readonly publish: <E = never>(
+      input: HtmlRenderPublishInput<E>,
+    ) => Effect.Effect<HtmlRenderReference, HtmlRenderPrepareError | HtmlRenderStoreError | E>;
     readonly preview: (input: {
       readonly html: string;
       readonly width?: number | undefined;
@@ -409,12 +434,9 @@ const make = Effect.gen(function* () {
     return inlined.html;
   });
 
-  const publish = Effect.fn("HtmlRender.publish")(function* (input: {
-    readonly threadId: ThreadId;
-    readonly html: string;
-    readonly title: string;
-    readonly height: number;
-  }) {
+  const publish = Effect.fn("HtmlRender.publish")(function* <E = never>(
+    input: HtmlRenderPublishInput<E>,
+  ) {
     const html = yield* prepare(input.html);
     // The `-html` id suffix makes the asset route serve it as a sandboxed text/html document.
     const attachmentId = createAttachmentId(input.threadId, "html");
@@ -428,32 +450,44 @@ const make = Effect.gen(function* () {
     if (attachmentId === null || filePath === null) {
       return yield* new HtmlRenderStoreError({ cause: new Error("Invalid thread id.") });
     }
+    const { record } = input;
     const baseReference: HtmlRenderReference = {
       attachmentId,
       title: input.title.trim().slice(0, HTML_RENDER_MAX_TITLE_LENGTH) || "HTML",
       height: clampHtmlRenderHeight(input.height),
     };
-    return yield* fileSystem.writeFileString(filePath, html).pipe(
-      Effect.mapError((cause) => new HtmlRenderStoreError({ cause })),
-      Effect.uninterruptible,
-      Effect.andThen(measure(html)),
-      Effect.andThen((heights) => {
-        const reference: HtmlRenderReference = {
-          ...baseReference,
-          ...(heights === undefined ? {} : { heights }),
-        };
-        return mcpSessions
-          .recordHtmlRender(input.threadId, input, reference)
-          .pipe(Effect.as(reference));
-      }),
-      // An interrupted publish must leave neither an attachment nor a recoverable reference.
-      Effect.onError(() =>
-        Effect.all(
-          [
-            fileSystem.remove(filePath, { force: true }).pipe(Effect.ignore),
-            mcpSessions.takeHtmlRender(input.threadId, input, baseReference).pipe(Effect.ignore),
-          ],
-          { discard: true },
+    // Only a reference the thread keeps lets thread deletion find the page, so
+    // a publish that fails or is interrupted before then removes it. Once the
+    // record starts it cannot be interrupted, so its own outcome decides.
+    const removePage = Effect.all(
+      [
+        fileSystem.remove(filePath, { force: true }).pipe(Effect.ignore),
+        mcpSessions.takeHtmlRender(input.threadId, input, baseReference).pipe(Effect.ignore),
+      ],
+      { discard: true },
+    );
+    return yield* Effect.uninterruptibleMask((restore) =>
+      restore(
+        fileSystem.writeFileString(filePath, html).pipe(
+          Effect.mapError((cause) => new HtmlRenderStoreError({ cause })),
+          Effect.uninterruptible,
+          Effect.andThen(measure(html)),
+          Effect.map((heights): HtmlRenderReference => ({
+            attachmentId,
+            title: input.title.trim().slice(0, HTML_RENDER_MAX_TITLE_LENGTH) || "HTML",
+            height: clampHtmlRenderHeight(input.height),
+            ...(heights === undefined ? {} : { heights }),
+          })),
+        ),
+      ).pipe(
+        Effect.onError(() => removePage),
+        Effect.tap((reference) => mcpSessions.recordHtmlRender(input.threadId, input, reference)),
+        Effect.tap((reference) =>
+          record === undefined
+            ? Effect.void
+            : record(reference).pipe(
+                Effect.tapError((error) => (isOwnershipUnknown(error) ? Effect.void : removePage)),
+              ),
         ),
       ),
     );
