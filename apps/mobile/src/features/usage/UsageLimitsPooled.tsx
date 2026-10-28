@@ -389,7 +389,8 @@ function PoolWindowCard({
         <View className="w-44 gap-1">{summary}</View>
         <View className="min-w-0 flex-1 gap-1">
           {bar}
-          {inlineLabels ? null : legend}
+          {/* Only the legend marks a stale reading, so it stays while any member is stale. */}
+          {inlineLabels && !pool.members.some((member) => member.stale) ? null : legend}
         </View>
       </View>
     );
