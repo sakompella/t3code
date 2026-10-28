@@ -127,7 +127,7 @@ describe("pools", () => {
     expect(accounts).toHaveLength(1);
     expect(accounts[0]).toMatchObject({
       key: "env-a:claude",
-      sourceLabel: null,
+      sourceLabel: "Desktop · hub",
       redeem: { environmentId: "env-b", input: { instanceId: "claude" } },
       environments: [
         { environmentId: "env-a", label: "Laptop" },
@@ -135,6 +135,19 @@ describe("pools", () => {
       ],
     });
     expect(accounts[0]?.limits.windows[0]?.usedPercent).toBe(55);
+  });
+
+  it("skips a provider that is not signed in, even with limits from an earlier read", () => {
+    const codex = provider({
+      auth: { status: "unauthenticated" },
+      usageLimits: { checkedAt, windows: [window] },
+    });
+    const presentations = (providers: ServerProvider[]) =>
+      new Map([[EnvironmentId.make("env-a"), { ...laptop, serverConfig: { providers } }]]);
+    expect(collectLimitAccounts(presentations([codex]))).toEqual([]);
+    expect(
+      collectLimitAccounts(presentations([{ ...codex, auth: { status: "authenticated" } }])),
+    ).toHaveLength(1);
   });
 
   it("merges OpenCode Go limits from machines with the same API key", () => {
@@ -754,6 +767,20 @@ describe("pooled account columns", () => {
       ]);
     });
 
+    it("lists a hub account that is also signed in directly under its hub", () => {
+      const both = { ...hub("both", 20), environments: direct("x", 0).environments };
+      const [session] = grouped([both, hub("hub-b", 60), direct("own-a", 10)]);
+      expect(
+        session?.groups.map((group) => [
+          group.label,
+          group.window.columns.map((column) => column.account.key),
+        ]),
+      ).toEqual([
+        ["CLIProxyAPI", ["both", "hub-b"]],
+        ["Direct logins", ["own-a"]],
+      ]);
+    });
+
     it("names several hubs by their own label, in label order, before direct logins", () => {
       const [session] = grouped([
         direct("own-a", 10),
@@ -1023,7 +1050,7 @@ describe("pooled account columns", () => {
     it("stays on its bar, marked, but adds nothing to the totals, pace or restores", () => {
       const old = stale(
         "old",
-        [{ ...window, usedPercent: 94, resetsAt: "2026-09-02T09:22:00.000Z" }],
+        [{ ...window, usedPercent: 94, resetsAt: "2026-09-03T13:00:00.000Z" }],
         19 * 3_600_000,
       );
       const [pool] = collectLimitPools([old, account("b", [{ ...window, usedPercent: 40 }])], now);
@@ -1038,6 +1065,23 @@ describe("pooled account columns", () => {
       expect(session).toMatchObject({ remainingPercent: 60, stale: false, pace: "under" });
       expect(session!.resets.map((reset) => reset.member.account.key)).toEqual(["b"]);
       expect(session!.resets[0]!.restoresPercent).toBe(40);
+    });
+
+    it("drops a window whose reset time has passed, keeping the account's other windows", () => {
+      const old = stale(
+        "old",
+        [
+          { ...window, usedPercent: 94, resetsAt: "2026-09-03T11:59:59.000Z" },
+          { ...weekly, usedPercent: 30 },
+        ],
+        19 * 3_600_000,
+      );
+      const [pool] = collectLimitPools([old, account("b", [{ ...window, usedPercent: 40 }])], now);
+      expect(pool!.windows.map((row) => row.kind)).toEqual(["session", "weekly"]);
+      expect(keys(pool!)).toEqual([
+        ["b", null],
+        [null, "old"],
+      ]);
     });
 
     it("marks a pool with no live member as stale and still shows what was last read", () => {

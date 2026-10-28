@@ -154,15 +154,16 @@ export const makeManagedServerProvider = Effect.fn("makeManagedServerProvider")(
         const generation = input.enrichSnapshot
           ? state.enrichmentGeneration + 1
           : state.enrichmentGeneration;
-        // Failed reads retain limits only for the same account and original workspace.
+        // Failed reads retain limits only for the same signed-in account and original workspace.
         const previous = state.snapshot.auth;
         const differs = (a: string | undefined, b: string | undefined) =>
           a !== undefined && b !== undefined && a !== b;
-        const switchedAccount =
+        const accountGone =
+          probedSnapshot.auth.status === "unauthenticated" ||
           differs(probedSnapshot.auth.email?.toLowerCase(), previous.email?.toLowerCase()) ||
           (probedSnapshot.auth.workspaceId !== undefined &&
             probedSnapshot.auth.workspaceId !== previous.workspaceId);
-        const usageLimits = switchedAccount
+        const usageLimits = accountGone
           ? probedSnapshot.usageLimits
           : resolveUsageLimitsAfterProbe({
               published: state.snapshot.usageLimits,
