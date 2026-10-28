@@ -504,7 +504,7 @@ export function LiveWorkEntryTimelineRow({
   const failed = workEntryDisplayIndicatesToolFailure(row.entry);
   const thoughtLine = row.thought && !row.expanded ? liveThoughtLine(row.thought.detail ?? "") : "";
   const thoughtIsStatus = thoughtLine !== "" && row.entry === row.thought;
-  const labelCode = questionHeading ? null : workEntryLabelCode(row.entry, label);
+  const labelCode = workEntryLabelCode(row.entry, label);
 
   return (
     <button
