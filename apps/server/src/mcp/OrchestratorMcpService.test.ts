@@ -2747,6 +2747,7 @@ describe("OrchestratorMcpService provider resolution", () => {
                 Effect.succeedSome({ id, defaultModelSelection: forkModelSelection } as never),
             }),
             Layer.mock(SecretRequests.SecretRequests)({}),
+            Layer.mock(RemoteDelegation.RemoteDelegation)({}),
             Layer.mock(ScheduledTaskService.ScheduledTaskService)({
               list: () => Effect.succeed({ tasks: [forkTask] }),
               upsert: () =>
@@ -2881,6 +2882,7 @@ describe("OrchestratorMcpService provider resolution", () => {
                       } as never),
                   }),
                   Layer.mock(SecretRequests.SecretRequests)({}),
+                  Layer.mock(RemoteDelegation.RemoteDelegation)({}),
                   Layer.mock(ScheduledTaskService.ScheduledTaskService)({
                     list: () =>
                       Ref.get(saved).pipe(
