@@ -7,7 +7,7 @@ import type { TranscriptUsageFormat } from "@t3tools/provider-core/server/usage"
 import { primeAgentUsageFormat } from "@t3tools/provider-pi/server/usage";
 
 import { readTranscriptRecords } from "./usageTranscriptReader.ts";
-import { decodeScanCache, dedupeWithinFile, encodeScanCache } from "./usageScanCache.ts";
+import { decodeScanCache, dedupeWithinFile, makeScanCacheWriter } from "./usageScanCache.ts";
 
 const formats = new Map([
   ["primeAgent" as const, primeAgentUsageFormat as TranscriptUsageFormat<unknown>],
@@ -67,21 +67,24 @@ describe("Prime Agent usage scans", () => {
         ))!;
         const stat = await NodeFSP.stat(file);
         const restored = decodeScanCache(
-          encodeScanCache(
-            new Map([
-              [
-                file,
-                {
-                  size: stat.size,
-                  mtimeMs: stat.mtimeMs,
-                  provider: "primeAgent" as const,
-                  records: first.records,
-                  tailRecords: first.tailRecords,
-                  malformedRecords: first.malformedRecords,
-                  position: first.position,
-                },
-              ],
-            ]),
+          JSON.parse(
+            makeScanCacheWriter()(
+              new Map([
+                [
+                  file,
+                  {
+                    size: stat.size,
+                    mtimeMs: stat.mtimeMs,
+                    provider: "primeAgent" as const,
+                    records: first.records,
+                    tailRecords: first.tailRecords,
+                    malformedRecords: first.malformedRecords,
+                    position: first.position,
+                  },
+                ],
+              ]),
+              {},
+            ),
           ),
           formats,
         ).get(file)!;

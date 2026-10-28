@@ -3135,6 +3135,7 @@ it.each([
     kind: "turn-fold",
     id: "fold",
     runId: RunId.make("run"),
+    foldKey: "run",
     createdAt: "2026-01-01T00:00:00Z",
     label: "Worked for 1m",
     expanded: true,
