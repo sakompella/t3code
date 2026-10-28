@@ -31,13 +31,25 @@ const yieldToRuntime = Effect.yieldNow.pipe(
   ),
 );
 
+const EndedProviderTurnStatus = Schema.Literals([
+  "completed",
+  "failed",
+  "interrupted",
+  "cancelled",
+]);
+type EndedProviderTurnStatus = typeof EndedProviderTurnStatus.Type;
+
+const endedStatus = (status: string | undefined): EndedProviderTurnStatus | undefined =>
+  Schema.is(EndedProviderTurnStatus)(status) ? status : undefined;
+
 export class ProviderTurnControlError extends Schema.TaggedError<ProviderTurnControlError>()(
   "ProviderTurnControlError",
   {
     threadId: ThreadId,
     operation: Schema.Literals(["interrupt", "restart", "steer"]),
     providerTurnId: ProviderTurnId,
-    turnCompleted: Schema.optional(Schema.Boolean),
+    /** Set when the target turn had already ended, so the steer can be redirected. */
+    turnEndedAs: Schema.optional(EndedProviderTurnStatus),
     cause: Schema.optional(Schema.Defect()),
   },
 ) {}
@@ -137,7 +149,7 @@ export const layer: Layer.Layer<
             threadId: input.threadId,
             operation: "steer",
             providerTurnId: input.providerTurnId,
-            turnCompleted: providerTurn.status === "completed",
+            turnEndedAs: endedStatus(providerTurn.status),
             cause: "The provider turn ended before the steering message was delivered.",
           });
         }
@@ -383,7 +395,7 @@ export const layer: Layer.Layer<
                     threadId: input.threadId,
                     operation: "steer",
                     providerTurnId: input.providerTurnId,
-                    turnCompleted: current.providerTurn?.status === "completed",
+                    turnEndedAs: endedStatus(current.providerTurn?.status),
                     cause,
                   });
                 }),

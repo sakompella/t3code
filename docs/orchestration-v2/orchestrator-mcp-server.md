@@ -401,10 +401,10 @@ links name no environment: clients resolve them in the message's environment,
 then by a unique match in another enabled environment.
 
 List and read results report `snoozed` and `snoozedUntil`, and
-`t3_thread_list` filters on `snoozed`. The server's `isSnoozed` follows the
-client's `effectiveSnoozed`, so agents and the sidebar agree: a snoozed thread
-wakes early only when it has a pending request or fails after snoozing. Completed
-runs, background wakes, and delegated completions keep it snoozed.
+`t3_thread_list` filters on `snoozed`. The server's `isSnoozed` and the
+client's `effectiveSnoozed` share one rule, so agents and the sidebar agree: a
+snoozed thread stays snoozed until its wake time or an explicit unsnooze,
+whatever it does or receives meanwhile.
 
 ### `t3_thread_update`
 
