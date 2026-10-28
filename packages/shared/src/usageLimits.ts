@@ -71,6 +71,7 @@ function providersWithLimits(providers: readonly ServerProvider[]): readonly Ser
       provider.enabled &&
       provider.installed &&
       isProviderAvailable(provider) &&
+      provider.auth.status === "authenticated" &&
       provider.usageLimits !== undefined,
   );
 }
@@ -241,7 +242,7 @@ export function collectLimitAccounts(presentations: LimitPresentations): readonl
       plan: previous.plan ?? next.plan,
       accentColor: previous.accentColor ?? next.accentColor,
       environments,
-      sourceLabel: environments.length > 0 ? null : (previous.sourceLabel ?? next.sourceLabel),
+      sourceLabel: previous.sourceLabel ?? next.sourceLabel,
       refreshIntervalMs: winner.refreshIntervalMs,
       redeem:
         hubRedeems.get(key)?.redeem ??
@@ -407,9 +408,21 @@ const WINDOW_KIND_ORDER: Record<ServerProviderUsageWindow["kind"], number> = {
 /**
  * A reading taken before a window's reset time says nothing about the window
  * that began at it, so that window reads full until a refresh says otherwise.
+ * A stale reading cannot say that, so its windows past their reset are dropped.
  */
 function withRolledOverWindows(account: LimitAccount, now: number): LimitAccount {
-  if (isStaleReading(account, now)) return account;
+  if (isStaleReading(account, now)) {
+    return {
+      ...account,
+      limits: {
+        ...account.limits,
+        windows: account.limits.windows.filter((window) => {
+          const resetsAt = resetMillis(window);
+          return resetsAt === null || resetsAt > now;
+        }),
+      },
+    };
+  }
   return {
     ...account,
     limits: {
@@ -600,7 +613,7 @@ function summarizeWindow(
 export interface GroupedLimitWindow {
   /** Every account pooled together; names the window and fixes its place in the list. */
   readonly window: LimitPoolWindow;
-  /** Hubs first, then the provider's own logins. A null label means one group holds every account. */
+  /** Hubs first, then logins no hub lists. A null label means one group holds every account. */
   readonly groups: ReadonlyArray<{
     readonly label: string | null;
     readonly window: LimitPoolWindow;
@@ -612,8 +625,8 @@ const OWN_LOGINS_GROUP_LABEL = "Direct logins";
 
 /**
  * Splits each window of a provider's pool into one group per usage-limit source (CLIProxyAPI hub),
- * then the provider's own logins. Each group is pooled on its own: a combined "% left" would hide
- * which supply is running out. An account signed in directly and also listed by a hub counts as its own login.
+ * then the logins no hub lists. Each group is pooled on its own: a combined "% left" would hide
+ * which supply is running out. An account signed in directly and also listed by a hub is one row, in its hub's group.
  */
 export function groupLimitWindows(pool: LimitPool, now: number): readonly GroupedLimitWindow[] {
   const hubLabels = [

@@ -539,6 +539,46 @@ describe("makeManagedServerProvider", () => {
     ).pipe(Effect.provide(layerAlwaysRunTest)),
   );
 
+  it.effect("drops published usage windows once a probe finds the login signed out", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const refreshCount = yield* Ref.make(0);
+        const liveLimits = {
+          checkedAt: "2026-04-10T00:00:01.000Z",
+          windows: [{ id: "primary", kind: "session", label: "Session", usedPercent: 10 }],
+        } as const;
+        const provider = yield* makeManagedServerProvider<TestSettings>({
+          resolveMaintenance: () => Effect.succeed(maintenanceCapabilities),
+          getSettings: Effect.succeed({ enabled: true }),
+          streamSettings: Stream.empty,
+          haveSettingsChanged: (previous, next) => previous.enabled !== next.enabled,
+          initialSnapshot: () => Effect.succeed(initialSnapshot),
+          checkProvider: Ref.updateAndGet(refreshCount, (count) => count + 1).pipe(
+            Effect.map((count) =>
+              count === 1
+                ? { ...refreshedSnapshot, usageLimits: liveLimits }
+                : {
+                    ...refreshedSnapshotSecond,
+                    auth: { status: "unauthenticated" as const },
+                    usageLimits: {
+                      checkedAt: "2026-04-10T00:00:03.000Z",
+                      windows: [],
+                      unavailable: { reason: "probeFailed" as const },
+                    },
+                  },
+            ),
+          ),
+          refreshInterval: "1 hour",
+        });
+        yield* Stream.take(provider.streamChanges, 1).pipe(Stream.runDrain);
+
+        const signedOut = yield* provider.refresh;
+        assert.strictEqual(signedOut.usageLimits?.unavailable?.reason, "probeFailed");
+        assert.deepStrictEqual(signedOut.usageLimits?.windows, []);
+      }),
+    ).pipe(Effect.provide(layerAlwaysRunTest)),
+  );
+
   it.effect("keeps sparse usage unavailable after probe failure until a full probe recovers", () =>
     Effect.scoped(
       Effect.gen(function* () {
