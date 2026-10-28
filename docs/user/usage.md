@@ -108,8 +108,9 @@ the bar show each account's quota, countdown, and credits. Tap a row to open its
 When a hub's accounts sit next to accounts signed in directly, each window card splits in two: the
 hub's accounts first (labeled **CLIProxyAPI**, or the hub's name when you have several), then
 **Direct logins**. Each group has its own total and bar, so you can see which supply is running
-low. An account signed in directly counts as a direct login even when a hub lists it too. The
-`/usage-limits` result lists hub accounts first as well.
+low. An account a hub lists appears in that hub's group even when it is also signed in directly;
+**Direct logins** holds only accounts no hub lists. The `/usage-limits` result lists hub accounts
+first as well.
 
 The same account signed in on more than one environment, or reported by a hub as well, counts once.
 Filter with the environment dropdown to see what a single machine has.
@@ -122,7 +123,8 @@ model-specific weekly allowances keep their reported values.
 
 Opening Limits checks the selected connected environments automatically. Each client waits at
 least five minutes between automatic checks of an environment, including after a failed check.
-If a window still looks stale, refresh Limits to re-check every provider and hub.
+If a window still looks stale, refresh Limits to re-check every provider and hub. A provider that
+is signed out is left out, and so is a stale window whose reset time has passed.
 
 Pick `/usage-limits` from the composer's command menu, or send it as a message, to check the
 current model's limits without leaving the conversation. The result opens above the composer and
