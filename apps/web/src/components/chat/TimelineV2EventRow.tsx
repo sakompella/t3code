@@ -1,3 +1,4 @@
+import type { OrchestrationV2ProjectedTurnItem } from "@t3tools/contracts";
 import { WorkLogBlock } from "./WorkLog";
 import { scopeThreadRef } from "@t3tools/client-runtime/environment";
 import { useAtomValue } from "@effect/atom-react";
@@ -7,12 +8,14 @@ import {
   summarizeSubagentStatuses,
 } from "@t3tools/client-runtime/state/subagent-display";
 import { memo, use, useState } from "react";
-import { ChevronDownIcon } from "lucide-react";
+import { ChevronDownIcon, Undo2Icon } from "lucide-react";
 import { cn } from "~/lib/utils";
+import { V2ItemInspector } from "./V2ItemInspector";
 import { Collapsible, CollapsibleTrigger, CollapsiblePanel } from "../ui/collapsible";
 import { EnvironmentSubagentAvatar, SubagentElapsed, V2LifecycleRow } from "./V2LifecycleRow";
 import { LinkRequestCard } from "./LinkRequestCard";
 import { SecretRequestCard } from "./SecretRequestCard";
+import { TimelineSystemDivider } from "./TimelineSystemDivider";
 import { TimelineRowCtx, type TimelineRow } from "./timelineRowContext";
 import { subagentGroupTiming } from "./TimelineV2EventRow.logic";
 
@@ -40,6 +43,9 @@ export function V2EventTimelineRow({ row }: { row: Extract<TimelineRow, { kind: 
       />
     );
   }
+  if (item.type === "rollback_summary") {
+    return <RollbackSummaryRow projectedItem={row.projectedItem} />;
+  }
   return (
     <V2LifecycleRow
       environmentId={ctx.activeThreadEnvironmentId}
@@ -48,6 +54,44 @@ export function V2EventTimelineRow({ row }: { row: Extract<TimelineRow, { kind: 
       runs={ctx.runs}
       onOpenThread={ctx.onOpenThread}
     />
+  );
+}
+
+/** Mounts the inspector only when opened, since it fetches the summary the wire item omits. */
+function RollbackSummaryRow({
+  projectedItem,
+}: {
+  readonly projectedItem: OrchestrationV2ProjectedTurnItem;
+}) {
+  const ctx = use(TimelineRowCtx);
+  const [open, setOpen] = useState(false);
+  return (
+    <details
+      className="group"
+      data-v2-item-type={projectedItem.item.type}
+      onToggle={(event) => setOpen(event.currentTarget.open)}
+    >
+      <summary className="cursor-pointer list-none rounded-md focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring/70 [&::-webkit-details-marker]:hidden">
+        <TimelineSystemDivider
+          label="Summary of discarded turns"
+          icon={Undo2Icon}
+          showDetailSeparator={false}
+          detail={
+            <ChevronDownIcon className="size-3 shrink-0 transition-transform group-open:rotate-180" />
+          }
+        />
+      </summary>
+      {open ? (
+        <div className="px-3 pb-2">
+          <V2ItemInspector
+            projectedItem={projectedItem}
+            environmentId={ctx.activeThreadEnvironmentId}
+            cwd={ctx.markdownCwd}
+            workspaceRoot={ctx.workspaceRoot}
+          />
+        </div>
+      ) : null}
+    </details>
   );
 }
 

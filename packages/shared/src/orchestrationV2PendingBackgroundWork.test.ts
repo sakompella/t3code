@@ -1,7 +1,12 @@
 import { describe, expect, it } from "vite-plus/test";
-import { ProviderInstanceId, ProviderThreadId } from "@t3tools/contracts";
+import {
+  type OrchestrationV2PendingBackgroundTask,
+  ProviderInstanceId,
+  ProviderThreadId,
+} from "@t3tools/contracts";
 import {
   backgroundWorkHoldsCompletion,
+  deriveOutlivingBackgroundWork,
   derivePendingBackgroundWork,
 } from "./orchestrationV2PendingBackgroundWork.ts";
 
@@ -444,5 +449,95 @@ describe("derivePendingBackgroundWork kinds", () => {
         }),
       ).toEqual([]);
     });
+  });
+});
+
+describe("deriveOutlivingBackgroundWork", () => {
+  const item = (
+    id: string,
+    runId: string | null,
+    type: "command_execution" | "subagent" | "assistant_message",
+    status: "running" | "completed",
+  ) => ({ id, runId, type, status, title: id });
+  const bashJob = { taskId: "bash:1", description: "sleep 60", kind: "command" } as const;
+  const rosterOf = (...tasks: Array<OrchestrationV2PendingBackgroundTask>) => [
+    { id: "pt-1" as never, pendingBackgroundTasks: tasks },
+  ];
+
+  it("lists a roster job that a finished cell left behind", () => {
+    expect(
+      deriveOutlivingBackgroundWork({
+        providerThreads: rosterOf(bashJob),
+        turnItems: [item("cell-1", "run-2", "command_execution", "completed")],
+        foregroundRunIds: new Set(["run-2"]),
+      }),
+    ).toEqual([bashJob]);
+  });
+
+  it("keeps an active step of the running turn out, even after later steps finished", () => {
+    expect(
+      deriveOutlivingBackgroundWork({
+        providerThreads: [],
+        turnItems: [
+          item("slow", "run-2", "command_execution", "running"),
+          item("edit", "run-2", "assistant_message", "completed"),
+          item("tests", "run-2", "command_execution", "completed"),
+        ],
+        foregroundRunIds: new Set(["run-2"]),
+      }),
+    ).toEqual([]);
+  });
+
+  it("keeps parallel steps and a step before an assistant message out", () => {
+    expect(
+      deriveOutlivingBackgroundWork({
+        providerThreads: [],
+        turnItems: [
+          item("a", "run-2", "subagent", "running"),
+          item("said", "run-2", "assistant_message", "completed"),
+          item("b", "run-2", "subagent", "running"),
+        ],
+        foregroundRunIds: new Set(["run-2"]),
+      }),
+    ).toEqual([]);
+  });
+
+  it("drops a roster task whose item is the live row", () => {
+    expect(
+      deriveOutlivingBackgroundWork({
+        providerThreads: rosterOf(bashJob, { taskId: "other", kind: "command" }),
+        turnItems: [
+          {
+            ...item("live", "run-2", "command_execution", "running"),
+            nativeItemRef: { nativeId: "bash:1" },
+          },
+        ],
+        foregroundRunIds: new Set(["run-2"]),
+      }),
+    ).toEqual([{ taskId: "other", kind: "command" }]);
+  });
+
+  it("lists active work an earlier run left behind", () => {
+    expect(
+      deriveOutlivingBackgroundWork({
+        providerThreads: [],
+        turnItems: [
+          item("dev-server", "run-1", "command_execution", "running"),
+          item("review", "run-2", "subagent", "running"),
+        ],
+        foregroundRunIds: new Set(["run-2"]),
+      }),
+    ).toEqual([{ taskId: "dev-server", description: "dev-server", kind: "command" }]);
+  });
+
+  it("drops work from rolled back runs", () => {
+    expect(
+      deriveOutlivingBackgroundWork({
+        providerThreads: [],
+        runs: [{ id: "run-1" as never, ordinal: 1, status: "rolled_back" }],
+        turnItems: [item("old", "run-1", "command_execution", "running")],
+        foregroundRunIds: new Set(["run-2"]),
+      }),
+    ).toEqual([]);
   });
 });

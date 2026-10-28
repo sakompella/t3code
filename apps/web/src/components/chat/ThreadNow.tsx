@@ -11,6 +11,8 @@ export interface ThreadNowItem {
   readonly icon: ReactNode;
   readonly title: ReactNode;
   readonly description?: ReactNode;
+  /** Shown under the line, such as the live subagent tree. */
+  readonly children?: ReactNode;
   readonly actions?: ReactNode;
 }
 
@@ -33,7 +35,7 @@ function ThreadNowLine({
   /** Announces the line when it appears; only for something that needs the user. */
   readonly announce?: boolean;
 }) {
-  return (
+  const line = (
     <div
       role={announce ? "alert" : undefined}
       className={lineClassName}
@@ -64,6 +66,16 @@ function ThreadNowLine({
         <span className="ms-1.5 flex shrink-0 items-center gap-2.5">{item.actions}</span>
       ) : null}
     </div>
+  );
+  if (!item.children) return line;
+  return (
+    <>
+      {line}
+      {/* Indented to the line's text, past its icon column. */}
+      <div className="mx-auto -mt-2 w-full min-w-0 max-w-(--chat-content-max-width) ps-6 pe-1 pb-2 text-muted-foreground">
+        {item.children}
+      </div>
+    </>
   );
 }
 

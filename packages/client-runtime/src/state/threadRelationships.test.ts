@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vite-plus/test";
-import { ThreadId } from "@t3tools/contracts";
+import { EnvironmentId, RunId, ThreadId } from "@t3tools/contracts";
 import * as DateTime from "effect/DateTime";
 
 import {
@@ -9,6 +9,8 @@ import {
   resolveMergeBackTargetThreadId,
   threadRelationshipRowStatus,
 } from "./threadRelationships.ts";
+import { presentThreadShell } from "./models.ts";
+import { v2ThreadShell } from "./orchestrationV2TestFixtures.ts";
 
 describe("thread relationships", () => {
   it.each([
@@ -40,6 +42,112 @@ describe("thread relationships", () => {
       threadRelationshipRowStatus(graph, immediateThreadRelationships(graph, parent)[0]!),
     ).toBe(childStatus);
   });
+
+  it.each([
+    ["the parent subagent's thread", "thread-worker"],
+    ["the root, as threads recorded before nested lineage do", "thread-root"],
+  ])(
+    "shows the same nested subagent family from every thread when it names %s",
+    (_, nestedParent) => {
+      const root = ThreadId.make("thread-root");
+      const worker = ThreadId.make("thread-worker");
+      const nested = ThreadId.make("thread-nested");
+      const threads = [
+        { id: root, status: "completed", forkedFrom: null, lineage: { parentThreadId: null } },
+        {
+          id: worker,
+          status: "running",
+          forkedFrom: null,
+          lineage: { parentThreadId: root, relationshipToParent: "subagent" },
+        },
+        {
+          id: nested,
+          status: "running",
+          forkedFrom: null,
+          lineage: { parentThreadId: nestedParent, relationshipToParent: "subagent" },
+        },
+      ];
+      // Prime Agent keeps every subagent record, nested or not, on the root thread.
+      const projections = {
+        [root]: {
+          thread: { id: root },
+          subagents: [
+            {
+              id: "node-worker",
+              parentNodeId: "node-root-turn",
+              childThreadId: worker,
+              status: "running",
+            },
+            {
+              id: "node-nested",
+              parentNodeId: "node-worker",
+              childThreadId: nested,
+              status: "running",
+            },
+          ],
+          contextTransfers: [],
+        },
+        [worker]: { thread: { id: worker }, subagents: [], contextTransfers: [] },
+        [nested]: { thread: { id: nested }, subagents: [], contextTransfers: [] },
+      };
+      const familyFrom = (openThreadId: ThreadId) =>
+        deriveThreadRelationshipGraph({
+          threads: threads as never,
+          projection: projections[openThreadId] as never,
+        })
+          .edges.map((edge) => `${edge.sourceThreadId} -> ${edge.targetThreadId}`)
+          .toSorted();
+
+      expect(familyFrom(worker)).toEqual(familyFrom(root));
+      expect(familyFrom(nested)).toEqual(familyFrom(root));
+      expect(familyFrom(root)).toEqual(
+        [`${root} -> ${worker}`, `${nestedParent} -> ${nested}`].toSorted(),
+      );
+    },
+  );
+
+  it.each([
+    ["completed", null, "subagent", "waiting"],
+    ["failed", null, "subagent", "failed"],
+    ["completed", "running", null, "running"],
+    ["completed", "running", "subagent", "waiting"],
+    ["completed", null, "monitor", "waiting"],
+    ["completed", null, "command", "completed"],
+    ["completed", null, null, "completed"],
+  ] as const)(
+    "shows a %s parent with activity %s and %s background work as %s, as the sidebar does",
+    (status, activityRunStatus, backgroundKind, expected) => {
+      const parent = {
+        ...v2ThreadShell,
+        id: ThreadId.make("thread-parent"),
+        latestRunId: RunId.make("run-parent"),
+        status,
+        activityRunStatus,
+        pendingBackgroundTasks:
+          backgroundKind === null ? [] : [{ taskId: "task-1", kind: backgroundKind }],
+      };
+      const child = {
+        ...v2ThreadShell,
+        id: ThreadId.make("thread-child"),
+        lineage: {
+          rootThreadId: parent.id,
+          parentThreadId: parent.id,
+          relationshipToParent: "subagent" as const,
+        },
+      };
+      const graph = deriveThreadRelationshipGraph({ threads: [parent, child], projection: null });
+      const lineageStatus = threadRelationshipRowStatus(
+        graph,
+        immediateThreadRelationships(graph, child.id)[0]!,
+      );
+      // The sidebar shows a runtime parked at idle as Waiting.
+      const runtimeStatus = presentThreadShell(EnvironmentId.make("environment"), parent).runtime
+        ?.status;
+
+      expect(lineageStatus).toBe(expected);
+      expect(runtimeStatus === "idle" ? "waiting" : runtimeStatus).toBe(expected);
+    },
+  );
 
   it("does not label a missing parent with its child's running status", () => {
     const parent = ThreadId.make("missing-parent");
