@@ -127,6 +127,7 @@ import * as ChildProcess from "effect/process/ChildProcess";
 import * as ChildProcessSpawner from "effect/process/ChildProcessSpawner";
 
 import { resolveAttachmentPath } from "../../attachmentStore.ts";
+import { readImageForProvider } from "../../provider/providerImage.ts";
 import { resolveClaudeSdkExecutablePath } from "../../provider/Drivers/ClaudeExecutable.ts";
 import {
   planClaudeSkillDispatch,
@@ -2264,7 +2265,8 @@ const makeClaudeUserMessageWithAttachments = Effect.fnUntraced(function* (input:
         detail: `Invalid attachment id '${attachment.id}'`,
       });
     }
-    const bytes = yield* input.fileSystem.readFile(attachmentPath).pipe(
+    const image = yield* readImageForProvider(attachmentPath, attachment.mimeType).pipe(
+      Effect.provideService(FileSystem.FileSystem, input.fileSystem),
       Effect.mapError(
         (cause) =>
           new ProviderAdapter.ProviderAdapterProtocolError({
@@ -2275,7 +2277,13 @@ const makeClaudeUserMessageWithAttachments = Effect.fnUntraced(function* (input:
           }),
       ),
     );
-    const retainedBytes = 4 * Math.ceil(bytes.length / 3) + 128;
+    if (!isSupportedClaudeImageMimeType(image.mimeType)) {
+      return yield* new ProviderAdapter.ProviderAdapterProtocolError({
+        driver: CLAUDE_PROVIDER,
+        detail: `Unsupported Claude image attachment type '${image.mimeType}'`,
+      });
+    }
+    const retainedBytes = 4 * Math.ceil(image.data.length / 3) + 128;
     if (retainedBytes > input.pdfReservation.budget.remainingBytes) continue;
     input.pdfReservation.budget.pending.bytes += retainedBytes;
     input.pdfReservation.bytes += retainedBytes;
@@ -2283,8 +2291,8 @@ const makeClaudeUserMessageWithAttachments = Effect.fnUntraced(function* (input:
       type: "image",
       source: {
         type: "base64",
-        media_type: attachment.mimeType,
-        data: Buffer.from(bytes).toString("base64"),
+        media_type: image.mimeType,
+        data: Buffer.from(image.data).toString("base64"),
       },
     };
     images.set(index, block);
