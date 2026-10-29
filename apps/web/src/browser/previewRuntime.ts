@@ -2,6 +2,7 @@ import { useAtomValue } from "@effect/atom-react";
 import type { EnvironmentId, PreviewRuntime, PreviewSessionSnapshot } from "@t3tools/contracts";
 
 import { isElectron } from "~/env";
+import { isLocalServerExternal } from "~/localEnvironment";
 import { isPreviewSupportedInRuntime } from "~/previewStateStore";
 import { appAtomRegistry } from "~/rpc/atomRegistry";
 import { primaryEnvironmentIdAtom } from "~/state/primaryEnvironment";
@@ -10,11 +11,21 @@ import {
   useEnvironmentSupportsServerBrowser,
 } from "~/state/entities";
 
+/**
+ * The environment whose server drives this window's webviews through the desktop bridge. A
+ * local server the app attaches to has no bridge, so it is treated like a remote environment.
+ */
+export function desktopBrowserEnvironmentId(
+  primaryEnvironmentId: EnvironmentId | null,
+): EnvironmentId | null {
+  return isLocalServerExternal() ? null : primaryEnvironmentId;
+}
+
 export function previewRuntimeFor(environmentId: EnvironmentId): PreviewRuntime | undefined {
   if (!readEnvironmentSupportsServerBrowser(environmentId)) return undefined;
   if (
     isPreviewSupportedInRuntime() &&
-    environmentId !== appAtomRegistry.get(primaryEnvironmentIdAtom)
+    environmentId !== desktopBrowserEnvironmentId(appAtomRegistry.get(primaryEnvironmentIdAtom))
   ) {
     return undefined;
   }
@@ -28,7 +39,7 @@ export function alternatePreviewRuntime(
   snapshot: Pick<PreviewSessionSnapshot, "runtime"> | null | undefined,
 ): PreviewRuntime | null {
   if (!snapshot || !serverBrowser || !isPreviewSupportedInRuntime()) return null;
-  if (environmentId === primaryEnvironmentId) return null;
+  if (environmentId === desktopBrowserEnvironmentId(primaryEnvironmentId)) return null;
   return snapshot.runtime === "server" ? "desktop" : "server";
 }
 
@@ -51,7 +62,7 @@ export function rendersServerTabNatively(
     snapshot?.runtime === "server" &&
     !snapshot.headless &&
     primaryEnvironmentId !== null &&
-    environmentId === primaryEnvironmentId
+    environmentId === desktopBrowserEnvironmentId(primaryEnvironmentId)
   );
 }
 
