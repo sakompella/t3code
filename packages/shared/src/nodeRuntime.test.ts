@@ -6,7 +6,12 @@ import * as Path from "effect/Path";
 import * as Result from "effect/Result";
 
 import * as HostProcess from "./HostProcess.ts";
-import { resolveNodeExecutable, resolveSelfInvocation, selfInvocationArgs } from "./nodeRuntime.ts";
+import {
+  resolveNodeExecutable,
+  resolveNodeRuntime,
+  resolveSelfInvocation,
+  selfInvocationArgs,
+} from "./nodeRuntime.ts";
 import { symlinksSupported } from "./testing/symlinks.ts";
 
 describe("Self invocation", () => {
@@ -42,6 +47,22 @@ describe("Self invocation", () => {
 });
 
 describe("Node runtime selection", () => {
+  it.effect("asks for ELECTRON_RUN_AS_NODE only when the runtime is Electron", () =>
+    Effect.gen(function* () {
+      const resolve = (isElectron: boolean) =>
+        resolveNodeRuntime("Local device support", { PATH: "" }).pipe(
+          Effect.provideService(HostProcess.ExecutablePath, "/runtime/binary"),
+          Effect.provideService(HostProcess.IsExecutable, false),
+          Effect.provideService(HostProcess.IsElectron, isElectron),
+        );
+      expect(yield* resolve(true)).toEqual({
+        command: "/runtime/binary",
+        env: { ELECTRON_RUN_AS_NODE: "1" },
+      });
+      expect(yield* resolve(false)).toEqual({ command: "/runtime/binary", env: {} });
+    }).pipe(Effect.provide(NodeServices.layer)),
+  );
+
   it.effect("keeps the current Node or Electron runtime without requiring Node on PATH", () =>
     Effect.gen(function* () {
       for (const executable of ["/runtime/node", "/Applications/T3 Code.app/Electron"]) {
