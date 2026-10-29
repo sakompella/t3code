@@ -1,6 +1,7 @@
 import { useAtomValue } from "@effect/atom-react";
 import type { EnvironmentPresentation } from "@t3tools/client-runtime/connection";
 import { createEnvironmentPresentationAtoms } from "@t3tools/client-runtime/state/presentation";
+import { createOfflineEnvironmentLabelsAtom } from "@t3tools/client-runtime/state/offline-environments";
 import type { EnvironmentId } from "@t3tools/contracts";
 import { Atom } from "effect/reactivity";
 
@@ -12,6 +13,10 @@ export const environmentPresentations = createEnvironmentPresentationAtoms({
   stateAtom: environmentCatalog.stateAtom,
   serverConfigValueAtom: serverEnvironment.configValueAtom,
 });
+
+export const offlineEnvironmentLabelsAtom = createOfflineEnvironmentLabelsAtom(
+  environmentPresentations.presentationsAtom,
+);
 
 const EMPTY_ENVIRONMENT_PRESENTATION_ATOM = Atom.make<EnvironmentPresentation | null>(null).pipe(
   Atom.withLabel("mobile-environment-presentation:empty"),
