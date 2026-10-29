@@ -50,6 +50,31 @@ public addresses, and every device still needs to pair or sign in. To keep the s
 `T3CODE_HOST=127.0.0.1` in `service.env` (below). Any `T3CODE_HOST` value
 replaces this default.
 
+## Use the desktop app with the service
+
+By default the desktop app starts its own server and refuses to open a T3 home
+that a running service already uses. To use the service as the desktop app's
+local environment instead, quit the app and add this line to
+`desktop-settings.json` in the T3 home's `userdata` folder (normally
+`~/.t3/userdata/desktop-settings.json`):
+
+```json
+"localEnvironmentMode": "external"
+```
+
+The app then connects to the server that runs for that T3 home and never starts,
+restarts, or stops it, including when you quit the app or it installs an update.
+If the server is not running, the app shows a waiting screen and connects as soon
+as the server answers. It reconnects on its own after `t3 service restart` or
+`t3 update`.
+
+The server owns its network access, Tailscale HTTPS, and version, so the app's
+Connections settings do not change them, and the WSL backend is off. Change
+those in `service.env` and with `t3 update`. The server must be a release that
+supports this mode; an older one shows an "Update the server" message. Two
+desktop apps attached to the same server sign each other out of it. Remove the
+line, or set it to `"managed"`, to go back.
+
 ## Configure the service environment
 
 Put custom environment variables in `service.env` under the service's T3 home
