@@ -11,6 +11,7 @@ import {
 } from "@t3tools/client-runtime/state/thread-settled";
 import type { SnoozePreset } from "@t3tools/client-runtime/state/thread-settled";
 import type { EnvironmentThreadShell } from "@t3tools/client-runtime/state/shell";
+import { parseScopedThreadKey } from "@t3tools/client-runtime/environment";
 import { resolveThreadProviderStack } from "@t3tools/client-runtime/state/models";
 import {
   threadSearchMatchKey,
@@ -32,6 +33,7 @@ import {
 import { isListedThreadLineage, type EnvironmentId, type ProjectId } from "@t3tools/contracts";
 import type { SnoozePresetSetting } from "@t3tools/contracts/settings";
 import { threadUnreadCompletionAt } from "@t3tools/client-runtime/state/thread-heartbeats";
+import { foldOfflineEnvironmentThreads } from "@t3tools/client-runtime/state/offline-environments";
 
 import type { ThreadListProvider } from "../../state/thread-list-environments";
 import type { ThreadMoveAvailability } from "./threadOrder";
@@ -303,6 +305,42 @@ export interface ThreadListV2Item {
   readonly isLast: boolean;
 }
 
+export interface ThreadListV2OfflineFold {
+  readonly environmentId: EnvironmentId;
+  readonly label: string;
+  readonly expanded: boolean;
+  readonly hiddenCount: number;
+  /** The most urgent status among the hidden threads, if any needs a look. */
+  readonly hiddenStatus: "attention" | "failed" | "unread" | "working" | null;
+  readonly headerIndex: number;
+}
+
+function resolveHiddenStatus(
+  threads: ReadonlyArray<EnvironmentThreadShell>,
+): ThreadListV2OfflineFold["hiddenStatus"] {
+  const statuses = new Set(threads.map(resolveThreadListV2Status));
+  if (
+    statuses.has("approval") ||
+    statuses.has("input") ||
+    statuses.has("request") ||
+    statuses.has("limited")
+  ) {
+    return "attention";
+  }
+  if (statuses.has("failed")) return "failed";
+  // Rows show Done only for ready threads, so the fold follows the same rule.
+  if (
+    threads.some(
+      (thread) =>
+        resolveThreadListV2Status(thread) === "ready" && threadHasUnseenCompletion(thread),
+    )
+  ) {
+    return "unread";
+  }
+  if (statuses.has("working")) return "working";
+  return null;
+}
+
 export interface ThreadListV2Layout {
   readonly items: ThreadListV2Item[];
   readonly hiddenSettledCount: number;
@@ -310,6 +348,8 @@ export interface ThreadListV2Layout {
   readonly listedSettledThreads: ReadonlyArray<EnvironmentThreadShell>;
   readonly workingCount: number;
   readonly workingShelfHeaderIndex: number | null;
+  /** One row per offline environment, between the Working and Snoozed shelves. */
+  readonly offlineFolds: ReadonlyArray<ThreadListV2OfflineFold>;
   readonly snoozedCount: number;
   readonly snoozedShelfHeaderIndex: number | null;
   readonly settledCount: number;
@@ -367,10 +407,21 @@ export interface ThreadListV2SettledShelfListItem {
   readonly disabled: boolean;
 }
 
+export interface ThreadListV2OfflineEnvironmentListItem {
+  readonly type: "v2-offline-environment";
+  readonly key: string;
+  readonly environmentId: EnvironmentId;
+  readonly label: string;
+  readonly count: number;
+  readonly status: ThreadListV2OfflineFold["hiddenStatus"];
+  readonly expanded: boolean;
+}
+
 export type ThreadListV2ListItem =
   | ThreadListV2ThreadListItem
   | ThreadListV2PendingListItem
   | ThreadListV2WorkingShelfListItem
+  | ThreadListV2OfflineEnvironmentListItem
   | ThreadListV2SnoozedShelfListItem
   | ThreadListV2SettledShelfListItem;
 
@@ -381,6 +432,7 @@ export function isThreadListV2ListItem(value: {
     value.type === "v2-thread" ||
     value.type === "v2-pending" ||
     value.type === "v2-working-shelf" ||
+    value.type === "v2-offline-environment" ||
     value.type === "v2-snoozed-shelf" ||
     value.type === "v2-settled-shelf"
   );
@@ -423,6 +475,15 @@ export function threadListV2ListItemsAreEqual(
         previous.count === item.count &&
         previous.expanded === item.expanded &&
         previous.disabled === item.disabled
+      );
+    case "v2-offline-environment":
+      return (
+        previous.type === "v2-offline-environment" &&
+        previous.key === item.key &&
+        previous.label === item.label &&
+        previous.count === item.count &&
+        previous.status === item.status &&
+        previous.expanded === item.expanded
       );
     case "v2-snoozed-shelf":
       return (
@@ -467,6 +528,7 @@ export function buildThreadListV2ListItems(input: {
   readonly workingCount?: number;
   readonly workingShelfExpanded?: boolean;
   readonly workingShelfHeaderIndex?: number | null;
+  readonly offlineFolds?: ReadonlyArray<ThreadListV2OfflineFold>;
   readonly snoozedCount?: number;
   readonly snoozedShelfExpanded?: boolean;
   readonly snoozedShelfHeaderIndex?: number | null;
@@ -524,8 +586,10 @@ export function buildThreadListV2ListItems(input: {
   const snoozedShelfHeaderIndex = input.snoozedShelfHeaderIndex ?? null;
   const settledCount = input.settledCount ?? 0;
   const settledShelfHeaderIndex = input.settledShelfHeaderIndex ?? null;
+  const offlineFolds = input.offlineFolds ?? [];
   const snoozedEnd = settledShelfHeaderIndex ?? threadItems.length;
-  const workingEnd = snoozedShelfHeaderIndex ?? snoozedEnd;
+  const foldsEnd = snoozedShelfHeaderIndex ?? snoozedEnd;
+  const workingEnd = offlineFolds[0]?.headerIndex ?? foldsEnd;
   const activeEnd = workingShelfHeaderIndex ?? workingEnd;
   const result: ThreadListV2ListItem[] = [...pendingItems, ...threadItems.slice(0, activeEnd)];
   const shelfDisabled = input.shelfPreferencesLoading === true;
@@ -538,6 +602,26 @@ export function buildThreadListV2ListItems(input: {
       disabled: shelfDisabled,
     });
     result.push(...threadItems.slice(workingShelfHeaderIndex, workingEnd));
+  }
+  for (const [index, fold] of offlineFolds.entries()) {
+    result.push({
+      type: "v2-offline-environment",
+      key: `v2-offline-environment:${fold.environmentId}`,
+      environmentId: fold.environmentId,
+      label: fold.label,
+      count: fold.hiddenCount,
+      status: fold.hiddenStatus,
+      expanded: fold.expanded,
+    });
+    // An offline environment cannot take a reorder.
+    for (const item of threadItems.slice(
+      fold.headerIndex,
+      offlineFolds[index + 1]?.headerIndex ?? foldsEnd,
+    )) {
+      result.push(
+        item.type === "v2-thread" ? { ...item, canMoveUp: false, canMoveDown: false } : item,
+      );
+    }
   }
   if (snoozedShelfHeaderIndex !== null && snoozedCount > 0) {
     result.push({
@@ -618,6 +702,8 @@ export function buildThreadListV2Items(input: {
   readonly isListedSettled?: (thread: EnvironmentThreadShell) => boolean;
   /** Settled threads in scope that are not local (older settled threads not loaded). */
   readonly unloadedSettledCount?: number;
+  readonly offlineEnvironmentLabels?: ReadonlyMap<EnvironmentId, string>;
+  readonly expandedOfflineEnvironmentIds?: ReadonlySet<EnvironmentId>;
 }): ThreadListV2Layout {
   const now = input.now;
   const pending =
@@ -733,6 +819,7 @@ export function buildThreadListV2Items(input: {
       listedSettledThreads: [],
       workingCount: 0,
       workingShelfHeaderIndex: null,
+      offlineFolds: [],
       snoozedCount: 0,
       snoozedShelfHeaderIndex: null,
       settledCount: 0,
@@ -745,12 +832,28 @@ export function buildThreadListV2Items(input: {
   const orderedActive = workingShelfEnabled
     ? sortInboxThreadsByReturn(active, input.inboxReturnAt)
     : applyPendingThreadOrder(sortThreadsForListV2(active), "active", pending);
-  const orderedWorking = sortWorkingThreadsBySend(working);
+  const orderedPinned = applyPendingThreadOrder(
+    sortPinnedThreadsByOrderKey(pinned),
+    "pinned",
+    pending,
+  );
+  const sortedWorking = sortWorkingThreadsBySend(working);
+  const selectedThreadKey = input.selectedThreadKey ?? null;
+  // An offline environment's inbox threads fold into one row; its shelved threads stay shelved.
+  const offlineEnvironmentLabels = input.offlineEnvironmentLabels ?? new Map();
+  const offlineFold = foldOfflineEnvironmentThreads({
+    threads: [...orderedPinned, ...orderedActive, ...sortedWorking],
+    offlineEnvironmentLabels,
+    expandedEnvironmentIds: input.expandedOfflineEnvironmentIds ?? new Set(),
+    openThread: selectedThreadKey === null ? null : parseScopedThreadKey(selectedThreadKey),
+  });
+  const isListed = (thread: EnvironmentThreadShell) =>
+    !offlineEnvironmentLabels.has(thread.environmentId);
+  const orderedWorking = sortedWorking.filter(isListed);
   const orderedSnoozed = [...snoozed].sort(
     (left, right) =>
       parseTimestampMs(left.snoozedUntil ?? "") - parseTimestampMs(right.snoozedUntil ?? ""),
   );
-  const selectedThreadKey = input.selectedThreadKey ?? null;
   const visibleWorking =
     input.workingShelfExpanded === true
       ? orderedWorking
@@ -789,11 +892,7 @@ export function buildThreadListV2Items(input: {
         );
 
   const items: ThreadListV2Item[] = [];
-  for (const thread of applyPendingThreadOrder(
-    sortPinnedThreadsByOrderKey(pinned),
-    "pinned",
-    pending,
-  )) {
+  for (const thread of orderedPinned.filter(isListed)) {
     items.push({
       thread,
       variant: "card",
@@ -803,7 +902,7 @@ export function buildThreadListV2Items(input: {
       isLast: false,
     });
   }
-  for (const thread of orderedActive) {
+  for (const thread of orderedActive.filter(isListed)) {
     items.push({
       thread,
       variant: "card",
@@ -823,6 +922,27 @@ export function buildThreadListV2Items(input: {
       wokeAt: resolveThreadListV2WokeAt(thread, { now }),
       isLast: false,
     });
+  }
+  const offlineFolds: ThreadListV2OfflineFold[] = [];
+  for (const fold of offlineFold.folds) {
+    offlineFolds.push({
+      environmentId: fold.environmentId,
+      label: fold.label,
+      expanded: fold.expanded,
+      hiddenCount: fold.hiddenThreads.length,
+      hiddenStatus: resolveHiddenStatus(fold.hiddenThreads),
+      headerIndex: items.length,
+    });
+    for (const thread of fold.shownThreads) {
+      items.push({
+        thread,
+        variant: "card",
+        snoozed: false,
+        pinned: thread.pinnedAt != null,
+        wokeAt: resolveThreadListV2WokeAt(thread, { now }),
+        isLast: false,
+      });
+    }
   }
   const snoozedShelfHeaderIndex = orderedSnoozed.length > 0 ? items.length : null;
   for (const thread of visibleSnoozed) {
@@ -856,6 +976,7 @@ export function buildThreadListV2Items(input: {
     listedSettledThreads: listedSettled,
     workingCount: orderedWorking.length,
     workingShelfHeaderIndex,
+    offlineFolds,
     snoozedCount: orderedSnoozed.length,
     snoozedShelfHeaderIndex,
     settledCount: settledTotal,

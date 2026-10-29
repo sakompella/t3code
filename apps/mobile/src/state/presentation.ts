@@ -4,6 +4,7 @@ import {
   createEnvironmentPresentationAtoms,
   createEnvironmentSummaryAtoms,
 } from "@t3tools/client-runtime/state/presentation";
+import { createOfflineEnvironmentLabelsAtom } from "@t3tools/client-runtime/state/offline-environments";
 import type { EnvironmentId } from "@t3tools/contracts";
 import { Atom } from "effect/reactivity";
 
@@ -25,6 +26,10 @@ export const { connectedEnvironmentIdsAtom } = createEnvironmentSummaryAtoms({
 export const threadListEnvironmentsAtom = createThreadListEnvironmentsAtom(
   environmentServerConfigsAtom,
   connectedEnvironmentIdsAtom,
+);
+
+export const offlineEnvironmentLabelsAtom = createOfflineEnvironmentLabelsAtom(
+  environmentPresentations.presentationsAtom,
 );
 
 const EMPTY_ENVIRONMENT_PRESENTATION_ATOM = Atom.make<EnvironmentPresentation | null>(null).pipe(
