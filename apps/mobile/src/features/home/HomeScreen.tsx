@@ -61,6 +61,7 @@ import {
   ThreadListV2Row,
   ThreadListV2SettledShelfHeader,
   ThreadListV2ShowMoreRow,
+  ThreadListV2OfflineEnvironmentHeader,
   ThreadListV2SnoozedShelfHeader,
   ThreadListV2WorkingShelfHeader,
 } from "../threads/thread-list-v2-items";
@@ -446,6 +447,7 @@ export function HomeScreen(props: HomeScreenProps) {
     items: threadListV2Items,
     contentOnlyThreadKeys,
     olderSettledShelf,
+    toggleOfflineFold,
   } = useThreadListV2({
     threads: props.threads,
     pendingTasks: props.pendingTasks,
@@ -533,6 +535,18 @@ export function HomeScreen(props: HomeScreenProps) {
           disabled={item.disabled}
           expanded={item.expanded}
           onToggle={toggleWorkingShelf}
+        />
+      );
+    }
+    if (item.type === "v2-offline-environment") {
+      return (
+        <ThreadListV2OfflineEnvironmentHeader
+          environmentId={item.environmentId}
+          label={item.label}
+          count={item.count}
+          status={item.status}
+          expanded={item.expanded}
+          onToggle={toggleOfflineFold}
         />
       );
     }

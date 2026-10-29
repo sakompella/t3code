@@ -69,6 +69,7 @@ import {
   ThreadListV2Row,
   ThreadListV2SettledShelfHeader,
   ThreadListV2ShowMoreRow,
+  ThreadListV2OfflineEnvironmentHeader,
   ThreadListV2SnoozedShelfHeader,
   ThreadListV2WorkingShelfHeader,
 } from "./thread-list-v2-items";
@@ -295,6 +296,7 @@ function ThreadNavigationSidebarPane(
     items: threadListV2Items,
     contentOnlyThreadKeys,
     olderSettledShelf,
+    toggleOfflineFold,
   } = useThreadListV2({
     threads,
     pendingTasks,
@@ -619,6 +621,18 @@ function ThreadNavigationSidebarPane(
             disabled={item.disabled}
             expanded={item.expanded}
             onToggle={toggleWorkingShelf}
+            pane="sidebar"
+          />
+        );
+      case "v2-offline-environment":
+        return (
+          <ThreadListV2OfflineEnvironmentHeader
+            environmentId={item.environmentId}
+            label={item.label}
+            count={item.count}
+            status={item.status}
+            expanded={item.expanded}
+            onToggle={toggleOfflineFold}
             pane="sidebar"
           />
         );
