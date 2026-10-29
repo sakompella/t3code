@@ -105,6 +105,8 @@ export const getLocalEnvironmentBootstraps = DesktopIpc.makeSyncIpcMethod({
   handler: Effect.fn("desktop.ipc.window.getLocalEnvironmentBootstraps")(function* () {
     const pool = yield* DesktopBackendPool.DesktopBackendPool;
     const configuration = yield* DesktopBackendConfiguration.DesktopBackendConfiguration;
+    const appSettings = yield* DesktopAppSettings.DesktopAppSettings;
+    const externalPrimary = (yield* appSettings.get).localEnvironmentMode === "external";
     const instances = yield* pool.list;
     const bootstraps: DesktopEnvironmentBootstrap[] = [];
     for (const instance of instances) {
@@ -144,6 +146,7 @@ export const getLocalEnvironmentBootstraps = DesktopIpc.makeSyncIpcMethod({
           : bootstrap.desktopBootstrapToken
             ? { bootstrapToken: bootstrap.desktopBootstrapToken }
             : {}),
+        ...(isPrimary && externalPrimary ? { externalServer: true } : {}),
       });
     }
     return bootstraps;
