@@ -8,6 +8,8 @@ import {
   displayLimitWindows,
   formatReadingAge,
   formatResetsIn,
+  groupLimitWindows,
+  type GroupedLimitWindow,
   type LimitAccount,
   type LimitPool,
   type LimitPoolMember,
@@ -505,10 +507,12 @@ function PoolBar({
   pool,
   color,
   now,
+  showAccountName,
 }: {
   readonly pool: LimitPoolWindow;
   readonly color: string;
   readonly now: number;
+  readonly showAccountName: boolean;
 }) {
   const restores = new Map(pool.resets.map((reset) => [reset.member.account.key, reset]));
   return (
@@ -529,7 +533,7 @@ function PoolBar({
               color={color}
               now={now}
               index={position + 1}
-              showAccountName={pool.columns.length > 1}
+              showAccountName={showAccountName}
             />
           ) : null,
         )}
@@ -538,24 +542,26 @@ function PoolBar({
   );
 }
 
-function PoolWindowCard({
+function PoolWindowRow({
   pool,
   color,
   now,
-  label,
-  description,
+  title,
+  titleClassName,
+  showAccountName,
 }: {
   readonly pool: LimitPoolWindow;
   readonly color: string;
   readonly now: number;
-  readonly label?: string | undefined;
-  readonly description?: string | undefined;
+  readonly title: string;
+  readonly titleClassName: string;
+  readonly showAccountName: boolean;
 }) {
   const nextRefill = pool.resets.find((reset) => reset.restoresPercent > 0);
   return (
-    <div className="grid items-center gap-x-6 gap-y-3 rounded-lg border border-border/60 p-4 md:grid-cols-[11rem_minmax(0,1fr)]">
+    <div className="grid items-center gap-x-6 gap-y-3 md:grid-cols-[11rem_minmax(0,1fr)]">
       <div className="flex flex-col gap-1">
-        <span className="text-sm font-medium text-foreground">{label ?? pool.label}</span>
+        <span className={titleClassName}>{title}</span>
         <span className="flex items-baseline gap-2">
           <span className="text-3xl font-semibold text-foreground tabular-nums">
             {pool.remainingPercent}%
@@ -572,10 +578,47 @@ function PoolWindowCard({
           </span>
         ) : null}
       </div>
-      <PoolBar pool={pool} color={color} now={now} />
-      {description ? (
-        <p className="text-xs text-muted-foreground md:col-span-2">{description}</p>
-      ) : null}
+      <PoolBar pool={pool} color={color} now={now} showAccountName={showAccountName} />
+    </div>
+  );
+}
+
+/** Groups only appear when the provider has accounts in more than one place. */
+function PoolWindowCard({
+  grouped,
+  color,
+  now,
+  label,
+  description,
+}: {
+  readonly grouped: GroupedLimitWindow;
+  readonly color: string;
+  readonly now: number;
+  readonly label?: string | undefined;
+  readonly description?: string | undefined;
+}) {
+  const title = label ?? grouped.window.label;
+  // Labels are all set or all null; a window one source reports still needs its own name.
+  const split = grouped.groups.some((group) => group.label !== null);
+  return (
+    <div className="flex flex-col gap-3 rounded-lg border border-border/60 p-4">
+      {split ? <span className="text-sm font-medium text-foreground">{title}</span> : null}
+      {grouped.groups.map((group) => (
+        <PoolWindowRow
+          key={group.label ?? ""}
+          pool={group.window}
+          color={color}
+          now={now}
+          title={group.label ?? title}
+          titleClassName={
+            split
+              ? "text-xs font-medium text-muted-foreground"
+              : "text-sm font-medium text-foreground"
+          }
+          showAccountName={split || group.window.columns.length > 1}
+        />
+      ))}
+      {description ? <p className="text-xs text-muted-foreground">{description}</p> : null}
     </div>
   );
 }
@@ -583,7 +626,7 @@ function PoolWindowCard({
 function PoolSection({ pool, now }: { readonly pool: LimitPool; readonly now: number }) {
   const color = barColor(pool.driver);
   const label = providerClients.get(pool.driver)?.label ?? String(pool.driver);
-  const windows = displayLimitWindows(pool);
+  const windows = groupLimitWindows(pool, now);
   return (
     <section className="flex flex-col gap-3">
       <h2 className="flex items-center gap-2 text-sm font-medium text-foreground">
@@ -596,12 +639,13 @@ function PoolSection({ pool, now }: { readonly pool: LimitPool; readonly now: nu
         />
         {label}
       </h2>
-      {windows.map((window) => {
+      {windows.map((grouped) => {
+        const { window } = grouped;
         const details = pool.driver === "cursor" ? cursorUsageWindowDetails(window.id) : undefined;
         return (
           <PoolWindowCard
             key={`${window.kind}:${window.id}`}
-            pool={window}
+            grouped={grouped}
             color={color}
             now={now}
             label={details?.label}
