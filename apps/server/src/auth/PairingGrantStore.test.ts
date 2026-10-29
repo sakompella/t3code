@@ -8,13 +8,16 @@ import * as Stream from "effect/Stream";
 import * as Queue from "effect/Queue";
 import * as TestClock from "effect/testing/TestClock";
 import {
+  DESKTOP_ATTACH_SECRET_NAME,
   DESKTOP_BOOTSTRAP_TOKEN_WINDOW_MS,
   currentDesktopBootstrapToken,
+  encodeDesktopAttachSecret,
 } from "@t3tools/shared/desktopBootstrapToken";
 
 import * as ServerConfig from "../config.ts";
 import * as SqlitePersistence from "../persistence/Sqlite.ts";
 import * as PairingGrantStore from "./PairingGrantStore.ts";
+import * as ServerSecretStore from "./ServerSecretStore.ts";
 
 const layerServerConfig = (
   overrides?: Partial<
@@ -40,6 +43,7 @@ const layerPairingGrantStore = (
   >,
 ) =>
   PairingGrantStore.layer.pipe(
+    Layer.provideMerge(ServerSecretStore.layer),
     Layer.provide(SqlitePersistence.layerMemory),
     Layer.provide(layerServerConfig(overrides)),
   );
@@ -181,6 +185,28 @@ it.layer(NodeServices.layer)("PairingGrantStore.layer", (it) => {
         ),
       ),
     ),
+  );
+
+  it.effect("accepts desktop tokens derived from the attach secret in the T3 home", () =>
+    Effect.gen(function* () {
+      const bootstrapCredentials = yield* PairingGrantStore.PairingGrantStore;
+      const secretStore = yield* ServerSecretStore.ServerSecretStore;
+      const stored = yield* secretStore.get(DESKTOP_ATTACH_SECRET_NAME);
+      if (stored._tag === "None") throw new Error("Expected the attach secret to be stored");
+      const attachSecret = encodeDesktopAttachSecret(stored.value);
+
+      const grant = yield* bootstrapCredentials.consume(
+        currentDesktopBootstrapToken(attachSecret, 0),
+      );
+      expect(grant.method).toBe("desktop-bootstrap");
+      expect(grant.subject).toBe("desktop-bootstrap");
+      expect(grant.scopes).toEqual(AuthStandardClientScopes);
+
+      const foreign = yield* Effect.flip(
+        bootstrapCredentials.consume(currentDesktopBootstrapToken("another-home", 0)),
+      );
+      expect(foreign._tag).toBe("UnknownBootstrapCredentialError");
+    }).pipe(Effect.provide(Layer.merge(layerPairingGrantStore(), TestClock.layer()))),
   );
 
   it.effect("keeps credentials out of pairing lists and change events", () =>

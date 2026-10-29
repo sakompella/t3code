@@ -10,11 +10,14 @@ import * as SubscriptionRef from "effect/SubscriptionRef";
 import * as SynchronizedRef from "effect/SynchronizedRef";
 
 import * as FileSystem from "effect/FileSystem";
+import * as Path from "effect/Path";
 import { HttpClient } from "effect/http";
 import { ChildProcessSpawner } from "effect/process";
 
 import * as DesktopBackendConfiguration from "./DesktopBackendConfiguration.ts";
 import * as DesktopBackendManager from "./DesktopBackendManager.ts";
+import * as DesktopExternalBackend from "./DesktopExternalBackend.ts";
+import * as DesktopEnvironment from "../app/DesktopEnvironment.ts";
 import * as DesktopObservability from "../app/DesktopObservability.ts";
 import * as DesktopState from "../app/DesktopState.ts";
 import * as DesktopAppSettings from "../settings/DesktopAppSettings.ts";
@@ -108,10 +111,14 @@ export const layer = Layer.effect(
     const electronDialog = yield* ElectronDialog.ElectronDialog;
     const electronApp = yield* ElectronApp.ElectronApp;
     const appSettings = yield* DesktopAppSettings.DesktopAppSettings;
+    const environment = yield* DesktopEnvironment.DesktopEnvironment;
     const { primaryBackendStartup } = yield* DesktopState.DesktopState;
     // Parent instance scopes to the pool so shutdown runs stop finalizers before the OS kills backends.
     const layerScope = yield* Scope.Scope;
     const factoryContext = yield* Effect.context<BackendInstanceFactoryRequirements>();
+    const externalContext = yield* Effect.context<
+      FileSystem.FileSystem | Path.Path | HttpClient.HttpClient
+    >();
 
     // Persist fatal Windows fallbacks; transient transport failures must preserve the user's WSL preference.
     const handlePrimaryPreflightFailure = Effect.fn("desktop.backendPool.primaryPreflightFailed")(
@@ -153,13 +160,9 @@ export const layer = Layer.effect(
       },
     );
 
-    const primary = yield* DesktopBackendManager.makeBackendInstance({
-      id: DesktopBackendManager.PRIMARY_INSTANCE_ID,
-      // Resolve lazily: startup loads persisted settings after pool initialization.
-      label: configuration.resolvePrimaryLabel,
-      configResolve: configuration.resolvePrimary,
+    const primaryCallbacks = {
       // Absorb window errors so readiness can reset restartAttempt.
-      onReady: (httpBaseUrl) =>
+      onReady: (httpBaseUrl: URL) =>
         desktopWindow.handleBackendReady(httpBaseUrl).pipe(
           // Only once the main window exists, so the recovery window never closes into nothing.
           Effect.andThen(SubscriptionRef.set(primaryBackendStartup, { _tag: "Ready" })),
@@ -169,28 +172,58 @@ export const layer = Layer.effect(
             }),
           ),
         ),
-      onStartupFailure: (failure) =>
+      onStartupFailure: (failure: DesktopBackendManager.BackendStartupFailure) =>
         SubscriptionRef.set(primaryBackendStartup, { _tag: "Failing", ...failure }),
       onShutdown: () => desktopWindow.handleBackendNotReady,
+    };
+
+    const makeManagedPrimary = DesktopBackendManager.makeBackendInstance({
+      id: DesktopBackendManager.PRIMARY_INSTANCE_ID,
+      label: configuration.resolvePrimaryLabel,
+      configResolve: configuration.resolvePrimary,
+      ...primaryCallbacks,
       onPreflightFailed: handlePrimaryPreflightFailure,
       onStateDirOwned: () =>
         electronDialog
           .showErrorBox(
             "This T3 home is unavailable",
-            "Another T3 Code server, such as the background service, is using this data directory, or an older background service is set up for it. Stop that server or try `t3 update`. If the older launcher cannot update, run `t3 service uninstall` and optionally reinstall with `t3 service install` from a current CLI. Use `npx t3@latest` if `t3` is missing or outdated, and pass `--base-dir` with the service's T3 home to each command. Then reopen T3 Code. You can also set a separate T3CODE_HOME and pair with the running server.",
+            `Another T3 Code server, such as the background service, is using this data directory, or an older background service is set up for it. Stop that server or try \`t3 update\`. If the older launcher cannot update, run \`t3 service uninstall\` and optionally reinstall with \`t3 service install\` from a current CLI. Use \`npx t3@latest\` if \`t3\` is missing or outdated, and pass \`--base-dir\` with the service's T3 home to each command. Then reopen T3 Code. You can also set a separate T3CODE_HOME and pair with the running server, or use that server as this app's local environment by adding "localEnvironmentMode": "external" to ${environment.desktopSettingsPath}.`,
           )
           .pipe(Effect.andThen(electronApp.quit)),
-    });
+    }).pipe(Effect.provide(factoryContext));
+
+    const makeExternalPrimary = DesktopExternalBackend.makeExternalBackendInstance({
+      id: DesktopBackendManager.PRIMARY_INSTANCE_ID,
+      label: configuration.resolvePrimaryLabel,
+      stateDir: environment.stateDir,
+      ...primaryCallbacks,
+    }).pipe(Effect.provide(externalContext));
 
     const instancesRef = yield* SynchronizedRef.make<
       ReadonlyMap<BackendInstanceId, RegisteredInstance>
-    >(
-      new Map([
-        [
-          DesktopBackendManager.PRIMARY_INSTANCE_ID,
-          { _tag: "Active", instance: primary, scope: Option.none() },
-        ],
-      ]),
+    >(new Map());
+
+    // Built on first use: startup loads persisted settings, which choose the kind, after pool initialization.
+    const primary = yield* Effect.cached(
+      Effect.gen(function* () {
+        const { localEnvironmentMode } = yield* appSettings.get;
+        const instance =
+          localEnvironmentMode === "external"
+            ? yield* makeExternalPrimary
+            : yield* makeManagedPrimary;
+        yield* SynchronizedRef.update(
+          instancesRef,
+          (current) =>
+            new Map([
+              [
+                DesktopBackendManager.PRIMARY_INSTANCE_ID,
+                { _tag: "Active", instance, scope: Option.none() } as const,
+              ],
+              ...current,
+            ]),
+        );
+        return instance;
+      }).pipe(Effect.provideService(Scope.Scope, layerScope)),
     );
 
     const register: DesktopBackendPool["Service"]["register"] = (spec) =>
@@ -313,7 +346,7 @@ export const layer = Layer.effect(
           ),
         ),
       ),
-      primary: Effect.succeed(primary),
+      primary,
       register,
       unregister,
     });

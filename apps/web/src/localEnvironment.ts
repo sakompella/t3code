@@ -1,3 +1,16 @@
+import { PRIMARY_LOCAL_ENVIRONMENT_ID } from "@t3tools/contracts";
+
 export function isLocalEnvironmentDisabled(): boolean {
   return window.desktopBridge?.getLocalEnvironmentEnabled() === false;
+}
+
+/** True when the desktop app attaches to a local server it does not run. */
+export function isLocalServerExternal(): boolean {
+  return (
+    window.desktopBridge
+      ?.getLocalEnvironmentBootstraps()
+      .some(
+        (entry) => entry.id === PRIMARY_LOCAL_ENVIRONMENT_ID && entry.externalServer === true,
+      ) === true
+  );
 }

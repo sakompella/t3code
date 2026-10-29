@@ -359,6 +359,8 @@ export interface DesktopEnvironmentBootstrap {
   httpBaseUrl: string | null;
   wsBaseUrl: string | null;
   bootstrapToken?: string;
+  // The server runs on its own; the app attaches to it and cannot restart or reconfigure it.
+  externalServer?: boolean;
 }
 
 export const DesktopEnvironmentBootstrapSchema = Schema.Struct({
@@ -368,6 +370,7 @@ export const DesktopEnvironmentBootstrapSchema = Schema.Struct({
   httpBaseUrl: Schema.NullOr(Schema.String),
   wsBaseUrl: Schema.NullOr(Schema.String),
   bootstrapToken: Schema.optionalKey(Schema.String),
+  externalServer: Schema.optionalKey(Schema.Boolean),
 });
 
 export const DesktopSshEnvironmentTargetSchema = Schema.Struct({
