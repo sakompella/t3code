@@ -29,7 +29,7 @@ import { useBrowserDefaults } from "./browserDefaults";
 import { useBrowserPointerStore } from "./browserPointerStore";
 import { HostedBrowserWebview } from "./HostedBrowserWebview";
 import { openUrlInPreview } from "./openFileInPreview";
-import { rendersServerTabNatively } from "./previewRuntime";
+import { desktopBrowserEnvironmentId, rendersServerTabNatively } from "./previewRuntime";
 import { previewRuntimeTabId } from "./previewRuntimeTabId";
 
 /** Every session this window renders as a hosted webview, in a fixed (non-display) order. */
@@ -128,7 +128,7 @@ export function startElectronBrowserHost(): () => void {
 export function ElectronBrowserHost() {
   const previewByThreadKey = useActivePreviewSessions();
   const primaryEnvironmentId = useAtomValue(primaryEnvironmentIdAtom);
-  useDesktopHostedPreviewSessions(primaryEnvironmentId);
+  useDesktopHostedPreviewSessions(desktopBrowserEnvironmentId(primaryEnvironmentId));
   const sessions = hostedBrowserSessions(previewByThreadKey, primaryEnvironmentId);
 
   if (!isElectron) return null;
