@@ -1,0 +1,13 @@
+# Fork topics, in merge order: <topic> <parent>. parent is `upstream` or an earlier topic.
+# Topic X lives on branch topic/X. Edit this file on topic/meta, then run scripts/fork-topics.py rebuild.
+meta    upstream   # fork rules (FORK.md), this list, scripts/fork-topics.py
+tailwind-src-scan upstream   # web build: Tailwind scans only apps/web/src
+image-scaling upstream   # images over 2000 px scaled before Claude and Pi/Prime Agent inline them
+electron-run-as-node upstream   # ELECTRON_RUN_AS_NODE only for the children that run Electron as Node
+failed-turn-sweep upstream   # a failed turn does not start a worktree cleanup sweep
+provider-switch-guidance upstream   # agent instructions: switch provider only for a missing capability
+syntax-highlighting-web meta   # syntax highlighting of shell and Python tool rows on web, and the shared entryCode.ts
+fork    syntax-highlighting-web   # everything else, until it is carved into topics (see FORK.md, Topic branches)
+restart-note-prime-children fork   # the server restart note leaves out Prime Agent subagents, which Prime resumes itself
+usage-cpa-split fork   # Limits groups accounts by CLIProxyAPI hub and direct logins
+offline-env-fold fork   # threads of an unreachable saved environment fold into one row
