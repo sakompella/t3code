@@ -18,6 +18,7 @@ import {
 } from "@t3tools/contracts";
 import { encodeOAuthScope } from "@t3tools/shared/oauthScope";
 import * as Clock from "effect/Clock";
+import * as Config from "effect/Config";
 import * as Context from "effect/Context";
 import * as Crypto from "effect/Crypto";
 import * as Effect from "effect/Effect";
@@ -25,6 +26,8 @@ import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Ref from "effect/Ref";
 import * as Schema from "effect/Schema";
+import * as SchemaIssue from "effect/SchemaIssue";
+import * as SchemaTransformation from "effect/SchemaTransformation";
 import { HttpServerRequest } from "effect/http";
 
 import * as ServerEnvironment from "../environment/ServerEnvironment.ts";
@@ -121,15 +124,62 @@ export const redirectMatches = (registered: string, presented: string): boolean 
   );
 };
 
-const sameResource = (urls: McpOAuthUrls, presented: string | undefined): boolean => {
-  if (presented === undefined) return true;
+/** Origin plus path without trailing slashes. Only an http(s) URL without a fragment has this form. */
+const normalizeResource = (value: string): string | undefined => {
+  // `URL.hash` is "" for an empty fragment too, so look for the `#` itself.
+  if (value.includes("#")) return undefined;
   try {
-    const url = new URL(presented);
-    return url.hash === "" && `${url.origin}${url.pathname.replace(/\/+$/u, "")}` === urls.resource;
+    const url = new URL(value);
+    return url.protocol === "https:" || url.protocol === "http:"
+      ? `${url.origin}${url.pathname.replace(/\/+$/u, "")}`
+      : undefined;
   } catch {
-    return false;
+    return undefined;
   }
 };
+
+const quoteForLog = Schema.encodeSync(Schema.fromJsonString(Schema.String));
+
+const ExtraResourcesFromString = Schema.String.pipe(
+  Schema.decodeTo(
+    Schema.Array(Schema.String),
+    SchemaTransformation.transformEffect<ReadonlyArray<string>, string>({
+      decode: (input) =>
+        Effect.forEach(
+          input
+            .split(",")
+            .map((entry) => entry.trim())
+            .filter((entry) => entry.length > 0),
+          (entry) => {
+            const resource = normalizeResource(entry);
+            return resource === undefined
+              ? Effect.fail(
+                  new SchemaIssue.InvalidValue({
+                    message: `Expected an http(s) URL without a fragment but received ${quoteForLog(entry)}.`,
+                  }),
+                )
+              : Effect.succeed(resource);
+          },
+        ),
+      encode: (resources) => Effect.succeed(resources.join(",")),
+    }),
+  ),
+);
+
+/**
+ * Resources this server also issues tokens for, as a comma-separated list. A tunnel can rewrite
+ * the protected-resource `resource` to its own URL, and the client then presents that URL
+ * instead of ours. Empty or unset means none.
+ */
+export const extraResourcesConfig = Config.schema(
+  ExtraResourcesFromString,
+  "T3CODE_MCP_OAUTH_EXTRA_RESOURCES",
+).pipe(Config.withDefault([]));
+
+const acceptedResources = (urls: McpOAuthUrls, extraResources: ReadonlyArray<string>) => [
+  urls.resource,
+  ...extraResources,
+];
 
 const ClientIdPayload = Schema.Struct({
   v: Schema.Literal(1),
@@ -236,7 +286,7 @@ export const redirectForError = (error: McpOAuthRedirectError, issuer: string) =
     iss: issuer,
   });
 
-const make = Effect.gen(function* () {
+const make = Effect.fnUntraced(function* (extraResources: ReadonlyArray<string>) {
   const environmentAuth = yield* EnvironmentAuth.EnvironmentAuth;
   const secretStore = yield* ServerSecretStore.ServerSecretStore;
   const crypto = yield* Crypto.Crypto;
@@ -376,7 +426,13 @@ const make = Effect.gen(function* () {
     ) {
       return yield* fail("invalid_request", "PKCE with code_challenge_method=S256 is required.");
     }
-    if (!sameResource(urls, request.resource)) {
+    const accepted = acceptedResources(urls, extraResources);
+    const resource =
+      request.resource === undefined ? urls.resource : normalizeResource(request.resource);
+    if (resource === undefined || !accepted.includes(resource)) {
+      yield* Effect.logWarning(
+        `Rejected MCP OAuth resource ${quoteForLog(request.resource ?? "")}; accepted: ${accepted.join(", ")}`,
+      );
       return yield* fail("invalid_target", `This server only issues tokens for ${urls.resource}.`);
     }
     return {
@@ -384,7 +440,7 @@ const make = Effect.gen(function* () {
       redirectUri,
       codeChallenge,
       state,
-      resource: urls.resource,
+      resource,
       issuer: urls.issuer,
     } satisfies AuthorizationRequest;
   });
@@ -504,13 +560,22 @@ const make = Effect.gen(function* () {
         return [found, next] as const;
       });
       const now = yield* Clock.currentTimeMillis;
+      const accepted = acceptedResources(urls, extraResources);
+      const resourceMatches =
+        pending !== undefined &&
+        accepted.includes(pending.resource) &&
+        (token.resource === undefined || normalizeResource(token.resource) === pending.resource);
+      if (pending !== undefined && !resourceMatches) {
+        yield* Effect.logWarning(
+          `Refused MCP OAuth code for resource ${quoteForLog(token.resource ?? "")}; issued for ${pending.resource}, accepted: ${accepted.join(", ")}`,
+        );
+      }
       if (
         pending === undefined ||
         pending.expiresAtMs <= now ||
         pending.clientId !== clientId ||
         pending.redirectUri !== redirectUri ||
-        pending.resource !== urls.resource ||
-        !sameResource(urls, token.resource) ||
+        !resourceMatches ||
         !(yield* pkceVerifies(verifier, pending.codeChallenge))
       ) {
         return yield* fail("invalid_grant", "The authorization code is invalid or expired.");
@@ -550,7 +615,10 @@ const make = Effect.gen(function* () {
   });
 });
 
-export const layer = Layer.effect(McpOAuth, make);
+export const layer = (extraResources: ReadonlyArray<string>) =>
+  Layer.effect(McpOAuth, make(extraResources));
+
+export const layerFromConfig = Layer.unwrap(Effect.map(extraResourcesConfig, layer));
 
 export const layerMcpClientAuthenticator = Layer.effect(
   McpHttpServer.McpClientAuthenticator,
