@@ -10,3 +10,4 @@ syntax-highlighting-web meta   # syntax highlighting of shell and Python tool ro
 fork    syntax-highlighting-web   # everything else, until it is carved into topics (see FORK.md, Topic branches)
 restart-note-prime-children fork   # the server restart note leaves out Prime Agent subagents, which Prime resumes itself
 usage-cpa-split fork   # Limits groups accounts by CLIProxyAPI hub and direct logins
+offline-env-fold fork   # threads of an unreachable saved environment fold into one row

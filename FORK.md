@@ -10,7 +10,7 @@
 
 ## Topic branches
 
-The fork is kept as topic branches on upstream `main`. `FORK-TOPICS` lists them in merge order as `<topic> <parent>`, where the parent is `upstream` or an earlier topic, and topic X lives on branch `topic/X`. Today there are ten, in merge order:
+The fork is kept as topic branches on upstream `main`. `FORK-TOPICS` lists them in merge order as `<topic> <parent>`, where the parent is `upstream` or an earlier topic, and topic X lives on branch `topic/X`. Today there are eleven, in merge order:
 
 - `meta` on upstream: this file, `FORK-TOPICS` and `scripts/fork-topics.py`.
 - `tailwind-src-scan` on upstream: Tailwind scans only `apps/web/src`.
@@ -22,6 +22,7 @@ The fork is kept as topic branches on upstream `main`. `FORK-TOPICS` lists them 
 - `fork` on `syntax-highlighting-web`: everything else, mostly the Prime Agent provider.
 - `restart-note-prime-children` on `fork`: the server restart note leaves out Prime Agent subagents, because the Prime Agent daemon resumes them itself.
 - `usage-cpa-split` on `fork`: Limits groups each provider's accounts into CLIProxyAPI hub accounts and direct logins.
+- `offline-env-fold` on `fork`: an unreachable saved environment's threads fold into one row on web and mobile.
 
 The feature list below covers every topic and stays in this file. More topics get carved out of `fork` once each builds on its own from whole hunks. When two features share a hunk, an ordinary refactor commit on `fork` first moves their lines apart. A topic whose code `fork` imports goes on `meta`, and `fork` is restacked on it. What blocks the next carves (checked 2026-10-21):
 
@@ -140,6 +141,9 @@ Changes against upstream `main`, grouped by feature. Each item says what changed
 ### General fixes
 
 These aren't Prime Agent-specific.
+
+- **An offline environment's threads fold into one row.** While a saved environment is unreachable, its pinned, active and working threads leave the web sidebar and the mobile thread list for one row per environment ("lima-sandbox · offline", with the count and status of the threads it hides), which opens to list them. The open thread stays visible under the closed row, snoozed and settled threads stay on their shelves, search still finds folded threads, and the primary environment never folds. The threads return on their own when it connects. Unreachable means a connection attempt failed and none has succeeded since (`isOfflineFoldedEnvironment` in `packages/client-runtime/src/state/offlineEnvironments.ts`), so a session that just dropped folds only once its reconnect fails. On web the rows sit below the Settled shelf, outside the drag-and-drop list; on mobile they sit between Working and Snoozed, and a list filtered to one environment does not fold it. The command palette is unchanged, so folded threads stay one search away.
+  - Why: a VM on a laptop that closes every night left its threads in the inbox all night, and they could not be snoozed, because snooze runs on that environment's server.
 
 - **Replies to steers and notifications stay visible** inside a folded run on web and mobile, and each segment between them folds separately. Before, only the run's last reply showed.
   - Why: a single fold for the whole run hid later work above earlier steers, so the collapsed view broke time order. Each segment now has its own "Worked for" row in place, timed and expanded on its own. A run without steers or notifications still has one fold. Segment keys and labels are shared in `packages/client-runtime/src/state/runFold.ts`.
