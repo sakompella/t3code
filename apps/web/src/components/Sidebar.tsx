@@ -118,6 +118,7 @@ import {
 } from "../threadSelectionStore";
 import { useAcknowledgeThreadWoke, useThreadActions } from "../hooks/useThreadActions";
 import { useHandleNewThread } from "../hooks/useHandleNewThread";
+import { foldOfflineEnvironmentThreads } from "@t3tools/client-runtime/state/offline-environments";
 import { useSidebarProjectGroups } from "../hooks/useSidebarProjectGroups";
 import { useTerminalFocus } from "../hooks/useTerminalFocus";
 import { isCommandPaletteOpen, openCommandPalette } from "../commandPaletteBus";
@@ -141,7 +142,7 @@ import {
   useServerConfigs,
   useQuietThreadShells,
 } from "../state/entities";
-import { environmentPresentations } from "../state/presentation";
+import { environmentPresentations, offlineEnvironmentLabelsAtom } from "../state/presentation";
 import { primaryServerKeybindingsAtom } from "../state/server";
 import { environmentProjects } from "../state/projects";
 import { threadEnvironment } from "../state/threads";
@@ -259,6 +260,10 @@ import {
   SidebarSectionHeader,
   SidebarSectionPlaceholder,
 } from "./sidebar/SidebarListMarkers";
+import {
+  SidebarOfflineEnvironmentHeader,
+  sidebarOfflineFoldRowId,
+} from "./sidebar/SidebarOfflineEnvironmentHeader";
 
 function sameSidebarProviderEntries(
   left: ReadonlyMap<string, SidebarProviderEntry>,
@@ -400,6 +405,7 @@ function useSidebarThreads(input: {
   readonly optimisticDrop: SidebarOptimisticDrop | null;
   readonly threads: readonly EnvironmentThreadShell[];
   readonly delegatedUnderParent: ReadonlySet<string>;
+  readonly routeRowThreadRef: ScopedThreadRef | null;
   readonly routeRowThreadKey: string | null;
   // Set in boring mode: the project groups to fold active threads into, in order.
   readonly folderGroups: readonly SidebarProjectSnapshot[] | null;
@@ -413,6 +419,7 @@ function useSidebarThreads(input: {
     optimisticDrop,
     threads,
     delegatedUnderParent,
+    routeRowThreadRef,
     routeRowThreadKey,
     folderGroups,
     keepEmptyFolders: keepEmpty,
@@ -454,6 +461,10 @@ function useSidebarThreads(input: {
   }
   const settledVisibleCount =
     settledTail.scopeKey === projectScopeKey ? settledTail.count : SETTLED_TAIL_INITIAL_COUNT;
+  const offlineEnvironmentLabels = useAtomValue(offlineEnvironmentLabelsAtom);
+  const [expandedOfflineEnvironmentIds, setExpandedOfflineEnvironmentIds] = useState<
+    ReadonlySet<EnvironmentId>
+  >(() => new Set());
 
   const partition = partitionSidebarThreads({
     threads,
@@ -466,8 +477,19 @@ function useSidebarThreads(input: {
     clockKey: `${nowMinute}:${snoozeWakeClock}:${inboxReturnsVersion}`,
   });
 
-  const { pinnedThreads, activeThreads, workingThreads, snoozedThreads, settledThreads } =
-    partition;
+  const { snoozedThreads, settledThreads } = partition;
+  // An offline environment's inbox threads fold into one row; its shelved threads stay shelved.
+  const offlineFold = foldOfflineEnvironmentThreads({
+    threads: [...partition.pinnedThreads, ...partition.activeThreads, ...partition.workingThreads],
+    offlineEnvironmentLabels,
+    expandedEnvironmentIds: expandedOfflineEnvironmentIds,
+    openThread: routeRowThreadRef,
+  });
+  const isListed = (thread: EnvironmentThreadShell) =>
+    !offlineEnvironmentLabels.has(thread.environmentId);
+  const pinnedThreads = partition.pinnedThreads.filter(isListed);
+  const activeThreads = partition.activeThreads.filter(isListed);
+  const workingThreads = partition.workingThreads.filter(isListed);
   // Older settled threads load in pages; the shelf lists them only as far as they are loaded.
   const olderSettledShelf = useOlderSettledShelf({
     scopes: olderSettledScopes([...serverConfigs.keys()], scopedProjectKeys),
@@ -528,12 +550,13 @@ function useSidebarThreads(input: {
     ...visibleWorkingThreads,
     ...visibleSnoozedThreads,
     ...renderedSettledThreads,
+    ...offlineFold.folds.flatMap((fold) => fold.shownThreads),
   ];
   const sectionByThreadKey = new Map<string, SidebarSection>();
   for (const [list, section] of [
-    [pinnedThreads, "pinned"],
-    [activeThreads, "active"],
-    [workingThreads, "working"],
+    [partition.pinnedThreads, "pinned"],
+    [partition.activeThreads, "active"],
+    [partition.workingThreads, "working"],
     [snoozedThreads, "snoozed"],
     [settledThreads, "settled"],
   ] as const) {
@@ -541,12 +564,15 @@ function useSidebarThreads(input: {
   }
   return {
     ...partition,
+    pinnedThreads,
+    activeThreads,
+    workingThreads,
     threads,
     workingShelfEnabled,
     searchableThreads: [
-      ...pinnedThreads,
-      ...activeThreads,
-      ...workingThreads,
+      ...partition.pinnedThreads,
+      ...partition.activeThreads,
+      ...partition.workingThreads,
       ...snoozedThreads,
       ...settledThreads,
     ],
@@ -565,6 +591,13 @@ function useSidebarThreads(input: {
     toggleSnoozedShelf: () => setSnoozedShelfExpanded((value) => !value),
     workingShelfExpanded,
     toggleWorkingShelf: () => setWorkingShelfExpanded((value) => !value),
+    offlineFolds: offlineFold.folds,
+    toggleOfflineFold: (environmentId: EnvironmentId) =>
+      setExpandedOfflineEnvironmentIds((current) => {
+        const next = new Set(current);
+        if (!next.delete(environmentId)) next.add(environmentId);
+        return next;
+      }),
     projectFolders,
     toggleProjectFolder: (group: SidebarProjectSnapshot) => {
       const keys = sidebarFolderExpansionKeys(group);
@@ -1066,19 +1099,14 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
           ),
         );
   const threads = useQuietThreadShells();
-  const routeRowThreadKey =
+  const routeRowThreadRef =
     routeThreadRef === null
       ? null
-      : scopedThreadKey(
-          scopeThreadRef(
-            routeThreadRef.environmentId,
-            resolveSidebarRowThreadId(
-              routeThreadRef.threadId,
-              routeThreadRef.environmentId,
-              threads,
-            ),
-          ),
+      : scopeThreadRef(
+          routeThreadRef.environmentId,
+          resolveSidebarRowThreadId(routeThreadRef.threadId, routeThreadRef.environmentId, threads),
         );
+  const routeRowThreadKey = routeRowThreadRef === null ? null : scopedThreadKey(routeRowThreadRef);
   const isSearchingThreads = threadSearchQuery.trim().length > 0;
 
   // History, the palette and links can open a thread the scope hides or the list
@@ -1255,6 +1283,8 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
     toggleSnoozedShelf,
     workingShelfExpanded,
     toggleWorkingShelf,
+    offlineFolds,
+    toggleOfflineFold,
     projectFolders,
     toggleProjectFolder,
     renderedSettledThreads,
@@ -1276,6 +1306,7 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
     optimisticDrop,
     threads,
     delegatedUnderParent,
+    routeRowThreadRef,
     routeRowThreadKey,
     folderGroups: boringSidebarEnabled
       ? scopedProjectGroups.length === 0
@@ -1860,7 +1891,8 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
         activeThreads.length +
         workingThreads.length +
         snoozedThreads.length +
-        settledCount ===
+        settledCount +
+        offlineFolds.length ===
         0
     ) {
       return [];
@@ -1914,6 +1946,7 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
     projectFolders
       ?.map((folder) => `${folder.group.projectKey}:${folder.threads.length}`)
       .join("\n") ?? "",
+    offlineFolds.map((fold) => `${fold.environmentId}:${fold.shownThreads.length}`).join("\n"),
     visibleDraftSessionCount,
     routeDraftIdForRows ?? "",
   ].join("\0");
@@ -3175,6 +3208,7 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
                             contextDrag={isContextDrag}
                             sortableDisabled={
                               projectFolders !== null ||
+                              folderRow !== undefined ||
                               renamingThreadKey === threadKey ||
                               !draggableThreadKeys.has(threadKey) ||
                               optimisticDrop !== null
@@ -3429,33 +3463,55 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
                             break;
                         }
                       }
+                      if (settledShelfExpanded && hiddenSettledCount > 0) {
+                        items.push(
+                          <li key="settled-more" className="list-none">
+                            <button
+                              type="button"
+                              role="treeitem"
+                              tabIndex={-1}
+                              data-sidebar-row="settled:more"
+                              data-sidebar-parent="shelf:settled"
+                              disabled={olderSettledShelf.loading}
+                              onClick={() => {
+                                olderSettledShelf.retry();
+                                showMoreSettled();
+                              }}
+                              className="flex h-9 w-full cursor-pointer items-center gap-2.5 rounded-md px-2.5 text-left text-sm text-sidebar-muted-foreground hover:bg-sidebar-row-hover hover:text-sidebar-foreground disabled:cursor-default"
+                            >
+                              {/* Plus means "add", so revealing more uses a chevron. */}
+                              <ChevronDownIcon aria-hidden className="size-4 shrink-0" />
+                              {olderSettledShelf.loading
+                                ? "Loading"
+                                : olderSettledShelf.failed
+                                  ? "Could not load older threads. Retry"
+                                  : `Show ${Math.min(hiddenSettledCount, SETTLED_TAIL_PAGE_COUNT)} more`}
+                            </button>
+                          </li>,
+                        );
+                      }
+                      // After every shelf and outside the sortable items, so drags never move them.
+                      for (const fold of offlineFolds) {
+                        const foldRow = sidebarOfflineFoldRowId(fold.environmentId);
+                        items.push(
+                          <SidebarOfflineEnvironmentHeader
+                            key={foldRow}
+                            fold={fold}
+                            onToggle={toggleOfflineFold}
+                          />,
+                        );
+                        for (const thread of fold.shownThreads) {
+                          items.push(
+                            renderThreadRow(
+                              thread,
+                              sectionByThreadKey.get(threadShellKey(thread)) ?? "active",
+                              foldRow,
+                            ),
+                          );
+                        }
+                      }
                       return items;
                     })()}
-                    {settledShelfExpanded && hiddenSettledCount > 0 ? (
-                      <li className="list-none">
-                        <button
-                          type="button"
-                          role="treeitem"
-                          tabIndex={-1}
-                          data-sidebar-row="settled:more"
-                          data-sidebar-parent="shelf:settled"
-                          disabled={olderSettledShelf.loading}
-                          onClick={() => {
-                            olderSettledShelf.retry();
-                            showMoreSettled();
-                          }}
-                          className="flex h-9 w-full cursor-pointer items-center gap-2.5 rounded-md px-2.5 text-left text-sm text-sidebar-muted-foreground hover:bg-sidebar-row-hover hover:text-sidebar-foreground disabled:cursor-default"
-                        >
-                          {/* Plus means "add", so revealing more uses a chevron. */}
-                          <ChevronDownIcon aria-hidden className="size-4 shrink-0" />
-                          {olderSettledShelf.loading
-                            ? "Loading"
-                            : olderSettledShelf.failed
-                              ? "Could not load older threads. Retry"
-                              : `Show ${Math.min(hiddenSettledCount, SETTLED_TAIL_PAGE_COUNT)} more`}
-                        </button>
-                      </li>
-                    ) : null}
                   </ul>
                 </SortableContext>
               </DndContext>
@@ -3468,7 +3524,8 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
             activeThreads.length +
             workingThreads.length +
             snoozedThreads.length +
-            settledCount ===
+            settledCount +
+            offlineFolds.length ===
             0 ? (
             <div className="flex flex-col items-center gap-2 px-2 py-6 text-center text-xs text-muted-foreground/60">
               {projects.length === 0 ? (
