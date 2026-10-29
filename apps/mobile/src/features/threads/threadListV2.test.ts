@@ -1743,3 +1743,104 @@ describe("Working section beta", () => {
     ]);
   });
 });
+
+describe("offline environment folds", () => {
+  const sandbox = EnvironmentId.make("lima-sandbox");
+  const threads = [
+    makeThread({ id: ThreadId.make("local"), title: "local" }),
+    makeThread({ id: ThreadId.make("remote-a"), title: "remote-a", environmentId: sandbox }),
+    makeThread({ id: ThreadId.make("remote-b"), title: "remote-b", environmentId: sandbox }),
+    makeThread({
+      id: ThreadId.make("snoozed"),
+      title: "snoozed",
+      snoozedAt: NOW,
+      snoozedUntil: "2026-06-03T00:00:00.000Z",
+    }),
+  ];
+  const listItems = (input: {
+    readonly expanded?: boolean;
+    readonly selectedThreadKey?: string;
+  }) => {
+    const layout = buildThreadListV2Items({
+      threads,
+      environmentId: null,
+      searchQuery: "",
+      now: NOW,
+      snoozedShelfExpanded: true,
+      offlineEnvironmentLabels: new Map([[sandbox, "lima-sandbox"]]),
+      expandedOfflineEnvironmentIds: new Set(input.expanded ? [sandbox] : []),
+      selectedThreadKey: input.selectedThreadKey ?? null,
+    });
+    return buildThreadListV2ListItems({
+      items: layout.items,
+      pendingTasks: [],
+      offlineFolds: layout.offlineFolds,
+      snoozedCount: layout.snoozedCount,
+      snoozedShelfExpanded: true,
+      snoozedShelfHeaderIndex: layout.snoozedShelfHeaderIndex,
+    }).map((item) =>
+      item.type === "v2-thread"
+        ? item.item.thread.id
+        : item.type === "v2-offline-environment"
+          ? `${item.label} (${item.count})`
+          : item.type,
+    );
+  };
+
+  it("folds the environment into one row between the inbox and the shelves", () => {
+    expect(listItems({})).toEqual(["local", "lima-sandbox (2)", "v2-snoozed-shelf", "snoozed"]);
+  });
+
+  it("lists the folded threads under the row once it is open", () => {
+    expect(listItems({ expanded: true })).toEqual([
+      "local",
+      "lima-sandbox (0)",
+      "remote-a",
+      "remote-b",
+      "v2-snoozed-shelf",
+      "snoozed",
+    ]);
+  });
+
+  it("keeps the selected thread under the closed row", () => {
+    expect(listItems({ selectedThreadKey: `${sandbox}:remote-b` })).toEqual([
+      "local",
+      "lima-sandbox (1)",
+      "remote-b",
+      "v2-snoozed-shelf",
+      "snoozed",
+    ]);
+  });
+});
+
+describe("offline environment fold status", () => {
+  const sandbox = EnvironmentId.make("lima-sandbox");
+  const foldStatus = (thread: Partial<EnvironmentThreadShell>) =>
+    buildThreadListV2Items({
+      threads: [
+        makeThread({
+          id: ThreadId.make("remote"),
+          title: "remote",
+          environmentId: sandbox,
+          ...thread,
+        }),
+      ],
+      environmentId: null,
+      searchQuery: "",
+      now: NOW,
+      offlineEnvironmentLabels: new Map([[sandbox, "lima-sandbox"]]),
+    }).offlineFolds[0]?.hiddenStatus;
+
+  it("says a hidden thread needs you", () => {
+    expect(foldStatus({ hasPendingApprovals: true })).toBe("attention");
+  });
+
+  it("says a hidden thread finished unseen, and stays quiet once it was seen", () => {
+    const completed = {
+      latestRun: { status: "completed", completedAt: NOW } as EnvironmentThreadShell["latestRun"],
+      latestTaskRunCompletedAt: NOW,
+    };
+    expect(foldStatus({ ...completed, lastVisitedAt: "2026-06-01T00:00:00.000Z" })).toBe("unread");
+    expect(foldStatus({ ...completed, lastVisitedAt: "2026-06-03T00:00:00.000Z" })).toBeNull();
+  });
+});
