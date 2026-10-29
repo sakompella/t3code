@@ -1,9 +1,11 @@
 import type { OlderSettledScope } from "@t3tools/client-runtime/state/threads";
 import type { EnvironmentId } from "@t3tools/contracts";
-import { useMemo, useSyncExternalStore } from "react";
+import { useAtomValue } from "@effect/atom-react";
+import { useMemo, useState, useSyncExternalStore } from "react";
 
 import { scopedProjectKey } from "../../lib/scopedEntities";
 import { useOlderSettledShelf, useOlderSettledShelfGrowth } from "../../state/olderSettledShelf";
+import { offlineEnvironmentLabelsAtom } from "../../state/presentation";
 import type { PendingNewTask } from "../../state/use-pending-new-tasks";
 import {
   buildThreadListV2Items,
@@ -26,6 +28,8 @@ function useKeySet(newlineSeparatedKeys: string): ReadonlySet<string> {
 }
 
 type LayoutInput = Parameters<typeof buildThreadListV2Items>[0];
+
+const NO_OFFLINE_ENVIRONMENTS: ReadonlyMap<EnvironmentId, string> = new Map();
 
 /**
  * Home's and the thread sidebar's thread list. Its result is one value a screen only reads:
@@ -56,6 +60,13 @@ export function useThreadListV2(input: {
   readonly selectedThreadKey: string | null;
 }) {
   const { threads, workingShelfEnabled } = input;
+  const allOfflineEnvironmentLabels = useAtomValue(offlineEnvironmentLabelsAtom);
+  const [expandedOfflineEnvironmentIds, setExpandedOfflineEnvironmentIds] = useState<
+    ReadonlySet<EnvironmentId>
+  >(() => new Set());
+  // A list filtered to one environment shows its threads, offline or not.
+  const offlineEnvironmentLabels =
+    input.environmentId === null ? allOfflineEnvironmentLabels : NO_OFFLINE_ENVIRONMENTS;
   // A thread can stop working when the threads change, or when its exit grace expires.
   const inboxVersion = useSyncExternalStore(
     threadListInboxReturns.subscribe,
@@ -117,6 +128,8 @@ export function useThreadListV2(input: {
     snoozedShelfExpanded: input.snoozedShelfExpanded,
     settledShelfExpanded: input.settledShelfExpanded,
     selectedThreadKey: input.selectedThreadKey,
+    offlineEnvironmentLabels,
+    expandedOfflineEnvironmentIds,
     isListedSettled: olderSettledShelf.isListed,
     unloadedSettledCount: olderSettledShelf.unloadedCount(
       threads.filter(
@@ -152,6 +165,7 @@ export function useThreadListV2(input: {
     workingCount: layout.workingCount,
     workingShelfExpanded: input.workingShelfExpanded,
     workingShelfHeaderIndex: layout.workingShelfHeaderIndex,
+    offlineFolds: layout.offlineFolds,
     snoozedCount: layout.snoozedCount,
     snoozedShelfExpanded: input.snoozedShelfExpanded,
     snoozedShelfHeaderIndex: layout.snoozedShelfHeaderIndex,
@@ -164,7 +178,13 @@ export function useThreadListV2(input: {
     moveAvailability,
     shelfPreferencesLoading: !input.shelfPreferencesLoaded,
   });
-  return { layout, items, contentOnlyThreadKeys, olderSettledShelf };
+  const toggleOfflineFold = (environmentId: EnvironmentId) =>
+    setExpandedOfflineEnvironmentIds((current) => {
+      const next = new Set(current);
+      if (!next.delete(environmentId)) next.add(environmentId);
+      return next;
+    });
+  return { layout, items, contentOnlyThreadKeys, olderSettledShelf, toggleOfflineFold };
 }
 
 /** The list's scope per environment: its projects there, or every project. */

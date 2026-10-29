@@ -25,7 +25,11 @@ import {
   formatWorkingDurationLabel,
   resolveThreadWorkingStartedAt,
 } from "@t3tools/client-runtime/state/models";
-import { AuthOrchestrationOperateScope, type EnvironmentMachineKind } from "@t3tools/contracts";
+import {
+  AuthOrchestrationOperateScope,
+  type EnvironmentId,
+  type EnvironmentMachineKind,
+} from "@t3tools/contracts";
 import type { SnoozePresetSetting } from "@t3tools/contracts/settings";
 import { canSnooze } from "@t3tools/client-runtime/state/thread-settled";
 import { threadChipCopyTarget } from "@t3tools/client-runtime/thread-reference";
@@ -295,6 +299,48 @@ export const ThreadListV2SettledShelfHeader = memo(function ThreadListV2SettledS
 ) {
   return <ThreadListV2ShelfHeader {...props} kind="settled" />;
 });
+
+const OFFLINE_STATUS_LABEL = {
+  attention: "needs you",
+  failed: "failed",
+  unread: "done",
+  working: "working",
+} as const;
+
+/** The row an offline environment's threads fold into; it opens to list them. */
+export const ThreadListV2OfflineEnvironmentHeader = memo(
+  function ThreadListV2OfflineEnvironmentHeader(props: {
+    readonly environmentId: EnvironmentId;
+    readonly label: string;
+    readonly count: number;
+    readonly status: keyof typeof OFFLINE_STATUS_LABEL | null;
+    readonly expanded: boolean;
+    readonly onToggle: (environmentId: EnvironmentId) => void;
+    readonly pane?: "screen" | "sidebar";
+  }) {
+    const { environmentId, onToggle } = props;
+    const details = [
+      "offline",
+      ...(props.status === null ? [] : [OFFLINE_STATUS_LABEL[props.status]]),
+    ].join(" · ");
+    return (
+      <ThreadListV2Section
+        label={
+          props.count > 0
+            ? `${props.label} · ${details} (${props.count})`
+            : `${props.label} · offline`
+        }
+        pane={props.pane}
+        disclosure={{
+          expanded: props.expanded,
+          onToggle: () => onToggle(environmentId),
+          accessibilityLabel: `${props.label} is offline, ${props.count} ${props.count === 1 ? "thread" : "threads"} hidden`,
+          accessibilityHint: `${props.expanded ? "Collapses" : "Expands"} the threads of ${props.label}.`,
+        }}
+      />
+    );
+  },
+);
 
 export const ThreadListV2ShowMoreRow = memo(function ThreadListV2ShowMoreRow(props: {
   readonly pane?: "screen" | "sidebar";
