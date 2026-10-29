@@ -4,13 +4,15 @@ export function isLocalEnvironmentDisabled(): boolean {
   return window.desktopBridge?.getLocalEnvironmentEnabled() === false;
 }
 
-/** True when the desktop app attaches to a local server it does not run. */
+let localServerExternal: boolean | undefined;
+
+/** True when the desktop app attaches to a local server it does not run. Fixed until relaunch. */
 export function isLocalServerExternal(): boolean {
-  return (
+  localServerExternal ??=
     window.desktopBridge
       ?.getLocalEnvironmentBootstraps()
       .some(
         (entry) => entry.id === PRIMARY_LOCAL_ENVIRONMENT_ID && entry.externalServer === true,
-      ) === true
-  );
+      ) === true;
+  return localServerExternal;
 }

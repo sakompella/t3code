@@ -284,7 +284,7 @@ export function ConnectionsSettings({ view }: { readonly view: "environments" | 
   const canMaintain = useEnvironmentScope(primaryEnvironmentId, AuthEnvironmentMaintainScope);
   const canManageRelay = useEnvironmentScope(primaryEnvironmentId, AuthRelayWriteScope);
   const canManageLocalBackend = !isLocalEnvironmentDisabled() && canMaintain;
-  const [localServerExternal] = useState(isLocalServerExternal);
+  const localServerExternal = isLocalServerExternal();
   // Network access, Tailscale HTTPS and WSL change how this app starts its local server.
   const canManageDesktopBackend =
     canManageLocalBackend && desktopBridge !== undefined && !localServerExternal;

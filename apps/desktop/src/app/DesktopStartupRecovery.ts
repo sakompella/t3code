@@ -237,15 +237,16 @@ export const listen: Effect.Effect<
   const show = Effect.fn("desktop.startupRecovery.show")(
     function* () {
       if (yield* Ref.get(quitting)) return;
-      // A backend that crashes after the app opened is reported by the app itself.
-      if (Option.isSome(yield* electronWindow.main)) return;
+      const failure = yield* Ref.get(failureRef);
+      if (Option.isNone(failure)) return;
+      // A backend this app runs that crashes after the app opened is reported by the app itself.
+      // An external server is started elsewhere, so the app says where even with a main window.
+      if (!failure.value.externalServer && Option.isSome(yield* electronWindow.main)) return;
       const existing = yield* Ref.get(windowRef);
       if (Option.isSome(existing) && !existing.value.isDestroyed()) {
         yield* electronWindow.reveal(existing.value);
         return;
       }
-      const failure = yield* Ref.get(failureRef);
-      if (Option.isNone(failure)) return;
       const shouldUseDarkColors = yield* electronTheme.shouldUseDarkColors;
       const window = yield* electronWindow.create(
         {
