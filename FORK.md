@@ -10,7 +10,7 @@
 
 ## Topic branches
 
-The fork is kept as topic branches on upstream `main`. `FORK-TOPICS` lists them in merge order as `<topic> <parent>`, where the parent is `upstream` or an earlier topic, and topic X lives on branch `topic/X`. Today there are eleven, in merge order:
+The fork is kept as topic branches on upstream `main`. `FORK-TOPICS` lists them in merge order as `<topic> <parent>`, where the parent is `upstream` or an earlier topic, and topic X lives on branch `topic/X`. Today there are twelve, in merge order:
 
 - `meta` on upstream: this file, `FORK-TOPICS` and `scripts/fork-topics.py`.
 - `tailwind-src-scan` on upstream: Tailwind scans only `apps/web/src`.
@@ -18,6 +18,7 @@ The fork is kept as topic branches on upstream `main`. `FORK-TOPICS` lists them 
 - `electron-run-as-node` on upstream: `ELECTRON_RUN_AS_NODE` goes only to the children that run Electron as Node.
 - `failed-turn-sweep` on upstream: a failed turn does not start a worktree cleanup sweep.
 - `provider-switch-guidance` on upstream: agent instructions delegate to another provider only for a missing capability.
+- `desktop-external-server` on upstream: the desktop app can use the server that already runs for its T3 home instead of starting its own.
 - `syntax-highlighting-web` on `meta`: syntax highlighting of shell and Python tool rows on web, plus `entryCode.ts`, which mobile and the Prime tool display also use.
 - `fork` on `syntax-highlighting-web`: everything else, mostly the Prime Agent provider.
 - `restart-note-prime-children` on `fork`: the server restart note leaves out Prime Agent subagents, because the Prime Agent daemon resumes them itself.
@@ -141,6 +142,10 @@ Changes against upstream `main`, grouped by feature. Each item says what changed
 ### General fixes
 
 These aren't Prime Agent-specific.
+
+- **The desktop app can attach to the server that runs for its T3 home.** With `"localEnvironmentMode": "external"` in `<home>/userdata/desktop-settings.json`, the primary local environment uses the server named in that home's `server-runtime.json` (Aditya's launchd `com.aditya.t3code` on 127.0.0.1:3773) instead of spawning one. The app never spawns, signals or stops it, takes no ownership lock, and its auto-updater writes no update-restart marker. It polls the server every 2 s, shows a "Waiting for the T3 server" recovery window with no update offer after three misses, and reattaches when the server comes back on any port. To authenticate, every server keeps `secrets/desktop-attach-secret.bin` (0600) and accepts rotating desktop-bootstrap tokens derived from it, so the app gets the same scopes as a managed desktop backend. Port selection, network exposure, Tailscale Serve and the WSL backend are skipped, and Connections settings explain why. Code: `apps/desktop/src/backend/DesktopExternalBackend.ts`, the lazy primary in `DesktopBackendPool.ts`, and `PairingGrantStore.ts`. User docs: `docs/user/background-service.md`.
+  - Why: the nix-darwin-managed server owns `~/.t3`, so the desktop app refused to open that home and could only pair with it as a remote environment, without local-only features. The attach secret avoids minting sessions through the CLI, which runs database migrations and could migrate the live database when the app and server versions differ.
+  - Limits: the server must include this change. The desktop browser channel needs file descriptors passed to a child server, so the server's browser tabs stream from its own browser, as for a remote environment (`desktopBrowserEnvironmentId` in `apps/web/src/browser/previewRuntime.ts`), and the waiting window also opens over the main window. Two attached desktop apps revoke each other's desktop session on each exchange.
 
 - **An offline environment's threads fold into one row.** While a saved environment is unreachable, its pinned, active and working threads leave the web sidebar and the mobile thread list for one row per environment ("lima-sandbox · offline", with the count and status of the threads it hides), which opens to list them. The open thread stays visible under the closed row, snoozed and settled threads stay on their shelves, search still finds folded threads, and the primary environment never folds. The threads return on their own when it connects. Unreachable means a connection attempt failed and none has succeeded since (`isOfflineFoldedEnvironment` in `packages/client-runtime/src/state/offlineEnvironments.ts`), so a session that just dropped folds only once its reconnect fails. On web the rows sit below the Settled shelf, outside the drag-and-drop list; on mobile they sit between Working and Snoozed, and a list filtered to one environment does not fold it. The command palette is unchanged, so folded threads stay one search away.
   - Why: a VM on a laptop that closes every night left its threads in the inbox all night, and they could not be snoozed, because snooze runs on that environment's server.
