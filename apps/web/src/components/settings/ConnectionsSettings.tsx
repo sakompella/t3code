@@ -24,7 +24,7 @@ import {
 } from "@t3tools/client-runtime/state/runtime";
 import * as Cause from "effect/Cause";
 
-import { isLocalEnvironmentDisabled } from "../../localEnvironment";
+import { isLocalEnvironmentDisabled, isLocalServerExternal } from "../../localEnvironment";
 import {
   applyWslEnableSelection,
   isWslSettingsRowVisible,
@@ -284,6 +284,10 @@ export function ConnectionsSettings({ view }: { readonly view: "environments" | 
   const canMaintain = useEnvironmentScope(primaryEnvironmentId, AuthEnvironmentMaintainScope);
   const canManageRelay = useEnvironmentScope(primaryEnvironmentId, AuthRelayWriteScope);
   const canManageLocalBackend = !isLocalEnvironmentDisabled() && canMaintain;
+  const localServerExternal = isLocalServerExternal();
+  // Network access, Tailscale HTTPS and WSL change how this app starts its local server.
+  const canManageDesktopBackend =
+    canManageLocalBackend && desktopBridge !== undefined && !localServerExternal;
   const showsAccess = view === "access";
   const authAccessChanges = useEnvironmentQuery(
     showsAccess && canReadAccess && primaryEnvironmentId !== null
@@ -294,10 +298,10 @@ export function ConnectionsSettings({ view }: { readonly view: "environments" | 
       : null,
   );
   const desktopNetworkAccess = useEnvironmentQuery(
-    showsAccess && canManageLocalBackend && desktopBridge ? desktopNetworkAccessStateAtom : null,
+    showsAccess && canManageDesktopBackend ? desktopNetworkAccessStateAtom : null,
   );
   const desktopWsl = useEnvironmentQuery(
-    showsAccess && canManageLocalBackend && desktopBridge ? desktopWslStateAtom : null,
+    showsAccess && canManageDesktopBackend ? desktopWslStateAtom : null,
   );
   const desktopWslState = desktopWsl.data;
   const desktopWslError = desktopWslMutationError ?? desktopWsl.error;
@@ -989,13 +993,15 @@ export function ConnectionsSettings({ view }: { readonly view: "environments" | 
     <SettingsRow
       title={searchableSetting("network-access").title}
       description={
-        desktopBridge
-          ? "This connection cannot view or change network exposure."
-          : currentAuthPolicy === "remote-reachable"
-            ? "Remote access is already configured. Change network exposure where the server starts."
-            : currentAuthPolicy === "loopback-browser"
-              ? "Only this machine can connect. Restart with a non-loopback host for remote pairing."
-              : "Network exposure information is unavailable."
+        localServerExternal
+          ? "This app uses a server it does not run. Change network access where that server starts."
+          : desktopBridge
+            ? "This connection cannot view or change network exposure."
+            : currentAuthPolicy === "remote-reachable"
+              ? "Remote access is already configured. Change network exposure where the server starts."
+              : currentAuthPolicy === "loopback-browser"
+                ? "Only this machine can connect. Restart with a non-loopback host for remote pairing."
+                : "Network exposure information is unavailable."
       }
       control={
         !desktopBridge &&
@@ -1110,7 +1116,7 @@ export function ConnectionsSettings({ view }: { readonly view: "environments" | 
                 }
               />
             ) : null}
-            {canManageLocalBackend && desktopBridge ? (
+            {canManageDesktopBackend ? (
               <>
                 {renderNetworkAccessRow()}
                 {renderEndpointRows()}

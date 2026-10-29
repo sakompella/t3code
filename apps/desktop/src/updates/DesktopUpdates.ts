@@ -589,6 +589,14 @@ export const make = Effect.gen(function* () {
       Effect.catch((error) =>
         logUpdaterWarning("Could not write the update restart marker.", { errorTag: error._tag }),
       ),
+      // The marker tells the server this app stops that an update restart follows.
+      // An external server keeps running, so the marker would mislead its next real restart.
+      Effect.when(
+        desktopSettings.get.pipe(
+          Effect.map((settings) => settings.localEnvironmentMode === "managed"),
+        ),
+      ),
+      Effect.asVoid,
     );
 
   // Failed or interrupted installs leave no replacement backend; later quits must release the tunnel.

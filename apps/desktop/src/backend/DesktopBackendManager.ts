@@ -76,6 +76,17 @@ export interface DesktopBackendStartConfig extends BackendProcessContext {
   readonly wslRuntimeId?: string;
 }
 
+/** What clients need to reach and authenticate to a backend, whether or not this app runs it. */
+export type DesktopBackendConnection = Pick<
+  DesktopBackendStartConfig,
+  "httpBaseUrl" | "preflightFailure" | "runningDistro"
+> & {
+  readonly bootstrap: Pick<
+    DesktopBackendBootstrapValue,
+    "desktopBootstrapToken" | "desktopBootstrapSecret"
+  >;
+};
+
 export interface PreflightFailure {
   readonly reason: string;
   readonly fatal: boolean;
@@ -222,8 +233,10 @@ export const PRIMARY_INSTANCE_ID: BackendInstanceId = BackendInstanceId(
 
 export interface BackendStartupFailure {
   readonly reason: string;
-  /** Tail of the last run's stdout and stderr. */
+  /** Tail of the last run's stdout and stderr, or what attaching to an external server found. */
   readonly output: string;
+  /** The server is not this app's to start, so a different app version cannot fix it. */
+  readonly externalServer?: true;
 }
 
 export interface DesktopBackendInstance {
@@ -231,7 +244,7 @@ export interface DesktopBackendInstance {
   readonly label: Effect.Effect<string>;
   readonly start: Effect.Effect<void>;
   readonly stop: (options?: { readonly timeout?: Duration.Duration }) => Effect.Effect<void>;
-  readonly currentConfig: Effect.Effect<Option.Option<DesktopBackendStartConfig>>;
+  readonly currentConfig: Effect.Effect<Option.Option<DesktopBackendConnection>>;
   readonly snapshot: Effect.Effect<DesktopBackendSnapshot>;
   readonly waitForReady: (timeout: Duration.Duration) => Effect.Effect<boolean>;
 }
