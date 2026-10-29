@@ -40,6 +40,7 @@ export interface UpdatesHarnessOptions {
   readonly savedChannel?: DesktopAppSettings.DesktopSettings["updateChannel"];
   /** Adds a WSL backend beside the primary, as on a Windows host with WSL enabled. */
   readonly wslBackend?: boolean;
+  readonly localEnvironmentMode?: DesktopAppSettings.DesktopLocalEnvironmentMode;
 }
 
 export function makeHarness(options: UpdatesHarnessOptions = {}) {
@@ -231,7 +232,12 @@ export function makeHarness(options: UpdatesHarnessOptions = {}) {
           applyWslWindowsFallback: Effect.die("unexpected WSL Windows fallback"),
           applyWslWindowsFallbackInMemory: Effect.die("unexpected WSL Windows fallback"),
         } satisfies DesktopAppSettings.DesktopAppSettings["Service"])
-      : DesktopAppSettings.layer;
+      : options.localEnvironmentMode
+        ? DesktopAppSettings.layerTest({
+            ...DesktopAppSettings.DEFAULT_DESKTOP_SETTINGS,
+            localEnvironmentMode: options.localEnvironmentMode,
+          })
+        : DesktopAppSettings.layer;
 
   const updateRestartMarkers = new Set<string>();
   const installRecords = new Map<string, string>();
