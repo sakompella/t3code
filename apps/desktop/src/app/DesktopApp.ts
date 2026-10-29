@@ -187,6 +187,11 @@ const bootstrap = Effect.gen(function* () {
 
   yield* snapShot.initialize;
 
+  const startAppActivation = appActivation.start.pipe(
+    Effect.tap(() => logBootstrapInfo("desktop app control socket ready")),
+    Effect.catch((error) => logStartupError("desktop app control socket unavailable", { error })),
+  );
+
   if (!settings.localEnvironmentEnabled) {
     yield* logBootstrapInfo("bootstrap skipping local environment (disabled in settings)");
     if (!(yield* Ref.get(state.quitting))) {
@@ -197,6 +202,19 @@ const bootstrap = Effect.gen(function* () {
 
   const pool = yield* DesktopBackendPool.DesktopBackendPool;
   const primaryBackend = yield* pool.primary;
+
+  if (settings.localEnvironmentMode === "external") {
+    // That server owns its port, exposure and WSL; this app only attaches to it.
+    yield* logBootstrapInfo("bootstrap attaching to the external server for this T3 home", {
+      stateDir: environment.stateDir,
+    });
+    if (!(yield* Ref.get(state.quitting))) {
+      yield* primaryBackend.start;
+      yield* startAppActivation;
+    }
+    return;
+  }
+
   const serverExposure = yield* DesktopServerExposure.DesktopServerExposure;
   const wslBackend = yield* DesktopWslBackend.DesktopWslBackend;
 
@@ -245,10 +263,7 @@ const bootstrap = Effect.gen(function* () {
     }
     yield* primaryBackend.start;
     yield* logBootstrapInfo("bootstrap backend start requested");
-    yield* appActivation.start.pipe(
-      Effect.tap(() => logBootstrapInfo("desktop app control socket ready")),
-      Effect.catch((error) => logStartupError("desktop app control socket unavailable", { error })),
-    );
+    yield* startAppActivation;
     yield* Effect.forkScoped(wslBackend.reconcile);
   }
 }).pipe(Effect.withSpan("desktop.bootstrap"));

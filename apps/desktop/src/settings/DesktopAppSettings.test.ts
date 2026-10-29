@@ -166,6 +166,7 @@ describe("DesktopSettings", () => {
           environment.desktopSettingsPath,
           `{
             // JSONC-style comments and trailing commas match server settings parsing.
+            "localEnvironmentMode": "external",
             "serverExposureMode": "network-accessible",
             "tailscaleServeEnabled": true,
             "tailscaleServePort": 8443,
@@ -176,6 +177,7 @@ describe("DesktopSettings", () => {
         assert.deepEqual(yield* settings.load, {
           linuxPasswordStore: "auto",
           localEnvironmentEnabled: true,
+          localEnvironmentMode: "external",
           mainWindowBounds: { x: 120, y: 80, width: 1280, height: 900 },
           mainWindowMaximized: false,
           serverExposureMode: "network-accessible",
@@ -187,6 +189,10 @@ describe("DesktopSettings", () => {
           wslOnly: false,
           wslDistro: null,
         } satisfies DesktopAppSettings.DesktopSettings);
+
+        // The app rewrites the file for unrelated changes; a hand-set mode must survive them.
+        yield* settings.setMainWindowBounds({ x: 0, y: 0, width: 1100, height: 780 }, false);
+        assert.equal((yield* settings.load).localEnvironmentMode, "external");
       }),
     ),
   );
@@ -271,6 +277,7 @@ describe("DesktopSettings", () => {
         assert.deepEqual(yield* settings.load, {
           linuxPasswordStore: "auto",
           localEnvironmentEnabled: true,
+          localEnvironmentMode: "managed",
           mainWindowBounds: null,
           mainWindowMaximized: false,
           serverExposureMode: "local-only",
@@ -300,6 +307,7 @@ describe("DesktopSettings", () => {
         assert.deepEqual(yield* settings.load, {
           linuxPasswordStore: "auto",
           localEnvironmentEnabled: true,
+          localEnvironmentMode: "managed",
           mainWindowBounds: null,
           mainWindowMaximized: false,
           serverExposureMode: "local-only",

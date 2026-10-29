@@ -79,8 +79,15 @@ const backendConfigurationLayer = Layer.succeed(
   } satisfies DesktopBackendConfiguration.DesktopBackendConfiguration["Service"],
 );
 
-const bootstrapsLayer = (instances: ReadonlyArray<DesktopBackendManager.DesktopBackendInstance>) =>
-  Layer.merge(DesktopBackendPool.layerTest([...instances]), backendConfigurationLayer);
+const bootstrapsLayer = (
+  instances: ReadonlyArray<DesktopBackendManager.DesktopBackendInstance>,
+  settings: DesktopAppSettings.DesktopSettings = DesktopAppSettings.DEFAULT_DESKTOP_SETTINGS,
+) =>
+  Layer.mergeAll(
+    DesktopBackendPool.layerTest([...instances]),
+    backendConfigurationLayer,
+    DesktopAppSettings.layerTest(settings),
+  );
 
 describe("getLocalEnvironmentBootstraps", () => {
   it.effect("hands out the current window's token to a backend launched with the secret", () =>
@@ -111,6 +118,42 @@ describe("getLocalEnvironmentBootstraps", () => {
             }),
           },
         ]),
+      ),
+    ),
+  );
+
+  it.effect("marks an external primary and hands out its own token", () =>
+    Effect.gen(function* () {
+      const result = yield* getLocalEnvironmentBootstraps.handler();
+
+      assert.deepEqual(result, [
+        {
+          id: "primary",
+          label: "Local environment",
+          runningDistro: null,
+          httpBaseUrl: "http://127.0.0.1:3773/",
+          wsBaseUrl: "ws://127.0.0.1:3773/",
+          bootstrapToken: "attach-token",
+          externalServer: true,
+        },
+      ]);
+    }).pipe(
+      Effect.provide(
+        bootstrapsLayer(
+          [
+            {
+              ...defaultWslInstance,
+              id: DesktopBackendManager.PRIMARY_INSTANCE_ID,
+              label: Effect.succeed("Local environment"),
+              currentConfig: Effect.succeedSome({
+                httpBaseUrl: new URL("http://127.0.0.1:3773"),
+                preflightFailure: Option.none(),
+                bootstrap: { desktopBootstrapToken: "attach-token" },
+              }),
+            },
+          ],
+          { ...DesktopAppSettings.DEFAULT_DESKTOP_SETTINGS, localEnvironmentMode: "external" },
+        ),
       ),
     ),
   );
