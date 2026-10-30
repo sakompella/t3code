@@ -244,6 +244,7 @@ describe("orchestration V2 wire projection", () => {
     });
     expect(event.type === "subagent.updated" ? event.payload.result : undefined).toBe(cardResult);
     const snapshot = projectThreadProjectionForWire({
+      checkpoints: [],
       subagents: [subagent],
       contextHandoffs: [],
       turnItems: [],
