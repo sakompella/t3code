@@ -12,6 +12,7 @@ import {
   formatPoolBurn,
   formatPoolPercent,
   type HubPoolSource,
+  poolEvents,
 } from "@t3tools/shared/usageLimitPools";
 import { AsyncResult } from "effect/reactivity";
 import { useEffect, useRef, useState } from "react";
@@ -189,6 +190,15 @@ function PoolStatsCard({
           }
           detail={null}
         />
+        {dashboard.events ? (
+          <Stat
+            label="Limit hits"
+            value={String(
+              poolEvents(dashboard, pool).filter((event) => event.kind === "limit-hit").length,
+            )}
+            detail={`since ${dayFormat.format(dashboard.fromMs)}`}
+          />
+        ) : null}
       </View>
       {unavailable ? <Text className="text-xs text-foreground-muted">{unavailable}</Text> : null}
     </View>

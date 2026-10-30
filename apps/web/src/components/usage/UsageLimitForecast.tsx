@@ -2,6 +2,7 @@ import type {
   ServerProvider,
   UsageLimitPool,
   UsageLimitPoolDashboard,
+  UsageLimitPoolEvent,
   UsageLimitPoolLookbackHours,
   UsageLimitPoolWindow,
 } from "@t3tools/contracts";
@@ -16,6 +17,8 @@ import {
   knownRuns,
   labeledResets,
   linkPoolAccounts,
+  markerRows,
+  poolEvents,
 } from "@t3tools/shared/usageLimitPools";
 import * as Cause from "effect/Cause";
 import { AsyncResult } from "effect/reactivity";
@@ -35,7 +38,7 @@ import { serverEnvironment } from "../../state/server";
 import { resolveHour12 } from "../../timestampFormat";
 import { Toggle, ToggleGroup } from "../ui/toggle-group";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
-import { AccountChip } from "./UsageAccountChip";
+import { AccountChip, accountMarkColor } from "./UsageAccountChip";
 
 const POLL_MS = 60_000;
 const NO_VALUE = "n/a";
@@ -47,6 +50,9 @@ const WINDOW_LABEL: Record<UsageLimitPoolWindow, string> = {
   "five-hour": "5-hour",
 };
 const FRAME = { left: 44, right: 14, top: 30, bottom: 26, height: 240 } as const;
+/** Event markers: half their size, and the spacing that stacks them (also their hover box). */
+const MARKER = { radius: 3, gap: 8, row: 8 } as const;
+const NO_EMAIL_MARK_COLOR = "var(--muted-foreground)";
 
 /**
  * History and forecast of one hub's pool for one provider, as the hub records it. Fetched when
@@ -224,8 +230,19 @@ function ForecastCard({
   readonly controls: ReactNode;
 }) {
   const timestampFormat = usePrimarySettings((settings) => settings.timestampFormat);
-  const formatTime = timeFormatter(resolveHour12(timestampFormat));
+  const hour12 = resolveHour12(timestampFormat);
+  const formatTime = timeFormatter(hour12);
   const nowMs = dashboard.nowMs;
+  const { from, to } = viewRange(dashboard);
+  const emailOf = new Map(
+    accounts.map(({ account, limitAccount }) => [account.id, limitAccount?.email]),
+  );
+  const events = poolEvents(dashboard, pool)
+    .filter((event) => event.atMs >= from && event.atMs <= to)
+    .map((event) => {
+      const email = emailOf.get(event.accountId);
+      return { ...event, color: email ? accountMarkColor(email) : NO_EMAIL_MARK_COLOR };
+    });
   const ready = pool.forecastState === "ready";
   const relative = (at: number) => (at <= nowMs ? "now" : `in ${formatDuration(at - nowMs)}`);
   const unavailable = forecastUnavailableReason(pool);
@@ -297,10 +314,23 @@ function ForecastCard({
           />
         </dl>
       </div>
-      <PoolChart pool={pool} dashboard={dashboard} color={color} formatTime={formatTime} />
+      <PoolChart
+        pool={pool}
+        dashboard={dashboard}
+        events={events}
+        color={color}
+        formatTime={formatTime}
+        formatEventTime={dateTimeFormatter(hour12)}
+      />
       <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-muted-foreground">
         <LegendLine color={color} label="Recorded" />
         {pool.projected.length > 0 ? <LegendLine color={color} label="Projected" dashed /> : null}
+        {events.some((event) => event.kind === "limit-hit") ? (
+          <LegendMarker kind="limit-hit" label="Limit hit" />
+        ) : null}
+        {events.some((event) => event.kind === "reset") ? (
+          <LegendMarker kind="reset" label="Reset" />
+        ) : null}
         {unavailable ? <span>{unavailable}</span> : null}
         {dashboard.historyStartedAtMs !== null &&
         dashboard.historyStartedAtMs > dashboard.fromMs ? (
@@ -354,6 +384,39 @@ function LegendLine({
       {label}
     </span>
   );
+}
+
+function LegendMarker({
+  kind,
+  label,
+}: {
+  readonly kind: UsageLimitPoolEvent["kind"];
+  readonly label: string;
+}) {
+  const size = 2 * MARKER.radius + 4;
+  return (
+    <span className="inline-flex items-center gap-1.5">
+      <svg aria-hidden width={size} height={size}>
+        <path
+          d={markerPath(kind, size / 2, size / 2)}
+          fill="none"
+          stroke="currentColor"
+          strokeWidth={1.5}
+          strokeLinecap="round"
+          strokeLinejoin="round"
+        />
+      </svg>
+      {label}
+    </span>
+  );
+}
+
+/** An X for a limit hit, an up arrow for a reset, centered on (x, y). */
+function markerPath(kind: UsageLimitPoolEvent["kind"], x: number, y: number): string {
+  const r = MARKER.radius;
+  return kind === "limit-hit"
+    ? `M${x - r},${y - r}L${x + r},${y + r}M${x + r},${y - r}L${x - r},${y + r}`
+    : `M${x},${y + r}V${y - r}M${x - r},${y}L${x},${y - r}L${x + r},${y}`;
 }
 
 function PoolAccountChips({
@@ -417,6 +480,17 @@ function timeFormatter(hour12: boolean) {
   return (at: number) => format.format(at);
 }
 
+function dateTimeFormatter(hour12: boolean) {
+  const format = new Intl.DateTimeFormat(undefined, {
+    month: "short",
+    day: "numeric",
+    hour: "numeric",
+    minute: "2-digit",
+    hour12,
+  });
+  return (at: number) => format.format(at);
+}
+
 const dayFormat = new Intl.DateTimeFormat(undefined, { month: "short", day: "numeric" });
 const formatDay = (at: number) => dayFormat.format(at);
 
@@ -451,13 +525,20 @@ function formatTick(at: number): string {
     : hourFormat.format(date);
 }
 
+type ChartEvent = UsageLimitPoolEvent & { readonly color: string };
+
 interface Sample {
   readonly atMs: number;
   readonly remainingPoints: number;
   readonly projected: boolean;
 }
 
-function chartGeometry(pool: UsageLimitPool, dashboard: UsageLimitPoolDashboard, width: number) {
+function chartGeometry(
+  pool: UsageLimitPool,
+  dashboard: UsageLimitPoolDashboard,
+  events: readonly ChartEvent[],
+  width: number,
+) {
   const { from, to } = viewRange(dashboard);
   const right = width - FRAME.right;
   const bottom = FRAME.height - FRAME.bottom;
@@ -492,6 +573,8 @@ function chartGeometry(pool: UsageLimitPool, dashboard: UsageLimitPoolDashboard,
     nowX,
     56,
   );
+  const eventXs = events.map((event) => x(event.atMs));
+  const eventRows = markerRows(eventXs, MARKER.gap);
   return {
     from,
     to,
@@ -505,6 +588,12 @@ function chartGeometry(pool: UsageLimitPool, dashboard: UsageLimitPoolDashboard,
     recorded: recorded.map((run) => ({ line: line(run), area: area(run) })),
     projected: projected.map((run) => ({ line: line(run), area: area(run) })),
     resets: resets.map((reset, index) => ({ ...reset, labeled: labels[index] ?? false })),
+    // On the baseline: a hit means the account added nothing to the pool.
+    markers: events.map((event, index) => ({
+      event,
+      x: eventXs[index]!,
+      y: bottom - eventRows[index]! * MARKER.row,
+    })),
     ticks: timeTicks(from, to, Math.max(2, Math.floor((right - FRAME.left) / 60))),
     poolEmptyAtMs:
       pool.poolEmptyAtMs !== null && inView(pool.poolEmptyAtMs) ? pool.poolEmptyAtMs : null,
@@ -523,21 +612,27 @@ function nearestSample(samples: readonly Sample[], at: number): number {
   return previous !== undefined && at - previous.atMs < samples[low]!.atMs - at ? low - 1 : low;
 }
 
+type Hover = { readonly kind: "sample" | "marker"; readonly index: number };
+
 function PoolChart({
   pool,
   dashboard,
+  events,
   color,
   formatTime,
+  formatEventTime,
 }: {
   readonly pool: UsageLimitPool;
   readonly dashboard: UsageLimitPoolDashboard;
+  readonly events: readonly ChartEvent[];
   readonly color: string;
   readonly formatTime: (at: number) => string;
+  readonly formatEventTime: (at: number) => string;
 }) {
   const id = useId();
   const [container, setContainer] = useState<HTMLDivElement | null>(null);
   const [width, setWidth] = useState(0);
-  const [hovered, setHovered] = useState<number | null>(null);
+  const [hovered, setHovered] = useState<Hover | null>(null);
   // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- measures the chart's width so labels keep their CSS size instead of scaling with the SVG
   useLayoutEffect(() => {
     if (!container) return;
@@ -545,17 +640,29 @@ function PoolChart({
     measure();
     return observeResize(container, measure);
   }, [container]);
-  const geometry = width > 0 ? chartGeometry(pool, dashboard, width) : null;
-  const sample = geometry && hovered !== null ? geometry.samples[hovered] : undefined;
+  const geometry = width > 0 ? chartGeometry(pool, dashboard, events, width) : null;
+  const sample =
+    geometry && hovered?.kind === "sample" ? geometry.samples[hovered.index] : undefined;
+  const marker =
+    geometry && hovered?.kind === "marker" ? geometry.markers[hovered.index] : undefined;
 
   const inspect = (event: PointerEvent<SVGSVGElement>) => {
-    if (!geometry || geometry.samples.length === 0) return;
+    if (!geometry) return;
     const bounds = event.currentTarget.getBoundingClientRect();
     const cursor = event.clientX - bounds.left;
+    const cursorY = event.clientY - bounds.top;
+    const markerIndex = geometry.markers.findIndex(
+      ({ x, y }) => Math.abs(x - cursor) < MARKER.gap / 2 && Math.abs(y - cursorY) < MARKER.row / 2,
+    );
+    if (markerIndex !== -1) {
+      setHovered({ kind: "marker", index: markerIndex });
+      return;
+    }
+    if (geometry.samples.length === 0) return;
     const at =
       geometry.from +
       ((cursor - FRAME.left) / (geometry.right - FRAME.left)) * (geometry.to - geometry.from);
-    setHovered(nearestSample(geometry.samples, at));
+    setHovered({ kind: "sample", index: nearestSample(geometry.samples, at) });
   };
 
   return (
@@ -725,6 +832,26 @@ function PoolChart({
               </text>
             </g>
           ) : null}
+          {geometry.markers.map(({ event, x, y }, index) => (
+            <g key={`${event.accountId}-${event.kind}-${event.atMs}`} pointerEvents="none">
+              <path
+                d={markerPath(event.kind, x, y)}
+                fill="none"
+                strokeWidth={4}
+                strokeLinecap="round"
+                strokeLinejoin="round"
+                className="stroke-background"
+              />
+              <path
+                d={markerPath(event.kind, x, y)}
+                fill="none"
+                stroke={event.color}
+                strokeWidth={hovered?.kind === "marker" && hovered.index === index ? 2.25 : 1.5}
+                strokeLinecap="round"
+                strokeLinejoin="round"
+              />
+            </g>
+          ))}
           {sample ? (
             <g pointerEvents="none">
               <line
@@ -746,6 +873,13 @@ function PoolChart({
             </g>
           ) : null}
         </svg>
+      ) : null}
+      {marker ? (
+        <ChartTooltip
+          x={marker.x}
+          width={width}
+          text={`${marker.event.label} ${marker.event.kind === "limit-hit" ? "hit" : "reset"} its ${WINDOW_LABEL[marker.event.window].toLowerCase()} limit, ${formatEventTime(marker.event.atMs)}`}
+        />
       ) : null}
       {geometry && sample ? (
         <ChartTooltip
