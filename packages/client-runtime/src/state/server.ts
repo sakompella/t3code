@@ -1324,6 +1324,13 @@ export function createServerEnvironmentAtoms<R, E>(
           ),
         ),
     }),
+    // Limits refreshes it on open, on its own refresh and once a minute while visible.
+    usageLimitPools: createEnvironmentRpcQueryAtomFamily(runtime, {
+      label: "environment-data:server:usage-limit-pools",
+      tag: WS_METHODS.serverGetUsageLimitPools,
+      staleTimeMs: 30_000,
+      idleTtlMs: 60_000,
+    }),
     resourceTelemetry: createEnvironmentRpcSubscriptionAtomFamily(runtime, {
       label: "environment-data:server:resource-telemetry",
       tag: WS_METHODS.subscribeResourceTelemetry,
