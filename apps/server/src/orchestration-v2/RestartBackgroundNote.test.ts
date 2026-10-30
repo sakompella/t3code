@@ -133,6 +133,28 @@ it("names a lost subagent by the id the agent resumes it with", () => {
   );
 });
 
+it("leaves Prime Agent subagents out of the restart note but keeps other work", () => {
+  const subagent = (driver: string) =>
+    ({
+      id: "item-1",
+      type: "subagent",
+      origin: "provider_native",
+      driver,
+      title: "Review",
+      nativeItemRef: { driver, nativeId: "rlm:sub-1", strength: "strong" },
+    }) as never;
+  assert.isUndefined(cancelledTurnItemWork(subagent("primeAgent")));
+  assert.equal(cancelledTurnItemWork(subagent("claudeAgent"))?.kind, "subagent");
+  assert.equal(
+    cancelledTurnItemWork({
+      id: "item-2",
+      type: "command_execution",
+      input: "sleep 20",
+    } as never)?.kind,
+    "shell",
+  );
+});
+
 it("keeps separate cancelled tasks that share a kind and label", () => {
   const first = { kind: "shell" as const, label: "sleep 20", id: "item-1" };
   const second = { kind: "shell" as const, label: "sleep 20", id: "item-2" };
