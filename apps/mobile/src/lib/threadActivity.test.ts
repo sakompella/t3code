@@ -26,7 +26,6 @@ import { describe, expect, it } from "vite-plus/test";
 
 import {
   buildThreadFeed,
-  workEntryRowLabel,
   threadFeedCompactionLabels,
   workEntryRowLabel,
   createThreadFeedCache,
@@ -974,10 +973,10 @@ describe("buildThreadFeed", () => {
       expect(sequence(deriveThreadFeedPresentation(feed, latestRun, new Set()))).toEqual([
         "Run checks",
         // From the run's start to the first reply.
-        "fold: Worked for 2.0s",
+        "fold: Worked for 2s",
         "reply-1",
         "steer-1",
-        "fold: Worked for 4.0s",
+        "fold: Worked for 4s",
         "reply-2",
         "steer-2",
         // From the last steer to the run's end.
@@ -991,10 +990,10 @@ describe("buildThreadFeed", () => {
       const expanded = deriveThreadFeedPresentation(feed, latestRun, new Set([middle!]));
       expect(sequence(expanded)).toEqual([
         "Run checks",
-        "fold: Worked for 2.0s",
+        "fold: Worked for 2s",
         "reply-1",
         "steer-1",
-        "fold: Worked for 4.0s",
+        "fold: Worked for 4s",
         "work",
         "commentary",
         "work",

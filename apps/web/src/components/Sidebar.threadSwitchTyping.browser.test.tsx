@@ -13,9 +13,10 @@ import {
   useParams,
 } from "@tanstack/react-router";
 import { useEffect, useRef } from "react";
-import { createRoot, type Root } from "react-dom/client";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
+import { describe, expect, it, vi } from "vite-plus/test";
 import { userEvent } from "vite-plus/test/browser";
+
+import { render } from "../../test/render";
 
 import { useComposerDraftStore } from "../composerDraftStore";
 import { makeThreadFixture } from "../test-fixtures";
@@ -35,8 +36,7 @@ const noop = () => {};
 
 type Router = ReturnType<typeof makeRouter>;
 let router: Router;
-let root: Root;
-let container: HTMLDivElement;
+let container: HTMLElement;
 
 /**
  * What ChatView gives the composer across a thread switch: one composer
@@ -53,6 +53,7 @@ function ThreadView() {
   const focusComposer = () => composerRef.current?.focusAtEnd();
   useEffect(() => {
     if (!thread.id) return;
+    // oxlint-disable-next-line t3code/no-frame-waits-in-browser-tests -- ChatView's own next-frame focus, reproduced as the behavior under test, not a wait
     const frame = requestAnimationFrame(focusComposer);
     return () => cancelAnimationFrame(frame);
   }, [thread.id, focusComposer]);
@@ -118,14 +119,8 @@ function ThreadView() {
     pullRequestProjectId: null,
     pullRequestRepository: null,
     threadPullRequests: undefined,
-    restingControlsHost: null,
-    restingControlsHaveLeadingContext: false,
-    onRestingControlsVisibilityChange: noop,
-    getTimelineScrollableNode: () => null,
-    isTimelineAtLogicalEnd: () => true,
-    timelineOverflows: false,
     onComposerOverlayHeightChange: noop,
-    onRestingChange: noop,
+    permissionsShownInStrip: false,
     promptRef,
     composerImagesRef: attachmentsRef,
     composerFilesRef: attachmentsRef,
@@ -153,6 +148,7 @@ function ThreadView() {
     handleRuntimeModeChange: noop,
     handleInteractionModeChange: noop,
     focusComposer,
+    // oxlint-disable-next-line t3code/no-frame-waits-in-browser-tests -- ChatView's own next-frame focus, reproduced as the behavior under test, not a wait
     scheduleComposerFocus: () => void requestAnimationFrame(focusComposer),
     setThreadError: noop,
     onExpandImage: noop,
@@ -226,7 +222,7 @@ function makeRouter() {
   });
 }
 
-const nextFrame = () => new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
+// oxlint-disable-next-line t3code/no-real-time-wait-in-tests, t3code/no-frame-waits-in-browser-tests -- a zero-delay macrotask boundary between key presses, not a wait for time
 const nextTask = () => new Promise<void>((resolve) => setTimeout(resolve, 0));
 
 function composerEditor() {
@@ -268,62 +264,60 @@ function pressKey(key: string) {
   view.dispatch(view.state.tr.insertText(key) as never);
 }
 
-beforeEach(async () => {
-  vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", false);
+/** Opens thread A with both drafts set and waits for the composer to take focus. */
+async function openThreadA() {
   useComposerDraftStore.getState().setPrompt(refFor("a"), "hi");
   useComposerDraftStore.getState().setPrompt(refFor("b"), "fix the bug");
-  container = document.createElement("div");
-  document.body.append(container);
-  root = createRoot(container);
   router = makeRouter();
   await router.load();
-  root.render(<RouterProvider router={router} />);
+  const screen = await render(<RouterProvider router={router} />, { router: false });
+  container = screen.container;
   await vi.waitFor(() => expect(document.activeElement).toBe(composerEditor()));
-});
-
-afterEach(() => {
-  root.unmount();
-  container.remove();
-  vi.unstubAllGlobals();
-});
+  return screen;
+}
 
 describe("typing right after clicking another thread in the sidebar", () => {
   it("lands every key in the clicked thread, in order", async () => {
+    await using _screen = await openThreadA();
     clickElement(container.querySelector<HTMLElement>('[data-testid="sidebar-row-card"]')!);
     for (const key of "please now") {
       await nextTask();
       pressKey(key);
     }
-    await nextFrame();
 
-    expect({ a: promptOf("a"), b: promptOf("b") }).toEqual({
-      a: "hi",
-      b: "fix the bugplease now",
-    });
+    await vi.waitFor(() =>
+      expect({ a: promptOf("a"), b: promptOf("b") }).toEqual({
+        a: "hi",
+        b: "fix the bugplease now",
+      }),
+    );
   });
 
   it("loses no key typed while the navigation is still settling", async () => {
+    await using _screen = await openThreadA();
     clickElement(container.querySelector<HTMLElement>('[data-testid="sidebar-row-card"]')!);
     for (const key of "please now") {
       await Promise.resolve();
       pressKey(key);
     }
-    await nextFrame();
 
-    const typedIntoA = promptOf("a").slice("hi".length);
-    const typedIntoB = promptOf("b").slice("fix the bug".length);
-    expect(typedIntoA + typedIntoB).toBe("please now");
+    await vi.waitFor(() => {
+      const typedIntoA = promptOf("a").slice("hi".length);
+      const typedIntoB = promptOf("b").slice("fix the bug".length);
+      expect(typedIntoA + typedIntoB).toBe("please now");
+    });
   });
 
   it("still lets the keyboard focus a row and open it", async () => {
+    await using _screen = await openThreadA();
     const row = container.querySelector<HTMLElement>('[data-testid="sidebar-row-card"]')!;
     row.focus();
     expect(document.activeElement).toBe(row);
     await userEvent.keyboard("{Enter}");
-    await nextTask();
-    await nextFrame();
 
-    expect(router.state.location.pathname).toBe("/b");
-    expect(document.activeElement).toBe(composerEditor());
+    await vi.waitFor(() => {
+      expect(router.state.location.pathname).toBe("/b");
+      expect(document.activeElement).toBe(composerEditor());
+    });
   });
 });
