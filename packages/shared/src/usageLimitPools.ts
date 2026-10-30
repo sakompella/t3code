@@ -19,7 +19,7 @@ import type { LimitAccount, LimitPresentations } from "./usageLimits.ts";
  * answer to the accounts Limits already shows. One point is one percent of one account's window.
  */
 
-export const POOL_PROVIDER_DRIVER: Record<UsageLimitPool["provider"], ServerProvider["driver"]> = {
+const POOL_PROVIDER_DRIVER: Record<UsageLimitPool["provider"], ServerProvider["driver"]> = {
   claude: ProviderDriverKind.make("claudeAgent"),
   codex: ProviderDriverKind.make("codex"),
 };
