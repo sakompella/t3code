@@ -108,7 +108,7 @@ const PI_EXTENSION_ARGUMENTS = new Set([
  * Resolved launch args split into those a CLI without extensions accepts and
  * those it rejects, each rejected option with its value.
  */
-export function partitionPiExtensionArgs(args: ReadonlyArray<string>): {
+function partitionPiExtensionArgs(args: ReadonlyArray<string>): {
   readonly accepted: ReadonlyArray<string>;
   readonly rejected: ReadonlyArray<string>;
 } {
