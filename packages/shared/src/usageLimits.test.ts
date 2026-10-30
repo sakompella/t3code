@@ -20,6 +20,7 @@ import {
   collectLimitPools,
   elapsedShare,
   exhaustedUsageWindow,
+  groupLimitWindows,
   paceOf,
   paceRemainingPercent,
   usesChatGptSharing,
@@ -228,7 +229,7 @@ describe("pools", () => {
     expect(accounts).toHaveLength(1);
     expect(accounts[0]).toMatchObject({
       key: "env-a:claude",
-      sourceLabel: null,
+      sourceLabel: "Desktop · hub",
       redeem: { environmentId: "env-b", input: { instanceId: "claude" } },
       environments: [
         { environmentId: "env-a", label: "Laptop" },
@@ -236,6 +237,19 @@ describe("pools", () => {
       ],
     });
     expect(accounts[0]?.limits.windows[0]?.usedPercent).toBe(55);
+  });
+
+  it("skips a provider that is not signed in, even with limits from an earlier read", () => {
+    const codex = provider({
+      auth: { status: "unauthenticated" },
+      usageLimits: { checkedAt, windows: [window] },
+    });
+    const presentations = (providers: ServerProvider[]) =>
+      new Map([[EnvironmentId.make("env-a"), { ...laptop, serverConfig: { providers } }]]);
+    expect(collectLimitAccounts(presentations([codex]))).toEqual([]);
+    expect(
+      collectLimitAccounts(presentations([{ ...codex, auth: { status: "authenticated" } }])),
+    ).toHaveLength(1);
   });
 
   it("merges OpenCode Go limits from machines with the same API key", () => {
@@ -775,6 +789,7 @@ describe("pools", () => {
           sourceLabel: null,
           redeem: null,
           refreshIntervalMs: FIVE_MINUTES,
+          hubAccounts: [],
           limits: {
             checkedAt,
             windows: [
@@ -821,12 +836,90 @@ describe("pooled account columns", () => {
     sourceLabel: "Hub",
     redeem: null,
     refreshIntervalMs: FIVE_MINUTES,
+    hubAccounts: [],
     limits: { checkedAt: "2026-09-03T11:58:00.000Z", windows },
   });
   const keys = (pool: ReturnType<typeof collectLimitPools>[number]) =>
     pool.windows.map((row) =>
       row.columns.map((member) => (member.window ? member.account.key : null)),
     );
+
+  describe("grouped by source", () => {
+    const hub = (key: string, usedPercent: number, sourceLabel = "Hub") => ({
+      ...account(key, [{ ...window, usedPercent }]),
+      sourceLabel,
+    });
+    const direct = (key: string, usedPercent: number): LimitAccount => ({
+      ...account(key, [{ ...window, usedPercent }]),
+      sourceLabel: null,
+      environments: [{ environmentId: EnvironmentId.make("local"), label: "Local" }],
+    });
+    const grouped = (accounts: readonly LimitAccount[]) =>
+      groupLimitWindows(collectLimitPools(accounts, now)[0]!, now);
+
+    it("puts the hub first and pools each group on its own", () => {
+      const [session] = grouped([direct("own-a", 10), hub("hub-a", 80), hub("hub-b", 60)]);
+      expect(
+        session?.groups.map((group) => [
+          group.label,
+          group.window.remainingPercent,
+          group.window.columns.map((column) => column.account.key),
+        ]),
+      ).toEqual([
+        ["CLIProxyAPI", 30, ["hub-a", "hub-b"]],
+        ["Direct logins", 90, ["own-a"]],
+      ]);
+    });
+
+    it("lists a hub account that is also signed in directly under its hub", () => {
+      const both = { ...hub("both", 20), environments: direct("x", 0).environments };
+      const [session] = grouped([both, hub("hub-b", 60), direct("own-a", 10)]);
+      expect(
+        session?.groups.map((group) => [
+          group.label,
+          group.window.columns.map((column) => column.account.key),
+        ]),
+      ).toEqual([
+        ["CLIProxyAPI", ["both", "hub-b"]],
+        ["Direct logins", ["own-a"]],
+      ]);
+    });
+
+    it("names several hubs by their own label, in label order, before direct logins", () => {
+      const [session] = grouped([
+        direct("own-a", 10),
+        hub("zed", 50, "Zed hub"),
+        hub("alpha", 50, "Alpha hub"),
+      ]);
+      expect(session?.groups.map((group) => group.label)).toEqual([
+        "Alpha hub",
+        "Zed hub",
+        "Direct logins",
+      ]);
+    });
+
+    it.each([
+      ["hub", [hub("hub-a", 80), hub("hub-b", 60)]],
+      ["direct", [direct("own-a", 10), direct("own-b", 30)]],
+    ])("keeps one unlabeled group when only %s accounts exist", (_, accounts) => {
+      const [session] = grouped(accounts);
+      expect(session?.groups).toEqual([{ label: null, window: session?.window }]);
+    });
+
+    it("omits a group from a window it has no reading for, and keeps labels on the rest", () => {
+      const own = direct("own-a", 10);
+      const weeklyOnly = { ...own, limits: { ...own.limits, windows: [weekly] } };
+      expect(
+        grouped([hub("hub-a", 80), weeklyOnly]).map(({ window, groups }) => [
+          window.kind,
+          groups.map((group) => group.label),
+        ]),
+      ).toEqual([
+        ["session", ["CLIProxyAPI"]],
+        ["weekly", ["Direct logins"]],
+      ]);
+    });
+  });
 
   // regression: #20349 sessions stay visible while the weekly quota is exhausted
   it.each([
@@ -1061,7 +1154,7 @@ describe("pooled account columns", () => {
     it("stays on its bar, marked, but adds nothing to the totals, pace or restores", () => {
       const old = stale(
         "old",
-        [{ ...window, usedPercent: 94, resetsAt: "2026-09-02T09:22:00.000Z" }],
+        [{ ...window, usedPercent: 94, resetsAt: "2026-09-03T13:00:00.000Z" }],
         19 * 3_600_000,
       );
       const [pool] = collectLimitPools([old, account("b", [{ ...window, usedPercent: 40 }])], now);
@@ -1076,6 +1169,23 @@ describe("pooled account columns", () => {
       expect(session).toMatchObject({ remainingPercent: 60, stale: false, pace: "under" });
       expect(session!.resets.map((reset) => reset.member.account.key)).toEqual(["b"]);
       expect(session!.resets[0]!.restoresPercent).toBe(40);
+    });
+
+    it("drops a window whose reset time has passed, keeping the account's other windows", () => {
+      const old = stale(
+        "old",
+        [
+          { ...window, usedPercent: 94, resetsAt: "2026-09-03T11:59:59.000Z" },
+          { ...weekly, usedPercent: 30 },
+        ],
+        19 * 3_600_000,
+      );
+      const [pool] = collectLimitPools([old, account("b", [{ ...window, usedPercent: 40 }])], now);
+      expect(pool!.windows.map((row) => row.kind)).toEqual(["session", "weekly"]);
+      expect(keys(pool!)).toEqual([
+        ["b", null],
+        [null, "old"],
+      ]);
     });
 
     it("marks a pool with no live member as stale and still shows what was last read", () => {
@@ -1201,8 +1311,9 @@ describe("/usage-limits", () => {
       })),
     }));
     const report = collectProviderUsageLimits(selected.instanceId, [selected], hubs, now);
-    expect(report?.accounts[0]?.limits.resetCredits?.availableCount).toBe(2);
-    expect(report?.accounts[0]?.resetCreditInput).toEqual({
+    const native = report?.accounts.find((account) => account.id === "codex");
+    expect(native?.limits.resetCredits?.availableCount).toBe(2);
+    expect(native?.resetCreditInput).toEqual({
       sourceId: "hub",
       accountId: "duplicate",
       creditId: "duplicate-credit",
@@ -1237,9 +1348,9 @@ describe("/usage-limits", () => {
     ];
     const report = collectProviderUsageLimits(workspaces[0]!.instanceId, workspaces, hub, now);
     expect(report?.accounts.map((account) => account.resetCreditInput)).toEqual([
+      { sourceId: "hub", accountId: "duplicate", creditId: "c" },
       { instanceId: "ws-a" },
       { instanceId: "ws-b" },
-      { sourceId: "hub", accountId: "duplicate", creditId: "c" },
     ]);
   });
 
@@ -1301,19 +1412,19 @@ describe("/usage-limits", () => {
     );
     expect(report?.createdAt).toBe("2026-09-03T12:00:00.000Z");
     expect(report?.accounts.map((account) => account.id)).toEqual([
+      "hub:oss",
       "codex",
       "codex-work",
-      "hub:oss",
     ]);
-    expect(report?.accounts[0]).toMatchObject({
+    expect(report?.accounts[1]).toMatchObject({
       instanceId: selected.instanceId,
       email: selected.auth.email,
     });
-    expect(report?.accounts[1]).toMatchObject({
+    expect(report?.accounts[2]).toMatchObject({
       displayName: "Work",
       limits: { resetCredits: { availableCount: 2 } },
     });
-    expect(report?.accounts[2]).toMatchObject({
+    expect(report?.accounts[0]).toMatchObject({
       label: "Accounts · oss",
       sourceLabel: "CLI Proxy",
       plan: "Codex OSS",
@@ -1355,8 +1466,8 @@ describe("/usage-limits", () => {
     const duplicates = [failed, staleCredit, credited, freshest];
     for (const providers of [duplicates, duplicates.toReversed()]) {
       const report = collectProviderUsageLimits(failed.instanceId, providers, sources, now);
-      expect(report?.accounts.map((account) => account.id)).toEqual(["codex-fresh", "hub:oss"]);
-      expect(report?.accounts[0]).toMatchObject({
+      expect(report?.accounts.map((account) => account.id)).toEqual(["hub:oss", "codex-fresh"]);
+      expect(report?.accounts[1]).toMatchObject({
         limits: {
           checkedAt: "2026-09-03T11:30:00.000Z",
           windows: [{ usedPercent: 55 }],
@@ -1364,7 +1475,7 @@ describe("/usage-limits", () => {
         },
         resetCreditInput: { instanceId: "codex-credit" },
       });
-      expect(report?.accounts[0]?.limits.unavailable).toBeUndefined();
+      expect(report?.accounts[1]?.limits.unavailable).toBeUndefined();
     }
   });
 
@@ -1419,7 +1530,7 @@ describe("/usage-limits", () => {
       collectProviderUsageLimits(selected.instanceId, [failed], sources, now)?.accounts.map(
         (account) => account.id,
       ),
-    ).toEqual(["codex", "hub:duplicate", "hub:oss"]);
+    ).toEqual(["hub:duplicate", "hub:oss", "codex"]);
     expect(collectProviderUsageLimits(selected.instanceId, [provider({})], [], now)).toBeNull();
     expect(
       collectProviderUsageLimits(

@@ -1,6 +1,8 @@
 import {
   DEFAULT_PROVIDER_HEALTH_REFRESH_INTERVAL,
   UsageLimitSourceError,
+  type UsageLimitPoolsInput,
+  type UsageLimitPoolsResult,
   type UsageLimitSourceConsumeResetCreditInput,
   type ProviderConsumeResetCreditResult,
   type ServerSettings,
@@ -33,6 +35,10 @@ export class UsageLimitSources extends Context.Service<
     readonly consumeResetCredit: (
       input: UsageLimitSourceConsumeResetCreditInput,
     ) => Effect.Effect<ProviderConsumeResetCreditResult, UsageLimitSourceError>;
+    /** The hub's recorded quota history and forecast; read on demand, never pushed. */
+    readonly readPools: (
+      input: UsageLimitPoolsInput,
+    ) => Effect.Effect<UsageLimitPoolsResult, UsageLimitSourceError>;
   }
 >()("t3/usage/UsageLimitSources") {}
 
@@ -100,19 +106,26 @@ export const make = Effect.gen(function* () {
     yield* publish(snapshots);
   }).pipe(refreshLock.withPermits(1), Effect.ignoreCause({ log: true }));
 
-  // Shares the refresh lock so a stale in-flight read cannot overwrite a redemption.
-  const consumeResetCredit = Effect.fn("UsageLimitSources.consumeResetCredit")(function* (
-    input: UsageLimitSourceConsumeResetCreditInput,
+  const enabledSource = Effect.fn("UsageLimitSources.enabledSource")(function* (
+    sourceId: UsageLimitSourceId,
   ) {
     const settings = yield* settingsService.getSettings.pipe(
       Effect.mapError(() => new UsageLimitSourceError({ detail: "Could not read hub settings." })),
     );
-    const config = settings.usageLimitSources[input.sourceId];
+    const config = settings.usageLimitSources[sourceId];
     if (!config?.enabled || !config.managementKey) {
       return yield* new UsageLimitSourceError({
         detail: "The usage limit source is missing or disabled.",
       });
     }
+    return config;
+  });
+
+  // Shares the refresh lock so a stale in-flight read cannot overwrite a redemption.
+  const consumeResetCredit = Effect.fn("UsageLimitSources.consumeResetCredit")(function* (
+    input: UsageLimitSourceConsumeResetCreditInput,
+  ) {
+    const config = yield* enabledSource(input.sourceId);
     const result = yield* api.consume(config, input.accountId, input.creditId);
     const snapshot = yield* readSource(input.sourceId, config);
     const previous = yield* Ref.get(stateRef);
@@ -149,9 +162,17 @@ export const make = Effect.gen(function* () {
 
   yield* refresh.pipe(Effect.forkScoped);
 
+  const readPools = Effect.fn("UsageLimitSources.readPools")(function* (
+    input: UsageLimitPoolsInput,
+  ) {
+    const config = yield* enabledSource(input.sourceId);
+    return yield* api.quotaPools(config, input);
+  });
+
   return {
     current: Ref.get(stateRef),
     consumeResetCredit,
+    readPools,
     refresh,
     get streamChanges() {
       return Stream.unwrap(
