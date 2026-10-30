@@ -1,7 +1,13 @@
+/**
+ * Pi's and Prime Agent's client definitions: settings form, label, and glyph.
+ * Browser- and React Native-safe.
+ *
+ * @module provider-pi/client
+ */
 import { ProviderDriverKind } from "@t3tools/contracts";
 import { defineProviderClient } from "@t3tools/provider-core/client";
 
-import { PiSettings } from "./settings.ts";
+import { PiSettings, PrimeAgentSettings } from "./settings.ts";
 
 export const piClient = defineProviderClient({
   driverKind: ProviderDriverKind.make("pi"),
@@ -19,4 +25,12 @@ export const piClient = defineProviderClient({
       { d: "M517.36 400H634.72V634.72H517.36Z" },
     ],
   },
+});
+
+/** Prime Agent has no official mark yet, so clients draw its initials. */
+export const primeAgentClient = defineProviderClient({
+  driverKind: ProviderDriverKind.make("primeAgent"),
+  label: "Prime Agent",
+  badgeLabel: "Early Access",
+  settingsSchema: PrimeAgentSettings,
 });

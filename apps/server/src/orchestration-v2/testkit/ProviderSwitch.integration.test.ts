@@ -69,6 +69,7 @@ const encodeJson = Schema.encodeEffect(Schema.fromJsonString(Schema.Unknown));
 
 const threadId = ThreadId.make("thread:provider-switch");
 const projectId = ProjectId.make("project:provider-switch");
+const returnPrompt = "Respond with exactly: codex after return";
 const CODEX_DRIVER = ProviderDriverKind.make("codex");
 const CLAUDE_DRIVER = ProviderDriverKind.make("claudeAgent");
 const GROK_DRIVER = ProviderDriverKind.make("acp");
@@ -119,6 +120,7 @@ function makeTestAdapter(input: {
   readonly subagentOnlyBackgroundWork?: boolean;
   readonly holdFirstTurn?: Deferred.Deferred<void>;
   readonly releaseFirstTurn?: Deferred.Deferred<void>;
+  readonly rollbacks?: Ref.Ref<ReadonlyArray<ProviderAdapter.ProviderAdapterV2RollbackThreadInput>>;
 }): ProviderAdapter.ProviderAdapterV2["Service"] {
   return {
     instanceId: input.instanceId,
@@ -376,8 +378,18 @@ function makeTestAdapter(input: {
           respondToRuntimeRequest: () => Effect.void,
           readThreadSnapshot: () =>
             unimplemented(input.driver, "readThreadSnapshot unused in provider switch test"),
-          rollbackThread: () =>
-            unimplemented(input.driver, "rollbackThread unused in provider switch test"),
+          rollbackThread: (rollback) =>
+            Effect.as(
+              input.rollbacks === undefined
+                ? Effect.void
+                : Ref.update(input.rollbacks, (rollbacks) => [...rollbacks, rollback]),
+              {
+                providerThread: rollback.providerThread,
+                providerTurns: [],
+                messages: [],
+                runtimeRequests: [],
+              },
+            ),
           forkThread: () =>
             unimplemented(input.driver, "forkThread unused in provider switch test"),
         };
@@ -392,6 +404,7 @@ const waitForIdle = Effect.fn("ProviderSwitchTest.waitForIdle")(function* (
   const orchestrator = yield* Orchestrator.OrchestratorV2;
   const eventSink = yield* EventSink.EventSinkV2;
   const isIdle = (projection: OrchestrationV2ThreadProjection) =>
+    !projection.thread.pendingHeadMove &&
     projection.runs.every(
       (run) => !["queued", "starting", "running", "waiting"].includes(run.status),
     );
@@ -3248,5 +3261,209 @@ describe("orchestration v2 provider switching", () => {
   it.live(
     "reissues imported v1 context when a queued provider starts after the first provider fails",
     () => importedFailureScenario(true),
+  );
+
+  it.live.each([
+    { behindClaudeTurn: false, label: "" },
+    { behindClaudeTurn: true, label: ", queued behind a Claude turn" },
+  ])(
+    "drops discarded turns from an earlier provider's conversation on rollback$label",
+    ({ behindClaudeTurn }) =>
+      Effect.scoped(
+        Effect.gen(function* () {
+          const cwd = yield* checkpointWorkspace("provider-switch-rollback");
+          const capturedTurns = yield* Ref.make<ReadonlyArray<CapturedTurn>>([]);
+          const codexNativeThreadGeneration = yield* Ref.make(0);
+          const forkThreadId = ThreadId.make("thread:provider-switch-rollback:fork");
+          const codexRollbacks = yield* Ref.make<
+            ReadonlyArray<ProviderAdapter.ProviderAdapterV2RollbackThreadInput>
+          >([]);
+          const claudeTurnStarted = yield* Deferred.make<void>();
+          const releaseClaudeTurn = yield* Deferred.make<void>();
+          const registryLayer = ProviderAdapterRegistry.layerFromAdapters([
+            makeTestAdapter({
+              instanceId: CODEX_MODEL_SELECTION.instanceId,
+              driver: CODEX_DRIVER,
+              capabilities: CodexProviderCapabilitiesV2,
+              modelSelection: CODEX_MODEL_SELECTION,
+              responseByRunOrdinal: { 1: "codex kept reply", 2: "codex discarded reply" },
+              capturedTurns,
+              nativeThreadGeneration: codexNativeThreadGeneration,
+              rollbacks: codexRollbacks,
+            }),
+            makeTestAdapter({
+              instanceId: CLAUDE_MODEL_SELECTION.instanceId,
+              driver: CLAUDE_DRIVER,
+              capabilities: ClaudeProviderCapabilitiesV2,
+              modelSelection: CLAUDE_MODEL_SELECTION,
+              responseByRunOrdinal: { 3: "claude discarded reply", 4: "claude kept reply" },
+              capturedTurns,
+              ...(behindClaudeTurn
+                ? {
+                    holdRunOrdinal: 4,
+                    holdFirstTurn: claudeTurnStarted,
+                    releaseFirstTurn: releaseClaudeTurn,
+                  }
+                : {}),
+            }),
+          ]);
+          const message = (
+            name: string,
+            text: string,
+            modelSelection: ModelSelection,
+            dispatchType: "start_immediately" | "queue_after_active" = "start_immediately",
+          ) =>
+            ({
+              type: "message.dispatch",
+              createdBy: "user",
+              creationSource: "web",
+              commandId: CommandId.make(`command:provider-switch-rollback:${name}`),
+              threadId,
+              messageId: MessageId.make(`message:provider-switch-rollback:${name}`),
+              text,
+              attachments: [],
+              modelSelection,
+              dispatchMode: { type: dispatchType },
+            }) satisfies OrchestrationV2Command;
+
+          const [projection, forked, generationAfterReturn] = yield* Effect.gen(function* () {
+            const orchestrator = yield* Orchestrator.OrchestratorV2;
+            yield* orchestrator.dispatch({
+              type: "thread.create",
+              createdBy: "user",
+              creationSource: "web",
+              commandId: CommandId.make("command:provider-switch-rollback:create"),
+              threadId,
+              projectId,
+              title: "Provider switch rollback",
+              modelSelection: CODEX_MODEL_SELECTION,
+              runtimeMode: "full-access",
+              interactionMode: "default",
+              branch: null,
+              worktreePath: null,
+            });
+            for (const [name, text, modelSelection] of [
+              ["codex-1", "codex kept prompt", CODEX_MODEL_SELECTION],
+              ["codex-2", "codex discarded prompt", CODEX_MODEL_SELECTION],
+              ["claude-3", "claude discarded prompt", CLAUDE_MODEL_SELECTION],
+            ] as const) {
+              yield* orchestrator.dispatch(message(name, text, modelSelection));
+              yield* waitForIdle(threadId);
+            }
+            const checkpoint = (yield* orchestrator.getThreadProjection(threadId)).checkpoints.find(
+              (candidate) => candidate.appRunOrdinal === 1,
+            )!;
+            yield* orchestrator.dispatch({
+              type: "checkpoint.rollback",
+              commandId: CommandId.make("command:provider-switch-rollback:rollback"),
+              threadId,
+              checkpointId: checkpoint.id,
+              scopeId: checkpoint.scopeId,
+              restoreFiles: false,
+            });
+            yield* waitForIdle(threadId);
+            if (behindClaudeTurn) {
+              // Promoting a queued run is a separate path from an immediate dispatch.
+              yield* orchestrator.dispatch(
+                message("claude-4", "claude kept prompt", CLAUDE_MODEL_SELECTION),
+              );
+              yield* Deferred.await(claudeTurnStarted);
+              yield* orchestrator.dispatch(
+                message("codex-5", returnPrompt, CODEX_MODEL_SELECTION, "queue_after_active"),
+              );
+              yield* Deferred.succeed(releaseClaudeTurn, undefined);
+            } else {
+              yield* orchestrator.dispatch(message("codex-4", returnPrompt, CODEX_MODEL_SELECTION));
+            }
+            const returned = yield* waitForIdle(threadId);
+            const generationAfterReturn = yield* Ref.get(codexNativeThreadGeneration);
+            // Codex's current native conversation has no turn for run 1, so a
+            // fork from it needs portable context (the fake cannot fork natively).
+            yield* orchestrator.dispatch({
+              type: "thread.fork",
+              createdBy: "user",
+              creationSource: "web",
+              commandId: CommandId.make("command:provider-switch-rollback:fork"),
+              sourceThreadId: threadId,
+              targetThreadId: forkThreadId,
+              sourcePoint: { type: "run", runId: returned.runs[0]!.id },
+            });
+            yield* orchestrator.dispatch({
+              ...message("fork-message", "fork prompt", CODEX_MODEL_SELECTION),
+              threadId: forkThreadId,
+            });
+            const forked = yield* waitForIdle(forkThreadId);
+            yield* orchestrator.dispatch({
+              type: "checkpoint.rollback",
+              commandId: CommandId.make("command:provider-switch-rollback:rollback-again"),
+              threadId,
+              checkpointId: checkpoint.id,
+              scopeId: checkpoint.scopeId,
+              restoreFiles: false,
+            });
+            yield* waitForIdle(threadId);
+            return [returned, forked, generationAfterReturn] as const;
+          }).pipe(
+            Effect.provide(
+              ProviderReplayHarness.layerWithRegistry(
+                {
+                  name: "provider-switch-rollback",
+                  runtimePolicyOverride: {
+                    cwd,
+                    approvalPolicy: "never",
+                    sandboxPolicy: { type: "readOnly" },
+                  },
+                },
+                registryLayer,
+              ),
+            ),
+          );
+
+          assert.deepEqual(
+            projection.runs.map((run) => [run.providerInstanceId, run.status]),
+            [
+              ["codex", "completed"],
+              ["codex", "rolled_back"],
+              ["claudeAgent", "rolled_back"],
+              ...(behindClaudeTurn ? [["claudeAgent", "completed"]] : []),
+              ["codex", "completed"],
+            ],
+          );
+          assert.equal(
+            projection.runs[0]?.providerThreadId,
+            projection.runs.at(-1)?.providerThreadId,
+          );
+          // Codex run 2 stays in the old native thread, so the return opens a
+          // fresh one and gets the kept history as a full handoff.
+          assert.equal(generationAfterReturn, 2);
+          const returnTurn =
+            (yield* Ref.get(capturedTurns)).findLast((turn) => turn.threadId === threadId)?.text ??
+            "";
+          assert.include(returnTurn, "Context handoff (full_thread_summary):");
+          assert.include(returnTurn, "codex kept reply");
+          if (behindClaudeTurn) assert.include(returnTurn, "claude kept reply");
+          assert.include(returnTurn, returnPrompt);
+          assert.notInclude(returnTurn, "codex discarded");
+          assert.notInclude(returnTurn, "claude discarded");
+          assert.deepEqual(
+            forked.contextTransfers.map((transfer) => transfer.resolution?.strategy),
+            ["portable_context"],
+          );
+          const forkTurn =
+            (yield* Ref.get(capturedTurns)).find((turn) => turn.threadId === forkThreadId)?.text ??
+            "";
+          assert.include(forkTurn, "codex kept reply");
+          assert.notInclude(forkTurn, "discarded");
+          // Rolling back to run 1 again rewinds the fresh conversation to its
+          // start; turns of the dropped one name entries it never had.
+          const [secondRollback, ...moreRollbacks] = yield* Ref.get(codexRollbacks);
+          assert.deepEqual(moreRollbacks, []);
+          assert.equal(secondRollback?.target.type, "thread_start");
+          assert.deepEqual(
+            secondRollback?.providerThreadTurns.map((turn) => turn.runAttemptId),
+            [projection.runs.at(-1)?.activeAttemptId],
+          );
+        }),
+      ),
   );
 });

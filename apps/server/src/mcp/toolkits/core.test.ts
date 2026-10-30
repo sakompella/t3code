@@ -36,6 +36,7 @@ import {
 
 import * as ServerSecretStore from "../../auth/ServerSecretStore.ts";
 import * as ServerConfig from "../../config.ts";
+import type { ProviderAdapterV2 } from "@t3tools/provider-core/server/ProviderAdapter";
 import * as ProviderAdapterRegistry from "../../orchestration-v2/ProviderAdapterRegistry.ts";
 import * as ThreadLaunchService from "../../orchestration-v2/ThreadLaunchService.ts";
 import * as GitVcsDriver from "../../vcs/GitVcsDriver.ts";
@@ -69,6 +70,8 @@ const declaredFailure = (result: McpSchema.CallToolResult) => {
   return result.isError === true && text?.type === "text" ? JSON.parse(text.text) : undefined;
 };
 import { htmlRenderFromToolItem } from "@t3tools/shared/toolOutput";
+
+type ProviderAdapterV2Shape = ProviderAdapterV2["Service"];
 
 const decodeMcpAttachmentInput = Schema.decodeUnknownEffect(McpAttachmentInput);
 const decodeThreadReadResult = Schema.decodeUnknownEffect(OrchestratorMcpThreadReadResult);
@@ -249,18 +252,53 @@ it("bounds public command rejections and redacts internal dispatch causes", () =
   });
 });
 
+const layerHtmlRenderFor = (adapters: ReadonlyArray<ProviderAdapterV2Shape>) =>
+  McpHttpServer.layerHtmlToolkit.pipe(
+    Layer.provideMerge(McpServer.McpServer.layer),
+    Layer.provide(McpProviderSessions.layer),
+    Layer.provide(PreviewBrowser.layer),
+    Layer.provide(ServerConfig.layerTest(process.cwd(), { prefix: "t3-mcp-html-render-" })),
+    Layer.provide(ProviderAdapterRegistry.layerFromAdapters(adapters)),
+    Layer.provide(DocumentText.layer.pipe(Layer.provideMerge(NodeServices.layer))),
+    // The preview browser is not installed in a fresh home, so nothing downloads.
+    Layer.provide(FetchHttpClient.layer),
+    Layer.provide(
+      Layer.mock(ThreadManagement.ThreadManagementService)({
+        // A live run: publishing stores a page, so it needs the caller's active turn.
+        getThreadShell: () =>
+          Effect.succeed({
+            id: threadId,
+            deletedAt: null,
+            archivedAt: null,
+            activeRunId: RunId.make("mcp-core-run"),
+            providerInstanceId: ProviderInstanceId.make("codex"),
+          } as OrchestrationV2ThreadShell),
+      }),
+    ),
+  );
+
+const callHtmlRender = McpServer.McpServer.pipe(
+  Effect.flatMap((server) =>
+    server.callTool({
+      name: "html_render",
+      arguments: { html: "<p>Revenue</p>", title: "Revenue", height: 240 },
+    }),
+  ),
+  Effect.provideService(McpInvocationContext.McpInvocationContext, scope),
+  Effect.provideService(McpSchema.McpServerClient, client),
+);
+
+const codexAdapter: ProviderAdapterV2Shape = {
+  instanceId: ProviderInstanceId.make("codex"),
+  driver: ProviderDriverKind.make("codex"),
+  getCapabilities: () => Effect.die("unused"),
+  planSelectionTransition: () => Effect.die("unused"),
+  openSession: () => Effect.die("unused"),
+};
+
 it.effect("returns an HTML render reference that Codex and Claude tool rows both carry", () =>
   Effect.gen(function* () {
-    const server = yield* McpServer.McpServer;
-    const result = yield* server
-      .callTool({
-        name: "html_render",
-        arguments: { html: "<p>Revenue</p>", title: "Revenue", height: 240 },
-      })
-      .pipe(
-        Effect.provideService(McpInvocationContext.McpInvocationContext, scope),
-        Effect.provideService(McpSchema.McpServerClient, client),
-      );
+    const result = yield* callHtmlRender;
     const reference = htmlRenderFromToolItem({
       toolName: "t3-code.html_render",
       output: result.structuredContent,
@@ -269,30 +307,14 @@ it.effect("returns an HTML render reference that Codex and Claude tool rows both
     expect(
       htmlRenderFromToolItem({ toolName: "mcp__t3-code__html_render", output: result.content }),
     ).toEqual(reference);
-  }).pipe(
-    Effect.provide(
-      McpHttpServer.layerHtmlToolkit.pipe(
-        Layer.provideMerge(McpServer.McpServer.layer),
-        Layer.provide(McpProviderSessions.layer),
-        Layer.provide(PreviewBrowser.layer),
-        Layer.provide(ServerConfig.layerTest(process.cwd(), { prefix: "t3-mcp-html-render-" })),
-        Layer.provide(DocumentText.layer.pipe(Layer.provideMerge(NodeServices.layer))),
-        Layer.provide(FetchHttpClient.layer),
-        Layer.provide(
-          Layer.mock(ThreadManagement.ThreadManagementService)({
-            getThreadShell: () =>
-              Effect.succeed({
-                id: threadId,
-                deletedAt: null,
-                archivedAt: null,
-                activeRunId: RunId.make("mcp-core-run"),
-                providerInstanceId: ProviderInstanceId.make("codex"),
-              } as OrchestrationV2ThreadShell),
-          }),
-        ),
-      ),
-    ),
-  ),
+  }).pipe(Effect.provide(layerHtmlRenderFor([codexAdapter]))),
+);
+
+it.effect("refuses an HTML render when the caller's provider is no longer registered", () =>
+  Effect.gen(function* () {
+    const result = yield* callHtmlRender;
+    expect(declaredFailure(result)).toMatchObject({ code: "orchestration_error" });
+  }).pipe(Effect.provide(layerHtmlRenderFor([]))),
 );
 
 it.effect("records only failed calls of tools that hand off no work", () => {
@@ -647,7 +669,9 @@ it.effect("a caller cannot rewrite a scheduled task that runs above its own mode
         Layer.provide(NodeCrypto.layer),
         Layer.provide(Layer.mock(ThreadManagement.ThreadManagementService)({})),
         Layer.provide(ServerSettings.layerTest()),
-        Layer.provide(Layer.mock(ProviderRegistry.ProviderRegistry)({})),
+        Layer.provide(
+          Layer.mock(ProviderRegistry.ProviderRegistry)({ getProviders: Effect.succeed([]) }),
+        ),
         Layer.provide(Layer.mock(ProviderAdapterRegistry.ProviderAdapterRegistryV2)({})),
         Layer.provide(
           Layer.mock(ScheduledTaskService.ScheduledTaskService)({

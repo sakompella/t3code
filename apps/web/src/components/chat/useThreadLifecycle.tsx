@@ -76,13 +76,13 @@ interface ThreadLifecycleInput {
   readonly activeThreadRef: ScopedThreadRef | null;
   readonly activeThreadKey: string | null;
   readonly activeThreadShell: EnvironmentThreadShell | null;
-  readonly activeLatestRun: EnvironmentThreadShell["latestRun"];
   readonly activeProjectCwd: string | null;
   readonly serverConfig: EnvironmentServerConfig | null;
   readonly runtimeMode: RuntimeMode;
   readonly isWorking: boolean;
   readonly pendingBackgroundTasks: Parameters<typeof backgroundWorkNowItem>[0]["tasks"];
   readonly turnItems: Parameters<typeof backgroundWorkNowItem>[0]["turnItems"];
+  readonly subagents: Parameters<typeof backgroundWorkNowItem>[0]["subagents"];
   readonly activePendingApproval: PendingThreadRequests["activePendingApproval"];
   readonly activePendingUserInput: PendingThreadRequests["activePendingUserInput"];
   readonly localCheckoutBranchMismatch: {
@@ -127,13 +127,13 @@ export function useThreadLifecycle(input: ThreadLifecycleInput) {
     activeThreadRef,
     activeThreadKey,
     activeThreadShell,
-    activeLatestRun,
     activeProjectCwd,
     serverConfig,
     runtimeMode,
     isWorking,
     pendingBackgroundTasks,
     turnItems,
+    subagents,
     activePendingApproval,
     activePendingUserInput,
     localCheckoutBranchMismatch,
@@ -198,7 +198,6 @@ export function useThreadLifecycle(input: ThreadLifecycleInput) {
     wokeAt: activeThreadWokeAt,
     settled: activeThreadShell?.settledOverride === "settled",
     lastVisitedAt: activeThreadLastVisitedAt,
-    latestRunCompletedAt: activeLatestRun?.completedAt ?? null,
   });
   const activeThreadSettled =
     serverConfigLoaded && activeThreadShell?.settledOverride === "settled";
@@ -367,9 +366,9 @@ export function useThreadLifecycle(input: ThreadLifecycleInput) {
   const handleSwitchCheckoutToThreadStable = useStableCallback(() => {
     void handleSwitchCheckoutToThread();
   });
-  // The interrupt path also accepts a completed run while its provider still
-  // has background work.
-  const activeBackgroundTasks = !isWorking && activeThread ? pendingBackgroundTasks : [];
+  // While a turn runs, the banner lists only work that outlived its step, and hides Stop because it
+  // would send the same interrupt as the composer's Stop.
+  const activeBackgroundTasks = activeThread ? pendingBackgroundTasks : [];
   const [stoppingBackgroundWorkKey, setStoppingBackgroundWorkKey] = useState<string | null>(null);
   const isStoppingBackgroundWork =
     stoppingBackgroundWorkKey === `${environmentId}:${activeThreadId}`;
@@ -514,6 +513,8 @@ export function useThreadLifecycle(input: ThreadLifecycleInput) {
         threadId: activeThread.id,
         tasks: activeBackgroundTasks,
         turnItems,
+        subagents,
+        turnRunning: isWorking,
         stopDisabled: !canOperateThread || isStoppingBackgroundWork,
         stopping: isStoppingBackgroundWork,
         onStop: handleStopBackgroundWorkStable,

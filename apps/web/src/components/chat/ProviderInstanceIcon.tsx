@@ -57,6 +57,18 @@ export function resolveProviderInstanceAcpRegistryIconUrl(input: {
   );
 }
 
+/**
+ * A provider with no brand, package or registry glyph is drawn as its instance
+ * initials, so a badge carrying the same initials would only repeat them.
+ */
+export function providerDrawsInitialsGlyph(driverKind: ProviderDriverKind): boolean {
+  return (
+    driverKind !== "acpRegistry" &&
+    !providerClients.get(driverKind)?.icon &&
+    !PROVIDER_ICON_BY_PROVIDER[driverKind]
+  );
+}
+
 export const ProviderInstanceIcon = memo(function ProviderInstanceIcon(props: {
   driverKind: ProviderDriverKind;
   displayName: string;
@@ -83,6 +95,7 @@ export const ProviderInstanceIcon = memo(function ProviderInstanceIcon(props: {
     : undefined;
   const badgeContent = props.badgeContent ?? "initials";
   const iconClassName = cn(props.size === "compact" && "size-3.5", props.iconClassName);
+  const drawsInitials = providerDrawsInitialsGlyph(props.driverKind);
   const isAcpRegistry = props.driverKind === "acpRegistry";
   const acpRegistryIconUrl = resolveProviderInstanceAcpRegistryIconUrl({
     driverKind: props.driverKind,
@@ -114,11 +127,17 @@ export const ProviderInstanceIcon = memo(function ProviderInstanceIcon(props: {
       ) : Icon ? (
         <Icon className={cn("size-5 shrink-0", iconClassName)} aria-hidden />
       ) : (
-        <span className={cn("text-3xs font-semibold leading-none", iconClassName)}>
+        <span
+          className={cn(
+            "text-3xs font-semibold leading-none",
+            accentColor && "text-(--provider-accent)",
+            iconClassName,
+          )}
+        >
           {providerInstanceInitials(props.displayName)}
         </span>
       )}
-      {props.showBadge ? (
+      {props.showBadge && !drawsInitials ? (
         <span
           className={cn(
             "pointer-events-none absolute right-0 bottom-0 z-10 flex h-3.5 min-w-3.5 items-center justify-center rounded-full border px-0.5 text-4xs font-semibold leading-none shadow-sm",

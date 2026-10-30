@@ -7,6 +7,29 @@ export const T3_MCP_URL_ENV = "T3_MCP_URL";
 export const T3_MCP_BEARER_ENV = "T3_MCP_BEARER_TOKEN";
 export const T3_PI_RUNTIME_MODE_ENV = "T3_PI_RUNTIME_MODE";
 export const T3_PI_MCP_EXTENSION_PATH_ENV = "T3_PI_MCP_EXTENSION_PATH";
+/**
+ * Set to `kernel` when the agent reaches T3 through its own MCP client and the
+ * `t3-code` skill. The extension then registers no T3 tools and adds no
+ * orchestration prompt; permissions, rollback, and the token cap stay.
+ */
+export const T3_PI_MCP_TOOLS_ENV = "T3_PI_MCP_TOOLS";
+export const T3_PI_MCP_TOOLS_KERNEL = "kernel";
+
+/**
+ * Hidden command that rolls the conversation back in place with the extension
+ * API's `navigateTree`, which RPC does not expose. It reports its outcome as a
+ * `notify` whose message starts with the marker; the adapter consumes it.
+ */
+export const T3_NAVIGATE_TREE_COMMAND = "t3-navigate-tree";
+export const T3_NAVIGATE_TREE_RESULT_MARKER = "t3-navigate-tree-result:";
+
+/**
+ * Sent to the agent with its next turn after an in-place rollback. Rewinding
+ * the conversation does not rewind live tool state such as Prime Agent's
+ * Python kernel, and neither RPC nor extensions can reset it.
+ */
+export const T3_ROLLBACK_NOTICE =
+  "[T3 Code rollback] The conversation was rewound to an earlier point. Live tool state from the discarded turns was not reset: Python variables, imports, and background jobs they created may still exist. Check that state before relying on it, and redo work from the discarded turns if you need it.";
 
 // These tools trigger file-change approvals, bypassed by Auto-accept edits.
 export const PI_FILE_CHANGE_TOOLS = ["edit", "write"] as const;
@@ -21,8 +44,13 @@ const URL_ENV = ${JSON.stringify(T3_MCP_URL_ENV)};
 const TOKEN_ENV = ${JSON.stringify(T3_MCP_BEARER_ENV)};
 const RUNTIME_MODE_ENV = ${JSON.stringify(T3_PI_RUNTIME_MODE_ENV)};
 const EXTENSION_PATH_ENV = ${JSON.stringify(T3_PI_MCP_EXTENSION_PATH_ENV)};
+const MCP_TOOLS_ENV = ${JSON.stringify(T3_PI_MCP_TOOLS_ENV)};
+const MCP_TOOLS_KERNEL = ${JSON.stringify(T3_PI_MCP_TOOLS_KERNEL)};
 const ORCHESTRATION_INSTRUCTIONS = ${JSON.stringify(T3_CODE_ORCHESTRATION_INSTRUCTIONS.trim())};
 const PROTOCOL = "2025-06-18";
+const NAVIGATE_TREE_COMMAND = ${JSON.stringify(T3_NAVIGATE_TREE_COMMAND)};
+const NAVIGATE_TREE_RESULT_MARKER = ${JSON.stringify(T3_NAVIGATE_TREE_RESULT_MARKER)};
+const ROLLBACK_NOTICE = ${JSON.stringify(T3_ROLLBACK_NOTICE)};
 const READ_ONLY_TOOLS = new Set(["read", "grep", "find", "ls"]);
 const FILE_CHANGE_TOOLS = new Set(${JSON.stringify(PI_FILE_CHANGE_TOOLS)});
 
@@ -59,7 +87,41 @@ function runtimeMode(): RuntimeMode {
     : "full-access";
 }
 
+/**
+ * Pi and Prime Agent retire an extension runner when its session is replaced
+ * or reloaded. Work still running on the old session, such as a pending
+ * auto-retry, hands handlers a ctx whose getters throw this error. Nothing is
+ * wrong with the new session, so handlers must not report it as a failure.
+ */
+const STALE_CTX_PATTERN = /extension ctx is stale/i;
+
+function isStaleCtxError(error: unknown): boolean {
+  // Read the message by shape: extension runtimes may load this file in a
+  // separate realm, where \`instanceof Error\` is false.
+  const message =
+    typeof error === "object" && error !== null && "message" in error
+      ? String(error.message)
+      : String(error);
+  return STALE_CTX_PATTERN.test(message);
+}
+
+/** Tells the user, unless the ctx is stale and has no user left to tell. */
+function notifyUnlessStale(
+  ctx: { readonly ui: { readonly notify: (message: string, type?: string) => void } },
+  message: string,
+  type: string,
+): void {
+  try {
+    ctx.ui.notify(message, type);
+  } catch (error) {
+    if (!isStaleCtxError(error)) throw error;
+  }
+}
+
 function toolInputSummary(input: unknown): string {
+  // Prime Agent's ipython cells are easier to judge as code than as JSON.
+  const code = (input as { readonly code?: unknown } | null)?.code;
+  if (typeof code === "string") return code.slice(0, 4_000);
   try {
     return JSON.stringify(input, null, 2).slice(0, 4_000);
   } catch {
@@ -279,7 +341,15 @@ export default async function t3McpExtension(pi: ExtensionAPI) {
   // reject even a short conversation. Remove this cap when Pi accounts for
   // the current request prefix reliably (api/simple-options + utils/estimate).
   pi.on("before_provider_request", (event, ctx) => {
-    if (ctx.model?.provider !== "openrouter") return;
+    let provider: string | undefined;
+    try {
+      provider = ctx.model?.provider;
+    } catch (error) {
+      // A request from a replaced session is not worth capping or reporting.
+      if (!isStaleCtxError(error)) throw error;
+      return;
+    }
+    if (provider !== "openrouter") return;
     const payload = event.payload;
     if (typeof payload !== "object" || payload === null || Array.isArray(payload)) return;
     const replacement = { ...payload } as Record<string, unknown>;
@@ -294,9 +364,6 @@ export default async function t3McpExtension(pi: ExtensionAPI) {
     if (changed) return replacement;
   });
 
-  // Pi deliberately leaves permission policy to extensions. T3's injected
-  // bridge uses Pi's public blocking tool hook so the shared runtime modes
-  // keep their normal meaning without replacing or shadowing Pi's runtime.
   // Only Pi's own search is known to be read-only. An extension that replaces
   // it keeps the name, and cannot discover deferred tools either.
   const hasBuiltinToolSearch = () =>
@@ -314,6 +381,40 @@ export default async function t3McpExtension(pi: ExtensionAPI) {
       NodePath.resolve(tool.sourceInfo.path) === NodePath.resolve(extensionPath));
   };
 
+  pi.registerCommand(NAVIGATE_TREE_COMMAND, {
+    description: "T3 Code internal: roll the conversation back in place.",
+    handler: async (args, ctx) => {
+      const [requestId = "", entryId = ""] = args.trim().split(/\\s+/);
+      const report = (result: Record<string, unknown>) =>
+        notifyUnlessStale(
+          ctx,
+          \`\${NAVIGATE_TREE_RESULT_MARKER}\${JSON.stringify({ requestId, ...result })}\`,
+          "info",
+        );
+      try {
+        const result = await ctx.navigateTree(entryId);
+        if (!result.cancelled) {
+          pi.sendMessage(
+            { customType: "t3_rollback_notice", content: ROLLBACK_NOTICE, display: false },
+            { deliverAs: "nextTurn" },
+          );
+        }
+        report({ outcome: result.cancelled ? "cancelled" : "ok" });
+      } catch (error) {
+        // Read the message by shape: extension runtimes may load this file in
+        // a separate realm, where \`instanceof Error\` is false.
+        const message =
+          typeof error === "object" && error !== null && "message" in error
+            ? String(error.message)
+            : String(error);
+        report({ outcome: "error", error: message });
+      }
+    },
+  });
+
+  // Pi deliberately leaves permission policy to extensions. T3's injected
+  // bridge uses Pi's public blocking tool hook so the shared runtime modes
+  // keep their normal meaning without replacing or shadowing Pi's runtime.
   pi.on("tool_call", async (event, ctx) => {
     const mode = runtimeMode();
     if (mode === "full-access") return;
@@ -323,21 +424,44 @@ export default async function t3McpExtension(pi: ExtensionAPI) {
     if (mode === "auto-accept-edits" && FILE_CHANGE_TOOLS.has(event.toolName)) {
       return;
     }
-    const approved = await ctx.ui.confirm(
-      \`Allow \${event.toolName}?\`,
-      toolInputSummary(event.input),
-      { signal: ctx.signal },
-    );
+    let approved: boolean;
+    try {
+      // Prime Agent drops a subagent's dialog on its way to T3, so the prompt
+      // would wait forever. Block instead, as a parent with no UI would.
+      if ((ctx.sessionManager?.getHeader()?.rlmDepth ?? 0) > 0) {
+        return {
+          block: true,
+          reason: \`\${event.toolName} was blocked: T3 Code cannot show a subagent's approval prompt. Run the thread with full access to let subagents use it.\`,
+        };
+      }
+      approved = await ctx.ui.confirm(
+        \`Allow \${event.toolName}?\`,
+        toolInputSummary(event.input),
+        { signal: ctx.signal },
+      );
+    } catch (error) {
+      if (!isStaleCtxError(error)) throw error;
+      // The approval prompt belonged to a replaced session, so nobody can
+      // answer it. Failing closed keeps the tool from running unapproved.
+      return {
+        block: true,
+        reason: \`\${event.toolName} was blocked: T3 Code cannot ask for approval because this agent session was replaced.\`,
+      };
+    }
     if (!approved) {
       return { block: true, reason: \`\${event.toolName} was declined in T3 Code.\` };
     }
   });
 
+  // The agent's own MCP client serves T3's tools, guided by the t3-code skill.
+  if (env(MCP_TOOLS_ENV) === MCP_TOOLS_KERNEL) return;
+
   const endpoint = env(URL_ENV);
   const token = env(TOKEN_ENV);
   if (endpoint === undefined || token === undefined) {
     pi.on("session_start", async (_event, ctx) => {
-      ctx.ui.notify(
+      notifyUnlessStale(
+        ctx,
         "t3-code MCP unavailable: T3_MCP_URL or T3_MCP_BEARER_TOKEN is missing.",
         "warning",
       );
@@ -444,7 +568,7 @@ export default async function t3McpExtension(pi: ExtensionAPI) {
       await ensureStarted();
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
-      ctx.ui.notify(\`t3-code MCP unavailable: \${message}\`, "warning");
+      notifyUnlessStale(ctx, \`t3-code MCP unavailable: \${message}\`, "warning");
     }
   });
 

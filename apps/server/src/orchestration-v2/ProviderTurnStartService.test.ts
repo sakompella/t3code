@@ -3,6 +3,7 @@ import { expect, it, vi } from "vite-plus/test";
 import { it as effectIt } from "@effect/vitest";
 import {
   CheckpointScopeId,
+  ContextTransferId,
   GitCommandError,
   MessageId,
   NodeId,
@@ -273,6 +274,8 @@ function makeLocalCommandHarness(input: {
   readonly logoutFailure?: string;
   readonly openFailure?: unknown;
   readonly ensureThreadFailure?: unknown;
+  /** Starts the run as a native fork of another thread, which the adapter refuses with this cause. */
+  readonly forkFailure?: unknown;
   readonly historyReadFailureAfterFallback?: unknown;
   readonly interruptOpen?: boolean;
   readonly interruptRunBeforeOpenFailure?: boolean;
@@ -286,7 +289,14 @@ function makeLocalCommandHarness(input: {
     readonly interruptFailure?: boolean;
     readonly interruptCurrentRun?: boolean;
   };
+  /** Loads the thread and starts the run. */
+  readonly startsNativeTurn?: boolean;
 }) {
+  const startsNativeTurn =
+    input.failReadsAfterRunning === true ||
+    input.startsNativeTurn === true ||
+    input.previousTurn !== undefined;
+  let recoveryProjectionReads = 0;
   const now = DateTime.makeUnsafe("2026-09-04T12:00:00Z");
   const threadId = ThreadId.make("thread-native-account-command");
   const runId = RunId.make("run-native-account-command");
@@ -449,7 +459,21 @@ function makeLocalCommandHarness(input: {
     providerSessions: [],
     providerTurns: [],
     contextHandoffs: [],
-    contextTransfers: [],
+    contextTransfers:
+      "forkFailure" in input
+        ? [
+            {
+              id: ContextTransferId.make("fork-transfer"),
+              type: "fork",
+              sourceThreadId: ThreadId.make("fork-source-thread"),
+              targetThreadId: threadId,
+              sourcePoint: { runId: RunId.make("fork-source-run") },
+              targetRunId: runId,
+              status: "pending",
+              resolution: null,
+            } as unknown as OrchestrationV2ThreadProjection["contextTransfers"][number],
+          ]
+        : [],
     turnItems: [],
     visibleTurnItems: [],
     runtimeRequests: [],
@@ -598,7 +622,7 @@ function makeLocalCommandHarness(input: {
                   ),
                 ),
               )
-            : input.failReadsAfterRunning === true || input.previousTurn !== undefined
+            : startsNativeTurn
               ? Effect.succeed({
                   driver: providerThread.driver,
                   providerSession: {
@@ -618,10 +642,22 @@ function makeLocalCommandHarness(input: {
                 } as never)
               : Effect.die("A local command must not open a native session."),
   );
+  const forkThread = vi.fn(() =>
+    Effect.fail(
+      new ProviderAdapter.ProviderAdapterForkThreadError({
+        driver: providerThread.driver,
+        providerThreadId,
+        cause: input.forkFailure,
+      }),
+    ),
+  );
+  const openForkSession = vi.fn(() =>
+    Effect.succeed({ driver: providerThread.driver, forkThread } as never),
+  );
   const startRootRun = vi.fn<
     (input: RunExecutionService.RunExecutionServiceV2StartRootRunInput) => Effect.Effect<void>
   >(() =>
-    input.failReadsAfterRunning === true || input.previousTurn !== undefined
+    startsNativeTurn
       ? Effect.suspend(() =>
           providerBusy ? Effect.die("The previous provider turn is still running.") : Effect.void,
         )
@@ -677,8 +713,19 @@ function makeLocalCommandHarness(input: {
   const createWorktree = vi.fn<GitWorkflow.GitWorkflowService["Service"]["createWorktree"]>(() =>
     Effect.succeed({} as never),
   );
-  const getThreadRecords = vi.fn<ProjectionStore.ProjectionStoreV2Shape["getThreadRecords"]>(() =>
-    Effect.succeed(projection),
+  const forkSourceRecords = {
+    runs: [{ id: RunId.make("fork-source-run"), providerThreadId, activeAttemptId: null }],
+    providerThreads: [providerThread],
+    attempts: [],
+    providerTurns: [],
+  };
+  const getThreadRecords = vi.fn<ProjectionStore.ProjectionStoreV2Shape["getThreadRecords"]>(
+    (requestedThreadId) =>
+      Effect.succeed(
+        requestedThreadId === ThreadId.make("fork-source-thread")
+          ? (forkSourceRecords as never)
+          : projection,
+      ),
   );
   const getTurnStartContext = vi.fn(() =>
     Effect.succeed({
@@ -719,13 +766,31 @@ function makeLocalCommandHarness(input: {
           getThreadRecords,
           getTurnStartContext,
           getRuntimeRecoveryProjection: () =>
-            Effect.as(failReadIfRunning, {
-              ...projection,
-              hasConversation: projection.messages.some(
-                (m) =>
-                  m.role === "user" &&
-                  (m.text.trim().toLowerCase() !== "/compact" || m.attachments.length > 0),
+            Effect.as(
+              Effect.andThen(
+                Effect.sync(() => {
+                  recoveryProjectionReads += 1;
+                }),
+                failReadIfRunning,
               ),
+              {
+                ...projection,
+                hasConversation: projection.messages.some(
+                  (m) =>
+                    m.role === "user" &&
+                    (m.text.trim().toLowerCase() !== "/compact" || m.attachments.length > 0),
+                ),
+              },
+            ),
+          getRunState: (_threadId, runId) =>
+            Effect.suspend(() => {
+              const current = projection.runs.find((candidate) => candidate.id === runId);
+              return Effect.as(
+                failReadIfRunning,
+                current === undefined
+                  ? undefined
+                  : { status: current.status, activeAttemptId: current.activeAttemptId },
+              );
             }),
           getTurnStartHistory: () =>
             Effect.fail(
@@ -736,7 +801,7 @@ function makeLocalCommandHarness(input: {
             ),
         }),
         Layer.mock(ProviderSessionManager.ProviderSessionManagerV2)({
-          open,
+          open: "forkFailure" in input ? openForkSession : open,
           get: () =>
             Effect.succeed(
               input.previousTurn?.liveSession === false
@@ -765,6 +830,7 @@ function makeLocalCommandHarness(input: {
     resolveRuntimePolicy,
     createWorktree,
     open,
+    forkThread,
     writeIfRunCurrent,
     startRootRun,
     interruptTurn,
@@ -774,6 +840,7 @@ function makeLocalCommandHarness(input: {
     newInstanceId,
     attemptId,
     projection: () => projection,
+    recoveryProjectionReads: () => recoveryProjectionReads,
     start: Effect.gen(function* () {
       yield* (yield* ProviderTurnStart.ProviderTurnStartServiceV2).start({ threadId, runId });
     }).pipe(Effect.provide(layer)),
@@ -1339,6 +1406,55 @@ effectIt.effect("does not overwrite a run interrupted while its provider session
     expect(projection.nodes[0]?.status).toBe("pending");
     expect(projection.turnItems).toEqual([]);
     expect(harness.events).toEqual([]);
+  }),
+);
+
+effectIt.effect("does not retry a fork the adapter refuses on protocol grounds", () =>
+  Effect.gen(function* () {
+    const harness = makeLocalCommandHarness({
+      text: "Continue",
+      forkFailure: new ProviderAdapter.ProviderAdapterProtocolError({
+        driver: ProviderDriverKind.make("primeAgent"),
+        detail: "fork source has no session file",
+      }),
+    });
+
+    yield* harness.startWithRetry;
+
+    expect(harness.forkThread).toHaveBeenCalledOnce();
+    expect(harness.projection().runs.at(-1)?.status).toBe("failed");
+  }),
+);
+
+effectIt.effect("retries a fork that failed for another reason", () =>
+  Effect.gen(function* () {
+    const harness = makeLocalCommandHarness({
+      text: "Continue",
+      forkFailure: new Error("pi process exited with code 1"),
+    });
+
+    const error = yield* harness.startWithRetry.pipe(Effect.flip);
+
+    expect(error._tag).toBe("ProviderTurnStartError");
+    expect(harness.projection().runs.at(-1)?.status).toBe("starting");
+  }),
+);
+
+effectIt.effect("checks a run's attempt without reading the thread's recovery projection", () =>
+  Effect.gen(function* () {
+    const harness = makeLocalCommandHarness({ text: "Continue", startsNativeTurn: true });
+
+    yield* harness.start;
+
+    const controls = harness.startRootRun.mock.calls[0]?.[0];
+    expect(controls).toBeDefined();
+    if (controls === undefined) return;
+    expect(yield* controls.shouldStartProviderTurn!()).toBe(true);
+    expect(yield* controls.shouldFinalizeRun!()).toBe(true);
+    // Only the inherited background routing needs the recovery projection. The
+    // guards run several times per start and wake, and on a large thread each
+    // recovery read blocks the event loop for tens of milliseconds.
+    expect(harness.recoveryProjectionReads()).toBe(1);
   }),
 );
 

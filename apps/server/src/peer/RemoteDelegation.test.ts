@@ -481,7 +481,9 @@ const boxToolkitLayer = (thread: BoxThread) => {
         Layer.provide(NodeServices.layer),
       ),
     ),
-    Layer.provide(Layer.mock(ProviderRegistry.ProviderRegistry)({})),
+    Layer.provide(
+      Layer.mock(ProviderRegistry.ProviderRegistry)({ getProviders: Effect.succeed([]) }),
+    ),
     Layer.provide(Layer.mock(ProviderAdapterRegistry.ProviderAdapterRegistryV2)({})),
     Layer.provide(Layer.mock(ScheduledTaskService.ScheduledTaskService)({})),
     Layer.provide(
@@ -590,7 +592,9 @@ const makeLaptop = (
       Layer.provide(Layer.mock(PeerLinkRequests.PeerLinkRequests)({})),
       Layer.provide(NodeCrypto.layer),
       Layer.provideMerge(layerThreads),
-      Layer.provide(Layer.mock(ProviderRegistry.ProviderRegistry)({})),
+      Layer.provide(
+        Layer.mock(ProviderRegistry.ProviderRegistry)({ getProviders: Effect.succeed([]) }),
+      ),
       Layer.provide(Layer.mock(ProviderAdapterRegistry.ProviderAdapterRegistryV2)({})),
       Layer.provide(Layer.mock(ScheduledTaskService.ScheduledTaskService)({})),
       Layer.provide(Layer.mock(ProjectService.ProjectService)({})),
@@ -780,11 +784,9 @@ const taskResult = (laptopEnv: Effect.Success<ReturnType<typeof makeLaptop>>, ta
           stored.event.payload.result !== null,
       ),
       Stream.runHead,
-      Effect.map((stored) =>
-        Option.isSome(stored) && stored.value.event.type === "subagent.updated"
-          ? stored.value.event.payload
-          : undefined,
-      ),
+      // The stream is the clients' wire, which bounds a task's text; agents read the record.
+      Effect.andThen(laptopEnv.threads.getThreadRecords(parentThreadId, ["subagents"])),
+      Effect.map(({ subagents }) => subagents.find((task) => task.id === taskId)),
     );
 
 it.effect("a task delegated to the box wakes the laptop's parent when it ends there", () =>
