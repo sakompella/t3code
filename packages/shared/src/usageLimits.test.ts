@@ -687,6 +687,7 @@ describe("pools", () => {
           sourceLabel: null,
           redeem: null,
           refreshIntervalMs: FIVE_MINUTES,
+          hubAccounts: [],
           limits: {
             checkedAt,
             windows: [
@@ -733,6 +734,7 @@ describe("pooled account columns", () => {
     sourceLabel: "Hub",
     redeem: null,
     refreshIntervalMs: FIVE_MINUTES,
+    hubAccounts: [],
     limits: { checkedAt: "2026-09-03T11:58:00.000Z", windows },
   });
   const keys = (pool: ReturnType<typeof collectLimitPools>[number]) =>

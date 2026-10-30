@@ -427,3 +427,144 @@ describe("CLIProxyAPI built-in management API", () => {
     }),
   );
 });
+
+const proxDashboard = {
+  nowMs: 1_800_000_000_000,
+  fromMs: 1_799_740_800_000,
+  toMs: 1_800_950_400_000,
+  window: "five-hour",
+  lookbackHours: 3,
+  multiplier: 1,
+  historyStartedAtMs: 1_799_900_000_000,
+  lastRefreshAtMs: 1_799_999_900_000,
+  nextRefreshAtMs: 1_800_000_200_000,
+  refreshing: false,
+  issues: [],
+  pools: [
+    {
+      provider: "claude",
+      accountCount: 1,
+      eligibleCount: 1,
+      loadedCount: 1,
+      capacityPoints: 100,
+      remainingPoints: 60,
+      burnPointsPerHour: 4,
+      drainPointsPerHour: 4,
+      forecastState: "ready",
+      firstEmptyAtMs: 1_800_054_000_000,
+      poolEmptyAtMs: 1_800_054_000_000,
+      nextResetAtMs: 1_800_007_200_000,
+      nextResetGainPoints: 48,
+      recorded: [
+        {
+          atMs: 1_799_999_700_000,
+          remainingPoints: 61,
+          burnPointsPerHour: 4,
+          drainPointsPerHour: 4,
+        },
+      ],
+      projected: [
+        {
+          atMs: 1_800_000_000_000,
+          remainingPoints: 60,
+          burnPointsPerHour: null,
+          drainPointsPerHour: null,
+        },
+      ],
+      resets: [{ atMs: 1_800_007_200_000, gainPoints: 48 }],
+      accounts: [
+        {
+          id: "claude-first.json",
+          label: "Claude 1",
+          disabled: false,
+          status: "ok",
+          observedAtMs: 1_799_999_700_000,
+          remainingPercent: 60,
+          resetAtMs: 1_800_007_200_000,
+          burnPointsPerHour: 4,
+          emptyAtMs: null,
+          plan: { label: null, capacityPoints: 100, known: false },
+          windows: [],
+        },
+      ],
+    },
+    { provider: "gemini", accountCount: 0 },
+  ],
+  combined: {},
+};
+
+function quotaFixture(respond: (url: URL) => Response) {
+  const urls: URL[] = [];
+  const http = HttpClient.make((request) =>
+    Effect.sync(() => {
+      expect(request.headers.authorization).toBe("Bearer management-secret");
+      const url = new URL(request.url);
+      for (const [key, value] of request.urlParams.params)
+        url.searchParams.append(key, String(value));
+      urls.push(url);
+      return HttpClientResponse.fromWeb(request, respond(url));
+    }),
+  );
+  return {
+    urls,
+    api: makeCliproxyApi.pipe(
+      Effect.provideService(HttpClient.HttpClient, http),
+      Effect.provide(NodeCrypto.layer),
+    ),
+  };
+}
+
+describe("quota pools", () => {
+  it.effect("reads the hub's pool view and keeps only what Limits draws", () =>
+    Effect.gen(function* () {
+      const { urls, api } = quotaFixture(() => Response.json(proxDashboard));
+      const dashboard = yield* (yield* api).quotaPools(config, {
+        window: "five-hour",
+        lookbackHours: 3,
+      });
+      expect(urls.map((url) => `${url.pathname}${url.search}`)).toEqual([
+        "/v0/management/quota/pools?window=five-hour&lookback=3",
+      ]);
+      // The unknown provider is dropped; Prox's extra fields are stripped.
+      expect(dashboard?.pools.map((pool) => pool.provider)).toEqual(["claude"]);
+      expect(dashboard?.pools[0]?.recorded).toEqual([
+        { atMs: 1_799_999_700_000, remainingPoints: 61 },
+      ]);
+      expect(dashboard?.pools[0]?.accounts[0]).toEqual({
+        id: "claude-first.json",
+        status: "ok",
+        observedAtMs: 1_799_999_700_000,
+        remainingPercent: 60,
+        resetAtMs: 1_800_007_200_000,
+        burnPointsPerHour: 4,
+        emptyAtMs: null,
+      });
+    }),
+  );
+
+  it.effect("reads a hub without quota history as no forecast", () =>
+    Effect.gen(function* () {
+      const { api } = quotaFixture(() => Response.json({ error: "not found" }, { status: 404 }));
+      expect(
+        yield* (yield* api).quotaPools(config, { window: "weekly", lookbackHours: 1 }),
+      ).toBeNull();
+    }),
+  );
+
+  it.effect("fails with a detail that names neither the key nor the body", () =>
+    Effect.gen(function* () {
+      const { api } = quotaFixture(() =>
+        Response.json({ ...proxDashboard, nowMs: "management-secret" }),
+      );
+      const failure = yield* (yield* api)
+        .quotaPools(config, { window: "weekly", lookbackHours: 6 })
+        .pipe(Effect.flip);
+      expect(failure.detail).toBe("The hub returned an unexpected quota history response.");
+      const refused = yield* quotaFixture(() => new Response("denied", { status: 401 })).api.pipe(
+        Effect.flatMap((hub) => hub.quotaPools(config, { window: "weekly", lookbackHours: 6 })),
+        Effect.flip,
+      );
+      expect(refused.detail).toBe("The hub answered with HTTP 401.");
+    }),
+  );
+});
