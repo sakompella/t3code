@@ -4,6 +4,7 @@ import {
   createEnvironmentPresentationAtoms,
   createEnvironmentSummaryAtoms,
 } from "@t3tools/client-runtime/state/presentation";
+import { createOfflineEnvironmentLabelsAtom } from "@t3tools/client-runtime/state/offline-environments";
 import type { EnvironmentId } from "@t3tools/contracts";
 import { Atom } from "effect/reactivity";
 
@@ -15,6 +16,10 @@ export const environmentPresentations = createEnvironmentPresentationAtoms({
   stateAtom: environmentCatalog.stateAtom,
   serverConfigValueAtom: serverEnvironment.configValueAtom,
 });
+
+export const offlineEnvironmentLabelsAtom = createOfflineEnvironmentLabelsAtom(
+  environmentPresentations.presentationsAtom,
+);
 
 export const environmentSummaries = createEnvironmentSummaryAtoms({
   catalogValueAtom: environmentCatalog.catalogValueAtom,
