@@ -5,10 +5,5 @@
  * @module provider-pi/server
  */
 export { PiDriver, PrimeAgentDriver, type PiDriverEnv } from "./server/driver.ts";
-export {
-  PI_PROVIDER,
-  PiAdapterV2Driver,
-  PrimeAgentAdapterV2Driver,
-  type PiAdapterV2DriverEnv,
-} from "./server/adapter.ts";
+export { PI_PROVIDER, PiAdapterV2Driver, type PiAdapterV2DriverEnv } from "./server/adapter.ts";
 export { callsT3ToolsFromKernel } from "./server/flavor.ts";

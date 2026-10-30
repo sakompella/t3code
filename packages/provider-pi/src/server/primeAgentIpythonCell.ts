@@ -182,7 +182,7 @@ export function readsHandle(code: string, variable: string): boolean {
 }
 
 /** Whether a cell calls `kill()` on a handle: the process group is gone within the kill's grace period. */
-export function killsHandle(code: string, variable: string): boolean {
+function killsHandle(code: string, variable: string): boolean {
   return new RegExp(`\\b${variable}\\s*\\.\\s*kill\\s*\\(`).test(code);
 }
 
