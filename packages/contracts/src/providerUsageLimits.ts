@@ -159,6 +159,20 @@ export const UsageLimitPool = Schema.Struct({
 });
 export type UsageLimitPool = typeof UsageLimitPool.Type;
 
+/** A limit hit or reset the hub saw for one account, imported or recorded; never a forecast. */
+export const UsageLimitPoolEvent = Schema.Struct({
+  accountId: TrimmedNonEmptyString,
+  /** The hub's own account label, never an email. */
+  label: TrimmedNonEmptyString,
+  provider: Schema.Literals(["claude", "codex"]),
+  window: UsageLimitPoolWindow,
+  kind: Schema.Literals(["limit-hit", "reset"]),
+  atMs: EpochMillis,
+  /** When a hit said its window resets. */
+  resetAtMs: Schema.optional(EpochMillis),
+});
+export type UsageLimitPoolEvent = typeof UsageLimitPoolEvent.Type;
+
 export const UsageLimitPoolDashboard = Schema.Struct({
   nowMs: EpochMillis,
   fromMs: EpochMillis,
@@ -167,6 +181,8 @@ export const UsageLimitPoolDashboard = Schema.Struct({
   lookbackHours: UsageLimitPoolLookbackHours,
   historyStartedAtMs: Schema.NullOr(EpochMillis),
   pools: ForwardCompatibleArray(UsageLimitPool),
+  /** Sorted by `atMs`, within `fromMs`..`toMs`; hubs from before observed events omit it. */
+  events: Schema.optional(ForwardCompatibleArray(UsageLimitPoolEvent)),
 });
 export type UsageLimitPoolDashboard = typeof UsageLimitPoolDashboard.Type;
 

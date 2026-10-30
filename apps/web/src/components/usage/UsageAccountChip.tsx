@@ -11,6 +11,11 @@ function accountHue(email: string): number {
   return Math.abs(hash) % 360;
 }
 
+/** The account's chip hue at a strength that reads as a thin chart mark on light and dark. */
+export function accountMarkColor(email: string): string {
+  return `oklch(0.7 0.14 ${accountHue(email)})`;
+}
+
 export function AccountChip({ email }: { readonly email: string }) {
   const hue = accountHue(email);
   return (
