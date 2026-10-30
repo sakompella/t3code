@@ -7,7 +7,6 @@ import type {
 } from "@t3tools/contracts";
 import { formatDuration } from "@t3tools/shared/usageLimits";
 import {
-  countLimitHits,
   dashboardPool,
   forecastUnavailableReason,
   formatPoolBurn,
@@ -195,7 +194,7 @@ function PoolStatsCard({
           <Stat
             label="Limit hits"
             value={String(
-              countLimitHits(poolEvents(dashboard, pool), dashboard.fromMs, dashboard.toMs),
+              poolEvents(dashboard, pool).filter((event) => event.kind === "limit-hit").length,
             )}
             detail={`since ${dayFormat.format(dashboard.fromMs)}`}
           />
