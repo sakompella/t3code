@@ -13,7 +13,6 @@ import {
   formatPoolBurn,
   formatPoolPercent,
   type HubPoolSource,
-  hubPoolWindows,
   knownRuns,
   labeledResets,
   linkPoolAccounts,
@@ -69,7 +68,7 @@ export function HubPoolForecast({
   readonly title: string;
   readonly now: number;
 }) {
-  const windows = hubPoolWindows(accounts, driver);
+  const windows = source.windows.get(driver) ?? [];
   const [chosenWindow, setWindow] = useState<UsageLimitPoolWindow | null>(null);
   const [lookbackHours, setLookbackHours] = useState<UsageLimitPoolLookbackHours>(3);
   const window =
@@ -432,7 +431,8 @@ function viewRange(dashboard: UsageLimitPoolDashboard): { from: number; to: numb
 
 /** Local midnights, or every few hours on a short view, at most `maxTicks` of them. */
 function timeTicks(from: number, to: number, maxTicks: number): number[] {
-  const stepHours = [6, 12, 24, 48, 72].find((hours) => (to - from) / (hours * HOUR) <= maxTicks) ?? 96;
+  const stepHours =
+    [6, 12, 24, 48, 72].find((hours) => (to - from) / (hours * HOUR) <= maxTicks) ?? 96;
   const tick = new Date(from);
   tick.setHours(0, 0, 0, 0);
   const ticks: number[] = [];

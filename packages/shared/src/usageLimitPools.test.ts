@@ -14,13 +14,7 @@ import * as Schema from "effect/Schema";
 import { describe, expect, it } from "@effect/vitest";
 
 import { collectLimitAccounts } from "./usageLimits.ts";
-import {
-  hubPoolSources,
-  hubPoolWindows,
-  knownRuns,
-  labeledResets,
-  linkPoolAccounts,
-} from "./usageLimitPools.ts";
+import { hubPoolSources, knownRuns, labeledResets, linkPoolAccounts } from "./usageLimitPools.ts";
 
 const checkedAt = "2026-10-30T11:00:00.000Z";
 const claude = ProviderDriverKind.make("claudeAgent");
@@ -150,19 +144,18 @@ describe("hub pool accounts", () => {
     ).toBeNull();
   });
 
-  it("offers only the windows the provider's hub accounts report", () => {
+  it("offers the windows this hub reports, not a fresher direct reading of the same account", () => {
     const presentations = new Map([
       [
         mac,
         {
           entry: { target: { label: "Mac" } },
           serverConfig: {
-            // A direct login's weekly window is not the hub's.
             providers: [
               {
                 ...nativeClaude,
-                auth: { status: "authenticated" as const, email: "own@example.com" },
-                usageLimits: { checkedAt, windows: [session, weekly] },
+                auth: { status: "authenticated" as const, email: "edu@example.com" },
+                usageLimits: { checkedAt: "2026-10-30T11:30:00.000Z", windows: [session, weekly] },
               },
             ],
             usageLimitSources: [
@@ -175,13 +168,13 @@ describe("hub pool accounts", () => {
         },
       ],
     ]);
-    const accounts = collectLimitAccounts(presentations);
-    expect(hubPoolWindows(accounts, claude)).toEqual(["five-hour"]);
-    expect(hubPoolWindows(accounts, codex)).toEqual(["weekly", "five-hour"]);
+    const [source] = hubPoolSources(presentations);
+    expect(source?.windows.get(claude)).toEqual(["five-hour"]);
+    expect(source?.windows.get(codex)).toEqual(["weekly", "five-hour"]);
   });
 
   it("asks each hub once, from the first environment that reads it", () => {
-    const source = hubSource([hubAccount("claude.json", claude, "edu@example.com")]);
+    const edu = hubAccount("claude.json", claude, "edu@example.com");
     const presentations = new Map([
       [
         mac,
@@ -189,7 +182,9 @@ describe("hub pool accounts", () => {
           entry: { target: { label: "Mac" } },
           serverConfig: {
             providers: [],
-            usageLimitSources: [{ ...source, error: "The hub did not answer within 15 seconds." }],
+            usageLimitSources: [
+              { ...hubSource([edu]), error: "The hub did not answer within 15 seconds." },
+            ],
           },
         },
       ],
@@ -197,19 +192,35 @@ describe("hub pool accounts", () => {
         hp,
         {
           entry: { target: { label: "hp" } },
-          serverConfig: { providers: [], usageLimitSources: [source] },
+          serverConfig: { providers: [], usageLimitSources: [hubSource([edu], "127.0.0.1:8318")] },
         },
       ],
       [
         EnvironmentId.make("vm"),
         {
           entry: { target: { label: "VM" } },
-          serverConfig: { providers: [], usageLimitSources: [source] },
+          serverConfig: {
+            providers: [],
+            usageLimitSources: [
+              // The same hub under another name, and another hub under the same name.
+              hubSource([edu], "hub.example"),
+              {
+                ...hubSource(
+                  [hubAccount("other.json", claude, "other@example.com")],
+                  "127.0.0.1:8318",
+                ),
+                id: UsageLimitSourceId.make("other"),
+              },
+            ],
+          },
         },
       ],
     ]);
-    expect(hubPoolSources(presentations)).toEqual([
-      { environmentId: hp, sourceId: hubId, label: "hub.example" },
+    expect(
+      hubPoolSources(presentations).map(({ environmentId, sourceId }) => [environmentId, sourceId]),
+    ).toEqual([
+      [hp, hubId],
+      [EnvironmentId.make("vm"), UsageLimitSourceId.make("other")],
     ]);
   });
 });
