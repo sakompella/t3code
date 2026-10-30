@@ -17,7 +17,6 @@ import { describe, expect, it } from "@effect/vitest";
 
 import { collectLimitAccounts } from "./usageLimits.ts";
 import {
-  countLimitHits,
   hubPoolSources,
   knownRuns,
   labeledResets,
@@ -277,8 +276,6 @@ describe("observed events", () => {
     );
     expect(events.map(({ atMs }) => atMs)).toEqual([1_000, 2_000, 9_000]);
     expect(events.slice(0, 2)).toEqual([hit, reset]);
-    expect(countLimitHits(events, 0, 5_000)).toBe(1);
-    expect(countLimitHits(events, 0, 10_000)).toBe(2);
   });
 
   it("finds no events on a hub from before observed events", () => {
