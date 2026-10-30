@@ -371,6 +371,10 @@
       "types": "./src/usageLimits.ts",
       "import": "./src/usageLimits.ts"
     },
+    "./usageLimitPools": {
+      "types": "./src/usageLimitPools.ts",
+      "import": "./src/usageLimitPools.ts"
+    },
     "./desktopAppControl": {
       "types": "./src/desktopAppControl.ts",
       "import": "./src/desktopAppControl.ts"

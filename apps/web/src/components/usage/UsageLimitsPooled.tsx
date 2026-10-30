@@ -8,6 +8,8 @@ import {
   displayLimitWindows,
   formatReadingAge,
   formatResetsIn,
+  groupLimitWindows,
+  type GroupedLimitWindow,
   type LimitAccount,
   type LimitPool,
   type LimitPoolMember,
@@ -15,6 +17,7 @@ import {
   paceRemainingPercent,
   remainingPercent,
 } from "@t3tools/shared/usageLimits";
+import { type HubPoolSource, hubPoolSources } from "@t3tools/shared/usageLimitPools";
 import type { Popover as PopoverPrimitive } from "@base-ui/react/popover";
 import { AlertTriangleIcon, ExternalLinkIcon, TicketIcon } from "lucide-react";
 import {
@@ -39,6 +42,8 @@ import { Button } from "../ui/button";
 import { OpenAI } from "../Icons";
 import { Alert, AlertTitle } from "../ui/alert";
 import { Popover, PopoverCreateHandle, PopoverPopup, PopoverTrigger } from "../ui/popover";
+import { AccountChip, accountInitials } from "./UsageAccountChip";
+import { HubPoolForecast } from "./UsageLimitForecast";
 import {
   PaceIcon,
   ResetCreditDialog,
@@ -47,33 +52,6 @@ import {
   resetCreditsSummary,
   useResetCredit,
 } from "./UsageLimits";
-
-function accountInitials(email: string): string {
-  const [local = "", domain = ""] = email.split("@");
-  return `${local[0] ?? ""}${domain[0] ?? ""}`.toUpperCase() || "?";
-}
-
-function accountHue(email: string): number {
-  let hash = 0;
-  for (let index = 0; index < email.length; index += 1) {
-    hash = (hash * 31 + email.charCodeAt(index)) | 0;
-  }
-  return Math.abs(hash) % 360;
-}
-
-function AccountChip({ email }: { readonly email: string }) {
-  const hue = accountHue(email);
-  return (
-    <span
-      role="img"
-      aria-label={`Account ${accountInitials(email)}`}
-      className="inline-flex size-4 shrink-0 items-center justify-center rounded-full text-3xs leading-none font-semibold"
-      style={{ backgroundColor: `oklch(0.85 0.08 ${hue})`, color: `oklch(0.35 0.1 ${hue})` }}
-    >
-      {accountInitials(email)}
-    </span>
-  );
-}
 
 function AccountAvatar({
   account,
@@ -505,10 +483,12 @@ function PoolBar({
   pool,
   color,
   now,
+  showAccountName,
 }: {
   readonly pool: LimitPoolWindow;
   readonly color: string;
   readonly now: number;
+  readonly showAccountName: boolean;
 }) {
   const restores = new Map(pool.resets.map((reset) => [reset.member.account.key, reset]));
   return (
@@ -529,7 +509,7 @@ function PoolBar({
               color={color}
               now={now}
               index={position + 1}
-              showAccountName={pool.columns.length > 1}
+              showAccountName={showAccountName}
             />
           ) : null,
         )}
@@ -538,24 +518,26 @@ function PoolBar({
   );
 }
 
-function PoolWindowCard({
+function PoolWindowRow({
   pool,
   color,
   now,
-  label,
-  description,
+  title,
+  titleClassName,
+  showAccountName,
 }: {
   readonly pool: LimitPoolWindow;
   readonly color: string;
   readonly now: number;
-  readonly label?: string | undefined;
-  readonly description?: string | undefined;
+  readonly title: string;
+  readonly titleClassName: string;
+  readonly showAccountName: boolean;
 }) {
   const nextRefill = pool.resets.find((reset) => reset.restoresPercent > 0);
   return (
-    <div className="grid items-center gap-x-6 gap-y-3 rounded-lg border border-border/60 p-4 md:grid-cols-[11rem_minmax(0,1fr)]">
+    <div className="grid items-center gap-x-6 gap-y-3 md:grid-cols-[11rem_minmax(0,1fr)]">
       <div className="flex flex-col gap-1">
-        <span className="text-sm font-medium text-foreground">{label ?? pool.label}</span>
+        <span className={titleClassName}>{title}</span>
         <span className="flex items-baseline gap-2">
           <span className="text-3xl font-semibold text-foreground tabular-nums">
             {pool.remainingPercent}%
@@ -572,18 +554,63 @@ function PoolWindowCard({
           </span>
         ) : null}
       </div>
-      <PoolBar pool={pool} color={color} now={now} />
-      {description ? (
-        <p className="text-xs text-muted-foreground md:col-span-2">{description}</p>
-      ) : null}
+      <PoolBar pool={pool} color={color} now={now} showAccountName={showAccountName} />
     </div>
   );
 }
 
-function PoolSection({ pool, now }: { readonly pool: LimitPool; readonly now: number }) {
+/** Groups only appear when the provider has accounts in more than one place. */
+function PoolWindowCard({
+  grouped,
+  color,
+  now,
+  label,
+  description,
+}: {
+  readonly grouped: GroupedLimitWindow;
+  readonly color: string;
+  readonly now: number;
+  readonly label?: string | undefined;
+  readonly description?: string | undefined;
+}) {
+  const title = label ?? grouped.window.label;
+  // Labels are all set or all null; a window one source reports still needs its own name.
+  const split = grouped.groups.some((group) => group.label !== null);
+  return (
+    <div className="flex flex-col gap-3 rounded-lg border border-border/60 p-4">
+      {split ? <span className="text-sm font-medium text-foreground">{title}</span> : null}
+      {grouped.groups.map((group) => (
+        <PoolWindowRow
+          key={group.label ?? ""}
+          pool={group.window}
+          color={color}
+          now={now}
+          title={group.label ?? title}
+          titleClassName={
+            split
+              ? "text-xs font-medium text-muted-foreground"
+              : "text-sm font-medium text-foreground"
+          }
+          showAccountName={split || group.window.columns.length > 1}
+        />
+      ))}
+      {description ? <p className="text-xs text-muted-foreground">{description}</p> : null}
+    </div>
+  );
+}
+
+function PoolSection({
+  pool,
+  hubSources,
+  now,
+}: {
+  readonly pool: LimitPool;
+  readonly hubSources: readonly HubPoolSource[];
+  readonly now: number;
+}) {
   const color = barColor(pool.driver);
   const label = providerClients.get(pool.driver)?.label ?? String(pool.driver);
-  const windows = displayLimitWindows(pool);
+  const windows = groupLimitWindows(pool, now);
   return (
     <section className="flex flex-col gap-3">
       <h2 className="flex items-center gap-2 text-sm font-medium text-foreground">
@@ -596,12 +623,13 @@ function PoolSection({ pool, now }: { readonly pool: LimitPool; readonly now: nu
         />
         {label}
       </h2>
-      {windows.map((window) => {
+      {windows.map((grouped) => {
+        const { window } = grouped;
         const details = pool.driver === "cursor" ? cursorUsageWindowDetails(window.id) : undefined;
         return (
           <PoolWindowCard
             key={`${window.kind}:${window.id}`}
-            pool={window}
+            grouped={grouped}
             color={color}
             now={now}
             label={details?.label}
@@ -609,6 +637,17 @@ function PoolSection({ pool, now }: { readonly pool: LimitPool; readonly now: nu
           />
         );
       })}
+      {hubSources.map((source) => (
+        <HubPoolForecast
+          key={`${source.environmentId}:${source.sourceId}`}
+          source={source}
+          driver={pool.driver}
+          accounts={pool.accounts}
+          color={color}
+          title={hubSources.length > 1 ? source.label : "CLIProxyAPI"}
+          now={now}
+        />
+      ))}
     </section>
   );
 }
@@ -625,6 +664,7 @@ export function UsageLimitsPooled({
   const [segmentPopover] = useState(() => PopoverCreateHandle<SegmentPayload>());
   const segmentPopoverActions = useRef<PopoverPrimitive.Root.Actions | null>(null);
   const pools = collectLimitPools(collectLimitAccounts(presentations), now);
+  const hubSources = hubPoolSources(presentations);
   const notices = collectLimitNotices(presentations);
   const externalLinks = collectExternalUsageLinks(presentations);
   const cursorPromptAt =
@@ -643,7 +683,7 @@ export function UsageLimitsPooled({
         {pools.map((pool, index) => (
           <Fragment key={pool.driver}>
             {index === cursorPromptAt ? cursorPrompt : null}
-            <PoolSection pool={pool} now={now} />
+            <PoolSection pool={pool} hubSources={hubSources} now={now} />
           </Fragment>
         ))}
       </SegmentPopoverContext>

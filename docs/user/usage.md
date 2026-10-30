@@ -105,6 +105,13 @@ Claude resets are not available when the server runs on macOS, where Claude keep
 Keychain. On narrow screens, numbered rows below
 the bar show each account's quota, countdown, and credits. Tap a row to open its details.
 
+When a hub's accounts sit next to accounts signed in directly, each window card splits in two: the
+hub's accounts first (labeled **CLIProxyAPI**, or the hub's name when you have several), then
+**Direct logins**. Each group has its own total and bar, so you can see which supply is running
+low. An account a hub lists appears in that hub's group even when it is also signed in directly;
+**Direct logins** holds only accounts no hub lists. The `/usage-limits` result lists hub accounts
+first as well.
+
 The same account signed in on more than one environment, or reported by a hub as well, counts once.
 Filter with the environment dropdown to see what a single machine has.
 
@@ -116,7 +123,8 @@ model-specific weekly allowances keep their reported values.
 
 Opening Limits checks the selected connected environments automatically. Each client waits at
 least five minutes between automatic checks of an environment, including after a failed check.
-If a window still looks stale, refresh Limits to re-check every provider and hub.
+If a window still looks stale, refresh Limits to re-check every provider and hub. A provider that
+is signed out is left out, and so is a stale window whose reset time has passed.
 
 Pick `/usage-limits` from the composer's command menu, or send it as a message, to check the
 current model's limits without leaving the conversation. The result opens above the composer and
@@ -148,6 +156,14 @@ environment that will connect to the hub and enter its URL and management key.
 
 The accounts appear under **Usage → Limits**. Codex accounts show banked reset credits; select an
 account and choose **Use reset** to redeem one. No hub plugin is required.
+
+If the hub records quota history, each provider under Limits also gets a chart of the hub's pool:
+what was left over the past days and a dashed forecast, with when the pool and the first account
+run out, the next reset, and the recent burn rate. The hub keeps the history, so it starts when
+the hub started recording, not when you opened T3. The forecast assumes you keep spending at the
+burn rate of the chosen 1, 3 or 6 hours, and that the hub serves from the account that resets
+soonest. A hub without quota history shows Limits as before. On mobile the four numbers appear
+without the chart.
 
 This connection supplies usage information; configure
 the provider separately to send agent requests through the hub. Remove the hub from the same
