@@ -435,7 +435,9 @@ describe("presentPendingBackgroundWork", () => {
       }),
     ).toMatchObject({ title: "Running: Watch PR", waiting: false });
     expect(
-      presentPendingBackgroundWork([{ taskId: "a", kind: "monitor", description: "Watch PR" }]),
+      presentPendingBackgroundWork([
+        { taskId: "a", kind: "monitor", description: "Watch PR", awaited: true },
+      ]),
     ).toMatchObject({ title: "Watch PR", waiting: true });
   });
 });
