@@ -4662,10 +4662,10 @@ describe("a run that received steers or notifications", () => {
     expect(sequence(settled(twoSteers))).toEqual([
       "prompt",
       // From the run's start to the first reply.
-      "fold: Worked for 2.0s",
+      "fold: Worked for 2s",
       "reply-1",
       "steer-1",
-      "fold: Worked for 4.0s",
+      "fold: Worked for 4s",
       "reply-2",
       "steer-2",
       // From the last steer to the run's end.
@@ -4679,10 +4679,10 @@ describe("a run that received steers or notifications", () => {
     const rows = settled(twoSteers, new Set([middle!]));
     expect(sequence(rows)).toEqual([
       "prompt",
-      "fold: Worked for 2.0s",
+      "fold: Worked for 2s",
       "reply-1",
       "steer-1",
-      "fold: Worked for 4.0s",
+      "fold: Worked for 4s",
       "tool-2",
       "commentary",
       "tool-3",
@@ -4714,7 +4714,7 @@ describe("a run that received steers or notifications", () => {
     ]);
     expect(sequence(rows)).toEqual([
       "prompt",
-      "fold: Worked for 2.0s",
+      "fold: Worked for 2s",
       "reply-1",
       "agent-message",
       "fold: Worked for 57s",
