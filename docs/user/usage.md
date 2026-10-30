@@ -172,8 +172,10 @@ what was left over the past days and a dashed forecast, with when the pool and t
 run out, the next reset, and the recent burn rate. The hub keeps the history, so it starts when
 the hub started recording, not when you opened T3. The forecast assumes you keep spending at the
 burn rate of the chosen 1, 3 or 6 hours, and that the hub serves from the account that resets
-soonest. A hub without quota history shows Limits as before. On mobile the four numbers appear
-without the chart.
+soonest. When the hub also knows when an account hit its limit or reset, the chart marks each
+time along its bottom, an X for a hit and an arrow for a reset, in the account's color. A hub
+without quota history shows Limits as before. On mobile the four numbers, and the number of limit
+hits, appear without the chart.
 
 This connection supplies usage information; configure
 the provider separately to send agent requests through the hub. Remove the hub from the same

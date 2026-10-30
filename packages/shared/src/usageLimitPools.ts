@@ -5,6 +5,7 @@ import {
   type UsageLimitPool,
   type UsageLimitPoolAccount,
   type UsageLimitPoolDashboard,
+  type UsageLimitPoolEvent,
   type UsageLimitPoolPoint,
   type UsageLimitPoolWindow,
   type UsageLimitSourceId,
@@ -108,6 +109,38 @@ export function linkPoolAccounts(
     account,
     limitAccount: byHubId.get(account.id) ?? null,
   }));
+}
+
+/**
+ * The limit hits and resets the hub saw for this pool's accounts, for the dashboard's quota
+ * window, oldest first.
+ */
+export function poolEvents(
+  dashboard: UsageLimitPoolDashboard,
+  pool: UsageLimitPool,
+): readonly UsageLimitPoolEvent[] {
+  const accountIds = new Set(pool.accounts.map((account) => account.id));
+  return (dashboard.events ?? []).filter(
+    (event) =>
+      event.provider === pool.provider &&
+      event.window === dashboard.window &&
+      accountIds.has(event.accountId),
+  );
+}
+
+/**
+ * Stacks event markers on the chart baseline: each marker takes the lowest row (0 = baseline)
+ * whose previous marker is at least `minGap` pixels to its left, so markers of different accounts
+ * at nearly the same time sit above each other and stay hoverable. `xs` must be ascending.
+ */
+export function markerRows(xs: readonly number[], minGap: number): readonly number[] {
+  const rowEnds: number[] = [];
+  return xs.map((x) => {
+    const free = rowEnds.findIndex((end) => x - end >= minGap);
+    const row = free === -1 ? rowEnds.length : free;
+    rowEnds[row] = x;
+    return row;
+  });
 }
 
 /** Splits a line where readings are missing, so a gap is never drawn as a value. */
