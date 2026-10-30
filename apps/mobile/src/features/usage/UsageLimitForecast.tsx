@@ -7,11 +7,13 @@ import type {
 } from "@t3tools/contracts";
 import { formatDuration } from "@t3tools/shared/usageLimits";
 import {
+  countLimitHits,
   dashboardPool,
   forecastUnavailableReason,
   formatPoolBurn,
   formatPoolPercent,
   type HubPoolSource,
+  poolEvents,
 } from "@t3tools/shared/usageLimitPools";
 import { AsyncResult } from "effect/reactivity";
 import { useEffect, useRef, useState } from "react";
@@ -189,6 +191,15 @@ function PoolStatsCard({
           }
           detail={null}
         />
+        {dashboard.events ? (
+          <Stat
+            label="Limit hits"
+            value={String(
+              countLimitHits(poolEvents(dashboard, pool), dashboard.fromMs, dashboard.toMs),
+            )}
+            detail={`since ${dayFormat.format(dashboard.fromMs)}`}
+          />
+        ) : null}
       </View>
       {unavailable ? <Text className="text-xs text-foreground-muted">{unavailable}</Text> : null}
     </View>

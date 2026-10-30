@@ -5,6 +5,8 @@ import {
   type ServerProvider,
   type ServerProviderUsageWindow,
   type UsageLimitPool,
+  type UsageLimitPoolDashboard,
+  type UsageLimitPoolEvent,
   type UsageLimitPoolPoint,
   UsageLimitSourceId,
 } from "@t3tools/contracts";
@@ -14,7 +16,15 @@ import * as Schema from "effect/Schema";
 import { describe, expect, it } from "@effect/vitest";
 
 import { collectLimitAccounts } from "./usageLimits.ts";
-import { hubPoolSources, knownRuns, labeledResets, linkPoolAccounts } from "./usageLimitPools.ts";
+import {
+  countLimitHits,
+  hubPoolSources,
+  knownRuns,
+  labeledResets,
+  linkPoolAccounts,
+  markerRows,
+  poolEvents,
+} from "./usageLimitPools.ts";
 
 const checkedAt = "2026-10-30T11:00:00.000Z";
 const claude = ProviderDriverKind.make("claudeAgent");
@@ -225,6 +235,57 @@ describe("hub pool accounts", () => {
   });
 });
 
+describe("observed events", () => {
+  const event = (
+    accountId: string,
+    kind: UsageLimitPoolEvent["kind"],
+    atMs: number,
+    overrides: Partial<UsageLimitPoolEvent> = {},
+  ): UsageLimitPoolEvent => ({
+    accountId,
+    label: accountId,
+    provider: "claude",
+    window: "five-hour",
+    kind,
+    atMs,
+    ...overrides,
+  });
+  const dashboard = (events?: UsageLimitPoolEvent[]): UsageLimitPoolDashboard => ({
+    nowMs: 10_000,
+    fromMs: 0,
+    toMs: 20_000,
+    window: "five-hour",
+    lookbackHours: 3,
+    historyStartedAtMs: null,
+    pools: [],
+    ...(events ? { events } : {}),
+  });
+
+  it("keeps the events of this pool's accounts in the dashboard's window", () => {
+    const hit = event("claude-first.json", "limit-hit", 1_000, { resetAtMs: 5_000 });
+    const reset = event("claude-second.json", "reset", 2_000);
+    const events = poolEvents(
+      dashboard([
+        hit,
+        event("claude-first.json", "limit-hit", 1_500, { window: "weekly" }),
+        event("codex.json", "limit-hit", 1_500, { provider: "codex" }),
+        event("claude-retired.json", "reset", 1_800),
+        reset,
+        event("claude-second.json", "limit-hit", 9_000),
+      ]),
+      pool(["claude-first.json", "claude-second.json"]),
+    );
+    expect(events.map(({ atMs }) => atMs)).toEqual([1_000, 2_000, 9_000]);
+    expect(events.slice(0, 2)).toEqual([hit, reset]);
+    expect(countLimitHits(events, 0, 5_000)).toBe(1);
+    expect(countLimitHits(events, 0, 10_000)).toBe(2);
+  });
+
+  it("finds no events on a hub from before observed events", () => {
+    expect(poolEvents(dashboard(), pool(["claude-first.json"]))).toEqual([]);
+  });
+});
+
 const pointArbitrary = Arbitrary.schema(
   Schema.Array(
     Schema.Struct({
@@ -255,6 +316,27 @@ describe("chart geometry", () => {
       });
     },
   );
+
+  it.effect("stacks close event markers into the fewest rows, each row spaced apart", () => {
+    const xs = Arbitrary.schema(
+      Schema.Array(Schema.Int.check(Schema.isBetween({ minimum: 0, maximum: 300 }))),
+    );
+    const gap = 8;
+    return check(xs, (unsorted) => {
+      const sorted = unsorted.toSorted((a, b) => a - b);
+      const rows = markerRows(sorted, gap);
+      return sorted.every((x, index) => {
+        const row = rows[index]!;
+        const previousInRow = sorted.findLast(
+          (_, earlier) => earlier < index && rows[earlier] === row,
+        );
+        const crowding = sorted.filter(
+          (other, earlier) => earlier < index && x - other < gap,
+        ).length;
+        return (previousInRow === undefined || x - previousInRow >= gap) && row <= crowding;
+      });
+    });
+  });
 
   it.effect("keeps reset labels apart from each other and from the Now marker", () => {
     const input = Arbitrary.schema(
