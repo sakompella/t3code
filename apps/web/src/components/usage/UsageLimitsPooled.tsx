@@ -17,6 +17,7 @@ import {
   paceRemainingPercent,
   remainingPercent,
 } from "@t3tools/shared/usageLimits";
+import { type HubPoolSource, hubPoolSources } from "@t3tools/shared/usageLimitPools";
 import type { Popover as PopoverPrimitive } from "@base-ui/react/popover";
 import { AlertTriangleIcon, ExternalLinkIcon, TicketIcon } from "lucide-react";
 import {
@@ -41,6 +42,8 @@ import { Button } from "../ui/button";
 import { OpenAI } from "../Icons";
 import { Alert, AlertTitle } from "../ui/alert";
 import { Popover, PopoverCreateHandle, PopoverPopup, PopoverTrigger } from "../ui/popover";
+import { AccountChip, accountInitials } from "./UsageAccountChip";
+import { HubPoolForecast } from "./UsageLimitForecast";
 import {
   PaceIcon,
   ResetCreditDialog,
@@ -49,33 +52,6 @@ import {
   resetCreditsSummary,
   useResetCredit,
 } from "./UsageLimits";
-
-function accountInitials(email: string): string {
-  const [local = "", domain = ""] = email.split("@");
-  return `${local[0] ?? ""}${domain[0] ?? ""}`.toUpperCase() || "?";
-}
-
-function accountHue(email: string): number {
-  let hash = 0;
-  for (let index = 0; index < email.length; index += 1) {
-    hash = (hash * 31 + email.charCodeAt(index)) | 0;
-  }
-  return Math.abs(hash) % 360;
-}
-
-function AccountChip({ email }: { readonly email: string }) {
-  const hue = accountHue(email);
-  return (
-    <span
-      role="img"
-      aria-label={`Account ${accountInitials(email)}`}
-      className="inline-flex size-4 shrink-0 items-center justify-center rounded-full text-3xs leading-none font-semibold"
-      style={{ backgroundColor: `oklch(0.85 0.08 ${hue})`, color: `oklch(0.35 0.1 ${hue})` }}
-    >
-      {accountInitials(email)}
-    </span>
-  );
-}
 
 function AccountAvatar({
   account,
@@ -623,7 +599,15 @@ function PoolWindowCard({
   );
 }
 
-function PoolSection({ pool, now }: { readonly pool: LimitPool; readonly now: number }) {
+function PoolSection({
+  pool,
+  hubSources,
+  now,
+}: {
+  readonly pool: LimitPool;
+  readonly hubSources: readonly HubPoolSource[];
+  readonly now: number;
+}) {
   const color = barColor(pool.driver);
   const label = providerClients.get(pool.driver)?.label ?? String(pool.driver);
   const windows = groupLimitWindows(pool, now);
@@ -653,6 +637,17 @@ function PoolSection({ pool, now }: { readonly pool: LimitPool; readonly now: nu
           />
         );
       })}
+      {hubSources.map((source) => (
+        <HubPoolForecast
+          key={`${source.environmentId}:${source.sourceId}`}
+          source={source}
+          driver={pool.driver}
+          accounts={pool.accounts}
+          color={color}
+          title={hubSources.length > 1 ? source.label : "CLIProxyAPI"}
+          now={now}
+        />
+      ))}
     </section>
   );
 }
@@ -669,6 +664,7 @@ export function UsageLimitsPooled({
   const [segmentPopover] = useState(() => PopoverCreateHandle<SegmentPayload>());
   const segmentPopoverActions = useRef<PopoverPrimitive.Root.Actions | null>(null);
   const pools = collectLimitPools(collectLimitAccounts(presentations), now);
+  const hubSources = hubPoolSources(presentations);
   const notices = collectLimitNotices(presentations);
   const externalLinks = collectExternalUsageLinks(presentations);
   const cursorPromptAt =
@@ -687,7 +683,7 @@ export function UsageLimitsPooled({
         {pools.map((pool, index) => (
           <Fragment key={pool.driver}>
             {index === cursorPromptAt ? cursorPrompt : null}
-            <PoolSection pool={pool} now={now} />
+            <PoolSection pool={pool} hubSources={hubSources} now={now} />
           </Fragment>
         ))}
       </SegmentPopoverContext>
