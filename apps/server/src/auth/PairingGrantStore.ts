@@ -5,7 +5,9 @@ import {
   type ServerAuthBootstrapMethod,
 } from "@t3tools/contracts";
 import {
+  DESKTOP_ATTACH_SECRET_NAME,
   DESKTOP_BOOTSTRAP_TOKEN_WINDOW_MS,
+  encodeDesktopAttachSecret,
   isValidDesktopBootstrapToken,
 } from "@t3tools/shared/desktopBootstrapToken";
 import * as Context from "effect/Context";
@@ -22,6 +24,7 @@ import * as Stream from "effect/Stream";
 
 import * as ServerConfig from "../config.ts";
 import * as AuthPairingLinks from "../persistence/AuthPairingLinks.ts";
+import * as ServerSecretStore from "./ServerSecretStore.ts";
 
 export interface BootstrapGrant {
   readonly method: ServerAuthBootstrapMethod;
@@ -258,6 +261,7 @@ const make = Effect.gen(function* () {
   const crypto = yield* Crypto.Crypto;
   const config = yield* ServerConfig.ServerConfig;
   const pairingLinks = yield* AuthPairingLinks.AuthPairingLinkRepository;
+  const secretStore = yield* ServerSecretStore.ServerSecretStore;
   const seededGrantsRef = yield* Ref.make(new Map<string, StoredBootstrapGrant>());
   const changesPubSub = yield* PubSub.unbounded<BootstrapCredentialChange>();
   const generatePairingToken = Effect.gen(function* () {
@@ -304,10 +308,15 @@ const make = Effect.gen(function* () {
     }).pipe(Effect.asVoid);
 
   // Accept tokens derived from the rotating desktop secret; older desktops send only a token.
+  // The attach secret lets a desktop app that reads this T3 home use a server it did not start.
   const desktopBootstrapSecret = config.desktopBootstrapSecret;
+  const desktopAttachSecret = encodeDesktopAttachSecret(
+    yield* secretStore.getOrCreateRandom(DESKTOP_ATTACH_SECRET_NAME, 32),
+  );
   const consumeRotatingDesktopToken = (credential: string, nowMs: number) =>
-    desktopBootstrapSecret !== undefined &&
-    isValidDesktopBootstrapToken(desktopBootstrapSecret, credential, nowMs);
+    [desktopBootstrapSecret, desktopAttachSecret].some(
+      (secret) => secret !== undefined && isValidDesktopBootstrapToken(secret, credential, nowMs),
+    );
 
   if (config.desktopBootstrapToken && desktopBootstrapSecret === undefined) {
     const now = yield* DateTime.now;

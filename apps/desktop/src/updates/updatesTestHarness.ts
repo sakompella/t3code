@@ -35,6 +35,7 @@ export interface UpdatesHarnessOptions {
   readonly platform?: NodeJS.Platform;
   readonly packageType?: string | undefined;
   readonly installRecord?: string | undefined;
+  readonly localEnvironmentMode?: DesktopAppSettings.DesktopLocalEnvironmentMode;
 }
 
 export function makeHarness(options: UpdatesHarnessOptions = {}) {
@@ -211,7 +212,12 @@ export function makeHarness(options: UpdatesHarnessOptions = {}) {
           applyWslWindowsFallback: Effect.die("unexpected WSL Windows fallback"),
           applyWslWindowsFallbackInMemory: Effect.die("unexpected WSL Windows fallback"),
         } satisfies DesktopAppSettings.DesktopAppSettings["Service"])
-      : DesktopAppSettings.layer;
+      : options.localEnvironmentMode
+        ? DesktopAppSettings.layerTest({
+            ...DesktopAppSettings.DEFAULT_DESKTOP_SETTINGS,
+            localEnvironmentMode: options.localEnvironmentMode,
+          })
+        : DesktopAppSettings.layer;
 
   const updateRestartMarkers = new Set<string>();
   const installRecords = new Map<string, string>();
