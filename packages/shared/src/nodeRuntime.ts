@@ -63,7 +63,7 @@ export interface NodeRuntime {
   readonly env: Readonly<Record<string, string>>;
 }
 
-export const ELECTRON_RUN_AS_NODE_ENV = { ELECTRON_RUN_AS_NODE: "1" } as const;
+const ELECTRON_RUN_AS_NODE_ENV = { ELECTRON_RUN_AS_NODE: "1" } as const;
 
 export const resolveNodeRuntime = Effect.fn("nodeRuntime.resolveNodeRuntime")(function* (
   feature: typeof NodeRuntimeFeature.Type,
