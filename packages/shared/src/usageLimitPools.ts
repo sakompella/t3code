@@ -27,23 +27,8 @@ export interface HubPoolSource {
   readonly environmentId: EnvironmentId;
   readonly sourceId: UsageLimitSourceId;
   readonly label: string;
-}
-
-/**
- * One source per hub, from the first environment that reads it. Two environments that read the
- * same hub get the same history, so asking both would draw it twice.
- */
-export function hubPoolSources(presentations: LimitPresentations): readonly HubPoolSource[] {
-  const sources = new Map<string, HubPoolSource>();
-  for (const [environmentId, presentation] of presentations) {
-    for (const source of presentation.serverConfig?.usageLimitSources ?? []) {
-      if (source.error !== undefined || source.accounts.length === 0) continue;
-      if (!sources.has(source.label)) {
-        sources.set(source.label, { environmentId, sourceId: source.id, label: source.label });
-      }
-    }
-  }
-  return [...sources.values()];
+  /** The pool windows this hub's accounts report, per provider, weekly first. */
+  readonly windows: ReadonlyMap<ServerProvider["driver"], readonly UsageLimitPoolWindow[]>;
 }
 
 const WINDOW_OF_KIND: Partial<Record<string, UsageLimitPoolWindow>> = {
@@ -51,17 +36,41 @@ const WINDOW_OF_KIND: Partial<Record<string, UsageLimitPoolWindow>> = {
   session: "five-hour",
 };
 
-/** The pool windows a provider's hub accounts report, weekly first. */
-export function hubPoolWindows(
-  accounts: readonly LimitAccount[],
-  driver: ServerProvider["driver"],
-): readonly UsageLimitPoolWindow[] {
-  const reported = new Set(
-    accounts
-      .filter((account) => account.driver === driver && account.hubAccounts.length > 0)
-      .flatMap((account) => account.limits.windows.flatMap((w) => WINDOW_OF_KIND[w.kind] ?? [])),
-  );
-  return (["weekly", "five-hour"] as const).filter((window) => reported.has(window));
+/**
+ * One source per hub, from the first environment that reads it. Two environments that read the
+ * same hub get the same history, so asking both would draw it twice. A hub is known by the auth
+ * files it lists: labels and URLs differ between environments that reach the same hub.
+ */
+export function hubPoolSources(presentations: LimitPresentations): readonly HubPoolSource[] {
+  const sources = new Map<string, HubPoolSource>();
+  for (const [environmentId, presentation] of presentations) {
+    for (const source of presentation.serverConfig?.usageLimitSources ?? []) {
+      if (source.error !== undefined || source.accounts.length === 0) continue;
+      const identity = JSON.stringify(source.accounts.map((account) => account.id).sort());
+      if (sources.has(identity)) continue;
+      const kinds = new Map<ServerProvider["driver"], Set<UsageLimitPoolWindow>>();
+      for (const account of source.accounts) {
+        const reported = kinds.get(account.driver) ?? new Set();
+        for (const window of account.usageLimits.windows) {
+          const poolWindow = WINDOW_OF_KIND[window.kind];
+          if (poolWindow) reported.add(poolWindow);
+        }
+        kinds.set(account.driver, reported);
+      }
+      sources.set(identity, {
+        environmentId,
+        sourceId: source.id,
+        label: source.label,
+        windows: new Map(
+          [...kinds].map(([driver, reported]) => [
+            driver,
+            (["weekly", "five-hour"] as const).filter((window) => reported.has(window)),
+          ]),
+        ),
+      });
+    }
+  }
+  return [...sources.values()];
 }
 
 export function dashboardPool(
