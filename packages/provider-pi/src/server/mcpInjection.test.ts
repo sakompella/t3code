@@ -1,13 +1,18 @@
+import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, describe, it } from "@effect/vitest";
 import { EnvironmentId, ProviderInstanceId, ThreadId } from "@t3tools/contracts";
+import * as Effect from "effect/Effect";
+import * as FileSystem from "effect/FileSystem";
 
 import {
   T3_MCP_BEARER_ENV,
   T3_MCP_URL_ENV,
+  T3_PI_MCP_TOOLS_ENV,
   T3_PI_RUNTIME_MODE_ENV,
   T3_PI_MCP_EXTENSION_PATH_ENV,
 } from "./mcpExtensionSource.ts";
-import { buildPiRpcLaunch, resolvePiLaunchArgs } from "./mcpInjection.ts";
+import { buildPiRpcLaunch, materializePiT3Skill, resolvePiLaunchArgs } from "./mcpInjection.ts";
+import { PI_T3_CODE_SKILL_NAME } from "./skillSource.ts";
 
 const threadId = ThreadId.make("thread-pi-t3-mcp");
 
@@ -86,6 +91,25 @@ describe("pi T3 MCP injection", () => {
     );
   });
 
+  it("starts the process on a given session file ahead of the user's launch arguments", () => {
+    const base = {
+      launchArgs: ["--model", "haiku"],
+      environment: {},
+      mcpSession: undefined,
+      extensionPath: undefined,
+    };
+
+    assert.deepEqual(buildPiRpcLaunch({ ...base, resumeSessionFile: "/sessions/a.jsonl" }).args, [
+      "--mode",
+      "rpc",
+      "--resume",
+      "/sessions/a.jsonl",
+      "--model",
+      "haiku",
+    ]);
+    assert.notInclude(buildPiRpcLaunch(base).args, "--resume");
+  });
+
   it("forces tools and user extensions off for unattended text generation", () => {
     const launch = buildPiRpcLaunch({
       launchArgs: [
@@ -123,6 +147,14 @@ describe("pi T3 MCP injection", () => {
     assert.deepInclude(resolvePiLaunchArgs("--plan @instructions.md"), { ok: false });
   });
 
+  it.each(["--daemon-socket /tmp/prime.sock", "--daemon-socket=/tmp/prime.sock"])(
+    "preserves the stock daemon socket in %s",
+    (args) => {
+      const resolved = resolvePiLaunchArgs(args);
+      assert.deepEqual(resolved, { ok: true, args: ["--daemon-socket", "/tmp/prime.sock"] });
+    },
+  );
+
   it("rejects --provider without --model, which Pi 1.0 refuses at startup", () => {
     const rejection = {
       ok: false,
@@ -133,4 +165,75 @@ describe("pi T3 MCP injection", () => {
     assert.isTrue(resolvePiLaunchArgs("--provider openrouter --model=deepseek/v4").ok);
     assert.isTrue(resolvePiLaunchArgs("--model deepseek/v4").ok);
   });
+
+  it("never registers native T3 tools for an agent with its own MCP client", () => {
+    const base = {
+      launchArgs: [],
+      environment: {},
+      extensionPath: "/tmp/cache/pi-t3-mcp-extension.ts",
+    };
+    const skillPath = "/tmp/cache/pi-t3-skills/t3-code";
+    const declared = buildPiRpcLaunch({ ...base, mcpSession, kernelMcp: { skillPath } });
+    assert.deepEqual(declared.args.slice(-2), ["--skill", skillPath]);
+    assert.equal(declared.env[T3_PI_MCP_TOOLS_ENV], "kernel");
+
+    // Undeclared: no skill, yet still no native tools and the permission hook stays.
+    const undeclared = buildPiRpcLaunch({
+      ...base,
+      mcpSession,
+      kernelMcp: { skillPath: undefined },
+    });
+    assert.notInclude(undeclared.args, "--skill");
+    assert.include(undeclared.args, "--extension");
+    assert.equal(undeclared.env[T3_PI_MCP_TOOLS_ENV], "kernel");
+
+    // Without a T3 credential the skill would describe tools that cannot work.
+    const noCredential = buildPiRpcLaunch({
+      ...base,
+      mcpSession: undefined,
+      kernelMcp: { skillPath },
+    });
+    assert.notInclude(noCredential.args, "--skill");
+    assert.equal(noCredential.env[T3_PI_MCP_TOOLS_ENV], "kernel");
+
+    // No extension means nothing registers tools, so there is nothing to switch off.
+    const noExtension = buildPiRpcLaunch({
+      ...base,
+      mcpSession,
+      kernelMcp: { skillPath },
+      disableExtensions: true,
+    });
+    assert.notProperty(noExtension.env, T3_PI_MCP_TOOLS_ENV);
+  });
+
+  it("keeps native tools for an agent without its own MCP client", () => {
+    const launch = buildPiRpcLaunch({
+      launchArgs: [],
+      // A value inherited from the server must not switch off native tools.
+      environment: { [T3_PI_MCP_TOOLS_ENV]: "kernel" },
+      mcpSession,
+      extensionPath: "/tmp/cache/pi-t3-mcp-extension.ts",
+    });
+    assert.notInclude(launch.args, "--skill");
+    assert.notProperty(launch.env, T3_PI_MCP_TOOLS_ENV);
+  });
+
+  it.effect("materializes a skill whose directory, name, and description Pi accepts", () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const cacheDir = yield* fs.makeTempDirectoryScoped({ prefix: "t3-pi-skill-" });
+      const skillDir = yield* materializePiT3Skill(cacheDir);
+      assert.isTrue(skillDir.endsWith(`/${PI_T3_CODE_SKILL_NAME}`));
+      const content = yield* fs.readFileString(`${skillDir}/SKILL.md`);
+      const frontmatter = /^---\n([\s\S]*?)\n---\n/.exec(content)?.[1] ?? "";
+      assert.equal(/^name: (.+)$/m.exec(frontmatter)?.[1], "t3-code");
+      const description = /^description: (.+)$/m.exec(frontmatter)?.[1] ?? "";
+      assert.isTrue(description.length > 0 && description.length <= 1024);
+      assert.include(content, 'await mcp.list_tools("t3-code")');
+      assert.include(content, 'await mcp.call_tool("t3-code"');
+      assert.notInclude(content, "acp-mcp-call");
+      // Rewriting an unchanged skill must be a no-op.
+      assert.equal(yield* materializePiT3Skill(cacheDir), skillDir);
+    }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+  );
 });

@@ -3,9 +3,11 @@ import {
   turnItemUpdateCanEndBackgroundWork,
 } from "@t3tools/shared/orchestrationV2PendingBackgroundWork";
 import { resolveProjectSettings } from "@t3tools/shared/projectSettings";
+import { isSnoozeActive } from "@t3tools/shared/threadSnooze";
 import { visibleThreadPullRequests } from "@t3tools/shared/threadPullRequests";
 import {
   CommandId,
+  isOrchestrationV2RoutineRun,
   isOrchestrationV2WorkActive,
   type ThreadId,
   type OrchestrationV2DomainEvent,
@@ -119,6 +121,38 @@ export function threadHasQueuedTurnStart(
   ].every((value) => value === null || value < messageAtMs);
 }
 
+type SettlementActivityShell = Pick<
+  OrchestrationV2ThreadShell,
+  | "status"
+  | "latestRunTrigger"
+  | "latestTaskRunCompletedAt"
+  | "latestRunRequestedAt"
+  | "latestRunStartedAt"
+  | "latestRunCompletedAt"
+>;
+
+/**
+ * The latest run's times that count as thread activity. A routine heartbeat
+ * check is not activity, so after one only the end of the latest run someone
+ * asked for counts; otherwise a thread with a heartbeat would never go stale.
+ */
+function activityRunTimes(thread: SettlementActivityShell): {
+  readonly requestedAt: number | null;
+  readonly all: ReadonlyArray<number | null>;
+} {
+  if (isOrchestrationV2RoutineRun({ status: thread.status, trigger: thread.latestRunTrigger })) {
+    return { requestedAt: null, all: [toMillis(thread.latestTaskRunCompletedAt)] };
+  }
+  return {
+    requestedAt: toMillis(thread.latestRunRequestedAt),
+    all: [
+      toMillis(thread.latestRunRequestedAt),
+      toMillis(thread.latestRunStartedAt),
+      toMillis(thread.latestRunCompletedAt),
+    ],
+  };
+}
+
 function pullRequestSettles(
   thread: Pick<
     ProjectionStore.ProjectionSettlementCandidate,
@@ -154,34 +188,21 @@ export function isAutoSettlementCandidate(
   if (thread.activityRunStatus != null) return false;
   if (backgroundWorkHoldsCompletion(thread.pendingBackgroundTasks ?? [])) return false;
   if (threadHasQueuedTurnStart(thread, nowMs)) return false;
-  // Interrupted runs must keep the same snooze protection the sidebar shows.
+  // A snoozed thread keeps its stronger statement until the wake time passes,
+  // whatever the thread did meanwhile; nothing wakes it early.
   return !isSnoozed(thread, nowMs);
 }
 
-/** Match client effectiveSnoozed so agents and sidebar agree. */
+/**
+ * Whether the wake time is still ahead. Strict like the clients' `effectiveSnoozed` (both use
+ * `isSnoozeActive`), so agents and the sidebar agree; requests, guest messages, failures and
+ * finished runs never wake it early.
+ */
 export function isSnoozed(
-  thread: Pick<
-    ProjectionStore.ProjectionSettlementCandidate,
-    | "snoozedUntil"
-    | "snoozedAt"
-    | "latestRunCompletedAt"
-    | "status"
-    | "pendingRuntimeRequest"
-    | "pendingGuestMessageCount"
-  >,
+  thread: Pick<ProjectionStore.ProjectionSettlementCandidate, "snoozedUntil">,
   nowMs: number,
 ): boolean {
-  const snoozedUntilMs = toMillis(thread.snoozedUntil);
-  if (snoozedUntilMs === null || snoozedUntilMs <= nowMs) return false;
-  if (thread.pendingRuntimeRequest !== null) return false;
-  // Same as the client: a waiting guest message wakes the thread, and the snooze stays stored.
-  if ((thread.pendingGuestMessageCount ?? 0) > 0) return false;
-  const snoozedAtMs = toMillis(thread.snoozedAt);
-  const completedAtMs = toMillis(thread.latestRunCompletedAt);
-  const wokeOnError =
-    thread.status === "failed" &&
-    (snoozedAtMs === null || (completedAtMs !== null && completedAtMs > snoozedAtMs));
-  return !wokeOnError;
+  return isSnoozeActive(toMillis(thread.snoozedUntil), nowMs);
 }
 
 export function resolveAutoSettlementAt(input: {
@@ -216,12 +237,8 @@ export function resolveAutoSettlementAt(input: {
   }
   if (!isAutoSettlementCandidate(thread, input.nowMs)) return null;
   const activityAtMs =
-    latestMillis([
-      toMillis(thread.latestUserMessageAt),
-      toMillis(thread.latestRunRequestedAt),
-      toMillis(thread.latestRunStartedAt),
-      toMillis(thread.latestRunCompletedAt),
-    ]) ?? DateTime.toEpochMillis(thread.createdAt);
+    latestMillis([toMillis(thread.latestUserMessageAt), ...activityRunTimes(thread).all]) ??
+    DateTime.toEpochMillis(thread.createdAt);
   if (pullRequest !== null && pullRequestSettles(thread, pullRequest, input.autoSettleOnMerge)) {
     return DateTime.makeUnsafe(activityAtMs);
   }

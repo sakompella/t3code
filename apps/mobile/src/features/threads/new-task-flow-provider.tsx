@@ -507,7 +507,10 @@ export function NewTaskFlowProvider(
   const selectedDefaultModel = resolveNewTaskModelSelection({
     draftSelection: draftModelSelection,
     projectDefaultSelection: projectDefaultModelSelection,
+    configuredDefaultSelection: projectSettings.settings.defaultModelSelection,
     stickySelection: stickyModelSelection,
+    config: selectedEnvironmentServerConfig,
+    projectId: selectedProject?.id ?? null,
     modelOptions,
   });
   const selectedModel = resolveNewThreadModelSelection({

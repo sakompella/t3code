@@ -876,6 +876,9 @@ export function materializeFixtureInput(input: {
                 name: step.checkpointSuffix,
               }),
             });
+            // The provider moves its conversation head after the dispatch returns;
+            // the next message is refused until that finishes.
+            steps.push({ type: "await_thread_idle", threadId: ids.threadId });
           }
           break;
       }

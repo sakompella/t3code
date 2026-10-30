@@ -124,6 +124,12 @@ function providerThreadHasPendingBackgroundTasks(
   return (providerThread.pendingBackgroundTasks?.length ?? 0) > 0;
 }
 
+function providerThreadHasHeartbeats(
+  providerThread: OrchestrationV2ThreadProjection["providerThreads"][number],
+): boolean {
+  return (providerThread.heartbeats?.length ?? 0) > 0;
+}
+
 function resolveStaleBackgroundItemProviderInstanceId(
   item: OrchestrationV2ThreadProjection["turnItems"][number],
   projection: ProjectionStore.ProjectionRuntimeRecoveryState,
@@ -585,7 +591,9 @@ export const make = Effect.gen(function* () {
       for (const providerThread of projection.providerThreads ?? []) {
         const needsIdle = providerThread.status === "active";
         const needsRosterClear = providerThreadHasPendingBackgroundTasks(providerThread);
-        if (!needsIdle && !needsRosterClear) {
+        // A heartbeat only runs while its session does, and none survives a restart.
+        const needsHeartbeatClear = providerThreadHasHeartbeats(providerThread);
+        if (!needsIdle && !needsRosterClear && !needsHeartbeatClear) {
           continue;
         }
         if (providerThread.ownerNodeId === null) {
@@ -612,6 +620,7 @@ export const make = Effect.gen(function* () {
             ...providerThread,
             status: needsIdle ? "idle" : providerThread.status,
             pendingBackgroundTasks: [],
+            heartbeats: [],
             updatedAt: now,
           },
         });

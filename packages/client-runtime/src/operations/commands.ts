@@ -11,8 +11,10 @@ import {
   MessageId,
   type ModelSelection,
   type NodeId,
+  type OrchestrationV2Checkpoint,
   type OrchestrationV2Command,
   type OrchestrationV2CreationSource,
+  type OrchestrationV2RollbackSummary,
   type PlanId,
   type ProjectId,
   type ProjectIconOverride,
@@ -204,6 +206,7 @@ export interface DismissThreadUserInputInput extends ThreadCommandInput {
 
 export interface RevertThreadCheckpointInput extends ThreadCommandInput {
   readonly restoreFiles?: boolean;
+  readonly summary?: OrchestrationV2RollbackSummary;
   readonly checkpointId?: string;
   readonly scopeId?: string;
   readonly turnCount?: number;
@@ -898,12 +901,39 @@ export const dismissThreadUserInput = Effect.fn("EnvironmentCommands.dismissThre
   },
 );
 
+/**
+ * The checkpoint holding files after run `runOrdinal`. A run without a checkpoint falls back to the
+ * last earlier one, else thread start; rolled-back checkpoints are skipped. A missing or failed
+ * checkpoint is returned as is so rollback fails rather than discard its run.
+ */
+function checkpointAfterRun(
+  checkpoints: ReadonlyArray<OrchestrationV2Checkpoint>,
+  runOrdinal: number,
+) {
+  let latest: OrchestrationV2Checkpoint | undefined;
+  let latestOrdinal = 0;
+  for (const candidate of checkpoints) {
+    const ordinal = candidate.appRunOrdinal;
+    if (ordinal === null || ordinal > runOrdinal || ordinal <= latestOrdinal) continue;
+    if (candidate.status === "stale") continue;
+    latest = candidate;
+    latestOrdinal = ordinal;
+  }
+  return (
+    latest ??
+    checkpoints.find(
+      (candidate) => candidate.ordinalWithinScope === 0 && candidate.appRunOrdinal === null,
+    )
+  );
+}
+
 export const revertThreadCheckpoint = Effect.fn("EnvironmentCommands.revertThreadCheckpoint")(
   function* (input: RevertThreadCheckpointInput) {
     if (input.checkpointId !== undefined && input.scopeId !== undefined) {
       return yield* dispatch({
         type: "checkpoint.rollback",
         ...(input.restoreFiles === undefined ? {} : { restoreFiles: input.restoreFiles }),
+        ...(input.summary === undefined ? {} : { summary: input.summary }),
         commandId: yield* allocateCommandId(input),
         threadId: input.threadId,
         scopeId: CheckpointScopeId.make(input.scopeId),
@@ -915,11 +945,9 @@ export const revertThreadCheckpoint = Effect.fn("EnvironmentCommands.revertThrea
       projection.checkpoints.find(
         (candidate) => candidate.id === input.checkpointId && candidate.scopeId === input.scopeId,
       ) ??
-      projection.checkpoints.findLast((candidate) =>
-        input.turnCount === 0
-          ? candidate.ordinalWithinScope === 0 && candidate.appRunOrdinal === null
-          : candidate.appRunOrdinal === input.turnCount,
-      );
+      (input.turnCount === undefined
+        ? undefined
+        : checkpointAfterRun(projection.checkpoints, input.turnCount));
     if (checkpoint === undefined || checkpoint.status !== "ready") {
       const target =
         input.checkpointId === undefined
@@ -933,6 +961,7 @@ export const revertThreadCheckpoint = Effect.fn("EnvironmentCommands.revertThrea
     return yield* dispatch({
       type: "checkpoint.rollback",
       ...(input.restoreFiles === undefined ? {} : { restoreFiles: input.restoreFiles }),
+      ...(input.summary === undefined ? {} : { summary: input.summary }),
       commandId: yield* allocateCommandId(input),
       threadId: input.threadId,
       scopeId: checkpoint.scopeId,

@@ -7,6 +7,7 @@ import type {
   OrchestrationProjectShell,
   OrchestrationV2ProviderGoal,
   OrchestrationV2RunStatus,
+  OrchestrationV2RunTrigger,
   OrchestrationV2ProviderFailureClass,
   OrchestrationV2ThreadProjection,
   OrchestrationV2ThreadShell,
@@ -89,6 +90,8 @@ export interface ThreadRunSummary {
    * generating while the server settles it.
    */
   readonly turnEnded?: boolean;
+  /** What started the run when nobody asked for it; absent or null when someone did. */
+  readonly trigger?: OrchestrationV2RunTrigger | null;
   readonly sourcePlanRef?: {
     readonly threadId: ThreadId;
     readonly planId: PlanId;
@@ -152,6 +155,10 @@ export interface EnvironmentThreadShell {
   readonly delegatedFrom: OrchestrationV2ThreadShell["delegatedFrom"] | null;
   readonly activeProviderThreadId: OrchestrationV2ThreadShell["activeProviderThreadId"];
   readonly latestRun: ThreadRunSummary | null;
+  /** See OrchestrationV2ThreadShell.latestTaskRunCompletedAt; absent from older servers. */
+  readonly latestTaskRunCompletedAt?: string | null;
+  /** See OrchestrationV2ThreadShell.latestTaskRunStatus; absent from older servers. */
+  readonly latestTaskRunStatus?: OrchestrationV2RunStatus | null;
   readonly runtime: ThreadRuntimeSummary | null;
   readonly blockedOnThreadWait?: boolean;
   readonly latestUserMessageAt: string | null;
@@ -216,14 +223,23 @@ function terminalRunStatus(status: OrchestrationV2RunStatus): boolean {
   );
 }
 
-// Only work the agent waits on holds it: commands and monitors it left running
-// unmarked, such as a dev server, present the run's own status. The
-// server suppresses the roster while an interruptible activity run exists, so a
-// remaining roster is stronger than checkpoint-oriented waiting.
+/**
+ * Whether the background roster holds the thread's run. Only work the agent waits on holds it;
+ * unmarked commands and monitors (a dev server) do not. A failed latest run outranks the roster so
+ * the failure stays visible.
+ */
+export function backgroundWorkHoldsThread(
+  thread: Pick<OrchestrationV2ThreadShell, "pendingBackgroundTasks" | "status">,
+): boolean {
+  return (
+    backgroundWorkHoldsCompletion(thread.pendingBackgroundTasks ?? []) && thread.status !== "failed"
+  );
+}
+
+// Park runtime at idle while background work holds the thread. latestRun keeps the latest run's
+// status for history presentation.
 function shellRuntime(thread: OrchestrationV2ThreadShell): ThreadRuntimeSummary | null {
-  const parkAtIdle =
-    backgroundWorkHoldsCompletion(thread.pendingBackgroundTasks ?? []) &&
-    thread.status !== "failed";
+  const parkAtIdle = backgroundWorkHoldsThread(thread);
   if (thread.latestRunId === null && thread.activeProviderThreadId === null && !parkAtIdle) {
     return null;
   }
@@ -275,6 +291,7 @@ export function presentThreadShell(
                 : null
               : nullableIso(thread.latestRunCompletedAt),
           assistantMessageId: null,
+          trigger: thread.latestRunTrigger ?? null,
         } satisfies ThreadRunSummary);
   const runtime = shellRuntime(thread);
   // Waiting runs have ended their provider turn and are only draining effects.
@@ -305,6 +322,12 @@ export function presentThreadShell(
     delegatedFrom: thread.delegatedFrom ?? null,
     activeProviderThreadId: thread.activeProviderThreadId,
     latestRun,
+    ...(thread.latestTaskRunCompletedAt === undefined
+      ? {}
+      : { latestTaskRunCompletedAt: nullableIso(thread.latestTaskRunCompletedAt) }),
+    ...(thread.latestTaskRunStatus === undefined
+      ? {}
+      : { latestTaskRunStatus: thread.latestTaskRunStatus }),
     runtime,
     blockedOnThreadWait: thread.blockedOnThreadWait ?? false,
     latestUserMessageAt: nullableIso(thread.latestUserMessageAt),
