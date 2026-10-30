@@ -111,7 +111,10 @@ export function linkPoolAccounts(
   }));
 }
 
-/** The limit hits and resets the hub saw for this pool's accounts in its window, oldest first. */
+/**
+ * The limit hits and resets the hub saw for this pool's accounts, for the dashboard's quota
+ * window, oldest first.
+ */
 export function poolEvents(
   dashboard: UsageLimitPoolDashboard,
   pool: UsageLimitPool,
@@ -123,16 +126,6 @@ export function poolEvents(
       event.window === dashboard.window &&
       accountIds.has(event.accountId),
   );
-}
-
-export function countLimitHits(
-  events: readonly UsageLimitPoolEvent[],
-  fromMs: number,
-  toMs: number,
-): number {
-  return events.filter(
-    (event) => event.kind === "limit-hit" && event.atMs >= fromMs && event.atMs <= toMs,
-  ).length;
 }
 
 /**
