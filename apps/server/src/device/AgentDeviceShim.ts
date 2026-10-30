@@ -237,7 +237,10 @@ const writeLauncher = Effect.fn("AgentDeviceShim.writeLauncher")(function* (inpu
   const { command: node, env: nodeEnv } = yield* resolveNodeRuntime("Device automation");
   yield* fs.makeDirectory(input.dir, { recursive: true });
   const launcherPath = path.join(input.dir, "agent-device-launcher.mjs");
-  yield* fs.writeFileString(launcherPath, launcherSource(node, nodeEnv, input.entryPath, input.boundArgs));
+  yield* fs.writeFileString(
+    launcherPath,
+    launcherSource(node, nodeEnv, input.entryPath, input.boundArgs),
+  );
   if (platform === "win32") {
     const assignments = Object.entries(nodeEnv).map(
       ([name, value]) => `set "${name}=${value}"\r\n`,
