@@ -39,8 +39,9 @@ const EndedProviderTurnStatus = Schema.Literals([
 ]);
 type EndedProviderTurnStatus = typeof EndedProviderTurnStatus.Type;
 
+const isEndedProviderTurnStatus = Schema.is(EndedProviderTurnStatus);
 const endedStatus = (status: string | undefined): EndedProviderTurnStatus | undefined =>
-  Schema.is(EndedProviderTurnStatus)(status) ? status : undefined;
+  isEndedProviderTurnStatus(status) ? status : undefined;
 
 export class ProviderTurnControlError extends Schema.TaggedError<ProviderTurnControlError>()(
   "ProviderTurnControlError",
