@@ -1282,10 +1282,10 @@ const make = Effect.gen(function* () {
       }),
     );
     yield* forkParked(
-      // A deleted thread's worktree waits for its sessions to stop. The
-      // recheck keeps a worktree whose session is live, so no other session
-      // update can free one. Pi, Prime Agent and OpenCode report each failed
-      // turn as "error" on a session that stays live.
+      // A deleted thread's worktree waits for its sessions to stop; the recheck
+      // keeps it while a session is live. Pi, Prime Agent and OpenCode report each
+      // failed turn as "error" on a session that stays live, so "error" never
+      // sweeps. A session that died in "error" is freed by the hourly sweep.
       Stream.runForEach(events, (event) => {
         if (event.type === "thread.deleted") deletions++;
         else if (event.type !== "provider-session.updated" || event.payload.status !== "stopped")
