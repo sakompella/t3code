@@ -443,7 +443,7 @@ export const makeCliproxyApi = Effect.gen(function* () {
     query: Pick<UsageLimitPoolsInput, "window" | "lookbackHours">,
   ): Effect.fn.Return<UsageLimitPoolsResult, UsageLimitSourceError> {
     const request = yield* managementRequest(config, "quota/pools", "GET");
-    const response = yield* client
+    const body = yield* client
       .execute(
         request.pipe(
           HttpClientRequest.setUrlParams({
@@ -453,18 +453,17 @@ export const makeCliproxyApi = Effect.gen(function* () {
         ),
       )
       .pipe(
+        Effect.flatMap((response) =>
+          response.status === 404
+            ? Effect.succeed(null)
+            : HttpClientResponse.filterStatusOk(response).pipe(Effect.flatMap((ok) => ok.json)),
+        ),
         Effect.timeout("15 seconds"),
         Effect.mapError(
           (error) => new UsageLimitSourceError({ detail: describeManagementFailure(error) }),
         ),
       );
-    if (response.status === 404) return null;
-    const body = yield* HttpClientResponse.filterStatusOk(response).pipe(
-      Effect.flatMap((ok) => ok.json),
-      Effect.mapError(
-        (error) => new UsageLimitSourceError({ detail: describeManagementFailure(error) }),
-      ),
-    );
+    if (body === null) return null;
     return yield* decodePoolDashboard(body).pipe(
       Effect.mapError(
         () =>

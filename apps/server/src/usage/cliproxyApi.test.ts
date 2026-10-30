@@ -1,6 +1,7 @@
 import * as NodeCrypto from "@effect/platform-node/NodeCrypto";
 import { describe, expect, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
+import * as Fiber from "effect/Fiber";
 import * as Schema from "effect/Schema";
 import * as TestClock from "effect/testing/TestClock";
 import { HttpClient, HttpClientError, HttpClientResponse } from "effect/http";
@@ -515,6 +516,20 @@ function quotaFixture(respond: (url: URL) => Response) {
 }
 
 describe("quota pools", () => {
+  it.effect("times out a hub that sends headers and then stalls the body", () =>
+    Effect.gen(function* () {
+      const { api } = quotaFixture(
+        () => new Response(new ReadableStream({ start: () => undefined }), { status: 200 }),
+      );
+      const hub = yield* api;
+      const read = yield* hub
+        .quotaPools(config, { window: "weekly", lookbackHours: 3 })
+        .pipe(Effect.flip, Effect.forkChild);
+      yield* TestClock.adjust("15 seconds");
+      expect((yield* Fiber.join(read)).detail).toBe("The hub did not answer within 15 seconds.");
+    }),
+  );
+
   it.effect("reads the hub's pool view and keeps only what Limits draws", () =>
     Effect.gen(function* () {
       const { urls, api } = quotaFixture(() => Response.json(proxDashboard));

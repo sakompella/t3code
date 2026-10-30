@@ -541,7 +541,6 @@ export function UsageLimitsSection({
                   key={`${source.environmentId}:${source.sourceId}`}
                   source={source}
                   driver={pool.driver}
-                  accounts={pool.accounts}
                   title={hubSources.length > 1 ? source.label : "CLIProxyAPI"}
                   now={now}
                 />
