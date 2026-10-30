@@ -255,7 +255,7 @@ const make = Effect.gen(function* () {
           label: link.label,
           status: link.status,
           access: link.access,
-          expiresAt: DateTime.formatIso(link.expiresAt),
+          expiresAt: link.expiresAt === null ? null : DateTime.formatIso(link.expiresAt),
           lastError: link.lastError,
         })),
         notListed: NOT_LISTED,

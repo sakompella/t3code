@@ -370,6 +370,7 @@ it.effect("tells the agent to link again once the peer revokes the link or it ex
       const revoked = yield* probe(a).pipe(Effect.flip);
       expect(revoked.code).toBe("capability_denied");
       expect(revoked.message).toContain("revoked there");
+      expect(yield* linkedSessions(b)).toEqual([]);
 
       yield* a.links.link({
         url: b.url,
@@ -402,7 +403,15 @@ it.effect("tells the agent to link again once the peer revokes the link or it ex
       });
       yield* probe(a);
 
-      yield* TestClock.adjust(Duration.days(31));
+      // A link lasts until the peer revokes it.
+      yield* TestClock.adjust(Duration.days(400));
+      expect((yield* a.links.list).map(({ status, expiresAt }) => [status, expiresAt])).toEqual([
+        ["reachable", null],
+      ]);
+      yield* probe(a);
+
+      // A link made with a peer that still gave its session 30 days.
+      yield* a.sql`UPDATE peer_environment_links SET expires_at = linked_at`;
       expect((yield* a.links.list).map((link) => link.status)).toEqual(["expired"]);
       yield* Ref.set(b.bearers, []);
       const expired = yield* probe(a).pipe(Effect.flip);

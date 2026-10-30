@@ -611,7 +611,8 @@ export const OrchestratorMcpEnvironmentLink = Schema.Struct({
   status: Schema.Literals(["reachable", "unreachable", "expired"]),
   /** The most the linked environment lets this one's agents do there. */
   access: AuthMcpClientAccess,
-  expiresAt: IsoDateTime,
+  /** Null when the link lasts until that environment revokes it. */
+  expiresAt: Schema.NullOr(IsoDateTime),
   lastError: Schema.NullOr(Schema.String),
 });
 export type OrchestratorMcpEnvironmentLink = typeof OrchestratorMcpEnvironmentLink.Type;

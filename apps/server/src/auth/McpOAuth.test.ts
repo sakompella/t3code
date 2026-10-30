@@ -287,9 +287,12 @@ it.live("signs in with a pairing code and issues a token only /mcp accepts", () 
       expect(tokenResponse.status).toBe(200);
       const token = (yield* json<unknown>(tokenResponse)) as {
         access_token: string;
+        expires_in: number;
         scope: string;
       };
       expect(token.scope).toBe("orchestration:read orchestration:operate");
+      // Only a peer link's session lasts until revoked.
+      expect(token.expires_in).toBe(30 * 24 * 60 * 60);
 
       expect((yield* exchange(verifier)).status).toBe(400);
 

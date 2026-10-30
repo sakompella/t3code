@@ -40,7 +40,7 @@ import * as EnvironmentAuthPolicy from "./EnvironmentAuthPolicy.ts";
 import * as PairingGrantStore from "./PairingGrantStore.ts";
 import * as ServerSecretStore from "./ServerSecretStore.ts";
 import * as SessionStore from "./SessionStore.ts";
-import { REUSABLE_DEV_SESSION_EXPIRES_AT, resolveReusableDevAuth } from "./ReusableDevAuth.ts";
+import { resolveReusableDevAuth } from "./ReusableDevAuth.ts";
 import { verifyRequestDpopProof } from "./dpop.ts";
 import { DESKTOP_RENDERER_ORIGINS } from "../httpCors.ts";
 import * as SqlitePersistence from "../persistence/Sqlite.ts";
@@ -70,6 +70,7 @@ export interface IssuedBearerSession {
 
 // MCP client tokens are restricted to /mcp; HTTP API and WebSocket RPC would bypass their access cap.
 const MCP_CLIENT_SUBJECT = "mcp-client";
+/** A peer link's session lasts until revoked instead, so linked machines stay linked. */
 const MCP_CLIENT_SESSION_TTL = Duration.days(30);
 
 export interface McpClientSession {
@@ -544,7 +545,8 @@ export class EnvironmentAuth extends Context.Service<
       {
         readonly sessionId: AuthSessionId;
         readonly token: string;
-        readonly expiresAt: DateTime.DateTime;
+        /** Null for a peer link, whose session lasts until revoked. */
+        readonly expiresAt: DateTime.DateTime | null;
       },
       ServerAuthInternalError
     >;
@@ -1137,7 +1139,7 @@ export const make = Effect.gen(function* () {
               id: session.sessionId,
               credential: devAuth.credential,
               label: "Reusable dev token",
-              expiresAt: DateTime.toUtc(session.expiresAt ?? REUSABLE_DEV_SESSION_EXPIRES_AT),
+              expiresAt: DateTime.toUtc(session.expiresAt ?? SessionStore.UNTIL_REVOKED_EXPIRES_AT),
             }) satisfies AuthPairingCredentialResult,
         ),
         Effect.catch((cause) =>
@@ -1305,7 +1307,7 @@ export const make = Effect.gen(function* () {
         subject: MCP_CLIENT_SUBJECT,
         method: "bearer-access-token",
         scopes: mcpClientScopes(input.access),
-        ttl: MCP_CLIENT_SESSION_TTL,
+        ttl: input.peerLink ? "until-revoked" : MCP_CLIENT_SESSION_TTL,
         ...(input.access === "read-only" ? {} : { runtimeModeCeiling: input.access }),
         peerLink: input.peerLink,
         client: { ...input.client, label: input.label, deviceType: "bot" },
@@ -1314,7 +1316,7 @@ export const make = Effect.gen(function* () {
         Effect.map((issued) => ({
           sessionId: issued.sessionId,
           token: issued.token,
-          expiresAt: issued.expiresAt,
+          expiresAt: input.peerLink ? null : issued.expiresAt,
         })),
         Effect.mapError((cause) => new ServerAuthSessionTokenIssueError({ cause })),
         Effect.withSpan("EnvironmentAuth.issueMcpClientSession"),

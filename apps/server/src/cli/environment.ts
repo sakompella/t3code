@@ -65,13 +65,16 @@ const encodeLinks = Schema.encodeEffect(
   Schema.fromJsonString(Schema.Array(Schema.toEncoded(Schema.Unknown))),
 );
 
+const formatExpiry = (expiresAt: DateTime.Utc | null) =>
+  expiresAt === null ? "until revoked there" : `until ${DateTime.formatIso(expiresAt)}`;
+
 const formatLinks = (links: ReadonlyArray<PeerLinkSummary>) =>
   links.length === 0
     ? "No linked environments.\n"
     : `${links
         .map(
           (link) =>
-            `${link.label} (${link.environmentId})\n  ${link.status}, access ${link.access}, expires ${DateTime.formatIso(link.expiresAt)}\n  ${link.urls.join(", ")}${link.lastError === null ? "" : `\n  last error: ${link.lastError}`}`,
+            `${link.label} (${link.environmentId})\n  ${link.status}, access ${link.access}, ${formatExpiry(link.expiresAt)}\n  ${link.urls.join(", ")}${link.lastError === null ? "" : `\n  last error: ${link.lastError}`}`,
         )
         .join("\n\n")}\n`;
 
@@ -109,7 +112,7 @@ const environmentLinkCommand = Command.make("link", {
           access: flags.access,
         });
         yield* Console.log(
-          `Linked ${linked.label} (${linked.environmentId}) with ${linked.access} access, until ${DateTime.formatIso(linked.expiresAt)}.\n`,
+          `Linked ${linked.label} (${linked.environmentId}) with ${linked.access} access, ${formatExpiry(linked.expiresAt)}.\n`,
         );
       }),
     ),
