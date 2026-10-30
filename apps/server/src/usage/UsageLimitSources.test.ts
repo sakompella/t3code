@@ -4,7 +4,7 @@ import { ServerConfigStreamEvent, UsageLimitSourceId } from "@t3tools/contracts"
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Schema from "effect/Schema";
-import { HttpClient } from "effect/http";
+import { HttpClient, HttpClientResponse } from "effect/http";
 
 import * as BackgroundPolicy from "../background/BackgroundPolicy.ts";
 import * as ServerSettings from "../serverSettings.ts";
@@ -77,6 +77,67 @@ it.effect("keeps malformed source URLs encodable for config subscribers", () =>
       Layer.succeed(
         HttpClient.HttpClient,
         HttpClient.make(() => Effect.die("Unexpected network request")),
+      ),
+      NodeCrypto.layer,
+    ]),
+    Effect.scoped,
+  ),
+);
+
+it.effect("reads quota pools from an enabled hub and refuses a disabled one", () =>
+  Effect.gen(function* () {
+    const sources = yield* UsageLimitSources.make;
+    const dashboard = yield* sources.readPools({
+      sourceId: UsageLimitSourceId.make("hub"),
+      window: "five-hour",
+      lookbackHours: 1,
+    });
+    expect(dashboard?.window).toBe("five-hour");
+    const refused = yield* sources
+      .readPools({ sourceId: UsageLimitSourceId.make("off"), window: "weekly", lookbackHours: 3 })
+      .pipe(Effect.flip);
+    expect(refused.detail).toBe("The usage limit source is missing or disabled.");
+  }).pipe(
+    Effect.provide([
+      ServerSettings.layerTest({
+        usageLimitSources: {
+          [UsageLimitSourceId.make("hub")]: {
+            kind: "cliproxy",
+            url: "https://hub.test",
+            managementKey: "management-secret",
+            enabled: true,
+          },
+          [UsageLimitSourceId.make("off")]: {
+            kind: "cliproxy",
+            url: "https://hub.test",
+            managementKey: "management-secret",
+            enabled: false,
+          },
+        },
+      }),
+      Layer.mock(BackgroundPolicy.BackgroundPolicy)({
+        shouldRunScopeWork: () => Effect.succeed(false),
+      }),
+      Layer.succeed(
+        HttpClient.HttpClient,
+        HttpClient.make((request) =>
+          Effect.succeed(
+            HttpClientResponse.fromWeb(
+              request,
+              new URL(request.url).pathname.endsWith("/quota/pools")
+                ? Response.json({
+                    nowMs: 1,
+                    fromMs: 0,
+                    toMs: 2,
+                    window: "five-hour",
+                    lookbackHours: 1,
+                    historyStartedAtMs: null,
+                    pools: [],
+                  })
+                : Response.json({ files: [] }),
+            ),
+          ),
+        ),
       ),
       NodeCrypto.layer,
     ]),

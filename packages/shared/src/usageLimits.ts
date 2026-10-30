@@ -13,6 +13,7 @@ import {
   type ServerProviderUsageLimits,
   type ServerProviderUsageWindow,
   type ServerSettings,
+  type UsageLimitSourceId,
   type UsageLimitSourceSnapshots,
 } from "@t3tools/contracts";
 
@@ -260,6 +261,15 @@ export interface LimitAccount {
   /** How often the server that took `limits` refreshes them. */
   readonly refreshIntervalMs: number;
   readonly limits: ServerProviderUsageLimits;
+  /** Every hub listing of this account, for joining hub-side data such as quota history. */
+  readonly hubAccounts: ReadonlyArray<HubAccountRef>;
+}
+
+export interface HubAccountRef {
+  readonly environmentId: EnvironmentId;
+  readonly sourceId: UsageLimitSourceId;
+  /** The hub's auth file id. */
+  readonly accountId: string;
 }
 
 function refreshIntervalMs(settings: ServerSettings | undefined): number {
@@ -326,6 +336,7 @@ export function collectLimitAccounts(presentations: LimitPresentations): readonl
       environments,
       sourceLabel: previous.sourceLabel ?? next.sourceLabel,
       refreshIntervalMs: winner.refreshIntervalMs,
+      hubAccounts: [...previous.hubAccounts, ...next.hubAccounts],
       redeem:
         hubRedeems.get(key)?.redeem ??
         (creditSource ? creditSource.redeem : (winner.redeem ?? previous.redeem ?? next.redeem)),
@@ -362,6 +373,7 @@ export function collectLimitAccounts(presentations: LimitPresentations): readonl
         redeem: { environmentId, input: { instanceId: provider.instanceId } },
         refreshIntervalMs: refreshInterval,
         limits: provider.usageLimits,
+        hubAccounts: [],
       });
     }
   }
@@ -396,6 +408,7 @@ export function collectLimitAccounts(presentations: LimitPresentations): readonl
             : null,
           refreshIntervalMs: refreshInterval,
           limits: account.usageLimits,
+          hubAccounts: [{ environmentId, sourceId: source.id, accountId: account.id }],
         });
       }
     }
