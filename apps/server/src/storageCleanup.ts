@@ -1329,10 +1329,7 @@ const make = Effect.gen(function* () {
       // turn as "error" on a session that stays live.
       Stream.runForEach(events, (event) => {
         if (event.type === "thread.deleted") deletions++;
-        else if (
-          event.type !== "provider-session.updated" ||
-          event.payload.status !== "stopped"
-        )
+        else if (event.type !== "provider-session.updated" || event.payload.status !== "stopped")
           return Effect.void;
         else if (!deletedWorktreeWaits && deletions === sweptDeletions) {
           const cwd = pathKey(event.payload.cwd);
