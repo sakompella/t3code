@@ -1,6 +1,16 @@
 // @effect-diagnostics-next-line nodeBuiltinImport:off -- Effect's Crypto has no createHmac or timingSafeEqual.
 import * as NodeCrypto from "node:crypto";
 
+/**
+ * Every server keeps this secret in its secrets directory and accepts tokens derived from it,
+ * so a desktop app that can read the T3 home can attach to a server it did not start.
+ */
+export const DESKTOP_ATTACH_SECRET_NAME = "desktop-attach-secret";
+
+export function encodeDesktopAttachSecret(bytes: Uint8Array): string {
+  return Buffer.from(bytes).toString("hex");
+}
+
 /** Accept previous/current windows for token lifetime and the next window for WSL clock lag. */
 export const DESKTOP_BOOTSTRAP_TOKEN_WINDOW_MS = 12 * 60 * 60 * 1000;
 
