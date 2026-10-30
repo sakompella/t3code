@@ -14,6 +14,7 @@ import { projectThreadAwarenessV2 } from "@t3tools/shared/agentAwareness";
 import * as Cause from "effect/Cause";
 import * as Option from "effect/Option";
 import * as Clock from "effect/Clock";
+import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Redacted from "effect/Redacted";
@@ -158,6 +159,7 @@ const main = Effect.gen(function* () {
               threads.delete(item.threadId);
               break;
           }
+          const now = yield* Clock.currentTimeMillis;
           const next = new Map<string, RelayAgentActivityState>();
           for (const thread of threads.values()) {
             const project = projects.get(thread.projectId);
@@ -166,12 +168,12 @@ const main = Effect.gen(function* () {
               environmentId: config.environment.environmentId,
               project,
               thread,
+              now: DateTime.makeUnsafe(now),
             });
             if (state) next.set(thread.id, state);
           }
           const state = item.kind === "thread.updated" ? next.get(item.thread.id) : undefined;
           const previous = state ? states.get(state.threadId) : undefined;
-          const now = yield* Clock.currentTimeMillis;
           const alert =
             state && state.phase !== previous?.phase && item.kind !== "snapshot"
               ? FcmDeliveries.androidAlertForState(state, preferences, now)
