@@ -550,7 +550,8 @@ export type AuthMcpTokenRequest = typeof AuthMcpTokenRequest.Type;
 export const AuthMcpTokenResult = Schema.Struct({
   access_token: Schema.String,
   token_type: Schema.Literal("Bearer"),
-  expires_in: Schema.Number,
+  /** Left out when the token lasts until revoked, as a peer link's does. */
+  expires_in: Schema.optionalKey(Schema.Number),
   scope: Schema.String,
 });
 export type AuthMcpTokenResult = typeof AuthMcpTokenResult.Type;

@@ -25,11 +25,7 @@ import * as ServerConfig from "../config.ts";
 import * as ServerEnvironment from "../environment/ServerEnvironment.ts";
 import * as AuthSessions from "../persistence/AuthSessions.ts";
 import * as ServerSecretStore from "./ServerSecretStore.ts";
-import {
-  REUSABLE_DEV_SESSION_EXPIRES_AT,
-  REUSABLE_DEV_SESSION_PREFIX,
-  resolveReusableDevAuth,
-} from "./ReusableDevAuth.ts";
+import { REUSABLE_DEV_SESSION_PREFIX, resolveReusableDevAuth } from "./ReusableDevAuth.ts";
 import {
   base64UrlDecodeUtf8,
   base64UrlEncode,
@@ -375,7 +371,8 @@ export class SessionStore extends Context.Service<
     readonly cookieName: string;
     readonly legacyCookieName: string | undefined;
     readonly issue: (input?: {
-      readonly ttl?: Duration.Duration;
+      /** `"until-revoked"` stores `UNTIL_REVOKED_EXPIRES_AT` as the expiry. */
+      readonly ttl?: Duration.Duration | "until-revoked";
       readonly subject?: string;
       readonly method?: ServerAuthSessionMethod;
       readonly scopes?: ReadonlyArray<AuthEnvironmentScope>;
@@ -425,6 +422,8 @@ export class SessionStore extends Context.Service<
 
 const SIGNING_SECRET_NAME = "server-signing-key";
 const DEFAULT_SESSION_TTL = Duration.days(30);
+/** The expiry of a session that lasts until revoked, since the database requires one. */
+export const UNTIL_REVOKED_EXPIRES_AT = DateTime.makeUnsafe("9999-12-31T23:59:59.999Z");
 const DEFAULT_WEBSOCKET_TOKEN_TTL = Duration.minutes(5);
 
 const SessionClaims = Schema.Struct({
@@ -524,7 +523,7 @@ const make = Effect.gen(function* () {
           browser: null,
         },
         issuedAt: yield* DateTime.now,
-        expiresAt: REUSABLE_DEV_SESSION_EXPIRES_AT,
+        expiresAt: UNTIL_REVOKED_EXPIRES_AT,
       })
       .pipe(
         Effect.mapError(
@@ -643,9 +642,12 @@ const make = Effect.gen(function* () {
           .pipe(Effect.mapError((cause) => new SessionCredentialIssueError({ cause }))),
       );
       const issuedAt = yield* DateTime.now;
-      const expiresAt = DateTime.add(issuedAt, {
-        milliseconds: Duration.toMillis(input?.ttl ?? DEFAULT_SESSION_TTL),
-      });
+      const expiresAt =
+        input?.ttl === "until-revoked"
+          ? UNTIL_REVOKED_EXPIRES_AT
+          : DateTime.add(issuedAt, {
+              milliseconds: Duration.toMillis(input?.ttl ?? DEFAULT_SESSION_TTL),
+            });
       const claims: SessionClaims = {
         v: 1,
         kind: "session",

@@ -1,3 +1,4 @@
+import * as DateTime from "effect/DateTime";
 import * as Schema from "effect/Schema";
 
 import { AuthMcpClientAccess } from "./auth.ts";
@@ -16,11 +17,15 @@ export const PeerLink = Schema.Struct({
   urls: Schema.Array(TrimmedNonEmptyString),
   access: AuthMcpClientAccess,
   linkedAt: Schema.DateTimeUtc,
-  expiresAt: Schema.DateTimeUtc,
+  /** Null when the link lasts until the peer revokes it. */
+  expiresAt: Schema.NullOr(Schema.DateTimeUtc),
   lastReachedAt: Schema.NullOr(Schema.DateTimeUtc),
   lastError: Schema.NullOr(Schema.String),
 });
 export type PeerLink = typeof PeerLink.Type;
+
+export const isPeerLinkExpired = (link: Pick<PeerLink, "expiresAt">, now: DateTime.Utc) =>
+  link.expiresAt !== null && DateTime.isLessThanOrEqualTo(link.expiresAt, now);
 
 /** Whether a link can be used now, as worked out when it is listed. */
 export const PeerLinkStatus = Schema.Literals(["reachable", "unreachable", "expired"]);

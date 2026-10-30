@@ -534,7 +534,14 @@ const make = Effect.gen(function* () {
       return {
         access_token: issued.token,
         token_type: "Bearer",
-        expires_in: Math.max(0, Math.floor((issued.expiresAt.epochMilliseconds - now) / 1000)),
+        ...(issued.expiresAt === null
+          ? {}
+          : {
+              expires_in: Math.max(
+                0,
+                Math.floor((issued.expiresAt.epochMilliseconds - now) / 1000),
+              ),
+            }),
         scope: encodeOAuthScope(mcpClientScopes(pending.access)),
       };
     },

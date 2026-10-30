@@ -5,6 +5,7 @@ import {
   EnvironmentHttpApi,
   EnvironmentId,
   type ExecutionEnvironmentCapabilities,
+  isPeerLinkExpired,
   MCP_PEER_LINK_SOFTWARE_ID,
   type PeerLink,
   type PeerLinkCreateInput,
@@ -106,6 +107,12 @@ interface PeerLinkRow {
   readonly fenced: number;
 }
 
+/**
+ * `expires_at` of a link that lasts until the peer revokes it. The column needs a
+ * value, and a version from before such links reads this one as a far-off expiry.
+ */
+const UNTIL_REVOKED = "9999-12-31T23:59:59.999Z";
+
 const decodeUrls = Schema.decodeUnknownEffect(Schema.fromJsonString(Schema.Array(Schema.String)));
 const encodeUrls = Schema.encodeEffect(Schema.fromJsonString(Schema.Array(Schema.String)));
 const decodeAccess = Schema.decodeUnknownEffect(AuthMcpClientAccess);
@@ -205,7 +212,12 @@ const make = Effect.gen(function* () {
       linkedAt: DateTime.makeUnsafe(row.linked_at),
       // Its token predates link fencing, so the peer would not fence its work:
       // like an expired link, only a new pairing code brings it back.
-      expiresAt: DateTime.makeUnsafe(row.fenced === 1 ? row.expires_at : row.linked_at),
+      expiresAt:
+        row.fenced !== 1
+          ? DateTime.makeUnsafe(row.linked_at)
+          : row.expires_at === UNTIL_REVOKED
+            ? null
+            : DateTime.makeUnsafe(row.expires_at),
       lastReachedAt: row.last_reached_at === null ? null : DateTime.makeUnsafe(row.last_reached_at),
       lastError: row.last_error,
     } satisfies PeerLink;
@@ -434,7 +446,8 @@ const make = Effect.gen(function* () {
       urls: origins,
       access: input.access,
       linkedAt: now,
-      expiresAt: DateTime.add(now, { seconds: issued.expires_in }),
+      expiresAt:
+        issued.expires_in === undefined ? null : DateTime.add(now, { seconds: issued.expires_in }),
       lastReachedAt: now,
       lastError: null,
     };
@@ -454,7 +467,8 @@ const make = Effect.gen(function* () {
           last_reached_at, last_error, fenced
         ) VALUES (
           ${linked.environmentId}, ${secretName}, ${linked.label}, ${urlsJson}, ${linked.access},
-          ${DateTime.formatIso(linked.linkedAt)}, ${DateTime.formatIso(linked.expiresAt)},
+          ${DateTime.formatIso(linked.linkedAt)},
+          ${linked.expiresAt === null ? UNTIL_REVOKED : DateTime.formatIso(linked.expiresAt)},
           ${DateTime.formatIso(now)}, NULL, 1
         )
         ON CONFLICT (environment_id) DO UPDATE SET
@@ -486,7 +500,7 @@ const make = Effect.gen(function* () {
     );
 
   const statusOf = (link: PeerLink, now: DateTime.Utc) =>
-    DateTime.isLessThanOrEqualTo(link.expiresAt, now)
+    isPeerLinkExpired(link, now)
       ? Effect.succeed<PeerLinkStatus>("expired")
       : Effect.findFirst(link.urls, (url) =>
           describe(url).pipe(
@@ -543,7 +557,7 @@ const make = Effect.gen(function* () {
         });
       }
       const link = yield* toLink(row.value);
-      if (DateTime.isLessThanOrEqualTo(link.expiresAt, yield* DateTime.now)) {
+      if (isPeerLinkExpired(link, yield* DateTime.now)) {
         return yield* new PeerLinkError({
           reason: "expired",
           message: `The link to ${link.label} expired. Link it again with a new pairing code from ${link.label}.`,
