@@ -16,6 +16,7 @@ import {
   type LimitAccount,
   type LimitPoolWindow,
 } from "@t3tools/shared/usageLimits";
+import { hubPoolSources } from "@t3tools/shared/usageLimitPools";
 import { Fragment, type ReactNode, useId, useState } from "react";
 import { Linking, Pressable, View } from "react-native";
 import { ScreenScrollView as ScrollView } from "../../components/ui/ScreenScrollView";
@@ -27,6 +28,7 @@ import { AppText as Text } from "../../components/ui/AppText";
 import { ProviderIcon } from "../../components/ProviderIcon";
 import { SettingsScreen } from "../settings/components/SettingsScreen";
 import { environmentPresentations } from "../../state/presentation";
+import { HubPoolStats } from "./UsageLimitForecast";
 import { ResetCredits } from "./UsageLimitsSection";
 import { usageProviderKind, useProviderColors } from "./usageProviders";
 
@@ -474,6 +476,7 @@ export function UsageLimitsSection({
       ? presentations
       : new Map([...presentations].filter(([id]) => selectedEnvironmentIds.has(id)));
   const pools = collectLimitPools(collectLimitAccounts(selected), now);
+  const hubSources = hubPoolSources(selected);
   const notices = collectLimitNotices(selected);
   const externalLinks = collectExternalUsageLinks(selected);
   const colors = useProviderColors();
@@ -526,6 +529,15 @@ export function UsageLimitsSection({
                   />
                 );
               })}
+              {hubSources.map((source) => (
+                <HubPoolStats
+                  key={`${source.environmentId}:${source.sourceId}`}
+                  source={source}
+                  driver={pool.driver}
+                  title={hubSources.length > 1 ? source.label : "CLIProxyAPI"}
+                  now={now}
+                />
+              ))}
             </View>
           </Fragment>
         );

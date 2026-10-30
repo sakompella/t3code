@@ -157,6 +157,14 @@ environment that will connect to the hub and enter its URL and management key.
 The accounts appear under **Usage → Limits**. Codex accounts show banked reset credits; select an
 account and choose **Use reset** to redeem one. No hub plugin is required.
 
+If the hub records quota history, each provider under Limits also gets a chart of the hub's pool:
+what was left over the past days and a dashed forecast, with when the pool and the first account
+run out, the next reset, and the recent burn rate. The hub keeps the history, so it starts when
+the hub started recording, not when you opened T3. The forecast assumes you keep spending at the
+burn rate of the chosen 1, 3 or 6 hours, and that the hub serves from the account that resets
+soonest. A hub without quota history shows Limits as before. On mobile the four numbers appear
+without the chart.
+
 This connection supplies usage information; configure
 the provider separately to send agent requests through the hub. Remove the hub from the same
 settings section when you no longer need it.
