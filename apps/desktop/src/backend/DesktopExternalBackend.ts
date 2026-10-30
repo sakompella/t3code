@@ -23,7 +23,7 @@ import type * as DesktopBackendManager from "./DesktopBackendManager.ts";
 export const POLL_INTERVAL = Duration.seconds(2);
 const PROBE_TIMEOUT = Duration.seconds(1);
 // About 4 s past the first miss: long enough for a deploy's restart, short enough to explain a stopped server.
-export const MISSES_BEFORE_REPORT = 3;
+const MISSES_BEFORE_REPORT = 3;
 const ENVIRONMENT_DESCRIPTOR_PATH = "/.well-known/t3/environment";
 
 const { logInfo, logWarning } = DesktopObservability.makeComponentLogger(
