@@ -25,8 +25,12 @@ import {
 import { resolveDefaultDesktopUpdateChannel } from "../updates/updateChannels.ts";
 import { isValidDistroName } from "../wsl/wslPathParsing.ts";
 
+/** "external" attaches to the server that already runs for this T3 home instead of starting one. */
+export type DesktopLocalEnvironmentMode = "managed" | "external";
+
 export interface DesktopSettings {
   readonly localEnvironmentEnabled: boolean;
+  readonly localEnvironmentMode: DesktopLocalEnvironmentMode;
   readonly linuxPasswordStore: LinuxPasswordStorePreference;
   readonly mainWindowBounds: DesktopWindowBounds | null;
   readonly mainWindowMaximized: boolean;
@@ -65,6 +69,7 @@ export const DEFAULT_MAIN_WINDOW_SIZE = {
 
 export const DEFAULT_DESKTOP_SETTINGS: DesktopSettings = {
   localEnvironmentEnabled: true,
+  localEnvironmentMode: "managed",
   linuxPasswordStore: DEFAULT_LINUX_PASSWORD_STORE,
   mainWindowBounds: null,
   mainWindowMaximized: false,
@@ -87,6 +92,7 @@ const DesktopWindowBoundsDocument = Schema.Struct({
 
 const DesktopSettingsDocument = Schema.Struct({
   localEnvironmentEnabled: Schema.optionalKey(Schema.Boolean),
+  localEnvironmentMode: Schema.optionalKey(Schema.Literals(["managed", "external"])),
   linuxPasswordStore: Schema.optionalKey(Schema.Unknown),
   mainWindowBounds: Schema.optionalKey(Schema.NullOr(DesktopWindowBoundsDocument)),
   mainWindowMaximized: Schema.optionalKey(Schema.Boolean),
@@ -216,6 +222,7 @@ function normalizeDesktopSettingsDocument(
 
   return {
     localEnvironmentEnabled: parsed.localEnvironmentEnabled !== false,
+    localEnvironmentMode: parsed.localEnvironmentMode ?? defaultSettings.localEnvironmentMode,
     linuxPasswordStore: normalizeLinuxPasswordStorePreference(parsed.linuxPasswordStore),
     mainWindowBounds,
     mainWindowMaximized: mainWindowBounds !== null && parsed.mainWindowMaximized === true,
@@ -241,6 +248,9 @@ function toDesktopSettingsDocument(
 
   if (settings.localEnvironmentEnabled !== defaults.localEnvironmentEnabled) {
     document.localEnvironmentEnabled = settings.localEnvironmentEnabled;
+  }
+  if (settings.localEnvironmentMode !== defaults.localEnvironmentMode) {
+    document.localEnvironmentMode = settings.localEnvironmentMode;
   }
 
   if (settings.linuxPasswordStore !== defaults.linuxPasswordStore) {
