@@ -1,6 +1,9 @@
 import {
+  applyProjectProviderEnablement,
   DEFAULT_SERVER_SETTINGS,
   type ModelSelection,
+  newThreadRuntimeMode,
+  runtimeModesForNewThreads,
   type WorktreeSubmodules,
 } from "@t3tools/contracts";
 import { createModelSelection } from "@t3tools/shared/model";
@@ -19,7 +22,7 @@ import { useEnvironmentProviders, useEnvironments } from "../../state/environmen
 import { EMPTY_SERVER_PROVIDERS } from "../../state/server";
 import { resolveEnvModeLabel, WORKTREE_SUBMODULES_LABELS } from "../BranchToolbar.logic";
 import { ProviderModelPicker } from "../chat/ProviderModelPicker";
-import { runtimeModeConfig, runtimeModeOptions } from "../chat/runtimeModeConfig";
+import { runtimeModeConfig } from "../chat/runtimeModeConfig";
 import { PULL_REQUEST_MERGE_METHOD_LABELS } from "../pullRequest/pullRequestDetail.logic";
 import { TraitsPicker } from "../chat/TraitsPicker";
 import { Select, SelectItem, SelectPopup, SelectTrigger, SelectValue } from "../ui/select";
@@ -48,7 +51,7 @@ function isWorktreeSubmodules(value: string | null): value is WorktreeSubmodules
 }
 
 export function ProjectDefaultsSettings({ category }: { category: ProjectSettingsCategory }) {
-  const { scope, target, connectedEnvironments } = useSettingsScope();
+  const { scope, target, targets, connectedEnvironments } = useSettingsScope();
   const settings = useScopedSettings();
   const updateSettings = useUpdateScopedSettings();
   const navigate = useNavigate();
@@ -78,7 +81,28 @@ export function ProjectDefaultsSettings({ category }: { category: ProjectSetting
   const activeEntry = entries.find((entry) => entry.instanceId === selection?.instanceId);
   const mixedModel = useScopedSettingsMixed(["defaultModelSelection"]);
   const mixedPermissions = useScopedSettingsMixed(["defaultRuntimeMode"]);
-  const PermissionIcon = runtimeModeConfig[settings.defaultRuntimeMode].icon;
+  // Each selected target offers what its new threads can run in, and a
+  // default a provider does not offer runs as the mode shown here.
+  const newThreadDefaults = targets.flatMap((candidate) => {
+    const providers = providersByEnvironment.get(candidate.environmentId);
+    return providers
+      ? [
+          {
+            providers: applyProjectProviderEnablement(
+              providers,
+              candidate.settings,
+              candidate.projectId,
+            ),
+            defaultModelSelection: candidate.settings.defaultModelSelection,
+            defaultRuntimeMode: candidate.settings.defaultRuntimeMode,
+          },
+        ]
+      : [];
+  });
+  const defaultRuntimeModes = runtimeModesForNewThreads(newThreadDefaults);
+  const shownDefaultRuntimeMode = newThreadRuntimeMode(newThreadDefaults);
+  const PermissionIcon =
+    runtimeModeConfig[shownDefaultRuntimeMode ?? settings.defaultRuntimeMode].icon;
   const mixedWorkspace = useScopedSettingsMixed(["defaultThreadEnvMode"]);
   const mixedAutoPull = useScopedSettingsMixed(["defaultAutoPull"]);
   const mixedAgentCredits = useScopedSettingsMixed(["removeAgentCreditsOnMerge"]);
@@ -253,23 +277,23 @@ export function ProjectDefaultsSettings({ category }: { category: ProjectSetting
             }
             control={
               <Select
-                value={mixedPermissions ? null : settings.defaultRuntimeMode}
+                value={shownDefaultRuntimeMode}
                 onValueChange={(value) => {
                   if (value) updateSettings({ defaultRuntimeMode: value });
                 }}
               >
                 <SelectTrigger size="sm" aria-label="Default permissions">
-                  {!mixedPermissions && (
+                  {shownDefaultRuntimeMode !== null && (
                     <PermissionIcon className="size-3.5 shrink-0 text-muted-foreground" />
                   )}
                   <SelectValue>
-                    {mixedPermissions
+                    {shownDefaultRuntimeMode === null
                       ? "Mixed"
-                      : runtimeModeConfig[settings.defaultRuntimeMode].label}
+                      : runtimeModeConfig[shownDefaultRuntimeMode].label}
                   </SelectValue>
                 </SelectTrigger>
                 <SelectPopup align="end" alignItemWithTrigger={false}>
-                  {runtimeModeOptions.map((mode) => {
+                  {defaultRuntimeModes.map((mode) => {
                     const option = runtimeModeConfig[mode];
                     const Icon = option.icon;
                     return (

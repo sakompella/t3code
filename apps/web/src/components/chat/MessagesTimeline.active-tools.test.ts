@@ -32,20 +32,27 @@ describe("long active tool groups", () => {
         supportsConversationRollback: false,
         expandedWorkGroupIds: new Set(expanded ? ["work-group:work-entry-0"] : []),
       });
+      const allIds = timelineEntries.map(({ entry }) => entry.id);
       const live = rows.find((row) => row.kind === "work-live");
+      const details = rows.filter((row) => row.kind === "work");
+      if (expanded) {
+        // An expanded live group shows its toggle and every step, marking the running one.
+        expect(live).toBeUndefined();
+        expect(rows.find((row) => row.kind === "work-toggle")?.groupId).toBe(
+          "work-group:work-entry-0",
+        );
+        expect(details).toHaveLength(1);
+        expect(details[0]?.groupedEntries.map(({ id }) => id)).toEqual(allIds);
+        expect(details[0]?.liveEntryId).toBe("work-999");
+        return;
+      }
       expect(live).toBeDefined();
       expect(live?.entry.id).toBe("work-999");
       expect(live && liveWorkEntryLabel(live.entry, undefined, live.active)).toContain("999");
       expect(live?.thought?.id).toBe("work-998");
-      expect(live?.groupedEntries.map(({ id }) => id)).toEqual(
-        timelineEntries.map(({ entry }) => entry.id),
-      );
+      expect(live?.groupedEntries.map(({ id }) => id)).toEqual(allIds);
       expect(live?.groupId).toBe("work-group:work-entry-0");
-      const details = rows.filter((row) => row.kind === "work");
-      expect(details).toHaveLength(expanded ? 1 : 0);
-      if (expanded) {
-        expect(details[0]?.groupedEntries).toEqual(live?.groupedEntries);
-      }
+      expect(details).toHaveLength(0);
     },
   );
 });

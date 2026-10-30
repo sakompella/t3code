@@ -152,7 +152,7 @@ export const layer: Layer.Layer<
                   ordinal
                 )
                 VALUES (
-                  ${stored.event.threadId},
+                  ${stored.event.payload.threadId},
                   ${stored.event.payload.id},
                   ${stored.event.payload.ordinal}
                 )

@@ -41,6 +41,7 @@ import {
   threadReadTargetId,
   threadReadTargetTitle,
   workEntryDisplayLabel,
+  workEntryHasInspectableContent,
   workEntryReadOutput,
 } from "./MessagesTimeline.logic";
 import { cn } from "~/lib/utils";
@@ -148,6 +149,7 @@ type WorkEntryRowProps = {
   workspaceRoot: string | undefined;
   displayLabel?: string | undefined;
   onToggleEntry?: ((collapsed: boolean) => void) | undefined;
+  active?: boolean;
 };
 
 export const SimpleWorkEntryRow = memo(function SimpleWorkEntryRow(props: WorkEntryRowProps) {
@@ -343,17 +345,21 @@ function WorkEntryLogRow(props: WorkEntryRowProps) {
     workEntry.projectedItem !== undefined &&
     turnItemNeedsDetailFetch(workEntry.projectedItem.item);
   const canExpandProjectedItem =
-    plainOutput !== undefined
+    workEntryHasInspectableContent(workEntry) &&
+    (plainOutput !== undefined
       ? Boolean(plainOutput || viewedImage || workEntry.questionAnswer || plainOutputFetches)
       : workEntry.projectedItem === undefined
         ? canExpand
         : isReasoning
           ? Boolean(workEntry.detail?.trim())
-          : Boolean(
-              viewedImage ||
-              workEntry.questionAnswer ||
-              turnItemHasDetail(workEntry.projectedItem.item),
-            );
+          : workEntry.projectedItem.item.type === "notification" ||
+              workEntry.projectedItem.item.type === "system_notice"
+            ? true
+            : Boolean(
+                viewedImage ||
+                workEntry.questionAnswer ||
+                turnItemHasDetail(workEntry.projectedItem.item),
+              ));
   const iconWrapperClass = cn(
     "flex size-4 items-center justify-center",
     showWarningIndicator
@@ -419,7 +425,12 @@ function WorkEntryLogRow(props: WorkEntryRowProps) {
         <div className="min-w-0 flex-1 overflow-hidden">
           <p className="flex min-w-0 w-full items-baseline gap-1.5 text-sm leading-relaxed">
             <span
-              className={cn(answerPreview ? "min-w-0" : "min-w-0 flex-1", "truncate", headingClass)}
+              className={cn(
+                answerPreview ? "min-w-0" : "min-w-0 flex-1",
+                "truncate",
+                headingClass,
+                props.active && !showFailedIndicator && "text-foreground",
+              )}
             >
               {isReasoning && !expanded ? (
                 <ChatMarkdown
