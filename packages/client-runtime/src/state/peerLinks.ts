@@ -1,4 +1,4 @@
-import { type PeerLinkSummary, WS_METHODS } from "@t3tools/contracts";
+import { isPeerLinkExpired, type PeerLinkSummary, WS_METHODS } from "@t3tools/contracts";
 import * as DateTime from "effect/DateTime";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
@@ -47,11 +47,12 @@ export type PeerLinkHealth =
  * successful call clears it.
  */
 export function peerLinkHealth(link: PeerLinkSummary, now: DateTime.Utc): PeerLinkHealth {
-  if (link.status === "expired" || DateTime.isLessThanOrEqualTo(link.expiresAt, now)) {
+  if (link.status === "expired" || isPeerLinkExpired(link, now)) {
     return { kind: "expired" };
   }
   if (link.status === "unreachable") return { kind: "unreachable", detail: link.lastError };
   if (link.lastError !== null) return { kind: "failing", detail: link.lastError };
+  if (link.expiresAt === null) return { kind: "reachable", expiresInDays: null };
   const days = Math.ceil(Duration.toDays(DateTime.distance(now, link.expiresAt)));
   return { kind: "reachable", expiresInDays: days <= EXPIRY_WARNING_DAYS ? days : null };
 }
