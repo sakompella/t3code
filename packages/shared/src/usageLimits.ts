@@ -71,6 +71,7 @@ function providersWithLimits(providers: readonly ServerProvider[]): readonly Ser
       provider.enabled &&
       provider.installed &&
       isProviderAvailable(provider) &&
+      provider.auth.status === "authenticated" &&
       provider.usageLimits !== undefined,
   );
 }
@@ -241,7 +242,7 @@ export function collectLimitAccounts(presentations: LimitPresentations): readonl
       plan: previous.plan ?? next.plan,
       accentColor: previous.accentColor ?? next.accentColor,
       environments,
-      sourceLabel: environments.length > 0 ? null : (previous.sourceLabel ?? next.sourceLabel),
+      sourceLabel: previous.sourceLabel ?? next.sourceLabel,
       refreshIntervalMs: winner.refreshIntervalMs,
       redeem:
         hubRedeems.get(key)?.redeem ??
@@ -407,9 +408,21 @@ const WINDOW_KIND_ORDER: Record<ServerProviderUsageWindow["kind"], number> = {
 /**
  * A reading taken before a window's reset time says nothing about the window
  * that began at it, so that window reads full until a refresh says otherwise.
+ * A stale reading cannot say that, so its windows past their reset are dropped.
  */
 function withRolledOverWindows(account: LimitAccount, now: number): LimitAccount {
-  if (isStaleReading(account, now)) return account;
+  if (isStaleReading(account, now)) {
+    return {
+      ...account,
+      limits: {
+        ...account.limits,
+        windows: account.limits.windows.filter((window) => {
+          const resetsAt = resetMillis(window);
+          return resetsAt === null || resetsAt > now;
+        }),
+      },
+    };
+  }
   return {
     ...account,
     limits: {
@@ -543,50 +556,112 @@ function poolWindows(accounts: readonly LimitAccount[], now: number): readonly L
     }
   }
   const pools = [...byKey].map(([key, members]): LimitPoolWindow => {
-    const memberByAccount = new Map(members.map((member) => [member.account.key, member]));
     const first = members[0]!.window;
     const id = members[0]!.account.driver === "codex" ? key : first.id;
-    const live = members.filter((member) => !member.stale);
-    const counted = live.length > 0 ? live : members;
-    const usedPercent = counted.reduce((sum, m) => sum + m.window.usedPercent, 0) / counted.length;
-    // Judge pace only for windows with reset clocks; others add spend without elapsed time.
-    const timed = members.flatMap((m) => {
-      const share = elapsedShare(m.window, now);
-      return share === null ? [] : [{ used: m.window.usedPercent, elapsed: share }];
-    });
-    const timedUsed = timed.reduce((sum, t) => sum + t.used, 0) / timed.length;
-    const meanElapsed =
-      timed.length > 0 ? timed.reduce((sum, t) => sum + t.elapsed, 0) / timed.length : null;
-    const resets = members
-      .flatMap((member) => {
-        const at = resetMillis(member.window);
-        return at === null
+    return summarizeWindow({ id, kind: first.kind, label: first.label }, members, accounts, now);
+  });
+  return pools.sort((left, right) => WINDOW_KIND_ORDER[left.kind] - WINDOW_KIND_ORDER[right.kind]);
+}
+
+/** One window's pooled totals over `members`, with a column for each of `accounts`. */
+function summarizeWindow(
+  identity: Pick<LimitPoolWindow, "id" | "kind" | "label">,
+  members: readonly LimitPoolMember[],
+  accounts: readonly LimitAccount[],
+  now: number,
+): LimitPoolWindow {
+  const memberByAccount = new Map(members.map((member) => [member.account.key, member]));
+  const live = members.filter((member) => !member.stale);
+  const counted = live.length > 0 ? live : members;
+  const usedPercent = counted.reduce((sum, m) => sum + m.window.usedPercent, 0) / counted.length;
+  // Judge pace only for windows with reset clocks; others add spend without elapsed time.
+  const timed = members.flatMap((m) => {
+    const share = elapsedShare(m.window, now);
+    return share === null ? [] : [{ used: m.window.usedPercent, elapsed: share }];
+  });
+  const timedUsed = timed.reduce((sum, t) => sum + t.used, 0) / timed.length;
+  const meanElapsed =
+    timed.length > 0 ? timed.reduce((sum, t) => sum + t.elapsed, 0) / timed.length : null;
+  const resets = members
+    .flatMap((member) => {
+      const at = resetMillis(member.window);
+      return at === null
+        ? []
+        : [
+            {
+              member,
+              at,
+              restoresPercent: Math.round(member.refillPercent / counted.length),
+            },
+          ];
+    })
+    .sort((left, right) => left.at - right.at);
+  return {
+    ...identity,
+    members,
+    columns: accounts.map(
+      (account) => memberByAccount.get(account.key) ?? { account, window: null },
+    ),
+    stale: live.length === 0,
+    usedPercent: Math.round(usedPercent),
+    remainingPercent: Math.round(100 - usedPercent),
+    pace: meanElapsed === null ? null : paceOfShares(timedUsed, meanElapsed),
+    resets,
+  };
+}
+
+export interface GroupedLimitWindow {
+  /** Every account pooled together; names the window and fixes its place in the list. */
+  readonly window: LimitPoolWindow;
+  /** Hubs first, then logins no hub lists. A null label means one group holds every account. */
+  readonly groups: ReadonlyArray<{
+    readonly label: string | null;
+    readonly window: LimitPoolWindow;
+  }>;
+}
+
+const HUB_GROUP_LABEL = "CLIProxyAPI";
+const OWN_LOGINS_GROUP_LABEL = "Direct logins";
+
+/**
+ * Splits each window of a provider's pool into one group per usage-limit source (CLIProxyAPI hub),
+ * then the logins no hub lists. Each group is pooled on its own: a combined "% left" would hide
+ * which supply is running out. An account signed in directly and also listed by a hub is one row, in its hub's group.
+ */
+export function groupLimitWindows(pool: LimitPool, now: number): readonly GroupedLimitWindow[] {
+  const hubLabels = [
+    ...new Set(pool.accounts.flatMap((account) => account.sourceLabel ?? [])),
+  ].sort((left, right) => left.localeCompare(right));
+  const sources = [
+    ...hubLabels.map((sourceLabel) => ({
+      sourceLabel,
+      label: hubLabels.length === 1 ? HUB_GROUP_LABEL : sourceLabel,
+    })),
+    ...(pool.accounts.some((account) => account.sourceLabel === null)
+      ? [{ sourceLabel: null, label: OWN_LOGINS_GROUP_LABEL }]
+      : []),
+  ];
+  return displayLimitWindows(pool).map((window) => {
+    if (sources.length <= 1) return { window, groups: [{ label: null, window }] };
+    const { id, kind, label: windowLabel } = window;
+    return {
+      window,
+      groups: sources.flatMap(({ sourceLabel, label }) => {
+        const members = window.members.filter(
+          (member) => member.account.sourceLabel === sourceLabel,
+        );
+        const accounts = pool.accounts.filter((account) => account.sourceLabel === sourceLabel);
+        return members.length === 0
           ? []
           : [
               {
-                member,
-                at,
-                restoresPercent: Math.round(member.refillPercent / counted.length),
+                label,
+                window: summarizeWindow({ id, kind, label: windowLabel }, members, accounts, now),
               },
             ];
-      })
-      .sort((left, right) => left.at - right.at);
-    return {
-      id,
-      kind: first.kind,
-      label: first.label,
-      members,
-      columns: accounts.map(
-        (account) => memberByAccount.get(account.key) ?? { account, window: null },
-      ),
-      stale: live.length === 0,
-      usedPercent: Math.round(usedPercent),
-      remainingPercent: Math.round(100 - usedPercent),
-      pace: meanElapsed === null ? null : paceOfShares(timedUsed, meanElapsed),
-      resets,
+      }),
     };
   });
-  return pools.sort((left, right) => WINDOW_KIND_ORDER[left.kind] - WINDOW_KIND_ORDER[right.kind]);
 }
 
 export function limitsNotice(limits: ServerProviderUsageLimits): string | null {
@@ -775,6 +850,35 @@ export function collectProviderUsageLimits(
   );
   const accounts: Array<UsageLimitsReport["accounts"][number]> = [];
   const notices: string[] = [];
+  // Hubs lead, as on the Limits page.
+  for (const source of sources) {
+    const matching = source.accounts.filter((account) => account.driver === selected.driver);
+    for (const account of matching) {
+      const key = resolveKey(account);
+      if (key && nativeAccountKeys.has(key)) continue;
+      accounts.push({
+        id: `${source.id}:${account.id}`,
+        driver: account.driver,
+        label: `${source.label} · ${account.id}`,
+        sourceLabel: "CLI Proxy",
+        ...(account.usageLimits.resetCredits?.nextCreditId
+          ? {
+              resetCreditInput: {
+                sourceId: source.id,
+                accountId: account.id,
+                creditId: account.usageLimits.resetCredits.nextCreditId,
+              },
+            }
+          : {}),
+        ...(account.plan ? { plan: account.plan } : {}),
+        ...(account.email ? { email: account.email } : {}),
+        limits: account.usageLimits,
+      });
+    }
+    if (source.error && (matching.length > 0 || source.accounts.length === 0)) {
+      notices.push(`${source.label}: ${source.error}`);
+    }
+  }
   for (const {
     usage: { provider, limits },
     credits,
@@ -821,34 +925,6 @@ export function collectProviderUsageLimits(
       ...(provider.auth.email ? { email: provider.auth.email } : {}),
       limits: shownCredits ? { ...limits, resetCredits: shownCredits } : limits,
     });
-  }
-  for (const source of sources) {
-    const matching = source.accounts.filter((account) => account.driver === selected.driver);
-    for (const account of matching) {
-      const key = resolveKey(account);
-      if (key && nativeAccountKeys.has(key)) continue;
-      accounts.push({
-        id: `${source.id}:${account.id}`,
-        driver: account.driver,
-        label: `${source.label} · ${account.id}`,
-        sourceLabel: "CLI Proxy",
-        ...(account.usageLimits.resetCredits?.nextCreditId
-          ? {
-              resetCreditInput: {
-                sourceId: source.id,
-                accountId: account.id,
-                creditId: account.usageLimits.resetCredits.nextCreditId,
-              },
-            }
-          : {}),
-        ...(account.plan ? { plan: account.plan } : {}),
-        ...(account.email ? { email: account.email } : {}),
-        limits: account.usageLimits,
-      });
-    }
-    if (source.error && (matching.length > 0 || source.accounts.length === 0)) {
-      notices.push(`${source.label}: ${source.error}`);
-    }
   }
   return { createdAt: DateTime.formatIso(DateTime.makeUnsafe(now)), accounts, notices };
 }
