@@ -1,13 +1,21 @@
+// @effect-diagnostics nodeBuiltinImport:off -- the test stands in for a server with a real process.
+import * as NodeChildProcess from "node:child_process";
+
+import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, describe, it } from "@effect/vitest";
+import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
+import * as Path from "effect/Path";
 import * as Option from "effect/Option";
 import * as Ref from "effect/Ref";
 import * as Stream from "effect/Stream";
 import { HttpClient } from "effect/http";
 import { ChildProcessSpawner } from "effect/process";
 
+import * as DesktopConfig from "../app/DesktopConfig.ts";
+import * as DesktopEnvironment from "../app/DesktopEnvironment.ts";
 import * as DesktopObservability from "../app/DesktopObservability.ts";
 import * as DesktopState from "../app/DesktopState.ts";
 import * as DesktopAppSettings from "../settings/DesktopAppSettings.ts";
@@ -20,20 +28,53 @@ import * as DesktopWslEnvironment from "../wsl/DesktopWslEnvironment.ts";
 import * as DesktopBackendConfiguration from "./DesktopBackendConfiguration.ts";
 import * as DesktopBackendPool from "./DesktopBackendPool.ts";
 import type { DesktopBackendStartConfig } from "./DesktopBackendManager.ts";
+import {
+  ENVIRONMENT_ID,
+  type FakeServer,
+  layerFakeServerHttp,
+  writeServerState,
+} from "./externalServerTestHarness.ts";
 
-function layerPool(labelRef: Ref.Ref<string>): Layer.Layer<DesktopBackendPool.DesktopBackendPool> {
+function layerPool(
+  labelRef: Ref.Ref<string>,
+  external?: {
+    readonly home: string;
+    readonly http: Layer.Layer<HttpClient.HttpClient>;
+  },
+): Layer.Layer<DesktopBackendPool.DesktopBackendPool> {
+  const environment = DesktopEnvironment.layer({
+    dirname: "/repo/apps/desktop/src",
+    homeDirectory: external?.home ?? "/home",
+    platform: "darwin",
+    processArch: "arm64",
+    appVersion: "1.2.3",
+    appPath: "/repo",
+    isPackaged: true,
+    resourcesPath: "/missing/resources",
+    runningUnderArm64Translation: false,
+  }).pipe(
+    Layer.provide(
+      Layer.mergeAll(
+        NodeServices.layer,
+        DesktopConfig.layerTest(external ? { T3CODE_HOME: external.home } : {}),
+      ),
+    ),
+    Layer.orDie,
+  );
   return DesktopBackendPool.layer.pipe(
     Layer.provideMerge(
       Layer.mergeAll(
-        FileSystem.layerNoop({}),
+        external ? NodeServices.layer : Layer.merge(FileSystem.layerNoop({}), Path.layer),
+        environment,
         Layer.succeed(
           ChildProcessSpawner.ChildProcessSpawner,
           ChildProcessSpawner.make(() => Effect.die("unexpected child process spawn")),
         ),
-        Layer.succeed(
-          HttpClient.HttpClient,
-          HttpClient.make(() => Effect.die("unexpected HTTP request")),
-        ),
+        external?.http ??
+          Layer.succeed(
+            HttpClient.HttpClient,
+            HttpClient.make(() => Effect.die("unexpected HTTP request")),
+          ),
         Layer.succeed(DesktopObservability.DesktopBackendOutputLogFactory, {
           forInstance: () =>
             Effect.succeed({
@@ -62,7 +103,10 @@ function layerPool(labelRef: Ref.Ref<string>): Layer.Layer<DesktopBackendPool.De
           resolveWsl: () => Effect.die("unexpected WSL config resolve"),
           currentBootstrapToken: Effect.die("unexpected bootstrap token read"),
         } satisfies DesktopBackendConfiguration.DesktopBackendConfiguration["Service"]),
-        DesktopAppSettings.layerTest(),
+        DesktopAppSettings.layerTest({
+          ...DesktopAppSettings.DEFAULT_DESKTOP_SETTINGS,
+          localEnvironmentMode: external ? "external" : "managed",
+        }),
         DesktopState.layer,
         DesktopWslEnvironment.layerTest(),
         ElectronDialog.layer,
@@ -132,5 +176,44 @@ describe("DesktopBackendPool", () => {
         assert.equal(Option.isNone(yield* pool.get(id)), true);
       }).pipe(Effect.provide(layerPool(Ref.makeUnsafe("Windows")))),
     ),
+  );
+  it.live("attaches to an external server and leaves it running through quit and update", () =>
+    Effect.gen(function* () {
+      const fileSystem = yield* FileSystem.FileSystem;
+      const home = yield* fileSystem.makeTempDirectoryScoped();
+      const server = NodeChildProcess.spawn(
+        process.execPath,
+        ["-e", "setInterval(() => {}, 1000)"],
+        {
+          stdio: "ignore",
+        },
+      );
+      yield* Effect.addFinalizer(() => Effect.sync(() => server.kill()));
+      yield* writeServerState(`${home}/userdata`, { pid: server.pid! });
+      const http = layerFakeServerHttp(
+        Ref.makeUnsafe<FakeServer>({ up: true, environmentId: ENVIRONMENT_ID }),
+      );
+
+      yield* Effect.gen(function* () {
+        const pool = yield* DesktopBackendPool.DesktopBackendPool;
+        const primary = yield* pool.primary;
+        yield* primary.start;
+        assert.isTrue(yield* primary.waitForReady(Duration.seconds(5)));
+        // Quit (DesktopApp) and an update install (DesktopUpdates) stop every pool instance.
+        yield* Effect.forEach(yield* pool.list, (instance) =>
+          instance.stop({ timeout: Duration.seconds(5) }),
+        );
+        // A relaunch starts it again.
+        yield* primary.start;
+        assert.isTrue(yield* primary.waitForReady(Duration.seconds(5)));
+      }).pipe(
+        Effect.scoped,
+        Effect.provide(layerPool(Ref.makeUnsafe("Local environment"), { home, http })),
+      );
+
+      // The pool's spawner dies on use, so reaching here also means nothing was spawned.
+      assert.isNull(server.exitCode);
+      assert.isNull(server.signalCode);
+    }).pipe(Effect.provide(NodeServices.layer)),
   );
 });
