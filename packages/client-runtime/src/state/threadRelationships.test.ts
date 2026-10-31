@@ -126,7 +126,13 @@ describe("thread relationships", () => {
         pendingBackgroundTasks:
           backgroundKind === null
             ? []
-            : [{ taskId: "task-1", kind: backgroundKind, awaited: backgroundKind === "monitor" }],
+            : [
+                {
+                  taskId: "task-1",
+                  kind: backgroundKind,
+                  ...(backgroundKind === "monitor" ? { awaited: true as const } : {}),
+                },
+              ],
       };
       const child = {
         ...v2ThreadShell,
