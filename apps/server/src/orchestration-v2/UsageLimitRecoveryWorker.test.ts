@@ -87,7 +87,6 @@ const failedThread = (failedAgoMs: number, resetAgoMs: number) => {
     settledOverride: null,
     pendingRuntimeRequest: null,
     limitRecovery: null,
-    snoozedUntil: null,
   };
   return candidate;
 };

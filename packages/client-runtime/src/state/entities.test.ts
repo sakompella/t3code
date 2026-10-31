@@ -50,7 +50,11 @@ describe("V2 client presentation", () => {
     });
     expect(completed.hasPendingUserInput).toBe(true);
     expect(isThreadWorking(completed)).toBe(false);
-    expect(effectiveSnoozed(active, { now: "2026-06-20T00:05:00.000Z" })).toBe(false);
+    // Strict snooze: only the timer or an unsnooze ends it, not a question waiting for an answer.
+    for (const shell of [active, completed]) {
+      expect(effectiveSnoozed(shell, { now: "2026-06-20T00:05:00.000Z" })).toBe(true);
+      expect(effectiveSnoozed(shell, { now: "2026-06-20T01:00:00.000Z" })).toBe(false);
+    }
   });
 
   it("keeps blocking and legacy questions out of Working", () => {

@@ -307,7 +307,7 @@ const makeLaptop = Effect.gen(function* () {
     ),
     Layer.provide(
       Layer.mergeAll(
-        Layer.mock(ProviderRegistry.ProviderRegistry)({}),
+        Layer.mock(ProviderRegistry.ProviderRegistry)({ getProviders: Effect.succeed([]) }),
         Layer.mock(ProviderAdapterRegistry.ProviderAdapterRegistryV2)({}),
         Layer.mock(ScheduledTaskService.ScheduledTaskService)({}),
         Layer.mock(ProjectService.ProjectService)({}),

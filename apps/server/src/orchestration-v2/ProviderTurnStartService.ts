@@ -44,7 +44,11 @@ import {
   historicalMessage,
   latestNativeContextUsage,
 } from "@t3tools/provider-core/server/handoffBudget";
-import { deliverContextHandoffs, withInlineContext } from "./ContextHandoffDelivery.ts";
+import {
+  deliverContextHandoffs,
+  handoffsForRun,
+  withInlineContext,
+} from "./ContextHandoffDelivery.ts";
 import * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
 import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
 import * as ProjectionStore from "./ProjectionStore.ts";
@@ -113,6 +117,11 @@ const PROMPT_REFUSAL_TAGS = [
 const refusedBeforePrompt = (error: unknown): boolean =>
   PROMPT_REFUSAL_TAGS.some((tag) => Predicate.isTagged(error, tag)) ||
   (Predicate.hasProperty(error, "cause") && refusedBeforePrompt(error.cause));
+
+/** A fork an adapter refuses for a protocol reason (no boundary, no session file) fails the same way every time. */
+const isRefusedFork = (error: ProviderAdapter.ProviderAdapterV2Error): boolean =>
+  error._tag === "ProviderAdapterForkThreadError" &&
+  Predicate.isTagged(error.cause, "ProviderAdapterProtocolError");
 
 export interface ProviderTurnStartServiceV2Shape {
   readonly start: (input: {
@@ -235,13 +244,18 @@ export const layer: Layer.Layer<
         typeof RunExecutionService.selectInheritedBackgroundTurnItems
       >;
     }) => {
+      // Guards read only the run's row, and background routing reads live
+      // execution state, never every completed message and tool output in the
+      // thread. `false` means the run moved on or is gone. A failed read is an error,
+      // so the caller fails the start or the run instead of skipping it.
       const isCurrentAttemptInStatus = (expectedStatus: OrchestrationV2Run["status"]) =>
-        projectionStore.getRuntimeRecoveryProjection(input.threadId).pipe(
-          Effect.map((current) => {
-            const run = current.runs.find((candidate) => candidate.id === input.runId);
-            return run?.activeAttemptId === input.attemptId && run.status === expectedStatus;
-          }),
-        );
+        projectionStore
+          .getRunState(input.threadId, input.runId)
+          .pipe(
+            Effect.map(
+              (run) => run?.activeAttemptId === input.attemptId && run.status === expectedStatus,
+            ),
+          );
       return {
         isCurrentAttemptInStatus,
         loadInheritedBackgroundTurnItems: () =>
@@ -259,15 +273,15 @@ export const layer: Layer.Layer<
           ),
         shouldStartProviderTurn: () => isCurrentAttemptInStatus("running"),
         shouldFinalizeRun: () =>
-          projectionStore.getRuntimeRecoveryProjection(input.threadId).pipe(
-            Effect.map((current) => {
-              const run = current.runs.find((candidate) => candidate.id === input.runId);
-              return (
-                run?.activeAttemptId === input.attemptId &&
-                (run.status === "starting" || run.status === "running")
-              );
-            }),
-          ),
+          projectionStore
+            .getRunState(input.threadId, input.runId)
+            .pipe(
+              Effect.map(
+                (run) =>
+                  run?.activeAttemptId === input.attemptId &&
+                  (run.status === "starting" || run.status === "running"),
+              ),
+            ),
         hasUnpairedRunInterruptRequest: () =>
           projectionStore
             .hasUnpairedRunInterruptRequest(
@@ -364,40 +378,17 @@ export const layer: Layer.Layer<
           .filter((transfer) => transfer.type === "subagent_result")
           .map((transfer) => transfer.id),
       );
-      const isPendingForRun = (handoff: OrchestrationV2ContextHandoff, anyProviderThread = false) =>
-        handoff.status === "ready" &&
-        (handoff.targetRunId === run.id ||
-          ((anyProviderThread || handoff.toProviderThreadId === run.providerThreadId) &&
-            projection.runs.some(
-              (source) =>
-                source.id === handoff.targetRunId &&
-                (source.status === "failed" ||
-                  source.status === "interrupted" ||
-                  source.status === "cancelled" ||
-                  (source.status === "completed" &&
-                    handoff.delivery === undefined &&
-                    // Compaction and /goal turns defer history to the next turn.
-                    projection.messages.some(
-                      (message) =>
-                        message.id === source.userMessageId &&
-                        (isCompactionCommandMessage(message) || parseGoalCommand(message) !== null),
-                    ))),
-            )));
       const isSideChatHandoff = (handoff: OrchestrationV2ContextHandoff) =>
         projection.thread.lineage.sideChat === true &&
         ContextHandoffService.isSideChatContextHandoff(handoff);
-      const handoffs = projection.contextHandoffs.filter(
+      const handoffs = handoffsForRun(projection, run).filter(
         (handoff) =>
           !isSideChatHandoff(handoff) &&
-          (handoff.transferId == null || !subagentResultTransfers.has(handoff.transferId)) &&
-          isPendingForRun(handoff),
+          (handoff.transferId == null || !subagentResultTransfers.has(handoff.transferId)),
       );
       // Carried forward until a provider turn accepts it, also after a provider switch.
-      const sideChatHandoff = projection.contextHandoffs.find(
-        (handoff) =>
-          isSideChatHandoff(handoff) &&
-          handoff.delivery === undefined &&
-          isPendingForRun(handoff, true),
+      const sideChatHandoff = handoffsForRun(projection, run, { anyProviderThread: true }).find(
+        (handoff) => isSideChatHandoff(handoff) && handoff.delivery === undefined,
       );
       const nativeForkTransfer = projection.contextTransfers.find(
         (transfer) =>
@@ -809,7 +800,8 @@ export const layer: Layer.Layer<
       ) {
         const loaded = yield* Effect.result(load);
         if (loaded._tag === "Success") return loaded.success;
-        if (input.willRetry === true) return yield* loaded.failure;
+        if (input.willRetry === true && !isRefusedFork(loaded.failure))
+          return yield* loaded.failure;
         yield* settleStartFailure({
           signal: "provider-thread-load-failure",
           title: "Provider turn failed to start",
@@ -1119,6 +1111,37 @@ export const layer: Layer.Layer<
               cause: `Native fork transfer ${nativeForkTransfer.id} has no source provider execution.`,
             });
           }
+          // Rolled-back turns stay in the audit history but no longer exist in
+          // the provider conversation, so their native refs cannot bound a fork.
+          const rolledBackRunIds = new Set(
+            sourceProjection.runs
+              .filter((candidate) => candidate.status === "rolled_back")
+              .map((candidate) => candidate.id),
+          );
+          // Nor can the source provider thread's turns from runs before its
+          // `firstRunOrdinal`: a rollback dropped the native conversation they
+          // belong to (see CheckpointRollbackService).
+          const droppedRunIds = new Set(
+            sourceProjection.runs
+              .filter(
+                (candidate) => candidate.ordinal < (sourceProviderThread.firstRunOrdinal ?? 0),
+              )
+              .map((candidate) => candidate.id),
+          );
+          const attemptRunIds = new Map(
+            sourceProjection.attempts.map((attempt) => [attempt.id, attempt.runId] as const),
+          );
+          const sourceProviderTurns = sourceProjection.providerTurns.filter((turn) => {
+            const turnRunId =
+              turn.runAttemptId === null ? undefined : attemptRunIds.get(turn.runAttemptId);
+            return (
+              turnRunId === undefined ||
+              (!rolledBackRunIds.has(turnRunId) &&
+                !(
+                  turn.providerThreadId === sourceProviderThread.id && droppedRunIds.has(turnRunId)
+                ))
+            );
+          });
           // Providers refuse to fork a busy thread, so a source that started a turn after
           // dispatch planned this fork gets the portable context dispatch gives a busy source.
           const sourceBusy = sourceProjection.runs.some(
@@ -1128,7 +1151,7 @@ export const layer: Layer.Layer<
             return yield* loadFromProvider(
               session.forkThread({
                 sourceProviderThread,
-                sourceProviderTurns: sourceProjection.providerTurns,
+                sourceProviderTurns,
                 targetThreadId: projection.thread.id,
                 modelSelection: run.modelSelection,
                 runtimePolicy: resolvedRuntimePolicy,

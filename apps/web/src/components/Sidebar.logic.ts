@@ -10,6 +10,7 @@ import {
   type AtomCommandResult,
 } from "@t3tools/client-runtime/state/runtime";
 import { defaultAnimateLayoutChanges, type AnimateLayoutChanges } from "@dnd-kit/sortable";
+import { threadUnreadCompletionAt } from "@t3tools/client-runtime/state/thread-heartbeats";
 import {
   threadSearchMatchKey,
   threadSearchSubject,
@@ -278,6 +279,18 @@ type SidebarThreadDropPlan =
       readonly unsnooze: boolean;
     }
   | { readonly kind: "settle" };
+
+/**
+ * Whether the dropped row should be held at its destination while the server
+ * applies the plan. A snoozed row stays on the snoozed shelf unless the plan
+ * wakes it, so pinning or settling it has no destination to hold.
+ */
+export function sidebarDropHoldsPlacement(
+  from: SidebarSection,
+  plan: SidebarThreadDropPlan,
+): boolean {
+  return from !== "snoozed" || (plan.kind === "move-active" && plan.unsnooze);
+}
 
 export type SidebarDropVerb = "pin" | "unpin" | "settle" | "unsettle" | "wake";
 
@@ -707,6 +720,7 @@ type ThreadStatusInput = Pick<
   | "pendingGuestMessageCount"
   | "interactionMode"
   | "latestRun"
+  | "latestTaskRunCompletedAt"
   | "runtime"
 > & {
   lastVisitedAt?: string | null | undefined;
@@ -740,8 +754,9 @@ export function resolveThreadLastVisitedAt(
 }
 
 export function hasUnseenCompletion(thread: ThreadStatusInput): boolean {
-  if (!thread.latestRun?.completedAt) return false;
-  const completedAt = Date.parse(thread.latestRun.completedAt);
+  const unreadCompletionAt = threadUnreadCompletionAt(thread);
+  if (!unreadCompletionAt) return false;
+  const completedAt = Date.parse(unreadCompletionAt);
   if (Number.isNaN(completedAt)) return false;
   if (!thread.lastVisitedAt) return false;
 
@@ -780,6 +795,19 @@ export function isSidebarNestedLinkClick(target: EventTarget | null): boolean {
       ? target.parentElement
       : null;
   return nodeClosest(parent, "a[href]") !== null;
+}
+
+/**
+ * A pointer press on a thread row leaves focus in the composer, so keys typed
+ * right after the click reach the thread it opens. Tab still focuses the row,
+ * nested controls still take focus, and focus elsewhere (a rename field) moves
+ * to the row as before.
+ */
+export function keepComposerFocusOnThreadRowPress(event: React.MouseEvent<HTMLElement>): void {
+  const focused = event.currentTarget.ownerDocument.activeElement;
+  if (focused?.closest('[data-chat-composer-form="true"]') == null) return;
+  if (nodeClosest(event.target, "button, a[href], input, textarea") !== null) return;
+  event.preventDefault();
 }
 
 /** The "New thread in" picker opens unless there is one open project or none; then the current context decides. */

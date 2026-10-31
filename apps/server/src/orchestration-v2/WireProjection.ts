@@ -147,11 +147,28 @@ function capCheckpointItemFiles(item: OrchestrationV2TurnItem): OrchestrationV2T
   return item.type === "checkpoint" ? capCheckpointFiles(item) : item;
 }
 
+/** A subagent's card and its record cross the wire with the same bound. */
+function boundSubagentText<
+  Subagent extends {
+    readonly prompt: string;
+    readonly progress?: string | undefined;
+    readonly result: string | null;
+  },
+>(subagent: Subagent): Subagent {
+  return {
+    ...subagent,
+    prompt: truncateDetail(subagent.prompt) ?? "",
+    progress: truncateDetail(subagent.progress),
+    result: subagent.result === null ? null : (truncateDetail(subagent.result) ?? null),
+  };
+}
+
 export function projectTurnItemForWire(item: OrchestrationV2TurnItem): OrchestrationV2TurnItem {
   switch (item.type) {
     case "checkpoint":
       return capCheckpointFiles(item);
-    case "handoff": {
+    case "handoff":
+    case "rollback_summary": {
       const { summary: _summary, ...projected } = item;
       return projected;
     }
@@ -178,12 +195,7 @@ export function projectTurnItemForWire(item: OrchestrationV2TurnItem): Orchestra
         : projected;
     }
     case "subagent":
-      return {
-        ...item,
-        prompt: truncateDetail(item.prompt) ?? "",
-        progress: truncateDetail(item.progress),
-        result: item.result === null ? null : (truncateDetail(item.result) ?? null),
-      };
+      return boundSubagentText(item);
     case "dynamic_tool": {
       const { output: rawOutput, ...projected } = item;
       const output = compactDynamicToolOutput(rawOutput);
@@ -298,6 +310,7 @@ export function projectThreadProjectionForWire(
   return {
     ...projection,
     checkpoints: projection.checkpoints.map(capCheckpointFiles),
+    subagents: projection.subagents.map(boundSubagentText),
     contextHandoffs: projection.contextHandoffs.map(projectContextHandoffForWire),
     turnItems: projection.turnItems.map(project),
     visibleTurnItems: projection.visibleTurnItems.map((row) => ({
@@ -312,11 +325,13 @@ export function projectDomainEventForWire(
 ): OrchestrationV2DomainEvent {
   return event.type === "turn-item.updated"
     ? { ...event, payload: projectTurnItemForWire(event.payload) }
-    : event.type === "context-handoff.updated"
-      ? { ...event, payload: projectContextHandoffForWire(event.payload) }
-      : event.type === "checkpoint.captured"
-        ? { ...event, payload: capCheckpointFiles(event.payload) }
-        : event;
+    : event.type === "subagent.updated"
+      ? { ...event, payload: boundSubagentText(event.payload) }
+      : event.type === "context-handoff.updated"
+        ? { ...event, payload: projectContextHandoffForWire(event.payload) }
+        : event.type === "checkpoint.captured"
+          ? { ...event, payload: capCheckpointFiles(event.payload) }
+          : event;
 }
 
 const LIVE_DEDUPE_MEMORY = 32;

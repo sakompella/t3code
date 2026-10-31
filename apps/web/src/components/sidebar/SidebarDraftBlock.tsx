@@ -9,7 +9,10 @@ import {
 } from "react";
 import type { EnvironmentProject } from "@t3tools/client-runtime/state/shell";
 import { cn } from "~/lib/utils";
-import { resolveSidebarRowAccessibility } from "../Sidebar.logic";
+import {
+  keepComposerFocusOnThreadRowPress,
+  resolveSidebarRowAccessibility,
+} from "../Sidebar.logic";
 import { ProjectFavicon, type ProjectFaviconProject } from "../ProjectFavicon";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
 import {
@@ -92,6 +95,7 @@ const SidebarDraftRow = memo(function SidebarDraftRow(props: {
           props.isActive ? "bg-sidebar-row-active" : draftSurfaceClassName,
         )}
         onClick={handleActivate}
+        onMouseDown={keepComposerFocusOnThreadRowPress}
         onContextMenu={handleContextMenu}
         onKeyDown={handleKeyDown}
       >

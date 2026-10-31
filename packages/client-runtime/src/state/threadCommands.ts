@@ -392,8 +392,6 @@ export function createThreadEnvironmentAtoms<R, E>(
             activeOrderKey: null,
             pinnedAt: null,
             pinOrderKey: null,
-            snoozedAt: null,
-            snoozedUntil: null,
           },
     ),
     unsettle: optimistic.wrap(commands.unsettle, (thread, input, now) => ({
@@ -435,8 +433,6 @@ export function createThreadEnvironmentAtoms<R, E>(
             unsettledAt: now,
           }
         : {}),
-      snoozedUntil: null,
-      snoozedAt: null,
     })),
     unpin: optimistic.wrap(commands.unpin, (thread) => ({
       ...thread,

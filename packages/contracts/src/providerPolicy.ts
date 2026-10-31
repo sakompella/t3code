@@ -6,6 +6,7 @@ import {
 import * as Schema from "effect/Schema";
 
 import { TrimmedNonEmptyString } from "./baseSchemas.ts";
+import type { ServerProviderAvailability, ServerProviderState } from "./server.ts";
 
 export const ProviderApprovalPolicy = Schema.Literals([
   "untrusted",
@@ -30,6 +31,110 @@ export const RuntimeMode = Schema.Literals([
 ]);
 export type RuntimeMode = typeof RuntimeMode.Type;
 export const DEFAULT_RUNTIME_MODE: RuntimeMode = "full-access";
+
+/** The runtime modes a provider offers, in `RuntimeMode` order; every mode when it states none. */
+export function offeredRuntimeModes(
+  supportedRuntimeModes: ReadonlyArray<RuntimeMode> | undefined,
+): ReadonlyArray<RuntimeMode> {
+  return supportedRuntimeModes === undefined || supportedRuntimeModes.length === 0
+    ? RuntimeMode.literals
+    : RuntimeMode.literals.filter((mode) => supportedRuntimeModes.includes(mode));
+}
+
+/**
+ * The mode a provider runs a thread in. A mode the provider does not offer
+ * (a thread set before it stopped offering it, or a stale client) runs in the
+ * most restrictive mode it does offer, rather than having T3 imitate it.
+ * Clients show this mode, and the server runs and authorizes it.
+ */
+export function providerRuntimeMode(
+  runtimeMode: RuntimeMode,
+  supportedRuntimeModes: ReadonlyArray<RuntimeMode> | undefined,
+): RuntimeMode {
+  const offered = offeredRuntimeModes(supportedRuntimeModes);
+  return offered.includes(runtimeMode) ? runtimeMode : (offered[0] ?? runtimeMode);
+}
+
+/** What decides whether a new thread can start on a provider. */
+export interface StartableProvider {
+  readonly instanceId: string;
+  readonly enabled: boolean;
+  readonly isAvailable: boolean;
+  readonly status: ServerProviderState;
+}
+
+/**
+ * The provider a new thread starts on: the requested one while it is enabled
+ * and available, else the first ready one, else the first enabled, available
+ * one whose probe did not fail. An errored provider is used only when it was
+ * requested; it is never picked as a fallback.
+ */
+export function providerForNewThread<Provider extends StartableProvider>(
+  providers: ReadonlyArray<Provider>,
+  requestedInstanceId: string | undefined,
+): Provider | undefined {
+  const startable = (provider: Provider) => provider.enabled && provider.isAvailable;
+  const requested = providers.find((provider) => provider.instanceId === requestedInstanceId);
+  if (requested !== undefined && startable(requested)) return requested;
+  return (
+    providers.find((provider) => startable(provider) && provider.status === "ready") ??
+    providers.find((provider) => startable(provider) && provider.status !== "error")
+  );
+}
+
+/** Where new threads start: a target's providers and its default model and permissions. */
+export interface NewThreadDefaults {
+  readonly providers: ReadonlyArray<{
+    readonly instanceId: string;
+    readonly enabled: boolean;
+    readonly availability?: ServerProviderAvailability | undefined;
+    readonly status: ServerProviderState;
+    readonly supportedRuntimeModes?: ReadonlyArray<RuntimeMode> | undefined;
+  }>;
+  readonly defaultModelSelection: { readonly instanceId: string } | null;
+  readonly defaultRuntimeMode: RuntimeMode;
+}
+
+/**
+ * The runtime modes a new thread can run in on `target`: those of the
+ * provider it starts on (see `providerForNewThread`). A target where no
+ * provider can start limits nothing.
+ */
+function newThreadOfferedModes(target: NewThreadDefaults): ReadonlyArray<RuntimeMode> {
+  const startsOn = providerForNewThread(
+    target.providers.map((provider) => ({
+      ...provider,
+      isAvailable: provider.availability !== "unavailable",
+    })),
+    target.defaultModelSelection?.instanceId,
+  );
+  return startsOn === undefined
+    ? RuntimeMode.literals
+    : offeredRuntimeModes(startsOn.supportedRuntimeModes);
+}
+
+/** The default permissions a picker may offer: modes new threads can run in on every target. */
+export function runtimeModesForNewThreads(
+  targets: ReadonlyArray<NewThreadDefaults>,
+): ReadonlyArray<RuntimeMode> {
+  return targets.reduce<ReadonlyArray<RuntimeMode>>((offered, target) => {
+    const targetOffers = newThreadOfferedModes(target);
+    return offered.filter((mode) => targetOffers.includes(mode));
+  }, RuntimeMode.literals);
+}
+
+/** The mode new threads run in on every target, or null when targets differ. */
+export function newThreadRuntimeMode(
+  targets: ReadonlyArray<NewThreadDefaults>,
+): RuntimeMode | null {
+  const modes = new Set(
+    targets.map((target) =>
+      providerRuntimeMode(target.defaultRuntimeMode, newThreadOfferedModes(target)),
+    ),
+  );
+  const [mode] = modes;
+  return modes.size === 1 && mode !== undefined ? mode : null;
+}
 
 export const ProviderInteractionMode = Schema.Literals(["default", "plan"]);
 export type ProviderInteractionMode = typeof ProviderInteractionMode.Type;

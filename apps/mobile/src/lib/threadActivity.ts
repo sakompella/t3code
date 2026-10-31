@@ -2,8 +2,14 @@ import type {
   ThreadPendingApproval,
   ThreadPendingUserInput,
 } from "@t3tools/client-runtime/state/thread-requests";
-import { turnItemIsWorkspacePreparation } from "@t3tools/client-runtime/state/turn-item-presentation";
 import type { ThreadCheckpointSummary } from "@t3tools/client-runtime/state/thread-checkpoints";
+import {
+  noticeExpandedText,
+  systemNoticeIsRoutine,
+  turnItemIsFinishedProgressNotice,
+  turnItemIsWorkspacePreparation,
+} from "@t3tools/client-runtime/state/turn-item-presentation";
+import { runFoldSegmentKey, runFoldSegmentLabel } from "@t3tools/client-runtime/state/run-fold";
 import { formatSubagentDisplayTitle } from "@t3tools/client-runtime/state/subagent-display";
 import { isLiveSubagentTurnItem } from "@t3tools/client-runtime/state/subagentRuntime";
 import { extractToolActivityPresentation } from "@t3tools/client-runtime/work-log/tool-presentation";
@@ -16,6 +22,11 @@ import {
   commandDisplayText,
   commandProgramName,
 } from "@t3tools/client-runtime/work-log/command-label";
+import {
+  pythonCellLabel,
+  workEntryLabelCode,
+  type WorkEntryCode,
+} from "@t3tools/client-runtime/work-log/entry-code";
 import {
   contextCompactionLabel,
   liveThoughtLine,
@@ -62,7 +73,6 @@ import {
   formatSearchToolLabel,
 } from "@t3tools/shared/toolActivity";
 import { claudeResumeCompactionAge } from "@t3tools/shared/claudeCompaction";
-import { formatDuration } from "@t3tools/shared/orchestrationTiming";
 import { truncate } from "@t3tools/shared/String";
 import type { HtmlRenderReference } from "@t3tools/shared/htmlRender";
 import type { McpAppReference } from "@t3tools/shared/mcpApp";
@@ -216,6 +226,8 @@ type ThreadFeedEntryContent =
       readonly toolSurface?: WorkLogPresentationEntry["toolSurface"];
       readonly toolIcon?: WorkLogPresentationEntry["toolIcon"];
       readonly summaryToolIcon?: "browser" | "device" | "t3-code" | "pull-request";
+      /** Set when the summary is one call's code, so the header can highlight it. */
+      readonly summaryCode?: WorkEntryCode;
       readonly hasFailure: boolean;
       readonly live: boolean;
       readonly shimmer: boolean;
@@ -227,6 +239,8 @@ type ThreadFeedEntryContent =
       readonly id: string;
       readonly createdAt: string;
       readonly runId: RunId;
+      /** Expand-state key of this fold's run segment. */
+      readonly foldKey: string;
       readonly label: string;
       readonly expanded: boolean;
     }
@@ -259,6 +273,8 @@ export function workEntryRowLabel(entry: WorkLogPresentationEntry, expanded = fa
   const presentation = resolveWorkEntryToolPresentation(entry);
   if (presentation) return presentation.displayName;
   if (entry.command?.trim()) return compactWorkEntryText(commandDisplayText(entry.command));
+  const pythonLabel = pythonCellLabel(entry);
+  if (pythonLabel !== null) return compactWorkEntryText(pythonLabel) || entry.label;
   const action = toolGroupAction(entry);
   const isToolRead = action === "read" && entry.itemType === "dynamic_tool";
   if (action === "code-search" || action === "search") {
@@ -382,6 +398,13 @@ export function isContextHandoffActivityGroup(entry: ThreadFeedActivityGroup): b
   );
 }
 
+function isRollbackSummaryActivityGroup(entry: ThreadFeedActivityGroup): boolean {
+  return (
+    entry.activities.length === 1 &&
+    entry.activities[0]?.projectedItem.item.type === "rollback_summary"
+  );
+}
+
 export function isSecretRequestActivityGroup(entry: ThreadFeedActivityGroup): boolean {
   return (
     entry.activities.length === 1 &&
@@ -498,6 +521,7 @@ function itemIcon(item: OrchestrationV2TurnItem): ThreadFeedActivity["icon"] {
         return "command";
       case "monitor":
         return "eye";
+      case "heartbeat":
       case "background_task":
       case "system":
         return "zap";
@@ -541,7 +565,7 @@ function itemIcon(item: OrchestrationV2TurnItem): ThreadFeedActivity["icon"] {
     case "run_interrupt_result":
       return "stop";
     case "system_notice":
-      return "warning";
+      return systemNoticeIsRoutine(item) ? "zap" : "warning";
     case "error":
       return item.failure.class === "usage_limit"
         ? item.status === "completed"
@@ -552,6 +576,8 @@ function itemIcon(item: OrchestrationV2TurnItem): ThreadFeedActivity["icon"] {
     case "proposed_plan":
     case "todo_list":
       return "check";
+    case "rollback_summary":
+      return "message";
     case "compaction":
     case "handoff":
     case "fork":
@@ -614,6 +640,8 @@ function itemSummary(
       return item.failure.class === "usage_limit" ? "Usage limit reached" : "Provider error";
     case "handoff":
       return "Context handed off";
+    case "rollback_summary":
+      return "Summary of discarded turns";
     case "fork":
       return "Thread forked";
     case "thread_created":
@@ -679,6 +707,9 @@ function itemPreview(item: OrchestrationV2TurnItem): string | null {
     case "fork":
     case "thread_created":
       return item.targetThreadId;
+    case "rollback_summary":
+      // The row keeps its label; the summary is shown only when expanded.
+      return null;
     case "secret_request":
     case "link_request":
       return item.reason || null;
@@ -801,14 +832,17 @@ function toFeedActivity(
     item.type === "dynamic_tool" && toolGroupAction(workEntry) === "read"
       ? collectToolFilePaths(item)
       : null;
-  const getFullDetail = memoizeValue(() =>
-    item.type === "proposed_plan"
-      ? item.markdown
-      : readPaths
-        ? readPaths.join("\n") || null
-        : item.type === "notification"
-          ? item.detail?.trim() || null
-          : formatItemFullDetail(row, item),
+  const noticeText = noticeExpandedText(item);
+  const getFullDetail = memoizeValue(
+    () =>
+      noticeText ??
+      (item.type === "proposed_plan"
+        ? item.markdown
+        : readPaths
+          ? readPaths.join("\n") || null
+          : item.type === "notification"
+            ? item.detail?.trim() || null
+            : formatItemFullDetail(row, item)),
   );
   const getCopyText = memoizeValue(() =>
     item.type === "proposed_plan"
@@ -827,11 +861,15 @@ function toFeedActivity(
     attemptId,
     summary,
     detail,
+    // A notice or notification is its one-line summary, so it opens only when
+    // the row can cut that off or there is a detail to add.
     canExpand:
+      (noticeText !== null || (item.type !== "system_notice" && item.type !== "notification")) &&
       !(item.type === "error" && item.status === "failed") &&
-      (readPaths
-        ? readPaths.length > 0 || turnItemNeedsDetailFetch(item)
-        : turnItemHasDetail(item) || workEntry.questionAnswer !== undefined),
+      (noticeText !== null ||
+        (readPaths
+          ? readPaths.length > 0 || turnItemNeedsDetailFetch(item)
+          : turnItemHasDetail(item) || workEntry.questionAnswer !== undefined)),
     fetchesDetail: turnItemNeedsDetailFetch(item),
     getFullDetail,
     getCopyText,
@@ -859,7 +897,9 @@ function singleToolCallLabel(activity: ThreadFeedActivity, expanded: boolean): s
   const presentation = resolveWorkEntryToolPresentation(activity.workEntry, "completed");
   if (presentation) return presentation.displayName;
   const command = activity.workEntry.command?.trim();
-  return command ? truncate(command, WORK_LOG_LABEL_MAX_LENGTH) : activity.summary;
+  if (command) return compactWorkEntryText(commandDisplayText(command));
+  const pythonLabel = pythonCellLabel(activity.workEntry);
+  return pythonLabel !== null ? compactWorkEntryText(pythonLabel) : activity.summary;
 }
 
 function isEmptyMessage(entry: RawThreadFeedEntry): boolean {
@@ -941,6 +981,7 @@ function groupAdjacentActivities(
       entry.activity.workEntry.questionAnswer !== undefined ||
       entry.activity.projectedItem.item.type === "compaction" ||
       entry.activity.projectedItem.item.type === "handoff" ||
+      entry.activity.projectedItem.item.type === "rollback_summary" ||
       entry.activity.projectedItem.item.type === "notification";
     if (
       isStandaloneActivity ||
@@ -964,12 +1005,6 @@ function groupAdjacentActivities(
   }
   flushGroup();
   return grouped;
-}
-
-function computeElapsedMs(startIso: string, endIso: string): number | null {
-  const start = Date.parse(startIso);
-  const end = Date.parse(endIso);
-  return Number.isFinite(start) && Number.isFinite(end) ? Math.max(0, end - start) : null;
 }
 
 function maxIsoTimestamp(left: string | null, right: string | null): string | null {
@@ -1011,6 +1046,7 @@ function threadFeedActivityIsVisible(
 interface ThreadFeedRunFold {
   readonly deferredWorkItemIds?: ReadonlyArray<string>;
   readonly runId: RunId;
+  readonly key: string;
   readonly createdAt: string;
   readonly hiddenEntryIds: ReadonlySet<string>;
   readonly label: string;
@@ -1039,7 +1075,7 @@ export function failedFeedRunIds(
 }
 
 /**
- * The key a run fold uses for the message `entryId`: its run, or for an
+ * The run whose folds can hide the message `entryId`: its run, or for an
  * imported message with no run, the runless key of the user message before
  * it. Null for user messages, which never fold.
  */
@@ -1060,13 +1096,46 @@ export function messageFoldRunId(
   return null;
 }
 
+/** User messages (steers included) and delivered notifications split a run into segments. */
+function feedEntryIsSegmentBoundary(entry: ThreadFeedEntry): boolean {
+  return (
+    (entry.type === "message" && entry.message.role === "user") ||
+    (entry.type === "activity-group" &&
+      entry.activities.some((activity) => activity.projectedItem.item.type === "notification"))
+  );
+}
+
+/**
+ * The assistant message that ends each response: the last one per run in
+ * every segment. A run keeps the reply to each steer and notification visible.
+ */
+export function deriveTerminalAssistantMessageIds(
+  feed: ReadonlyArray<ThreadFeedEntry>,
+): ReadonlySet<string> {
+  const lastIdByResponseKey = new Map<string, string>();
+  let boundaryIndex = 0;
+  for (const entry of feed) {
+    if (feedEntryIsSegmentBoundary(entry)) {
+      boundaryIndex += 1;
+    } else if (entry.type === "message" && entry.message.role === "assistant") {
+      lastIdByResponseKey.set(`${entry.message.runId ?? "unkeyed"}:${boundaryIndex}`, entry.id);
+    }
+  }
+  return new Set(lastIdByResponseKey.values());
+}
+
+/**
+ * A prompt without a run (provider-native subagent, imported V1 turn) folds like a run.
+ * `runlessWorkActive` keeps the latest runless response open; V2 work must not reopen imported
+ * turns.
+ */
 function deriveThreadFeedRunFolds(
   feed: ReadonlyArray<ThreadFeedEntry>,
   latestRun: ThreadFeedLatestRun | null,
   runlessWorkActive: boolean,
   feedFailedRunIds: ReadonlySet<RunId>,
 ): ReadonlyMap<string, ThreadFeedRunFold> {
-  const terminalAssistantMessageIdByRun = new Map<RunId, string>();
+  const terminalAssistantMessageIds = deriveTerminalAssistantMessageIds(feed);
   const interruptedRunIds = new Set<RunId>();
   const failedRunIds = new Set(feedFailedRunIds);
   const promptIndexByRunId = new Map<RunId, number>();
@@ -1082,14 +1151,24 @@ function deriveThreadFeedRunFolds(
     const runId = entry.message.runId;
     if (runId != null && !promptIndexByRunId.has(runId)) promptIndexByRunId.set(runId, index);
   }
+  interface RunSegment {
+    readonly key: string;
+    readonly entries: ThreadFeedEntry[];
+    /** The prompt, steer or notification that started the segment. */
+    readonly startBoundary: string | null;
+  }
   const groupsByRunId = new Map<
     RunId,
-    { entries: ThreadFeedEntry[]; startBoundary: string | null }
+    { segments: RunSegment[]; boundaryEntryId: string | null }
   >();
   let runlessKey: RunId | null = null;
   let responseKey: RunId | null = null;
   let pendingUserBoundary: string | null = null;
+  let segmentBoundary: { entryId: string; createdAt: string } | null = null;
   for (const [index, entry] of feed.entries()) {
+    if (feedEntryIsSegmentBoundary(entry)) {
+      segmentBoundary = { entryId: entry.id, createdAt: entry.createdAt };
+    }
     if (entry.type === "message" && entry.message.role === "user") {
       pendingUserBoundary = entry.message.createdAt;
       runlessKey = entry.message.runId == null ? RunId.make(`runless:${entry.id}`) : null;
@@ -1112,14 +1191,27 @@ function deriveThreadFeedRunFolds(
         : ownRunId;
     let group = groupsByRunId.get(runId);
     if (!group) {
-      group = { entries: [], startBoundary: pendingUserBoundary };
+      group = {
+        segments: [
+          {
+            key: runFoldSegmentKey(runId, null),
+            entries: [],
+            startBoundary: pendingUserBoundary,
+          },
+        ],
+        boundaryEntryId: segmentBoundary?.entryId ?? null,
+      };
       pendingUserBoundary = null;
       groupsByRunId.set(runId, group);
+    } else if (segmentBoundary !== null && group.boundaryEntryId !== segmentBoundary.entryId) {
+      group.segments.push({
+        key: runFoldSegmentKey(runId, segmentBoundary.entryId),
+        entries: [],
+        startBoundary: segmentBoundary.createdAt,
+      });
+      group.boundaryEntryId = segmentBoundary.entryId;
     }
-    group.entries.push(entry);
-    if (entry.type === "message") {
-      terminalAssistantMessageIdByRun.set(runId, entry.id);
-    }
+    group.segments.at(-1)!.entries.push(entry);
     if (entry.type !== "activity-group") continue;
     for (const activity of entry.activities) {
       const item = activity.projectedItem.item;
@@ -1138,91 +1230,83 @@ function deriveThreadFeedRunFolds(
   const activeRunId = unsettledRunId(latestRun);
   const foldsByAnchorId = new Map<string, ThreadFeedRunFold>();
   for (const [runId, group] of groupsByRunId) {
+    const entries = group.segments.flatMap((segment) => segment.entries);
     if (
       runId === activeRunId ||
       (runlessWorkActive && runId === runlessKey) ||
       interruptedRunIds.has(runId) ||
       failedRunIds.has(runId) ||
-      group.entries.some((entry) => entry.type === "message" && entry.message.streaming)
+      entries.some((entry) => entry.type === "message" && entry.message.streaming)
     ) {
       continue;
     }
-    const terminalAssistantId = terminalAssistantMessageIdByRun.get(runId);
-    const hiddenEntryIds = new Set(
-      group.entries
-        .filter(
-          (entry) =>
-            entry.id !== terminalAssistantId &&
-            entry.type !== "html-render" &&
-            entry.type !== "mcp-app" &&
-            !(entry.type === "activity-group" && isContextCompactionActivityGroup(entry)) &&
-            !(
-              entry.type === "activity-group" &&
-              entry.activities.some(
-                (activity) =>
-                  activity.prominent ||
-                  activity.workEntry.questionAnswer !== undefined ||
-                  activity.projectedItem.item.type === "notification" ||
-                  activity.projectedItem.item.type === "handoff" ||
-                  // A child still working outlives its settled launching run;
-                  // its group stays visible while any member is live.
-                  isLiveSubagentTurnItem(activity.projectedItem.item),
-              )
-            ),
-        )
-        .map((entry) => entry.id),
-    );
-    const firstEntry = group.entries[0];
-    const firstHiddenEntry = group.entries.find((entry) => hiddenEntryIds.has(entry.id));
-    const lastEntry = group.entries.at(-1);
-    if (!firstHiddenEntry || !firstEntry || !lastEntry) continue;
-    const hidesNonCompactionWork = group.entries.some(
-      (entry) =>
-        hiddenEntryIds.has(entry.id) &&
-        !(entry.type === "activity-group" && isContextCompactionActivityGroup(entry)),
-    );
-    if (!hidesNonCompactionWork) continue;
-    const terminalEntry = terminalAssistantId
-      ? group.entries.find((entry) => entry.id === terminalAssistantId)
-      : null;
-    const latestRunMatches = latestRun?.runId === runId;
-    const lastEntryEnd =
-      lastEntry.type === "message" ? lastEntry.message.updatedAt : lastEntry.createdAt;
-    const elapsedMs =
-      latestRunMatches && latestRun.startedAt && latestRun.completedAt
-        ? computeElapsedMs(latestRun.startedAt, latestRun.completedAt)
-        : computeElapsedMs(
-            group.startBoundary ?? firstEntry.createdAt,
-            maxIsoTimestamp(
-              terminalEntry?.type === "message" ? terminalEntry.message.updatedAt : null,
-              lastEntryEnd,
-            ) ?? lastEntryEnd,
-          );
-    const duration = elapsedMs === null ? null : formatDuration(elapsedMs);
-    const interrupted =
-      latestRunMatches && (latestRun.status === "interrupted" || latestRun.status === "cancelled");
-    const deferredWorkItemIds = group.entries.flatMap((entry) =>
-      entry.type === "activity-group"
-        ? entry.activities.flatMap((activity) =>
-            activity.projectedItem.item.deferredWork
-              ? [String(activity.projectedItem.sourceItemId)]
-              : [],
+    const runTiming = latestRun?.runId === runId ? latestRun : null;
+    for (const [segmentIndex, segment] of group.segments.entries()) {
+      const hiddenEntryIds = new Set(
+        segment.entries
+          .filter(
+            (entry) =>
+              entry.type !== "html-render" &&
+              entry.type !== "mcp-app" &&
+              !terminalAssistantMessageIds.has(entry.id) &&
+              !(entry.type === "activity-group" && isContextCompactionActivityGroup(entry)) &&
+              !(
+                entry.type === "activity-group" &&
+                entry.activities.some(
+                  (activity) =>
+                    activity.prominent ||
+                    activity.workEntry.questionAnswer !== undefined ||
+                    activity.projectedItem.item.type === "notification" ||
+                    activity.projectedItem.item.type === "handoff" ||
+                    activity.projectedItem.item.type === "rollback_summary" ||
+                    // A child still working outlives its settled launching run;
+                    // its group stays visible while any member is live.
+                    isLiveSubagentTurnItem(activity.projectedItem.item),
+                )
+              ),
           )
-        : [],
-    );
-    foldsByAnchorId.set(firstHiddenEntry.id, {
-      ...(deferredWorkItemIds.length > 0 ? { deferredWorkItemIds } : {}),
-      runId,
-      createdAt: firstHiddenEntry.createdAt,
-      hiddenEntryIds,
-      label: interrupted
-        ? duration
-          ? `You stopped after ${duration}`
-          : "You stopped this response"
-        : duration
-          ? `Worked for ${duration}`
-          : "Worked",
-    });
+          .map((entry) => entry.id),
+      );
+      const firstEntry = segment.entries[0];
+      const firstHiddenEntry = segment.entries.find((entry) => hiddenEntryIds.has(entry.id));
+      const lastEntry = segment.entries.at(-1);
+      if (!firstHiddenEntry || !firstEntry || !lastEntry) continue;
+      const terminalEntry = segment.entries.findLast((entry) =>
+        terminalAssistantMessageIds.has(entry.id),
+      );
+      const lastEntryEnd =
+        lastEntry.type === "message" ? lastEntry.message.updatedAt : lastEntry.createdAt;
+      const deferredWorkItemIds = segment.entries.flatMap((entry) =>
+        entry.type === "activity-group"
+          ? entry.activities.flatMap((activity) =>
+              activity.projectedItem.item.deferredWork
+                ? [String(activity.projectedItem.sourceItemId)]
+                : [],
+            )
+          : [],
+      );
+      foldsByAnchorId.set(firstHiddenEntry.id, {
+        ...(deferredWorkItemIds.length > 0 ? { deferredWorkItemIds } : {}),
+        runId,
+        key: segment.key,
+        createdAt: firstHiddenEntry.createdAt,
+        hiddenEntryIds,
+        label: runFoldSegmentLabel({
+          segment: {
+            start: segment.startBoundary ?? firstEntry.createdAt,
+            end:
+              maxIsoTimestamp(
+                terminalEntry?.type === "message" ? terminalEntry.message.updatedAt : null,
+                lastEntryEnd,
+              ) ?? lastEntryEnd,
+            isFirst: segmentIndex === 0,
+            isLast: segmentIndex === group.segments.length - 1,
+          },
+          run: runTiming,
+          stopped: runTiming?.status === "interrupted" || runTiming?.status === "cancelled",
+        }),
+      });
+    }
   }
   const covered = new Set(
     [...foldsByAnchorId.values()].flatMap((fold) => [...fold.hiddenEntryIds]),
@@ -1233,8 +1317,10 @@ function deriveThreadFeedRunFolds(
       activity.projectedItem.item.deferredWork ? [String(activity.projectedItem.sourceItemId)] : [],
     );
     if (deferredWorkItemIds.length === 0) continue;
+    const runId = RunId.make(`deferred-work:${entry.id}`);
     foldsByAnchorId.set(entry.id, {
-      runId: RunId.make(`deferred-work:${entry.id}`),
+      runId,
+      key: runFoldSegmentKey(runId, null),
       createdAt: entry.createdAt,
       hiddenEntryIds: new Set([entry.id]),
       label: "Earlier work",
@@ -1277,7 +1363,7 @@ function settleSupersededReasoning(
 interface ThreadFeedPresentationBuild {
   readonly feed: ReadonlyArray<ThreadFeedEntry>;
   readonly latestRun: ThreadFeedLatestRun | null;
-  readonly expandedRunIds: ReadonlySet<RunId>;
+  readonly expandedFoldKeys: ReadonlySet<string>;
   readonly expandedWorkGroupIds: ReadonlySet<string>;
   readonly activeWorkStartedAt: string | null;
   readonly runlessWorkActive: boolean;
@@ -1319,7 +1405,7 @@ function presentationRestart(
   previous: ThreadFeedPresentationBuild | null,
   feed: ReadonlyArray<ThreadFeedEntry>,
   latestRun: ThreadFeedLatestRun | null,
-  expandedRunIds: ReadonlySet<RunId>,
+  expandedFoldKeys: ReadonlySet<string>,
   expandedWorkGroupIds: ReadonlySet<string>,
   activeWorkStartedAt: string | null,
   runlessWorkActive: boolean,
@@ -1329,7 +1415,7 @@ function presentationRestart(
     !latestRunsEqual(previous.latestRun, latestRun) ||
     previous.activeWorkStartedAt !== activeWorkStartedAt ||
     previous.runlessWorkActive !== runlessWorkActive ||
-    !setsEqual(previous.expandedRunIds, expandedRunIds) ||
+    !setsEqual(previous.expandedFoldKeys, expandedFoldKeys) ||
     !setsEqual(previous.expandedWorkGroupIds, expandedWorkGroupIds)
   ) {
     return null;
@@ -1350,7 +1436,8 @@ function presentationRestart(
 export function deriveThreadFeedPresentation(
   feed: ReadonlyArray<ThreadFeedEntry>,
   latestRun: ThreadFeedLatestRun | null,
-  expandedRunIds: ReadonlySet<RunId>,
+  /** Expanded run fold segments, by `runFoldSegmentKey`. */
+  expandedFoldKeys: ReadonlySet<string>,
   expandedWorkGroupIds: ReadonlySet<string> = new Set(),
   activeWorkStartedAt: string | null = null,
   runlessWorkActive = false,
@@ -1361,7 +1448,7 @@ export function deriveThreadFeedPresentation(
     previous,
     feed,
     latestRun,
-    expandedRunIds,
+    expandedFoldKeys,
     expandedWorkGroupIds,
     activeWorkStartedAt,
     runlessWorkActive,
@@ -1425,7 +1512,7 @@ export function deriveThreadFeedPresentation(
   );
   const collapsedEntryIds = new Set<string>();
   for (const fold of foldsByAnchorId.values()) {
-    if (!expandedRunIds.has(fold.runId)) {
+    if (!expandedFoldKeys.has(fold.key)) {
       for (const entryId of fold.hiddenEntryIds) collapsedEntryIds.add(entryId);
     }
   }
@@ -1449,11 +1536,11 @@ export function deriveThreadFeedPresentation(
       entry.runId === activeRunId;
     const fold = foldsByAnchorId.get(entry.id);
     if (fold) {
-      const expanded = expandedRunIds.has(fold.runId);
+      const expanded = expandedFoldKeys.has(fold.key);
       let row = runFoldRowsCache.get(entry);
       if (
         !row ||
-        row.runId !== fold.runId ||
+        row.foldKey !== fold.key ||
         row.createdAt !== fold.createdAt ||
         row.label !== fold.label ||
         row.expanded !== expanded ||
@@ -1461,10 +1548,11 @@ export function deriveThreadFeedPresentation(
       ) {
         row = {
           type: "run-fold",
-          id: `run-fold:${fold.runId}`,
+          id: `run-fold:${fold.key}`,
           ...(fold.deferredWorkItemIds ? { deferredWorkItemIds: fold.deferredWorkItemIds } : {}),
           createdAt: fold.createdAt,
           runId: fold.runId,
+          foldKey: fold.key,
           label: fold.label,
           expanded,
         };
@@ -1601,7 +1689,7 @@ export function deriveThreadFeedPresentation(
     cache.presentation = {
       feed,
       latestRun,
-      expandedRunIds,
+      expandedFoldKeys,
       expandedWorkGroupIds,
       activeWorkStartedAt,
       runlessWorkActive,
@@ -1623,6 +1711,7 @@ function isWorkLogFeedRow(row: ThreadFeedEntry | undefined): boolean {
       (row.type === "activity-group" &&
         !isContextCompactionActivityGroup(row) &&
         !isContextHandoffActivityGroup(row) &&
+        !isRollbackSummaryActivityGroup(row) &&
         row.activities.every(
           (activity) =>
             !activity.prominent &&
@@ -1656,6 +1745,7 @@ function appendPresentedFeedEntry(
   if (
     isContextCompactionActivityGroup(entry) ||
     isContextHandoffActivityGroup(entry) ||
+    isRollbackSummaryActivityGroup(entry) ||
     isUserInputActivityGroup(entry) ||
     entry.activities[0]?.projectedItem.item.type === "subagent"
   ) {
@@ -1826,6 +1916,7 @@ function appendToolGroupRows(
   const summaryToolIcon = live
     ? resolveWorkEntryToolPresentation(latestActivity.workEntry)?.icon
     : undefined;
+  const summaryCode = live ? workEntryLabelCode(latestActivity.workEntry, summary) : null;
   result.push({
     type: "work-toggle",
     id,
@@ -1842,6 +1933,7 @@ function appendToolGroupRows(
     ...(groupToolIcon ? { toolIcon: groupToolIcon } : {}),
     ...(summaryToolIcon ? { summaryToolIcon } : {}),
     ...(thought ? { thought } : {}),
+    ...(summaryCode ? { summaryCode } : {}),
     hasFailure: (() => {
       const lastToolLike = activities.findLast((activity) => activity.toolLike);
       return (
@@ -1897,6 +1989,8 @@ function liveToolActivitySummary(activity: ThreadFeedActivity, presentTense: boo
               : "Ran";
     return `${verb} ${program ?? "command"}`;
   }
+  const pythonLabel = pythonCellLabel(activity.workEntry);
+  if (pythonLabel !== null) return compactWorkEntryText(pythonLabel);
   return activity.detail ?? activity.summary;
 }
 
@@ -2060,6 +2154,7 @@ export function buildThreadFeed(
     const row = visibleTurnItems[index]!;
     const item = row.item;
     if (turnItemIsWorkspacePreparation(item) && !item.deferredWork) continue;
+    if (turnItemIsFinishedProgressNotice(item)) continue;
     if (item.type === "todo_list" || item.type === "checkpoint") continue;
     if (
       item.type === "user_message" &&

@@ -25,6 +25,7 @@ import {
   deriveRunlessWorkStartedAt,
   deriveThreadActivityRun,
   deriveThreadRuntime,
+  presentPendingBackgroundWork,
   presentProviderGoal,
   presentRunStop,
   threadRuntimeHasInterruptibleRun,
@@ -415,6 +416,30 @@ describe("deriveProviderSubagentStatus", () => {
   it("leaves T3 delegated tasks and ordinary threads alone", () => {
     expect(deriveProviderSubagentStatus(child("mcp"))).toBeNull();
     expect(deriveProviderSubagentStatus({ ...v2Projection, nodes: [root] })).toBeNull();
+  });
+});
+
+describe("presentPendingBackgroundWork", () => {
+  it("reads as running, not waiting, while a turn runs", () => {
+    expect(
+      presentPendingBackgroundWork(
+        [
+          { taskId: "a", kind: "command", description: "npm run dev" },
+          { taskId: "b", kind: "subagent" },
+        ],
+        { turnRunning: true },
+      ),
+    ).toMatchObject({ title: "Running 1 subagent and 1 command", waiting: false });
+    expect(
+      presentPendingBackgroundWork([{ taskId: "a", kind: "monitor", description: "Watch PR" }], {
+        turnRunning: true,
+      }),
+    ).toMatchObject({ title: "Running: Watch PR", waiting: false });
+    expect(
+      presentPendingBackgroundWork([
+        { taskId: "a", kind: "monitor", description: "Watch PR", awaited: true },
+      ]),
+    ).toMatchObject({ title: "Watch PR", waiting: true });
   });
 });
 
