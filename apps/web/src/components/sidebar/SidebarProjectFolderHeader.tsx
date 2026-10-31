@@ -11,19 +11,33 @@ import { ProjectFavicon } from "../ProjectFavicon";
 import { Button } from "../ui/button";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
 
-const FOLDER_DOT_CLASS_NAME = {
+export const FOLDER_DOT_CLASS_NAME = {
   attention: "bg-warning",
   failed: "bg-error",
   unread: "bg-success",
   working: "bg-info",
 } as const;
 
-const FOLDER_DOT_LABEL = {
+export const FOLDER_DOT_LABEL = {
   attention: ", needs you",
   failed: ", failed",
   unread: ", done",
   working: ", working",
 } as const;
+
+/** The status dot a closed group shows for the threads it hides. */
+export function useHiddenThreadsDot(hiddenThreads: readonly EnvironmentThreadShell[]) {
+  const localLastVisitedAtById = useUiStateStore((state) => state.threadLastVisitedAtById);
+  return resolveSidebarFolderDot(
+    hiddenThreads.map((thread) => ({
+      ...thread,
+      lastVisitedAt: resolveThreadLastVisitedAt(
+        thread.lastVisitedAt,
+        localLastVisitedAtById[scopedThreadKey(scopeThreadRef(thread.environmentId, thread.id))],
+      ),
+    })),
+  );
+}
 
 /** The folder's sidebar tree row; its thread rows name it as their parent. */
 export function sidebarFolderRowId(projectKey: string) {
@@ -45,20 +59,7 @@ export const SidebarProjectFolderHeader = memo(function SidebarProjectFolderHead
 }) {
   const { group, collapsed, hiddenThreads } = props;
   const rowId = sidebarFolderRowId(group.projectKey);
-  const localLastVisitedAtById = useUiStateStore((state) => state.threadLastVisitedAtById);
-  const dot = collapsed
-    ? resolveSidebarFolderDot(
-        hiddenThreads.map((thread) => ({
-          ...thread,
-          lastVisitedAt: resolveThreadLastVisitedAt(
-            thread.lastVisitedAt,
-            localLastVisitedAtById[
-              scopedThreadKey(scopeThreadRef(thread.environmentId, thread.id))
-            ],
-          ),
-        })),
-      )
-    : null;
+  const dot = useHiddenThreadsDot(collapsed ? hiddenThreads : []);
   return (
     <li
       data-testid="sidebar-project-folder"
