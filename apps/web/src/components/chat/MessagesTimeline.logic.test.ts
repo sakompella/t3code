@@ -1436,7 +1436,6 @@ describe("deriveMessagesTimelineRows", () => {
         timelineEntries,
         latestRun: { runId, status: "completed", startedAt: time(0), completedAt: time(30) },
         isWorking: false,
-        expandedRunIds: new Set(),
         turnDiffSummaries: [],
         supportsConversationRollback: false,
       });

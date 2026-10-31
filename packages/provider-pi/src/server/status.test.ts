@@ -222,7 +222,7 @@ describe("PiProvider", () => {
     },
     {
       label: "a pinned model on Pi without auth check",
-      version: MINIMUM_PI_VERSION,
+      version: PI_FLAVOR.minimumVersion,
       activeModel: { provider: "openai", id: "gpt-5" },
       authCheck: undefined,
       message: "Pi default (openai/gpt-5) uses openai, which has no available models in Pi.",
@@ -252,7 +252,7 @@ describe("PiProvider", () => {
         },
         { version: row.version, state: { model: row.activeModel }, authCheck: row.authCheck },
       );
-      const snapshot = yield* checkPiProviderStatus({
+      const snapshot = yield* checkPiProviderStatus(PI_FLAVOR, {
         ...settings,
         launchArgs: row.launchArgs ?? "",
       }).pipe(Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner));

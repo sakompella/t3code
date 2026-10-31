@@ -45,7 +45,10 @@ export function resolveMergeBackTargetThreadId(
 }
 
 /** A thread's status as Lineage shows it: waiting where the sidebar shows Waiting. */
-function shellActivityStatus(thread: OrchestrationV2ThreadShell): string {
+function shellActivityStatus(
+  thread: Pick<OrchestrationV2ThreadShell, "activityRunStatus"> &
+    Parameters<typeof backgroundWorkHoldsThread>[0],
+) {
   return backgroundWorkHoldsThread(thread)
     ? "waiting"
     : (thread.activityRunStatus ?? thread.status);

@@ -124,7 +124,9 @@ describe("thread relationships", () => {
         status,
         activityRunStatus,
         pendingBackgroundTasks:
-          backgroundKind === null ? [] : [{ taskId: "task-1", kind: backgroundKind }],
+          backgroundKind === null
+            ? []
+            : [{ taskId: "task-1", kind: backgroundKind, awaited: backgroundKind === "monitor" }],
       };
       const child = {
         ...v2ThreadShell,

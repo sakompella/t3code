@@ -239,9 +239,10 @@ export function shellHasPendingUserInput(thread: OrchestrationV2ThreadShell): bo
  * unmarked commands and monitors (a dev server) do not. A failed latest run outranks the roster so
  * the failure stays visible.
  */
-export function backgroundWorkHoldsThread(
-  thread: Pick<OrchestrationV2ThreadShell, "pendingBackgroundTasks" | "status">,
-): boolean {
+export function backgroundWorkHoldsThread(thread: {
+  readonly pendingBackgroundTasks?: OrchestrationV2ThreadShell["pendingBackgroundTasks"];
+  readonly status: OrchestrationV2ThreadShell["status"] | null;
+}): boolean {
   return (
     backgroundWorkHoldsCompletion(thread.pendingBackgroundTasks ?? []) && thread.status !== "failed"
   );
