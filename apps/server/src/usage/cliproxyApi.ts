@@ -2,6 +2,9 @@ import {
   ProviderDriverKind,
   UsageLimitSourceError,
   type ProviderConsumeResetCreditResult,
+  UsageLimitPoolDashboard,
+  type UsageLimitPoolsInput,
+  type UsageLimitPoolsResult,
   type UsageLimitSourceAccount,
   type UsageLimitSourceConfig,
 } from "@t3tools/contracts";
@@ -89,6 +92,7 @@ const decodeApiResponse = Schema.decodeUnknownEffect(ApiResponse);
 const decodeCreditList = Schema.decodeUnknownEffect(Schema.fromJsonString(CreditList));
 const decodeClaudeUsage = Schema.decodeUnknownEffect(Schema.fromJsonString(ClaudeUsage));
 const decodeCodexUsage = Schema.decodeUnknownEffect(Schema.fromJsonString(CodexUsage));
+const decodePoolDashboard = Schema.decodeUnknownEffect(UsageLimitPoolDashboard);
 const isUsageLimitSourceError = Schema.is(UsageLimitSourceError);
 
 // Extra CAs can fix untrusted chains; expiry/hostname failures report codes only.
@@ -161,22 +165,32 @@ export const makeCliproxyApi = Effect.gen(function* () {
   const client = yield* HttpClient.HttpClient;
   const crypto = yield* Crypto.Crypto;
 
-  const management = Effect.fn("CliproxyApi.management")(function* (
+  const managementRequest = (
     config: UsageLimitSourceConfig,
     path: string,
-    body?: unknown,
-  ) {
-    const url = yield* Effect.try({
+    method: "GET" | "POST",
+  ) =>
+    Effect.try({
       try: () =>
         new URL(
           `v0/management/${path}`,
           config.url.endsWith("/") ? config.url : `${config.url}/`,
         ).toString(),
       catch: () => new UsageLimitSourceError({ detail: "The hub URL is not valid." }),
-    });
-    const request = (
-      body === undefined ? HttpClientRequest.get(url) : HttpClientRequest.post(url)
-    ).pipe(HttpClientRequest.setHeader("Authorization", `Bearer ${config.managementKey}`));
+    }).pipe(
+      Effect.map((url) =>
+        (method === "GET" ? HttpClientRequest.get(url) : HttpClientRequest.post(url)).pipe(
+          HttpClientRequest.setHeader("Authorization", `Bearer ${config.managementKey}`),
+        ),
+      ),
+    );
+
+  const management = Effect.fn("CliproxyApi.management")(function* (
+    config: UsageLimitSourceConfig,
+    path: string,
+    body?: unknown,
+  ) {
+    const request = yield* managementRequest(config, path, body === undefined ? "GET" : "POST");
     const response = yield* client
       .execute(body === undefined ? request : request.pipe(HttpClientRequest.bodyJsonUnsafe(body)))
       .pipe(
@@ -423,5 +437,42 @@ export const makeCliproxyApi = Effect.gen(function* () {
       ),
     );
   });
-  return { readAccounts, consume };
+  // A hub without quota history answers 404, which is not an error: Limits then shows no forecast.
+  const quotaPools = Effect.fn("CliproxyApi.quotaPools")(function* (
+    config: UsageLimitSourceConfig,
+    query: Pick<UsageLimitPoolsInput, "window" | "lookbackHours">,
+  ): Effect.fn.Return<UsageLimitPoolsResult, UsageLimitSourceError> {
+    const request = yield* managementRequest(config, "quota/pools", "GET");
+    const body = yield* client
+      .execute(
+        request.pipe(
+          HttpClientRequest.setUrlParams({
+            window: query.window,
+            lookback: String(query.lookbackHours),
+          }),
+        ),
+      )
+      .pipe(
+        Effect.flatMap((response) =>
+          response.status === 404
+            ? Effect.succeed(null)
+            : HttpClientResponse.filterStatusOk(response).pipe(Effect.flatMap((ok) => ok.json)),
+        ),
+        Effect.timeout("15 seconds"),
+        Effect.mapError(
+          (error) => new UsageLimitSourceError({ detail: describeManagementFailure(error) }),
+        ),
+      );
+    if (body === null) return null;
+    return yield* decodePoolDashboard(body).pipe(
+      Effect.mapError(
+        () =>
+          new UsageLimitSourceError({
+            detail: "The hub returned an unexpected quota history response.",
+          }),
+      ),
+    );
+  });
+
+  return { readAccounts, consume, quotaPools };
 });

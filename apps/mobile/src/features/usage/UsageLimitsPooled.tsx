@@ -8,14 +8,16 @@ import {
   collectLimitNotices,
   collectLimitPools,
   cursorUsageWindowDetails,
-  displayLimitWindows,
   formatReadingAge,
   formatResetsIn,
+  groupLimitWindows,
   paceRemainingPercent,
   remainingPercent,
+  type GroupedLimitWindow,
   type LimitAccount,
   type LimitPoolWindow,
 } from "@t3tools/shared/usageLimits";
+import { hubPoolSources } from "@t3tools/shared/usageLimitPools";
 import { Fragment, type ReactNode, useId, useState } from "react";
 import { Linking, Pressable, View } from "react-native";
 import { ScreenScrollView as ScrollView } from "../../components/ui/ScreenScrollView";
@@ -27,6 +29,7 @@ import { AppText as Text } from "../../components/ui/AppText";
 import { ProviderIcon } from "../../components/ProviderIcon";
 import { SettingsScreen } from "../settings/components/SettingsScreen";
 import { environmentPresentations } from "../../state/presentation";
+import { HubPoolStats } from "./UsageLimitForecast";
 import { ResetCredits } from "./UsageLimitsSection";
 import { usageProviderKind, useProviderColors } from "./usageProviders";
 
@@ -164,12 +167,13 @@ function AccountSegment({
   );
 }
 
-function PoolWindowCard({
+function PoolGroup({
   pool,
   color,
   now,
   environmentIds,
-  label,
+  title,
+  titleClassName,
   description,
   wide,
 }: {
@@ -177,8 +181,9 @@ function PoolWindowCard({
   readonly color: string;
   readonly now: number;
   readonly environmentIds: readonly string[] | null;
-  readonly label?: string;
-  readonly description?: string;
+  readonly title: string;
+  readonly titleClassName: string;
+  readonly description?: string | undefined;
   readonly wide: boolean;
 }) {
   const navigation = useNavigation();
@@ -201,7 +206,7 @@ function PoolWindowCard({
     <>
       <View className={wide ? "gap-1" : "flex-row items-start justify-between gap-3"}>
         <View className="gap-1">
-          <Text className="text-sm font-t3-medium text-foreground">{label ?? pool.label}</Text>
+          <Text className={titleClassName}>{title}</Text>
           <View className="flex-row items-baseline gap-1.5">
             <Text className="text-3xl font-t3-bold tabular-nums text-foreground">
               {pool.remainingPercent}%
@@ -392,7 +397,7 @@ function PoolWindowCard({
   );
   if (wide) {
     return (
-      <View className="flex-row items-center gap-6 rounded-[24px] border-continuous bg-grouped-card p-4">
+      <View className="flex-row items-center gap-6">
         <View className="w-44 gap-1">{summary}</View>
         <View className="min-w-0 flex-1 gap-1">
           {bar}
@@ -403,10 +408,58 @@ function PoolWindowCard({
     );
   }
   return (
-    <View className="gap-3 rounded-[24px] border-continuous bg-grouped-card p-4">
+    <View className="gap-3">
       {summary}
       {bar}
       {legend}
+    </View>
+  );
+}
+
+/** Groups only appear when the provider has accounts in more than one place. */
+function PoolWindowCard({
+  grouped,
+  color,
+  now,
+  environmentIds,
+  label,
+  description,
+  wide,
+}: {
+  readonly grouped: GroupedLimitWindow;
+  readonly color: string;
+  readonly now: number;
+  readonly environmentIds: readonly string[] | null;
+  readonly label?: string;
+  readonly description?: string;
+  readonly wide: boolean;
+}) {
+  const title = label ?? grouped.window.label;
+  // Labels are all set or all null; a window one source reports still needs its own name.
+  const split = grouped.groups.some((group) => group.label !== null);
+  return (
+    <View className="gap-4 rounded-[24px] border-continuous bg-grouped-card p-4">
+      {split ? <Text className="text-sm font-t3-medium text-foreground">{title}</Text> : null}
+      {grouped.groups.map((group) => (
+        <PoolGroup
+          key={group.label ?? ""}
+          pool={group.window}
+          color={color}
+          now={now}
+          environmentIds={environmentIds}
+          title={group.label ?? title}
+          titleClassName={
+            split
+              ? "text-xs font-t3-medium text-foreground-muted"
+              : "text-sm font-t3-medium text-foreground"
+          }
+          description={split ? undefined : description}
+          wide={wide}
+        />
+      ))}
+      {split && description ? (
+        <Text className="text-xs text-foreground-muted">{description}</Text>
+      ) : null}
     </View>
   );
 }
@@ -430,6 +483,7 @@ export function UsageLimitsSection({
       ? presentations
       : new Map([...presentations].filter(([id]) => selectedEnvironmentIds.has(id)));
   const pools = collectLimitPools(collectLimitAccounts(selected), now);
+  const hubSources = hubPoolSources(selected);
   const notices = collectLimitNotices(selected);
   const externalLinks = collectExternalUsageLinks(selected);
   const colors = useProviderColors();
@@ -452,7 +506,7 @@ export function UsageLimitsSection({
         </Text>
       ) : null}
       {pools.map((pool, index) => {
-        const windows = displayLimitWindows(pool);
+        const windows = groupLimitWindows(pool, now);
         return (
           <Fragment key={pool.driver}>
             {index === cursorPromptAt ? cursorPrompt : null}
@@ -463,13 +517,14 @@ export function UsageLimitsSection({
                   {DRIVER_LABEL[pool.driver] ?? pool.driver}
                 </Text>
               </View>
-              {windows.map((window) => {
+              {windows.map((grouped) => {
+                const { window } = grouped;
                 const details =
                   pool.driver === "cursor" ? cursorUsageWindowDetails(window.id) : undefined;
                 return (
                   <PoolWindowCard
                     key={`${window.kind}:${window.id}`}
-                    pool={window}
+                    grouped={grouped}
                     color={colors[usageProviderKind(pool.driver) ?? "codex"]}
                     now={now}
                     environmentIds={
@@ -481,6 +536,15 @@ export function UsageLimitsSection({
                   />
                 );
               })}
+              {hubSources.map((source) => (
+                <HubPoolStats
+                  key={`${source.environmentId}:${source.sourceId}`}
+                  source={source}
+                  driver={pool.driver}
+                  title={hubSources.length > 1 ? source.label : "CLIProxyAPI"}
+                  now={now}
+                />
+              ))}
             </View>
           </Fragment>
         );
@@ -552,9 +616,17 @@ export function UsageLimitAccountScreen({ route }: AccountScreenProps) {
       : new Map([...presentations].filter(([id]) => selectedIds.has(id)));
   const accounts = collectLimitAccounts(selected);
   const account = accounts.find((candidate) => candidate.key === accountKey);
-  const pool = collectLimitPools(accounts, now)
-    .find((candidate) => candidate.driver === account?.driver)
-    ?.windows.find((candidate) => candidate.id === windowId && candidate.kind === windowKind);
+  const driverPool = collectLimitPools(accounts, now).find(
+    (candidate) => candidate.driver === account?.driver,
+  );
+  // The account's own group, so "Restores" counts against the pool it is part of.
+  const pool =
+    driverPool &&
+    groupLimitWindows(driverPool, now)
+      .find(({ window }) => window.id === windowId && window.kind === windowKind)
+      ?.groups.find((group) =>
+        group.window.members.some((candidate) => candidate.account.key === accountKey),
+      )?.window;
   const member = pool?.members.find((candidate) => candidate.account.key === accountKey);
   const window = member?.window;
   const evenPace = window ? paceRemainingPercent(window, now) : null;
