@@ -119,6 +119,7 @@ function layerProviderHost(input: {
       },
       shouldRunBackgroundWork: () => Effect.succeed(input.runBackgroundWork),
       resolveAttachmentPath: () => null,
+      readImageForProvider: () => Effect.die("unused"),
       credentials: () => Effect.die("unused"),
     }),
   );
