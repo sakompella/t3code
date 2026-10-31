@@ -1051,6 +1051,7 @@ describe("deleted thread worktrees", () => {
     threadId: ThreadId,
     beforeStop: Effect.Effect<void> = Effect.void,
     cwd = fixture.worktree,
+    status: "stopped" | "error" = "stopped",
   ) =>
     Effect.gen(function* () {
       const startupSwept = yield* Deferred.make<void>();
@@ -1064,7 +1065,7 @@ describe("deleted thread worktrees", () => {
           id: ProviderSessionId.make("session-1"),
           driver: ProviderDriverKind.make("codex"),
           providerInstanceId: ProviderInstanceId.make("codex"),
-          status: "stopped",
+          status,
           cwd,
           model: null,
           capabilities: CodexProviderCapabilitiesV2,
@@ -1123,6 +1124,32 @@ describe("deleted thread worktrees", () => {
       );
       expect(reads).toBeGreaterThan(0);
       expect(yield* fixture.fs.exists(fixture.worktree)).toBe(false);
+    }).pipe(Effect.provide(cleanupTestLayer), Effect.scoped),
+  );
+
+  it.effect("does not sweep when a deleted thread's live session reports a failed turn", () =>
+    Effect.gen(function* () {
+      yield* TestClock.setTime(NOW_MS);
+      const fixture = yield* cleanupFixture({
+        ...DEFAULT_SERVER_SETTINGS.storageCleanup,
+        worktreeAfterDays: null,
+        worktreeOnDelete: true,
+      });
+      const owner = parent(fixture.worktree);
+      fixture.setDeletedThreads([owner]);
+      fixture.setThreads([]);
+      fixture.setOpenSessionCwd(fixture.worktree);
+      const reads = yield* stopSessionAfterStartupSweep(
+        fixture,
+        owner.id,
+        Effect.void,
+        fixture.worktree,
+        "error",
+      );
+      expect(reads, "a failed turn's session stays live, so a sweep cannot free its worktree").toBe(
+        0,
+      );
+      expect(yield* fixture.fs.exists(fixture.worktree)).toBe(true);
     }).pipe(Effect.provide(cleanupTestLayer), Effect.scoped),
   );
 
