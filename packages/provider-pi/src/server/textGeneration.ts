@@ -15,6 +15,7 @@ import {
   piRecordString,
   piStateIsIdle,
   type PiRpcConnection,
+  type PiRpcRecord,
 } from "./rpc.ts";
 import { buildPiRpcLaunch, resolvePiLaunchArgs } from "./mcpInjection.ts";
 import { detectPiFlavor } from "./status.ts";
@@ -36,10 +37,9 @@ const turnErrorDetail = (flavor: PiFlavor, errorMessage: string | undefined) => 
 const SETTLE_POLL_INTERVAL = Duration.millis(100);
 
 /**
- * Waits until the one prompt this process was given is fully done, and returns
- * the error of its latest assistant reply, if that failed. Pi says it is done
- * with `agent_settled`. Prime Agent has no such event, so after its first
- * `agent_end` this polls `get_state` until retries and post-run work finish.
+ * Waits until the prompt is fully done and returns its latest reply's error, if any. Pi
+ * sends `agent_settled`. Prime Agent has none, so after its first `agent_end` this polls
+ * `get_state` until retries and post-run work finish, still reading their replies.
  */
 const waitForPromptSettled = Effect.fn("PiTextGeneration.waitForPromptSettled")(function* (
   flavor: PiFlavor,
@@ -49,9 +49,7 @@ const waitForPromptSettled = Effect.fn("PiTextGeneration.waitForPromptSettled")(
   // Provider failures (bad key, rate limit, 5xx) arrive on the assistant
   // `message_end`. Keep only the latest, since Pi can retry and still answer.
   let turnError: string | undefined;
-  while (true) {
-    const event = yield* Queue.take(connection.events);
-    if (event["type"] === terminalEvent) break;
+  const readReply = (event: PiRpcRecord) => {
     const message = event["message"];
     if (event["type"] === "message_end" && piRecordString(message, "role") === "assistant") {
       turnError =
@@ -59,12 +57,20 @@ const waitForPromptSettled = Effect.fn("PiTextGeneration.waitForPromptSettled")(
           ? turnErrorDetail(flavor, piRecordString(message, "errorMessage"))
           : undefined;
     }
+  };
+  while (true) {
+    const event = yield* Queue.take(connection.events);
+    if (event["type"] === terminalEvent) break;
+    readReply(event);
   }
   if (flavor.settleSignal === "agent_settled") return turnError;
-  while (!piStateIsIdle(yield* connection.request({ type: "get_state" }))) {
+  while (true) {
+    const idle = piStateIsIdle(yield* connection.request({ type: "get_state" }));
+    // Events sent before the `get_state` reply are queued by the time it arrives.
+    for (const event of yield* Queue.clear(connection.events)) readReply(event);
+    if (idle) return turnError;
     yield* Effect.sleep(SETTLE_POLL_INTERVAL);
   }
-  return turnError;
 });
 
 export const makePiTextGeneration = Effect.fn("makePiTextGeneration")(function* (

@@ -14,6 +14,7 @@ import { makePiTextGeneration } from "./textGeneration.ts";
 import { PI_FLAVOR, PRIME_AGENT_FLAVOR } from "./flavor.ts";
 import {
   PRIME_AGENT_098_CAPABILITIES,
+  PRIME_AGENT_098_HELP,
   PRIME_AGENT_FORK_CAPABILITIES,
   PRIME_AGENT_FORK_HELP,
 } from "./primeAgentHelp.testkit.ts";
@@ -251,5 +252,39 @@ it.effect.each([
     assert.include(error.detail, detail);
     assert.deepEqual(binary.rpcLaunches(), []);
     assert.deepEqual(pi.received, []);
+  }),
+);
+
+it.effect("reports Prime Agent's last retry error, which arrives after its first agent_end", () =>
+  Effect.gen(function* () {
+    const pi = yield* makeFakePi("", undefined, [
+      failedTurnWith("500 Internal Server Error"),
+      { type: "agent_end" },
+      failedTurn,
+    ]);
+    const binary = primeAgentCli(pi, {
+      version: "0.9.8",
+      help: PRIME_AGENT_098_HELP,
+      helpExitCode: 0,
+      capabilities: PRIME_AGENT_098_CAPABILITIES.stdout,
+    });
+    const textGeneration = yield* makePiTextGeneration(
+      PRIME_AGENT_FLAVOR,
+      { enabled: true, binaryPath: "prime-agent", launchArgs: "", customModels: [] },
+      {},
+    ).pipe(Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, binary.spawner));
+
+    const error = yield* textGeneration
+      .generateThreadTitle({
+        cwd: process.cwd(),
+        message: "Rename the settings page",
+        modelSelection: createModelSelection(ProviderInstanceId.make("primeAgent"), "default"),
+      })
+      .pipe(Effect.flip);
+
+    assert.equal(
+      error.detail,
+      "Prime Agent could not generate text: the model provider returned HTTP 401.",
+    );
   }),
 );
