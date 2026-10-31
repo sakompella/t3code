@@ -1719,7 +1719,7 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
                 turn,
                 `queue-cleared:${turn.providerTurn.id}`,
                 [
-                  `Stop cleared ${cleared.length} queued ${cleared.length === 1 ? "message" : "messages"} Pi had not read:`,
+                  `Stop cleared ${cleared.length} queued ${cleared.length === 1 ? "message" : "messages"} ${flavor.displayName} had not read:`,
                   // Image-only messages come back as empty text.
                   ...cleared.filter((text) => text.length > 0),
                 ]
