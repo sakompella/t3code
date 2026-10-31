@@ -738,10 +738,7 @@ export const make = Effect.fn("LocalDeviceHost.make")(function* () {
       > {
         const running = yield* ensureHubReady(onPhase);
         if (running.agentDevice) {
-          const agentDevice = yield* startAgentDeviceDaemon(
-            running.agentDevice,
-            running.hub.node,
-          );
+          const agentDevice = yield* startAgentDeviceDaemon(running.agentDevice, running.hub.node);
           yield* Ref.set(runningRef, { ...running, agentDevice });
           return { ...toReady(running), agentDevice };
         }
