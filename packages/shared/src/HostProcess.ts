@@ -73,6 +73,15 @@ export const IsExecutable = Context.Reference<boolean>("@t3tools/shared/HostProc
   defaultValue: () => NodeSea.isSea(),
 });
 
+/**
+ * Whether the host runtime is Electron, including Electron started as plain
+ * Node with `ELECTRON_RUN_AS_NODE`. Such a binary only behaves as `node` when
+ * the child it runs is given that variable.
+ */
+export const IsElectron = Context.Reference<boolean>("@t3tools/shared/HostProcess/IsElectron", {
+  defaultValue: () => process.versions.electron !== undefined,
+});
+
 /** Includes hostname-resolved addresses absent from interfaces, such as Debian's 127.0.1.1 used by Firefox locks. */
 export const Addresses = Context.Reference<Effect.Effect<ReadonlySet<string>>>(
   "@t3tools/shared/HostProcess/Addresses",

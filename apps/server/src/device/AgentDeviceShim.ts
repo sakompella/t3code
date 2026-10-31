@@ -1,6 +1,6 @@
 // @effect-diagnostics preferSchemaOverJson:off - JSON string literals embed paths safely into generated JavaScript.
 import * as HostProcess from "@t3tools/shared/HostProcess";
-import { resolveNodeExecutable } from "@t3tools/shared/nodeRuntime";
+import { resolveNodeRuntime } from "@t3tools/shared/nodeRuntime";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Path from "effect/Path";
@@ -152,7 +152,12 @@ const VALUE_FLAGS: ReadonlyArray<string> = [
 // agent-device 0.21.31 refuses some bound flags per command; connect/disconnect/auth/daemon would
 // replace T3's connection; device status reads this machine's claims. It reports a sandboxed shell and a
 // dropped tunnel alike, so check first, at --daemon-base-url if given, as agent-device prefers it.
-const launcherSource = (node: string, entryPath: string, boundArgs: ReadonlyArray<string>) =>
+const launcherSource = (
+  node: string,
+  nodeEnv: Readonly<Record<string, string>>,
+  entryPath: string,
+  boundArgs: ReadonlyArray<string>,
+) =>
   `import { spawn } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
 import { connect } from "node:net";
@@ -211,7 +216,7 @@ if (local) {
     process.exit(1);
   }
 }
-const env = { ...process.env, ELECTRON_RUN_AS_NODE: "1" };
+const env = { ...process.env, ...${JSON.stringify(nodeEnv)} };
 delete env.AGENT_DEVICE_DAEMON_BASE_URL;
 delete env.AGENT_DEVICE_DAEMON_AUTH_TOKEN;
 delete env.AGENT_DEVICE_CONFIG;
@@ -229,17 +234,30 @@ const writeLauncher = Effect.fn("AgentDeviceShim.writeLauncher")(function* (inpu
   const fs = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
   const platform = yield* HostProcess.Platform;
-  const node = yield* resolveNodeExecutable("Device automation");
+  const { command: node, env: nodeEnv } = yield* resolveNodeRuntime("Device automation");
   yield* fs.makeDirectory(input.dir, { recursive: true });
   const launcherPath = path.join(input.dir, "agent-device-launcher.mjs");
-  yield* fs.writeFileString(launcherPath, launcherSource(node, input.entryPath, input.boundArgs));
+  yield* fs.writeFileString(
+    launcherPath,
+    launcherSource(node, nodeEnv, input.entryPath, input.boundArgs),
+  );
   if (platform === "win32") {
-    const script = `@echo off\r\nsetlocal EnableExtensions DisableDelayedExpansion\r\nif not exist "${node}" (echo ${STALE_RUNTIME} 1>&2 & exit /b 1)\r\nset "ELECTRON_RUN_AS_NODE=1"\r\n"${node}" "${launcherPath}" %*\r\n`;
+    const assignments = Object.entries(nodeEnv).map(
+      ([name, value]) => `set "${name}=${value}"\r\n`,
+    );
+    // setlocal scopes the assignments to this invocation; the child's exit code
+    // is still the script's exit code, because endlocal runs implicitly.
+    const script = `@echo off\r\nsetlocal EnableExtensions DisableDelayedExpansion\r\nif not exist "${node}" (echo ${STALE_RUNTIME} 1>&2 & exit /b 1)\r\n${assignments.join("")}"${node}" "${launcherPath}" %*\r\n`;
     const scriptPath = path.join(input.dir, "agent-device.cmd");
     yield* fs.writeFileString(scriptPath, script);
     return scriptPath;
   }
-  const script = `#!/bin/sh\n[ -x ${quoteShell(node)} ] || { echo ${quoteShell(STALE_RUNTIME)} >&2; exit 1; }\nexport ELECTRON_RUN_AS_NODE=1\nexec ${quoteShell(node)} ${quoteShell(launcherPath)} "$@"\n`;
+  // The agent's shell no longer inherits ELECTRON_RUN_AS_NODE, so the shim
+  // sets it for the one process that needs it.
+  const assignments = Object.entries(nodeEnv).map(
+    ([name, value]) => `${name}=${quoteShell(value)} `,
+  );
+  const script = `#!/bin/sh\n[ -x ${quoteShell(node)} ] || { echo ${quoteShell(STALE_RUNTIME)} >&2; exit 1; }\n${assignments.join("")}exec ${quoteShell(node)} ${quoteShell(launcherPath)} "$@"\n`;
   const scriptPath = path.join(input.dir, "agent-device");
   yield* fs.writeFileString(scriptPath, script);
   yield* fs.chmod(scriptPath, 0o755);
