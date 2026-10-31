@@ -77,7 +77,7 @@ as the server answers. It reconnects on its own after `t3 service restart` or
 
 The server owns its network access, Tailscale HTTPS, and version, so the app's
 Connections settings do not change them, and the WSL backend is off. Change
-those in `service.env` and with `t3 update`. Browser tabs an agent opens show
+those with `t3 up` (network access), in `service.env`, and with `t3 update`. Browser tabs an agent opens show
 the server's own browser, as they do for a remote environment. The server must be a release that
 supports this mode; an older one shows an "Update the server" message. Two
 desktop apps attached to the same server sign each other out of it. Remove the
